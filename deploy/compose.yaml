@@ -84,6 +84,8 @@ services:
       JIMIN_AUTH_VERIFY_KEY_FILE: /run/secrets/auth_verify_key
       JIMIN_AUTH_REFRESH_PEPPER_FILE: /run/secrets/auth_refresh_pepper
       JIMIN_AUTH_ALLOWLIST_FILE: /run/secrets/auth_allowlist
+      JIMIN_GOOGLE_MACOS_CLIENT_ID: ${JIMIN_GOOGLE_MACOS_CLIENT_ID:?set JIMIN_GOOGLE_MACOS_CLIENT_ID}
+      JIMIN_GOOGLE_MACOS_REDIRECT_URI: ${JIMIN_GOOGLE_MACOS_REDIRECT_URI:?set JIMIN_GOOGLE_MACOS_REDIRECT_URI}
       RUST_LOG: ${RUST_LOG:-info}
     secrets:
       - api_database_url

@@ -1,14 +1,16 @@
 use std::{env, net::SocketAddr, process::ExitCode, sync::Arc, time::Duration};
 
 use jimin_api::{
-    ApiState,
+    ApiState, LoginRuntime,
     auth::Authentication,
     config::{AppConfig, AuthenticationSetting, AuthenticationSettings, SecretSetting},
     probe::{ProbeTarget, run_probe},
     router, serve_with_shutdown,
 };
+use jimin_application::{SessionLifetime, SessionService};
 use jimin_auth::{AccessTokenIssuer, AccessTokenSettings, AccessTokenVerifier, RefreshTokenPepper};
 use jimin_domain::EmailAllowlist;
+use jimin_google::{GoogleIdentityAdapter, GoogleOAuthProfile};
 use jimin_observability::init_tracing;
 use jimin_storage::Database;
 use secrecy::ExposeSecret;
@@ -77,7 +79,7 @@ async fn run_server() -> Result<(), &'static str> {
         }
     };
 
-    let authentication = database
+    let runtime = database
         .as_ref()
         .and_then(|database| match config.authentication() {
             AuthenticationSetting::Available(settings) => build_authentication(settings, database),
@@ -96,7 +98,7 @@ async fn run_server() -> Result<(), &'static str> {
                 None
             }
         });
-    let configuration_ready = configuration_ready && authentication.is_some();
+    let configuration_ready = configuration_ready && runtime.is_some();
     let readiness_database = database
         .as_ref()
         .map(|database| Arc::new(database.clone()) as Arc<dyn jimin_api::ReadinessProbe>);
@@ -105,8 +107,9 @@ async fn run_server() -> Result<(), &'static str> {
         configuration_ready,
         readiness_database,
     );
-    if let Some(authentication) = authentication {
+    if let Some((authentication, login)) = runtime {
         state = state.with_authentication(authentication);
+        state = state.with_login(login);
     }
     let listener = TcpListener::bind(config.bind_addr())
         .await
@@ -140,15 +143,17 @@ async fn run_server() -> Result<(), &'static str> {
 fn build_authentication(
     settings: &AuthenticationSettings,
     database: &Database,
-) -> Option<Authentication> {
+) -> Option<(Authentication, LoginRuntime)> {
     let access_settings = AccessTokenSettings::new(
         settings.issuer(),
         settings.key_id(),
         settings.access_token_ttl(),
     )
     .ok()?;
-    AccessTokenIssuer::from_ed25519_pem(access_settings, settings.signing_key()).ok()?;
-    RefreshTokenPepper::new(settings.refresh_pepper().clone()).ok()?;
+    let access_issuer =
+        AccessTokenIssuer::from_ed25519_pem(access_settings.clone(), settings.signing_key())
+            .ok()?;
+    let refresh_pepper = RefreshTokenPepper::new(settings.refresh_pepper().clone()).ok()?;
     let allowlist_entries: Vec<_> = settings
         .allowlist()
         .expose_secret()
@@ -160,7 +165,7 @@ fn build_authentication(
     if allowlist_entries.is_empty() {
         return None;
     }
-    EmailAllowlist::from_entries(allowlist_entries).ok()?;
+    let allowlist = EmailAllowlist::from_entries(allowlist_entries).ok()?;
     let verifier = AccessTokenVerifier::from_ed25519_pems(
         settings.issuer(),
         [(
@@ -169,7 +174,26 @@ fn build_authentication(
         )],
     )
     .ok()?;
-    Some(Authentication::new(verifier, Arc::new(database.clone())))
+    let google_profile = GoogleOAuthProfile::new(
+        jimin_domain::ClientPlatform::Macos,
+        env::var("JIMIN_GOOGLE_MACOS_CLIENT_ID").ok()?,
+        [env::var("JIMIN_GOOGLE_MACOS_REDIRECT_URI").ok()?],
+        true,
+    )
+    .ok()?;
+    let google = GoogleIdentityAdapter::new([google_profile]).ok()?;
+    let session_lifetime = SessionLifetime::new(settings.session_ttl()).ok()?;
+    let sessions = SessionService::new(
+        database.clone(),
+        allowlist,
+        access_issuer,
+        refresh_pepper,
+        session_lifetime,
+    );
+    Some((
+        Authentication::new(verifier, Arc::new(database.clone())),
+        LoginRuntime::new(sessions, google),
+    ))
 }
 
 async fn reconcile_migrations(database: Database) {
