@@ -13,6 +13,8 @@ const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
 const DEFAULT_BUILD_SHA: &str = "dev";
 const DEFAULT_MAX_CONNECTIONS: u32 = 5;
 const DEFAULT_ACQUIRE_TIMEOUT_MS: u64 = 2_000;
+const DEFAULT_ACCESS_TOKEN_TTL_SECONDS: u64 = 10 * 60;
+const DEFAULT_SESSION_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
 const MAX_SECRET_FILE_BYTES: u64 = 16 * 1024;
 
 pub struct AppConfig {
@@ -21,10 +23,28 @@ pub struct AppConfig {
     database_url: SecretSetting,
     database_max_connections: u32,
     database_acquire_timeout: Duration,
+    authentication: AuthenticationSetting,
 }
 
 pub enum SecretSetting {
     Available(SecretString),
+    Missing,
+    Invalid,
+}
+
+pub struct AuthenticationSettings {
+    issuer: String,
+    key_id: String,
+    access_token_ttl: Duration,
+    session_ttl: Duration,
+    signing_key: SecretString,
+    verify_key: SecretString,
+    refresh_pepper: SecretString,
+    allowlist: SecretString,
+}
+
+pub enum AuthenticationSetting {
+    Available(AuthenticationSettings),
     Missing,
     Invalid,
 }
@@ -37,6 +57,8 @@ pub enum ConfigError {
     InvalidBuildSha,
     #[error("database pool configuration is invalid")]
     InvalidDatabasePool,
+    #[error("authentication configuration is invalid")]
+    InvalidAuthentication,
     #[error("environment configuration contains non-Unicode data")]
     NonUnicodeEnvironment,
 }
@@ -48,6 +70,7 @@ impl ConfigError {
             Self::InvalidBindAddress => "config.bind_address_invalid",
             Self::InvalidBuildSha => "config.build_sha_invalid",
             Self::InvalidDatabasePool => "config.database_pool_invalid",
+            Self::InvalidAuthentication => "config.authentication_invalid",
             Self::NonUnicodeEnvironment => "config.environment_non_unicode",
         }
     }
@@ -90,6 +113,7 @@ impl AppConfig {
             (Ok(direct), Ok(file)) => resolve_secret(direct, file, read_secret_file),
             _ => SecretSetting::Invalid,
         };
+        let authentication = AuthenticationSetting::load()?;
 
         Ok(Self {
             bind_addr,
@@ -97,6 +121,7 @@ impl AppConfig {
             database_url,
             database_max_connections,
             database_acquire_timeout: Duration::from_millis(acquire_timeout_ms),
+            authentication,
         })
     }
 
@@ -124,6 +149,111 @@ impl AppConfig {
     pub const fn database_acquire_timeout(&self) -> Duration {
         self.database_acquire_timeout
     }
+
+    #[must_use]
+    pub const fn authentication(&self) -> &AuthenticationSetting {
+        &self.authentication
+    }
+}
+
+impl AuthenticationSetting {
+    fn load() -> Result<Self, ConfigError> {
+        let issuer = env_string("JIMIN_AUTH_ISSUER")?;
+        let key_id = env_string("JIMIN_AUTH_KEY_ID")?;
+        let signing_key = secret_from_environment("JIMIN_AUTH_SIGNING_KEY")?;
+        let verify_key = secret_from_environment("JIMIN_AUTH_VERIFY_KEY")?;
+        let refresh_pepper = secret_from_environment("JIMIN_AUTH_REFRESH_PEPPER")?;
+        let allowlist = secret_from_environment("JIMIN_AUTH_ALLOWLIST")?;
+
+        let any_invalid = [&signing_key, &verify_key, &refresh_pepper, &allowlist]
+            .iter()
+            .any(|setting| matches!(setting, SecretSetting::Invalid));
+        if any_invalid {
+            return Ok(Self::Invalid);
+        }
+        let (Some(issuer), Some(key_id)) = (issuer, key_id) else {
+            return Ok(Self::Missing);
+        };
+        let (
+            SecretSetting::Available(signing_key),
+            SecretSetting::Available(verify_key),
+            SecretSetting::Available(refresh_pepper),
+            SecretSetting::Available(allowlist),
+        ) = (signing_key, verify_key, refresh_pepper, allowlist)
+        else {
+            return Ok(Self::Missing);
+        };
+        if !valid_auth_text(&issuer) || !valid_auth_text(&key_id) {
+            return Ok(Self::Invalid);
+        }
+        let access_token_ttl = parse_bounded_u64(
+            env_string("JIMIN_AUTH_ACCESS_TOKEN_TTL_SECONDS")?,
+            DEFAULT_ACCESS_TOKEN_TTL_SECONDS,
+            60,
+            15 * 60,
+        )
+        .map_err(|_| ConfigError::InvalidAuthentication)?;
+        let session_ttl = parse_bounded_u64(
+            env_string("JIMIN_AUTH_SESSION_TTL_SECONDS")?,
+            DEFAULT_SESSION_TTL_SECONDS,
+            60 * 60,
+            90 * 24 * 60 * 60,
+        )
+        .map_err(|_| ConfigError::InvalidAuthentication)?;
+
+        Ok(Self::Available(AuthenticationSettings {
+            issuer,
+            key_id,
+            access_token_ttl: Duration::from_secs(access_token_ttl),
+            session_ttl: Duration::from_secs(session_ttl),
+            signing_key,
+            verify_key,
+            refresh_pepper,
+            allowlist,
+        }))
+    }
+}
+
+impl AuthenticationSettings {
+    #[must_use]
+    pub fn issuer(&self) -> &str {
+        &self.issuer
+    }
+
+    #[must_use]
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    #[must_use]
+    pub const fn access_token_ttl(&self) -> Duration {
+        self.access_token_ttl
+    }
+
+    #[must_use]
+    pub const fn session_ttl(&self) -> Duration {
+        self.session_ttl
+    }
+
+    #[must_use]
+    pub const fn signing_key(&self) -> &SecretString {
+        &self.signing_key
+    }
+
+    #[must_use]
+    pub const fn verify_key(&self) -> &SecretString {
+        &self.verify_key
+    }
+
+    #[must_use]
+    pub const fn refresh_pepper(&self) -> &SecretString {
+        &self.refresh_pepper
+    }
+
+    #[must_use]
+    pub const fn allowlist(&self) -> &SecretString {
+        &self.allowlist
+    }
 }
 
 fn env_string(key: &str) -> Result<Option<String>, ConfigError> {
@@ -149,6 +279,12 @@ where
             read_file(&path).map_or(SecretSetting::Invalid, to_secret)
         }
     }
+}
+
+fn secret_from_environment(name: &str) -> Result<SecretSetting, ConfigError> {
+    let direct = env_string(name)?;
+    let file = env_string(&format!("{name}_FILE"))?;
+    Ok(resolve_secret(direct, file, read_secret_file))
 }
 
 fn read_secret_file(path: &str) -> Result<String, ()> {
@@ -178,6 +314,10 @@ fn valid_build_sha(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn valid_auth_text(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= 255 && !value.chars().any(char::is_control)
 }
 
 fn parse_bounded_u32(

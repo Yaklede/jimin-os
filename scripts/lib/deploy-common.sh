@@ -205,6 +205,10 @@ validate_runtime_secrets() {
 
   validate_secret_file "${secrets_dir}/postgres_password" "PostgreSQL password file"
   validate_secret_file "${secrets_dir}/api_database_url" "API database URL file"
+  validate_secret_file "${secrets_dir}/auth_signing_key" "access-token signing key file"
+  validate_secret_file "${secrets_dir}/auth_verify_key" "access-token verify key file"
+  validate_secret_file "${secrets_dir}/auth_refresh_pepper" "refresh-token pepper file"
+  validate_secret_file "${secrets_dir}/auth_allowlist" "Google account allowlist file"
   if [[ "${DEPLOY_TLS_MODE}" == "files" ]]; then
     validate_secret_file "${secrets_dir}/gateway_tls_cert" "gateway certificate"
     validate_secret_file "${secrets_dir}/gateway_tls_key" "gateway private key"

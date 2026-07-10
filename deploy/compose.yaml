@@ -76,9 +76,21 @@ services:
       JIMIN_BUILD_SHA: ${JIMIN_BUILD_SHA:?set JIMIN_BUILD_SHA}
       JIMIN_DATABASE_ACQUIRE_TIMEOUT_MS: ${JIMIN_DATABASE_ACQUIRE_TIMEOUT_MS:-2000}
       JIMIN_DATABASE_MAX_CONNECTIONS: ${JIMIN_DATABASE_MAX_CONNECTIONS:-5}
+      JIMIN_AUTH_ISSUER: ${JIMIN_AUTH_ISSUER:?set JIMIN_AUTH_ISSUER}
+      JIMIN_AUTH_KEY_ID: ${JIMIN_AUTH_KEY_ID:?set JIMIN_AUTH_KEY_ID}
+      JIMIN_AUTH_ACCESS_TOKEN_TTL_SECONDS: ${JIMIN_AUTH_ACCESS_TOKEN_TTL_SECONDS:-600}
+      JIMIN_AUTH_SESSION_TTL_SECONDS: ${JIMIN_AUTH_SESSION_TTL_SECONDS:-2592000}
+      JIMIN_AUTH_SIGNING_KEY_FILE: /run/secrets/auth_signing_key
+      JIMIN_AUTH_VERIFY_KEY_FILE: /run/secrets/auth_verify_key
+      JIMIN_AUTH_REFRESH_PEPPER_FILE: /run/secrets/auth_refresh_pepper
+      JIMIN_AUTH_ALLOWLIST_FILE: /run/secrets/auth_allowlist
       RUST_LOG: ${RUST_LOG:-info}
     secrets:
       - api_database_url
+      - auth_signing_key
+      - auth_verify_key
+      - auth_refresh_pepper
+      - auth_allowlist
     tmpfs:
       - /tmp:uid=10001,gid=10001,mode=0700,size=32m
     networks:
@@ -197,3 +209,11 @@ secrets:
     file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/api_database_url
   postgres_credential:
     file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/postgres_password
+  auth_signing_key:
+    file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/auth_signing_key
+  auth_verify_key:
+    file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/auth_verify_key
+  auth_refresh_pepper:
+    file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/auth_refresh_pepper
+  auth_allowlist:
+    file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/auth_allowlist

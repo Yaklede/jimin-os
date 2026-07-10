@@ -2,12 +2,16 @@ use std::{env, net::SocketAddr, process::ExitCode, sync::Arc, time::Duration};
 
 use jimin_api::{
     ApiState,
-    config::{AppConfig, SecretSetting},
+    auth::Authentication,
+    config::{AppConfig, AuthenticationSetting, AuthenticationSettings, SecretSetting},
     probe::{ProbeTarget, run_probe},
     router, serve_with_shutdown,
 };
+use jimin_auth::{AccessTokenIssuer, AccessTokenSettings, AccessTokenVerifier, RefreshTokenPepper};
+use jimin_domain::EmailAllowlist;
 use jimin_observability::init_tracing;
 use jimin_storage::Database;
+use secrecy::ExposeSecret;
 use tokio::{net::TcpListener, signal};
 use tracing::{error, info, warn};
 
@@ -73,14 +77,37 @@ async fn run_server() -> Result<(), &'static str> {
         }
     };
 
+    let authentication = database
+        .as_ref()
+        .and_then(|database| match config.authentication() {
+            AuthenticationSetting::Available(settings) => build_authentication(settings, database),
+            AuthenticationSetting::Missing => {
+                warn!(
+                    event = "auth.configuration_missing",
+                    error_code = "auth.configuration_missing"
+                );
+                None
+            }
+            AuthenticationSetting::Invalid => {
+                warn!(
+                    event = "auth.configuration_invalid",
+                    error_code = "auth.configuration_invalid"
+                );
+                None
+            }
+        });
+    let configuration_ready = configuration_ready && authentication.is_some();
     let readiness_database = database
         .as_ref()
         .map(|database| Arc::new(database.clone()) as Arc<dyn jimin_api::ReadinessProbe>);
-    let state = ApiState::new(
+    let mut state = ApiState::new(
         config.build_sha().to_owned(),
         configuration_ready,
         readiness_database,
     );
+    if let Some(authentication) = authentication {
+        state = state.with_authentication(authentication);
+    }
     let listener = TcpListener::bind(config.bind_addr())
         .await
         .map_err(|_| "api.bind_failed")?;
@@ -108,6 +135,41 @@ async fn run_server() -> Result<(), &'static str> {
     }
 
     result
+}
+
+fn build_authentication(
+    settings: &AuthenticationSettings,
+    database: &Database,
+) -> Option<Authentication> {
+    let access_settings = AccessTokenSettings::new(
+        settings.issuer(),
+        settings.key_id(),
+        settings.access_token_ttl(),
+    )
+    .ok()?;
+    AccessTokenIssuer::from_ed25519_pem(access_settings, settings.signing_key()).ok()?;
+    RefreshTokenPepper::new(settings.refresh_pepper().clone()).ok()?;
+    let allowlist_entries: Vec<_> = settings
+        .allowlist()
+        .expose_secret()
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if allowlist_entries.is_empty() {
+        return None;
+    }
+    EmailAllowlist::from_entries(allowlist_entries).ok()?;
+    let verifier = AccessTokenVerifier::from_ed25519_pems(
+        settings.issuer(),
+        [(
+            settings.key_id().to_owned(),
+            settings.verify_key().expose_secret().to_owned(),
+        )],
+    )
+    .ok()?;
+    Some(Authentication::new(verifier, Arc::new(database.clone())))
 }
 
 async fn reconcile_migrations(database: Database) {
