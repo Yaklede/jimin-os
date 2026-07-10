@@ -1,0 +1,26 @@
+{
+  "name": "jimin-os",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.5.0",
+  "engines": {
+    "node": ">=22.14.0 <23"
+  },
+  "scripts": {
+    "frontend:dev": "pnpm --filter @jimin-os/desktop dev",
+    "frontend:format": "pnpm --filter @jimin-os/desktop format:check",
+    "frontend:lint": "pnpm --filter @jimin-os/desktop typecheck",
+    "frontend:test": "pnpm --filter @jimin-os/desktop test",
+    "frontend:build": "pnpm --filter @jimin-os/desktop build",
+    "format": "cargo fmt --all --check",
+    "lint": "cargo clippy --workspace --all-targets -- -D warnings",
+    "test": "cargo test --workspace",
+    "build": "cargo build --workspace --release",
+    "backend:format": "cargo fmt --all --check",
+    "backend:lint": "cargo clippy --workspace --all-targets -- -D warnings",
+    "backend:test": "cargo test --workspace",
+    "backend:build": "cargo build --workspace --release",
+    "security:scan": "bash scripts/scan-secrets.sh",
+    "check": "pnpm backend:format && pnpm backend:lint && pnpm backend:test && pnpm frontend:format && pnpm frontend:lint && pnpm frontend:test && pnpm frontend:build && pnpm security:scan"
+  }
+}
