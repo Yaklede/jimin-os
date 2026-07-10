@@ -10,6 +10,7 @@ repository.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 jimin-observability = { path = "../../crates/observability" }
+jimin-auth = { path = "../../crates/auth" }
 jimin-storage = { path = "../../crates/storage" }
 secrecy.workspace = true
 serde.workspace = true
@@ -21,7 +22,9 @@ utoipa.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+ed25519-dalek.workspace = true
 http-body-util.workspace = true
+pkcs8.workspace = true
 tower.workspace = true
 
 [lints]
