@@ -3,6 +3,7 @@ members = [
   "apps/agent",
   "apps/api",
   "crates/codex-client",
+  "crates/domain",
   "crates/observability",
   "crates/storage",
 ]
