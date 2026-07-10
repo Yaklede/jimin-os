@@ -40,6 +40,10 @@ async fn baseline_migration_and_schema_version_are_consistent() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The integration test exercises one complete session lifecycle."
+)]
 async fn login_provision_is_atomic_and_the_session_guard_is_user_scoped() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;
