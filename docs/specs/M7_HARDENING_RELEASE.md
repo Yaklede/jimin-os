@@ -191,7 +191,7 @@ CI는 서명 가능한 JSON release manifest를 artifact로 만든다.
   "schemaVersion": 17,
   "minimumCompatibleSchemaVersion": 15,
   "composeConfigVersion": 1,
-  "codexVersionRange": ">=0.142.3,<0.143.0",
+  "codexVersionRange": ">=0.144.1,<0.145.0",
   "clientApiRange": ">=1,<2",
   "createdAt": "RFC3339"
 }

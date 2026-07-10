@@ -335,7 +335,7 @@ Rust Agent Runner
 
 ### 호환성 규칙
 
-1. M0 개발 기준은 현재 확인된 `codex-cli 0.142.3`이다.
+1. M0 개발 기준은 실제 account와 provider 호환성을 검증한 `codex-cli 0.144.1`이다.
 2. 해당 버전으로 JSON Schema를 생성하고 저장한다.
 3. 운영에서는 정확한 한 버전보다 최소/최대 지원 범위를 둔다.
 4. 서버 시작 시 `codex --version`과 필수 method를 검사한다.

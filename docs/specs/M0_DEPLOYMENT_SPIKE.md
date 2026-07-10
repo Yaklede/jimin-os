@@ -222,10 +222,10 @@ initialize
 - `item/completed`의 최종 item을 authoritative state로 취급한다.
 - `turn/completed.turn.status`가 `completed`일 때만 probe 성공이다.
 - `failed`와 `interrupted`를 성공으로 간주하지 않는다.
-- request `id`와 pending oneshot channel을 map으로 관리한다.
-- 알 수 없는 notification은 log metadata만 남기고 연결을 끊지 않는다.
+- M0 probe는 연결당 한 request만 전송하고 response `id`를 엄격히 대조한다. 여러 in-flight request의 pending oneshot map은 M4에서 도입한다.
+- 알 수 없는 notification은 bounded frame 안에서 원문을 버리고 연결을 유지한다. 운영 metadata 집계는 M4에서 도입한다.
 - 알 수 없는 response ID, line size 초과, stdout EOF는 protocol error다.
-- stderr는 구조화 log로 수집하되 credential과 대화 원문을 마스킹한다.
+- stderr 원문은 보관하거나 log하지 않고 byte/line/overflow/read 상태만 bounded telemetry로 남긴다.
 
 ### 6.3 Schema와 호환성
 
@@ -233,7 +233,7 @@ initialize
 
 ```text
 codex app-server generate-json-schema --out schemas/codex/<version>/json
-codex app-server generate-ts --out schemas/codex/<version>/typescript
+codex app-server generate-ts --out schemas/codex/<version>/dist/typescript
 ```
 
 각 schema directory에는 다음 metadata를 둔다.
@@ -271,6 +271,7 @@ stopped
 
 initializing → auth_required
 initializing → incompatible
+initializing → unsupported_account
 initializing → protocol_error
 ready → crashed → restart_wait → starting
 ready → stopping → stopped
@@ -281,10 +282,11 @@ ready → stopping → stopped
 | `ready` | handshake, account, turn probe 가능 | Agent 기능 가능 |
 | `auth_required` | OpenAI 인증 없음 또는 만료 | 로그인 runbook 안내 |
 | `incompatible` | binary/schema 지원 범위 불일치 | 배포 중단, 일정 API 영향 없음 |
+| `unsupported_account` | ChatGPT가 아닌 API key account로 인증됨 | Agent turn 차단, ChatGPT device auth 요구 |
 | `protocol_error` | JSONL 또는 handshake 계약 위반 | captured fixture로 회귀 테스트 추가 |
 | `crashed` | child process 비정상 종료 | pending request 실패 처리 후 제한 재시작 |
 
-무한 restart loop를 만들지 않는다. 연속 crash 횟수와 마지막 원인을 저장하고 operator가 확인할 수 있게 한다.
+무한 restart loop를 만들지 않는다. M0에서는 연속 crash 횟수와 마지막 원인을 content-free 구조화 log로 남긴다. 별도 조회 API와 상태 이력 저장은 M4에서 구현한다.
 
 ## 7. 모바일·Mac 기술 스파이크
 
