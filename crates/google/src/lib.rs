@@ -10,7 +10,11 @@ use std::{collections::BTreeMap, time::Duration};
 use jimin_application::VerifiedGoogleIdentity;
 use jimin_domain::{ClientPlatform, EmailAddress, GoogleSubject, PkceVerifier};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
-use reqwest::{Client, Response, header::CACHE_CONTROL, redirect::Policy};
+use reqwest::{
+    Client, Response,
+    header::{CACHE_CONTROL, CONTENT_TYPE},
+    redirect::Policy,
+};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use thiserror::Error;
@@ -174,6 +178,9 @@ impl GoogleIdentityAdapter {
         if !response.status().is_success() {
             return Err(classify_provider_status(response.status().as_u16()));
         }
+        if !is_json_response(&response) {
+            return Err(GoogleAuthError::ProviderUnavailable);
+        }
         let payload = bounded_body(response, MAX_TOKEN_RESPONSE_BYTES).await?;
         let token_response: GoogleTokenResponse =
             serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
@@ -261,6 +268,9 @@ impl GoogleIdentityAdapter {
             .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
         if !response.status().is_success() {
             return Err(classify_provider_status(response.status().as_u16()));
+        }
+        if !is_json_response(&response) {
+            return Err(GoogleAuthError::ProviderUnavailable);
         }
         let cache_ttl = cache_ttl(&response);
         let payload = bounded_body(response, MAX_JWKS_RESPONSE_BYTES).await?;
@@ -362,6 +372,19 @@ fn cache_ttl(response: &Response) -> Duration {
     seconds
         .map_or(DEFAULT_JWKS_TTL, Duration::from_secs)
         .min(MAX_JWKS_TTL)
+}
+
+fn is_json_response(response: &Response) -> bool {
+    response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .is_some_and(|mime| mime.trim() == "application/json")
+        })
 }
 
 fn validate_redirect_uri(value: String) -> Result<String, GoogleAuthError> {
