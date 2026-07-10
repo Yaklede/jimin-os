@@ -1,0 +1,30 @@
+---
+description: Design Ultrawork 품질 게이트
+globs: **/*
+alwaysApply: false
+---
+
+Apply Design Ultrawork before final handoff. Read `DESIGN.md` first and treat it as the design contract.
+
+- Create `.opendock/runs/design/<run-id>/manifest.md` from `.opendock/templates/design/DESIGN_RUN.md` and list only files created or changed for this task under `Target Files`.
+- The harness validates only explicit target files from argv or the active design run manifest; do not use it as a whole-project scanner.
+- Before building UI, read `REFERENCE_RESEARCH.md`, `LAYOUT_PLAYBOOK.md`, `COLOR_PLAYBOOK.md`, `PATTERN_GUIDE.md`, and `CREATE_UI_PLAYBOOK.md`; choose layout type, first gaze, primary action, section architecture, palette source, palette mood, palette role map, contrast plan, color risks, reference categories, component inventory, typography token plan, spacing token plan, radius token plan, shadow token plan, and state coverage.
+- For UI work, read https://styleseed-demo.vercel.app/llms-full.txt and apply StyleSeed's design rules.
+- UI를 만들기 전에 사용자와 함께 `STYLESEED.md`를 확정하거나 업데이트합니다. 포함할 항목은 app type, key color/accent, radius personality, shadow language, motion style, type direction, density입니다.
+- Self-check coherence after implementation: one accent, one radius personality, one shadow language, one icon set.
+- Typography, color, layout, component, imagery, do/don't rule은 `DESIGN.md`를 따라야 합니다.
+- Create UI 공개 문서는 component code 복사 대상이 아니라 component decision과 semantic token 기준입니다. Form은 Field/Label/Input/Error, transient notice는 Toast, section-scoped notice는 Inline Alert, blocking decision은 Modal, option picking은 Select/Combobox처럼 목적에 맞는 primitive를 고릅니다.
+- Use semantic tokens over hardcoded hex when possible.
+- Prefer role tokens for type, spacing, radius, color, and shadow. Arbitrary Tailwind values and raw shadows require a documented exception.
+- Use `COLOR_PLAYBOOK.md` to keep 3-5 core colors plus neutrals, clear canvas/surface/text/border/accent/focus roles, and avoid muddy beige-only or one-note purple/blue gradient palettes.
+- 디자인 단계 접근성은 결과물의 기본 요건입니다. 색상만으로 상태를 전달하지 않고, 텍스트 대비, focus/focus-visible, 명확한 label/alt, reduced motion을 함께 확인합니다.
+- Fractional value와 negative tracking은 `DESIGN.md`가 명시적으로 허용할 때만 사용할 수 있습니다.
+- Viewport 기반 font-size는 금지합니다.
+- Pure black, emoji-as-icon, random decorative color, Tailwind `text-[var(...)]` font-size pattern은 금지합니다.
+- Button, chip, tab, compact control의 text가 overflow되면 안 됩니다.
+- Mobile viewport에서 horizontal scroll이 생기면 안 됩니다.
+- Hover, focus, disabled, loading, empty, error state가 표현되어야 합니다. 관련 있는 경우 focus ring과 reduced-motion 처리가 필요합니다.
+- Contract가 더 엄격하지 않다면 color contrast는 WCAG AA를 목표로 하고 typography scale은 절제해야 합니다.
+- References are inspiration only; do not copy screenshots, exact text, brand assets, paid/private content, or proprietary interaction details.
+
+Run `node .opendock/harness/opendock__design-ultrawork/check.mjs` when possible.

@@ -1,0 +1,19 @@
+---
+description: UX Writing Ultrawork 품질 게이트
+globs: **/*
+alwaysApply: false
+---
+
+Apply UX Writing Ultrawork before final handoff. Read `WRITING.md` first and treat it as the writing contract.
+
+- `WRITING.md` overrides generic UX writing rules.
+- Read `TERMS.md` and remove avoid terms from public UI copy.
+- Create `.opendock/runs/ux-writing/<run-id>/manifest.md` from `.opendock/templates/ux-writing/WRITING_RUN.md` and list only files created or changed for this task under `Target Files`.
+- The harness validates only explicit target files from argv or the active writing run manifest; do not use it as a whole-project scanner.
+- Korean copy must follow the configured tone and avoid developer jargon unless allowed by `WRITING.md`.
+- English copy must be plain, concise, sentence case, and action-first unless `WRITING.md` says otherwise.
+- Error copy must include a useful next action.
+- Button/CTA copy should name the user's next action.
+- Naming must fit the product concept and avoid internal code names.
+
+Run `node .opendock/harness/opendock__ux-writing-ultrawork/check.mjs` when possible.

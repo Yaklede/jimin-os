@@ -1,0 +1,32 @@
+# Operating system
+.DS_Store
+
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+auth.json
+.codex/
+
+# Rust and JavaScript build output
+target/
+node_modules/
+dist/
+build/
+coverage/
+*.log
+
+# Local runtime data
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+data/
+backups/
+
+# OpenDock local execution state
+.opendock/workdirs/
+.opendock/runs/

@@ -1,0 +1,256 @@
+schema: opendock.lock/v1
+docks:
+  - id: opendock/backend-ultrawork
+    name: opendock/backend-ultrawork
+    requested: 1.3.1
+    version: 1.3.1
+    checksum: 3acac9de5a1c91ff43d8bac9ed34a8960a637e3619cb8ac1be5a75b1a83ae254
+    signature: eIgLMGbm9tlE/XJuoRezKyxCIFiNDF9/vIUg585eVKJfZcDlyOx8OA+mVQpMzgl+t49JTQtNeB9LYOBMrPBuBw==
+    platform: macos
+    workdir: .opendock/workdirs/opendock__backend-ultrawork__70dcca06ddf2
+    runtimes: []
+    tools: []
+    dependencies: []
+    files:
+      - path: AGENTS.md
+        mode: managed_block
+        checksum: 2ad680a5d01858b8906881cbca8c645691a4bc51bb136ecb7a6eabd28816c22e
+        markerId: files:AGENTS.md
+        source: files
+      - path: CLAUDE.md
+        mode: managed_block
+        checksum: 2ad680a5d01858b8906881cbca8c645691a4bc51bb136ecb7a6eabd28816c22e
+        markerId: files:CLAUDE.md
+        source: files
+      - path: GEMINI.md
+        mode: managed_block
+        checksum: 2ad680a5d01858b8906881cbca8c645691a4bc51bb136ecb7a6eabd28816c22e
+        markerId: files:GEMINI.md
+        source: files
+      - path: README.md
+        mode: managed_block
+        checksum: 59aacaac5489451dee2a7a049a2bb4bb4a4aac9e14cd733d61aa04f81f648548
+        markerId: files:README.md
+        source: files
+      - path: HARNESS.md
+        mode: managed_block
+        checksum: e5cf8f181c026a8585ca9dbaa7b15e8c4e990494a496e426421e935bdda11754
+        markerId: files:HARNESS.md
+        source: files
+      - path: .opendock/harness/opendock__backend-ultrawork/check.mjs
+        mode: managed_file
+        checksum: 67008b533f46ce65f78199d674cf1af79de71e10f4ea5a8a8a6279b6e58d57fa
+        source: files
+      - path: .opendock/harness/opendock__backend-ultrawork/check.sh
+        mode: managed_file
+        checksum: cb11968f4776d54fe2fc69930fff7c227850e3e3c0c18fb1d5b48928be043607
+        source: files
+      - path: .opendock/harness/opendock__backend-ultrawork/check.ps1
+        mode: managed_file
+        checksum: 1d3f0fad0d350942cb03d2618614332e89c8152ab5536a2a53c82c66b8532777
+        source: files
+      - path: .agents/skills/opendock-backend-ultrawork/SKILL.md
+        mode: managed_file
+        checksum: 7bebe62b897e151d78b7cd480aaba1bd5bc78658957661fb09fb2d15f67a8ba3
+        source: files
+      - path: .cursor/rules/opendock-backend-ultrawork.mdc
+        mode: managed_file
+        checksum: 0f5fe18626f31636116f74cea53ab35cbfe26979f612f8486d44021633bedc3a
+        source: files
+      - path: .agents/workflows/opendock-backend-ultrawork/quality-gate.md
+        mode: managed_file
+        checksum: 1c14df1af7f3cbfd6edce2feb7764706e369905496203c1127dea69644f17e4f
+        source: files
+      - path: .claude/commands/opendock-backend-ultrawork/quality-gate.md
+        mode: managed_file
+        checksum: 1c14df1af7f3cbfd6edce2feb7764706e369905496203c1127dea69644f17e4f
+        source: files
+      - path: .agents/hooks/opendock-backend-ultrawork/hook.json
+        mode: managed_file
+        checksum: 535e4231f3dd80f3c40eeb9622143c50099fc7ae95e1a25b2e7f19eaee49c88e
+        source: files
+  - id: opendock/design-ultrawork
+    name: opendock/design-ultrawork
+    requested: 1.0.3
+    version: 1.0.3
+    checksum: 14ba4b90d10fd8631df958758bbdc4c03b9fe71a2e315bfeecddd1ebc4dee1e7
+    signature: icti8UCg022uhL+Y0/avCr1Ig7LC2PWDiggXzDTyMjyfOYd/3MGrcZ8pogrP13++JK4xcdc9duXkIXx9l1xZAQ==
+    platform: macos
+    workdir: .opendock/workdirs/opendock__design-ultrawork__54093992ce81
+    runtimes: []
+    tools: []
+    dependencies: []
+    files:
+      - path: AGENTS.md
+        mode: managed_block
+        checksum: dff07c6e6a53193c837a83831bc3463be7203e847207853604bc6a29cce9cac5
+        markerId: files:AGENTS.md
+        source: files
+      - path: CLAUDE.md
+        mode: managed_block
+        checksum: dff07c6e6a53193c837a83831bc3463be7203e847207853604bc6a29cce9cac5
+        markerId: files:CLAUDE.md
+        source: files
+      - path: GEMINI.md
+        mode: managed_block
+        checksum: dff07c6e6a53193c837a83831bc3463be7203e847207853604bc6a29cce9cac5
+        markerId: files:GEMINI.md
+        source: files
+      - path: README.md
+        mode: managed_block
+        checksum: fca835045f5bcc70bbccfb99addf9b3fec2c877bf58febb08e055bf6b07bd0a8
+        markerId: files:README.md
+        source: files
+      - path: REFERENCE_RESEARCH.md
+        mode: managed_block
+        checksum: c00067d28ded580a01156af50674d15e8a976295f37874c55f6cfd6ed16fb9f6
+        markerId: files:REFERENCE_RESEARCH.md
+        source: files
+      - path: LAYOUT_PLAYBOOK.md
+        mode: managed_block
+        checksum: ccc327e03aeae7a24d63fb33911be3a09b3d44baa5f2d77a0af055dd612c3125
+        markerId: files:LAYOUT_PLAYBOOK.md
+        source: files
+      - path: COLOR_PLAYBOOK.md
+        mode: managed_block
+        checksum: 01ffc942ebc22f64a90caf4b3a37d2f798b496e118319e3600ec0ace758a3675
+        markerId: files:COLOR_PLAYBOOK.md
+        source: files
+      - path: PATTERN_GUIDE.md
+        mode: managed_block
+        checksum: 924d476e2fa747e649f21fb68f534e6291a550854b263943383f3cc539a0225d
+        markerId: files:PATTERN_GUIDE.md
+        source: files
+      - path: CREATE_UI_PLAYBOOK.md
+        mode: managed_block
+        checksum: cc0cc8716a9e864b2085e63c8460f15c3228a30a5e4759ce06eb809f647ee096
+        markerId: files:CREATE_UI_PLAYBOOK.md
+        source: files
+      - path: HARNESS.md
+        mode: managed_block
+        checksum: 731e685177870bf15b982cd917a2b8368239d0111f177bf2805a8bd92918358a
+        markerId: files:HARNESS.md
+        source: files
+      - path: .opendock/harness/opendock__design-ultrawork/check.mjs
+        mode: managed_file
+        checksum: 7f726d2062ca665fffe0fd656831b0c60fd210daf498d7570b9d5593f76fbebc
+        source: files
+      - path: .opendock/harness/opendock__design-ultrawork/check.sh
+        mode: managed_file
+        checksum: cb11968f4776d54fe2fc69930fff7c227850e3e3c0c18fb1d5b48928be043607
+        source: files
+      - path: .opendock/harness/opendock__design-ultrawork/check.ps1
+        mode: managed_file
+        checksum: 1d3f0fad0d350942cb03d2618614332e89c8152ab5536a2a53c82c66b8532777
+        source: files
+      - path: .opendock/templates/design/DESIGN_RUN.md
+        mode: managed_block
+        checksum: 8e4ae46ad93c3327305c88f1701c79f249cf2aaf48ee3808e1cb10be6a811ef8
+        markerId: files:.opendock/templates/design/DESIGN_RUN.md
+        source: files
+      - path: .agents/skills/opendock-design-ultrawork/SKILL.md
+        mode: managed_file
+        checksum: 49ef8466add4e4032cd898d479362ccc4bacbd9642576f1d513e50a3e7948ece
+        source: files
+      - path: .cursor/rules/opendock-design-ultrawork.mdc
+        mode: managed_file
+        checksum: 4d055cd1ed57aa08b8e7fb87ef08ae77dd4532c00b0f383065f3afbf329f5108
+        source: files
+      - path: .agents/workflows/opendock-design-ultrawork/quality-gate.md
+        mode: managed_file
+        checksum: f8a1f5c867548d2eef746b375621799f31d33a8108a9a37e5029268711a7bc1a
+        source: files
+      - path: .claude/commands/opendock-design-ultrawork/quality-gate.md
+        mode: managed_file
+        checksum: 829eaf6680f973c43c62b98b364755bd51b9a7dc43eb4648a86afa4101ac9c42
+        source: files
+      - path: .agents/hooks/opendock-design-ultrawork/hook.json
+        mode: managed_file
+        checksum: 87d23fa6db3d6f9a4df0c7984a8610813b3f0a9ec7bf8476be60d0fc0d294acb
+        source: files
+  - id: opendock/ux-writing-ultrawork
+    name: opendock/ux-writing-ultrawork
+    requested: 1.0.3
+    version: 1.0.3
+    checksum: 0428dd45d8f5f5f5bba0e303d64fdcc4a0aeca23f309b16b5c400ef949d43095
+    signature: OGDYBAeKnAp010S6GhEKbFWA4qEfJCaJJTQyJogffIRs/d/QKRCCXUxE2wnr8oPOsaUbvZtAF8v/Ybc8pG6wBA==
+    platform: macos
+    workdir: .opendock/workdirs/opendock__ux-writing-ultrawork__7355767e78ef
+    runtimes: []
+    tools: []
+    dependencies: []
+    files:
+      - path: AGENTS.md
+        mode: managed_block
+        checksum: 9736fab687c2efb0028089642703811559fe35ebdd96940f70be612af56fce8a
+        markerId: files:AGENTS.md
+        source: files
+      - path: CLAUDE.md
+        mode: managed_block
+        checksum: 9736fab687c2efb0028089642703811559fe35ebdd96940f70be612af56fce8a
+        markerId: files:CLAUDE.md
+        source: files
+      - path: GEMINI.md
+        mode: managed_block
+        checksum: 9736fab687c2efb0028089642703811559fe35ebdd96940f70be612af56fce8a
+        markerId: files:GEMINI.md
+        source: files
+      - path: README.md
+        mode: managed_block
+        checksum: 1ee7426b33c49c970583d6013123ae6913885d7225a1dfc66433c136dc7a8401
+        markerId: files:README.md
+        source: files
+      - path: HARNESS.md
+        mode: managed_block
+        checksum: 557adab91c0f20aa11ffcb267b947a8f8e8cbbfe349cdb7dd6459e330181594a
+        markerId: files:HARNESS.md
+        source: files
+      - path: WRITING.md
+        mode: managed_block
+        checksum: 3c0d53a446e747279b387bd519817b09cf0a7e655d36eef17b0aa66f4abe2e46
+        markerId: files:WRITING.md
+        source: files
+      - path: TERMS.md
+        mode: managed_block
+        checksum: 15a85f85612df494fc86e21d745d29d6ad0cda092e87b914335988d73f640c2e
+        markerId: files:TERMS.md
+        source: files
+      - path: .opendock/harness/opendock__ux-writing-ultrawork/check.mjs
+        mode: managed_file
+        checksum: b8cbf4de0c0c155c6c72f2272c54af8d6ec7a83e95c3d64c8bd3ac3a6295e408
+        source: files
+        executable: true
+      - path: .opendock/harness/opendock__ux-writing-ultrawork/check.sh
+        mode: managed_file
+        checksum: cb11968f4776d54fe2fc69930fff7c227850e3e3c0c18fb1d5b48928be043607
+        source: files
+        executable: true
+      - path: .opendock/harness/opendock__ux-writing-ultrawork/check.ps1
+        mode: managed_file
+        checksum: 1d3f0fad0d350942cb03d2618614332e89c8152ab5536a2a53c82c66b8532777
+        source: files
+      - path: .opendock/templates/ux-writing/WRITING_RUN.md
+        mode: managed_block
+        checksum: 2af1c9df5d65ebac9900f93b4af86db023885508b30479a9c66fcd9aa1066ab0
+        markerId: files:.opendock/templates/ux-writing/WRITING_RUN.md
+        source: files
+      - path: .agents/skills/opendock-ux-writing-ultrawork/SKILL.md
+        mode: managed_file
+        checksum: ca5ef293091b91d3b8b9e13a17b883db5af6677fe04e792e1198c7248508a69a
+        source: files
+      - path: .cursor/rules/opendock-ux-writing-ultrawork.mdc
+        mode: managed_file
+        checksum: 443bd6c0cab6b1e498c763bad12991805c5e09997e2afa15d1b30f56a9c72c74
+        source: files
+      - path: .agents/workflows/opendock-ux-writing-ultrawork/quality-gate.md
+        mode: managed_file
+        checksum: bf6b033750f91fbacb2c386c0328de939752b705c52545ad60708230d4600342
+        source: files
+      - path: .claude/commands/opendock-ux-writing-ultrawork/quality-gate.md
+        mode: managed_file
+        checksum: b9d64affb125369724f0a255252a6908cf7c642d060d7fd3dc14ed2376ac49d1
+        source: files
+      - path: .agents/hooks/opendock-ux-writing-ultrawork/hook.json
+        mode: managed_file
+        checksum: 0fc3eb00ff70d3f6fcd8c4782f9ba942d62b62cc679ec05e9553d751c7ada3c4
+        source: files

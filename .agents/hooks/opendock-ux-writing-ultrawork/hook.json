@@ -1,0 +1,9 @@
+{
+  "name": "opendock-ux-writing-ultrawork-quality-gate",
+  "description": "Run the UX Writing Ultrawork harness before final handoff.",
+  "events": [
+    "Stop"
+  ],
+  "command": "node .opendock/harness/opendock__ux-writing-ultrawork/check.mjs",
+  "manualFallback": "If hooks are not active, run `node .opendock/harness/opendock__ux-writing-ultrawork/check.mjs` manually before final response."
+}

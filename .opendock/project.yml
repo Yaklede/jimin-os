@@ -1,0 +1,20 @@
+schema: opendock.project/v1
+docks:
+  - id: opendock/backend-ultrawork
+    name: opendock/backend-ultrawork
+    requested: 1.3.1
+    version: 1.3.1
+    platform: macos
+    workdir: .opendock/workdirs/opendock__backend-ultrawork__70dcca06ddf2
+  - id: opendock/design-ultrawork
+    name: opendock/design-ultrawork
+    requested: 1.0.3
+    version: 1.0.3
+    platform: macos
+    workdir: .opendock/workdirs/opendock__design-ultrawork__54093992ce81
+  - id: opendock/ux-writing-ultrawork
+    name: opendock/ux-writing-ultrawork
+    requested: 1.0.3
+    version: 1.0.3
+    platform: macos
+    workdir: .opendock/workdirs/opendock__ux-writing-ultrawork__7355767e78ef
