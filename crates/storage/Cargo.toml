@@ -7,9 +7,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+jimin-auth = { path = "../auth" }
+jimin-domain = { path = "../domain" }
 secrecy.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
+time.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

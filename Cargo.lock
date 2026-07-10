@@ -490,6 +490,9 @@ name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "digest"
@@ -1208,10 +1211,15 @@ dependencies = [
 name = "jimin-storage"
 version = "0.1.0"
 dependencies = [
+ "jimin-auth",
+ "jimin-domain",
  "secrecy",
+ "serde_json",
  "sqlx",
  "thiserror",
+ "time",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2140,6 +2148,7 @@ dependencies = [
  "sha2 0.10.9",
  "smallvec",
  "thiserror",
+ "time",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -2209,6 +2218,7 @@ dependencies = [
  "sha2 0.11.0",
  "sqlx-core",
  "thiserror",
+ "time",
  "tracing",
  "uuid",
 ]
@@ -2244,6 +2254,7 @@ dependencies = [
  "sqlx-core",
  "stringprep",
  "thiserror",
+ "time",
  "tracing",
  "uuid",
  "whoami",
@@ -2269,6 +2280,7 @@ dependencies = [
  "serde",
  "sqlx-core",
  "thiserror",
+ "time",
  "tracing",
  "url",
  "uuid",

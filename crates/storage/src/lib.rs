@@ -4,6 +4,8 @@ use secrecy::{ExposeSecret, SecretString};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use thiserror::Error;
 
+pub mod auth;
+
 pub const EXPECTED_SCHEMA_VERSION: i64 = 2;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
@@ -33,6 +35,10 @@ pub enum StorageError {
     InvalidConfiguration,
     #[error("database migration is unavailable")]
     MigrationUnavailable,
+    #[error("database persistence is unavailable")]
+    PersistenceUnavailable,
+    #[error("stored identity conflicts with the current login")]
+    IdentityConflict,
 }
 
 impl Database {
@@ -132,6 +138,10 @@ impl Database {
 
     pub async fn close(&self) {
         self.pool.close().await;
+    }
+
+    pub(crate) const fn pool(&self) -> &PgPool {
+        &self.pool
     }
 }
 

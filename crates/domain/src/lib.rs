@@ -177,6 +177,17 @@ pub enum ClientPlatform {
     Android,
 }
 
+impl ClientPlatform {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Macos => "macos",
+            Self::Ios => "ios",
+            Self::Android => "android",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceRegistration {
     installation_id: Uuid,
