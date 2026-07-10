@@ -13,12 +13,17 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use jimin_application::{ApplicationError, DeviceSession, SessionService};
+use jimin_domain::{ClientPlatform, DeviceRegistration, PkceVerifier};
+use jimin_google::{GoogleAuthError, GoogleAuthorizationCode, GoogleIdentityAdapter};
 use jimin_observability::{RequestId, request_context};
 use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness,
     auth::{Device, DeviceStatus, Profile},
 };
+use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::net::TcpListener;
 use utoipa::{OpenApi, ToSchema};
 
@@ -41,6 +46,7 @@ pub struct ApiState {
     database: Option<Arc<dyn ReadinessProbe>>,
     expected_schema_version: i64,
     authentication: Option<Arc<auth::Authentication>>,
+    login: Option<Arc<LoginRuntime>>,
 }
 
 impl ApiState {
@@ -56,6 +62,7 @@ impl ApiState {
             database,
             expected_schema_version: EXPECTED_SCHEMA_VERSION,
             authentication: None,
+            login: None,
         }
     }
 
@@ -68,6 +75,29 @@ impl ApiState {
     #[must_use]
     pub(crate) fn authentication(&self) -> Option<&Arc<auth::Authentication>> {
         self.authentication.as_ref()
+    }
+
+    #[must_use]
+    pub fn with_login(mut self, login: LoginRuntime) -> Self {
+        self.login = Some(Arc::new(login));
+        self
+    }
+
+    #[must_use]
+    fn login(&self) -> Option<&Arc<LoginRuntime>> {
+        self.login.as_ref()
+    }
+}
+
+pub struct LoginRuntime {
+    sessions: SessionService,
+    google: GoogleIdentityAdapter,
+}
+
+impl LoginRuntime {
+    #[must_use]
+    pub fn new(sessions: SessionService, google: GoogleIdentityAdapter) -> Self {
+        Self { sessions, google }
     }
 }
 
@@ -144,6 +174,40 @@ pub struct DeviceListResponse {
     next_cursor: Option<String>,
 }
 
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleExchangeResponse {
+    access_token: String,
+    access_token_expires_at: String,
+    refresh_token: String,
+    user: MeResponse,
+    device: DeviceResponse,
+    sync_cursor: String,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct GoogleExchangeRequest {
+    #[schema(value_type = String)]
+    client_kind: ClientPlatform,
+    #[schema(value_type = String)]
+    authorization_code: SecretString,
+    code_verifier: Option<String>,
+    redirect_uri: String,
+    device: DeviceRegistrationRequest,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct DeviceRegistrationRequest {
+    installation_id: uuid::Uuid,
+    #[schema(value_type = String)]
+    platform: ClientPlatform,
+    name: String,
+    app_version: String,
+    os_version: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ErrorEnvelope {
@@ -184,7 +248,7 @@ pub(crate) fn error_response(
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(live, ready, me, devices),
+    paths(live, ready, google_exchange, me, devices),
     components(schemas(
         LiveStatus,
         ReadyStatus,
@@ -194,7 +258,8 @@ pub(crate) fn error_response(
         ReadyHealthResponse,
         MeResponse,
         DeviceResponse,
-        DeviceListResponse
+        DeviceListResponse,
+        GoogleExchangeResponse
     )),
     tags((name = "health", description = "Process and dependency health"))
 )]
@@ -209,6 +274,10 @@ pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
+        .route(
+            "/v1/auth/google/exchange",
+            axum::routing::post(google_exchange),
+        )
         .route("/v1/me", get(me))
         .route("/v1/devices", get(devices))
         .fallback(not_found)
@@ -374,6 +443,161 @@ async fn devices(
         next_cursor: None,
     })
     .into_response()
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth/google/exchange",
+    tag = "identity",
+    responses(
+        (status = 200, description = "Google identity exchanged for a Jimin OS device session", body = GoogleExchangeResponse),
+        (status = 400, description = "OAuth request or device metadata is invalid"),
+        (status = 401, description = "Google identity verification failed"),
+        (status = 403, description = "Google account is not allowed"),
+        (status = 503, description = "Authentication service is temporarily unavailable")
+    )
+)]
+async fn google_exchange(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    Json(request): Json<GoogleExchangeRequest>,
+) -> Response {
+    let Some(login) = state.login() else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service.temporarily_unavailable",
+            "잠시 후 다시 시도해 주세요.",
+            request_id,
+            true,
+        );
+    };
+    if request.client_kind != request.device.platform {
+        return invalid_request_response(request_id);
+    }
+    let Ok(code_verifier) = request.code_verifier.map(PkceVerifier::parse).transpose() else {
+        return invalid_request_response(request_id);
+    };
+    let Ok(device) = DeviceRegistration::new(
+        request.device.installation_id,
+        request.device.platform,
+        request.device.name,
+        request.device.app_version,
+        request.device.os_version,
+    ) else {
+        return invalid_request_response(request_id);
+    };
+    let identity = match login
+        .google
+        .exchange(GoogleAuthorizationCode {
+            platform: request.client_kind,
+            authorization_code: request.authorization_code,
+            code_verifier,
+            redirect_uri: request.redirect_uri,
+        })
+        .await
+    {
+        Ok(identity) => identity,
+        Err(error) => return google_error_response(error, request_id),
+    };
+    let session = match login
+        .sessions
+        .login(identity, device, uuid::Uuid::now_v7())
+        .await
+    {
+        Ok(session) => session,
+        Err(error) => return application_error_response(&error, request_id),
+    };
+    match google_exchange_response(&session) {
+        Ok(response) => Json(response).into_response(),
+        Err(()) => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service.temporarily_unavailable",
+            "잠시 후 다시 시도해 주세요.",
+            request_id,
+            true,
+        ),
+    }
+}
+
+fn google_exchange_response(session: &DeviceSession) -> Result<GoogleExchangeResponse, ()> {
+    let expires_at = OffsetDateTime::from(session.access_token().expires_at())
+        .format(&Rfc3339)
+        .map_err(|_| ())?;
+    let sync_cursor = session.sync_cursor().ok_or(())?.to_string();
+    Ok(GoogleExchangeResponse {
+        access_token: session.access_token().token().expose_secret().to_owned(),
+        access_token_expires_at: expires_at,
+        refresh_token: session
+            .refresh_token()
+            .serialized()
+            .expose_secret()
+            .to_owned(),
+        user: me_response(session.profile().clone()),
+        device: device_response(session.device().clone()),
+        sync_cursor,
+    })
+}
+
+fn invalid_request_response(request_id: RequestId) -> Response {
+    error_response(
+        StatusCode::BAD_REQUEST,
+        "request.invalid",
+        "입력한 내용을 다시 확인해 주세요.",
+        request_id,
+        false,
+    )
+}
+
+fn google_error_response(error: GoogleAuthError, request_id: RequestId) -> Response {
+    match error {
+        GoogleAuthError::InvalidRequest => invalid_request_response(request_id),
+        GoogleAuthError::ProviderRejected | GoogleAuthError::IdentityRejected => error_response(
+            StatusCode::UNAUTHORIZED,
+            "auth.google_login_failed",
+            "Google 로그인을 다시 진행해 주세요.",
+            request_id,
+            false,
+        ),
+        GoogleAuthError::ProviderUnavailable => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service.temporarily_unavailable",
+            "잠시 후 다시 시도해 주세요.",
+            request_id,
+            true,
+        ),
+    }
+}
+
+fn application_error_response(error: &ApplicationError, request_id: RequestId) -> Response {
+    match error {
+        ApplicationError::AccountNotAllowed => error_response(
+            StatusCode::FORBIDDEN,
+            "auth.account_not_allowed",
+            "이 계정으로는 로그인할 수 없어요.",
+            request_id,
+            false,
+        ),
+        ApplicationError::InvalidIdentity | ApplicationError::InvalidSessionLifetime => {
+            invalid_request_response(request_id)
+        }
+        ApplicationError::SessionExpired => {
+            auth::AuthenticationFailure::Unauthorized.into_response(request_id)
+        }
+        ApplicationError::RefreshReused => error_response(
+            StatusCode::UNAUTHORIZED,
+            "auth.refresh_reused",
+            "보안을 위해 다시 로그인해 주세요.",
+            request_id,
+            false,
+        ),
+        ApplicationError::Storage(_) | ApplicationError::AccessToken(_) => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service.temporarily_unavailable",
+            "잠시 후 다시 시도해 주세요.",
+            request_id,
+            true,
+        ),
+    }
 }
 
 fn me_response(profile: Profile) -> MeResponse {
@@ -674,7 +898,13 @@ mod tests {
 
         assert_eq!(
             paths,
-            ["/health/live", "/health/ready", "/v1/devices", "/v1/me"]
+            [
+                "/health/live",
+                "/health/ready",
+                "/v1/auth/google/exchange",
+                "/v1/devices",
+                "/v1/me"
+            ]
         );
     }
 
