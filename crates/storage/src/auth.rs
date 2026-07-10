@@ -6,6 +6,7 @@
 use jimin_auth::SessionIdentity;
 use jimin_domain::{ClientPlatform, DeviceRegistration, EmailAddress, GoogleSubject};
 use sqlx::{Postgres, Transaction};
+use subtle::ConstantTimeEq;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -41,15 +42,13 @@ impl ProvisionLogin {
     /// Returns [`StorageError::InvalidConfiguration`] for non-UUIDv7 IDs or a
     /// malformed refresh verifier.
     pub fn validate(&self) -> Result<(), StorageError> {
-        let ids_are_version_seven = [
+        if !all_version_seven(&[
             self.user_id,
             self.session_id,
             self.family_id,
             self.refresh_token_id,
-        ]
-        .into_iter()
-        .all(|id| id.get_version_num() == 7);
-        if !ids_are_version_seven || self.refresh_token_verifier.len() != 32 {
+        ]) || !valid_refresh_verifier(&self.refresh_token_verifier)
+        {
             return Err(StorageError::InvalidConfiguration);
         }
         if self.refresh_token_expires_at < self.session_expires_at {
@@ -107,6 +106,53 @@ pub struct ProvisionedLogin {
     pub sync_cursor: i64,
 }
 
+/// Inputs for a single-use refresh token rotation. Both verifier values are
+/// derived with the server pepper before this command reaches storage.
+pub struct RotateRefreshToken {
+    pub session_id: Uuid,
+    pub presented_verifier: Vec<u8>,
+    pub new_refresh_token_id: Uuid,
+    pub new_refresh_token_verifier: Vec<u8>,
+    pub new_refresh_token_expires_at: OffsetDateTime,
+    pub request_id: Uuid,
+}
+
+impl RotateRefreshToken {
+    /// Validates generated IDs and HMAC verifier lengths before opening a lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed input.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        if !all_version_seven(&[self.session_id, self.new_refresh_token_id])
+            || !valid_refresh_verifier(&self.presented_verifier)
+            || !valid_refresh_verifier(&self.new_refresh_token_verifier)
+            || self.new_refresh_token_expires_at <= OffsetDateTime::now_utc()
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
+/// Result of a refresh request. Only a successful rotation returns user/device
+/// state; invalid, expired, and replayed requests intentionally reveal no row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshRotation {
+    Rotated(Box<RotatedRefreshToken>),
+    Reused,
+    Rejected,
+}
+
+/// Safe session details returned only after a successful refresh rotation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RotatedRefreshToken {
+    pub profile: Profile,
+    pub device: Device,
+    pub session_id: Uuid,
+    pub family_id: Uuid,
+}
+
 #[derive(sqlx::FromRow)]
 struct ProfileRow {
     id: Uuid,
@@ -143,6 +189,22 @@ struct DeviceRow {
     os_version: Option<String>,
     status: String,
     version: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct SessionLockRow {
+    user_id: Uuid,
+    device_id: Uuid,
+    family_id: Uuid,
+    status: String,
+    expires_at: OffsetDateTime,
+}
+
+#[derive(sqlx::FromRow)]
+struct RefreshTokenRow {
+    id: Uuid,
+    token_verifier: Vec<u8>,
+    status: String,
 }
 
 impl TryFrom<DeviceRow> for Device {
@@ -313,6 +375,151 @@ impl Database {
         })
     }
 
+    /// Rotates one device refresh token while holding the session and all
+    /// session-token rows locked. Reusing a rotated/revoked verifier marks the
+    /// entire family compromised before the method returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an unavailable error only for storage failures. Invalid and
+    /// replayed token inputs are represented by [`RefreshRotation`] to avoid
+    /// exposing session state to a caller.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Rotation and compromise must remain visibly transactional."
+    )]
+    pub async fn rotate_refresh_token(
+        &self,
+        command: &RotateRefreshToken,
+    ) -> Result<RefreshRotation, StorageError> {
+        command.validate()?;
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| classify_database_error(&error))?;
+        let session = sqlx::query_as::<_, SessionLockRow>(
+            "\
+            SELECT user_id, device_id, family_id, status, expires_at
+            FROM sessions
+            WHERE id = $1
+            FOR UPDATE",
+        )
+        .bind(command.session_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| classify_database_error(&error))?;
+        let Some(session) = session else {
+            return Ok(RefreshRotation::Rejected);
+        };
+
+        let refresh_tokens = sqlx::query_as::<_, RefreshTokenRow>(
+            "\
+            SELECT id, token_verifier, status
+            FROM session_refresh_tokens
+            WHERE session_id = $1
+            ORDER BY created_at ASC
+            FOR UPDATE",
+        )
+        .bind(command.session_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|error| classify_database_error(&error))?;
+        let matching_token =
+            find_matching_refresh_token(&refresh_tokens, &command.presented_verifier);
+        let Some(matching_token) = matching_token else {
+            return Ok(RefreshRotation::Rejected);
+        };
+
+        if matching_token.status != ACTIVE_STATUS {
+            compromise_refresh_family(
+                &mut transaction,
+                session.user_id,
+                session.device_id,
+                session.family_id,
+                command.session_id,
+                command.request_id,
+            )
+            .await?;
+            transaction
+                .commit()
+                .await
+                .map_err(|error| classify_database_error(&error))?;
+            return Ok(RefreshRotation::Reused);
+        }
+
+        if session.status != ACTIVE_STATUS || session.expires_at <= OffsetDateTime::now_utc() {
+            mark_session_expired_if_needed(&mut transaction, command.session_id, &session.status)
+                .await?;
+            transaction
+                .commit()
+                .await
+                .map_err(|error| classify_database_error(&error))?;
+            return Ok(RefreshRotation::Rejected);
+        }
+
+        let profile = active_profile_in_transaction(&mut transaction, session.user_id).await?;
+        let device = active_device_in_transaction(&mut transaction, session.device_id).await?;
+        let (Some(profile), Some(device)) = (profile, device) else {
+            transaction
+                .commit()
+                .await
+                .map_err(|error| classify_database_error(&error))?;
+            return Ok(RefreshRotation::Rejected);
+        };
+
+        sqlx::query(
+            "\
+            INSERT INTO session_refresh_tokens (
+                id, session_id, token_verifier, status, expires_at
+            ) VALUES ($1, $2, $3, 'active', $4)",
+        )
+        .bind(command.new_refresh_token_id)
+        .bind(command.session_id)
+        .bind(&command.new_refresh_token_verifier)
+        .bind(command.new_refresh_token_expires_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| classify_database_error(&error))?;
+        sqlx::query(
+            "\
+            UPDATE session_refresh_tokens
+            SET status = 'rotated', used_at = NOW(), rotated_to_id = $1
+            WHERE id = $2 AND status = 'active'",
+        )
+        .bind(command.new_refresh_token_id)
+        .bind(matching_token.id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| classify_database_error(&error))?;
+        sqlx::query("UPDATE sessions SET last_used_at = NOW() WHERE id = $1")
+            .bind(command.session_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| classify_database_error(&error))?;
+        write_refresh_audit(
+            &mut transaction,
+            profile.id,
+            device.id,
+            command.session_id,
+            command.request_id,
+            "auth.refresh.rotated",
+            "success",
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| classify_database_error(&error))?;
+
+        Ok(RefreshRotation::Rotated(Box::new(RotatedRefreshToken {
+            profile,
+            device,
+            session_id: command.session_id,
+            family_id: session.family_id,
+        })))
+    }
+
     /// Checks that the token claim still maps to an active, unexpired session,
     /// active device, and active user. It is safe to use at every route guard.
     ///
@@ -385,6 +592,154 @@ impl Database {
         .map_err(|error| classify_database_error(&error))?;
         devices.into_iter().map(Device::try_from).collect()
     }
+}
+
+fn all_version_seven(ids: &[Uuid]) -> bool {
+    ids.iter().all(|id| id.get_version_num() == 7)
+}
+
+fn valid_refresh_verifier(verifier: &[u8]) -> bool {
+    verifier.len() == 32
+}
+
+fn find_matching_refresh_token<'row>(
+    refresh_tokens: &'row [RefreshTokenRow],
+    presented_verifier: &[u8],
+) -> Option<&'row RefreshTokenRow> {
+    let mut matching_token = None;
+    for token in refresh_tokens {
+        let matches = token.token_verifier.ct_eq(presented_verifier).unwrap_u8() == 1;
+        if matches {
+            matching_token = Some(token);
+        }
+    }
+    matching_token
+}
+
+async fn active_profile_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+) -> Result<Option<Profile>, StorageError> {
+    let row = sqlx::query_as::<_, ProfileRow>(
+        "\
+        SELECT id, email, display_name, time_zone, status, version
+        FROM users
+        WHERE id = $1 AND status = 'active'",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| classify_database_error(&error))?;
+    row.map(Profile::try_from).transpose()
+}
+
+async fn active_device_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    device_id: Uuid,
+) -> Result<Option<Device>, StorageError> {
+    let row = sqlx::query_as::<_, DeviceRow>(
+        "\
+        SELECT id, platform, name, app_version, os_version, status, version
+        FROM devices
+        WHERE id = $1 AND status = 'active'",
+    )
+    .bind(device_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| classify_database_error(&error))?;
+    row.map(Device::try_from).transpose()
+}
+
+async fn mark_session_expired_if_needed(
+    transaction: &mut Transaction<'_, Postgres>,
+    session_id: Uuid,
+    status: &str,
+) -> Result<(), StorageError> {
+    if status == ACTIVE_STATUS {
+        sqlx::query(
+            "\
+            UPDATE sessions
+            SET status = 'expired', revoked_at = NOW(), revocation_reason = 'session_expired'
+            WHERE id = $1 AND status = 'active'",
+        )
+        .bind(session_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| classify_database_error(&error))?;
+    }
+    Ok(())
+}
+
+async fn compromise_refresh_family(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    device_id: Uuid,
+    family_id: Uuid,
+    session_id: Uuid,
+    request_id: Uuid,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "\
+        UPDATE sessions
+        SET status = 'compromised', revoked_at = NOW(), revocation_reason = 'refresh_reuse'
+        WHERE family_id = $1 AND status = 'active'",
+    )
+    .bind(family_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| classify_database_error(&error))?;
+    sqlx::query(
+        "\
+        UPDATE session_refresh_tokens token
+        SET status = 'revoked'
+        FROM sessions session
+        WHERE token.session_id = session.id
+          AND session.family_id = $1
+          AND token.status = 'active'",
+    )
+    .bind(family_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| classify_database_error(&error))?;
+    write_refresh_audit(
+        transaction,
+        user_id,
+        device_id,
+        session_id,
+        request_id,
+        "auth.refresh.reused",
+        "rejected",
+    )
+    .await
+}
+
+async fn write_refresh_audit(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    device_id: Uuid,
+    session_id: Uuid,
+    request_id: Uuid,
+    action: &str,
+    outcome: &str,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "\
+        INSERT INTO audit_logs (
+            id, actor_user_id, actor_device_id, action, target_type, target_id,
+            outcome, request_id, metadata
+        ) VALUES ($1, $2, $3, $4, 'session', $5, $6, $7, '{}')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(user_id)
+    .bind(device_id)
+    .bind(action)
+    .bind(session_id)
+    .bind(outcome)
+    .bind(request_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| classify_database_error(&error))?;
+    Ok(())
 }
 
 async fn append_change(

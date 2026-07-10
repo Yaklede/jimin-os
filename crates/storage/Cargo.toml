@@ -12,6 +12,7 @@ jimin-domain = { path = "../domain" }
 secrecy.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
+subtle.workspace = true
 thiserror.workspace = true
 time.workspace = true
 uuid.workspace = true

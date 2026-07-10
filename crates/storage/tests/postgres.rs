@@ -2,7 +2,10 @@ use std::time::Duration;
 
 use jimin_auth::SessionIdentity;
 use jimin_domain::{ClientPlatform, DeviceRegistration, EmailAddress, GoogleSubject};
-use jimin_storage::{Database, EXPECTED_SCHEMA_VERSION, Readiness, auth::ProvisionLogin};
+use jimin_storage::{
+    Database, EXPECTED_SCHEMA_VERSION, Readiness,
+    auth::{ProvisionLogin, RefreshRotation, RotateRefreshToken},
+};
 use secrecy::SecretString;
 use time::{Duration as TimeDuration, OffsetDateTime};
 use uuid::Uuid;
@@ -67,6 +70,46 @@ async fn login_provision_is_atomic_and_the_session_guard_is_user_scoped() {
     assert!(provisioned.sync_cursor >= 2);
     assert!(
         database
+            .is_session_active(
+                SessionIdentity::new(
+                    user_id,
+                    first_session,
+                    provisioned.device.id,
+                    Uuid::now_v7(),
+                )
+                .expect("guard identity should be valid"),
+            )
+            .await
+            .expect("guard query should succeed")
+    );
+
+    let rotation = database
+        .rotate_refresh_token(&RotateRefreshToken {
+            session_id: first_session,
+            presented_verifier: first.refresh_token_verifier.clone(),
+            new_refresh_token_id: Uuid::now_v7(),
+            new_refresh_token_verifier: vec![22; 32],
+            new_refresh_token_expires_at: OffsetDateTime::now_utc() + TimeDuration::days(30),
+            request_id: Uuid::now_v7(),
+        })
+        .await
+        .expect("active refresh token should rotate");
+    assert!(matches!(rotation, RefreshRotation::Rotated(_)));
+
+    let replay = database
+        .rotate_refresh_token(&RotateRefreshToken {
+            session_id: first_session,
+            presented_verifier: first.refresh_token_verifier.clone(),
+            new_refresh_token_id: Uuid::now_v7(),
+            new_refresh_token_verifier: vec![33; 32],
+            new_refresh_token_expires_at: OffsetDateTime::now_utc() + TimeDuration::days(30),
+            request_id: Uuid::now_v7(),
+        })
+        .await
+        .expect("rotated token replay should be handled safely");
+    assert_eq!(replay, RefreshRotation::Reused);
+    assert!(
+        !database
             .is_session_active(
                 SessionIdentity::new(
                     user_id,
