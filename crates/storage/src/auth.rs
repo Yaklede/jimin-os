@@ -205,6 +205,7 @@ struct RefreshTokenRow {
     id: Uuid,
     token_verifier: Vec<u8>,
     status: String,
+    expires_at: OffsetDateTime,
 }
 
 impl TryFrom<DeviceRow> for Device {
@@ -415,7 +416,7 @@ impl Database {
 
         let refresh_tokens = sqlx::query_as::<_, RefreshTokenRow>(
             "\
-            SELECT id, token_verifier, status
+            SELECT id, token_verifier, status, expires_at
             FROM session_refresh_tokens
             WHERE session_id = $1
             ORDER BY created_at ASC
@@ -446,6 +447,24 @@ impl Database {
                 .await
                 .map_err(|error| classify_database_error(&error))?;
             return Ok(RefreshRotation::Reused);
+        }
+
+        if matching_token.expires_at <= OffsetDateTime::now_utc() {
+            sqlx::query(
+                "\
+                UPDATE session_refresh_tokens
+                SET status = 'revoked'
+                WHERE id = $1 AND status = 'active'",
+            )
+            .bind(matching_token.id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| classify_database_error(&error))?;
+            transaction
+                .commit()
+                .await
+                .map_err(|error| classify_database_error(&error))?;
+            return Ok(RefreshRotation::Rejected);
         }
 
         if session.status != ACTIVE_STATUS || session.expires_at <= OffsetDateTime::now_utc() {

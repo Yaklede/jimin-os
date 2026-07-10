@@ -123,6 +123,29 @@ async fn login_provision_is_atomic_and_the_session_guard_is_user_scoped() {
             .expect("guard query should succeed")
     );
 
+    let mut expired_login = provision_login_command(Uuid::now_v7(), Uuid::now_v7());
+    let expired_at = OffsetDateTime::now_utc() - TimeDuration::days(1);
+    expired_login.session_expires_at = expired_at;
+    expired_login.refresh_token_expires_at = expired_at;
+    let expired_session_id = expired_login.session_id;
+    let expired_refresh_verifier = expired_login.refresh_token_verifier.clone();
+    database
+        .provision_login(&expired_login)
+        .await
+        .expect("expired login fixture should persist for rejection coverage");
+    let expired_refresh = database
+        .rotate_refresh_token(&RotateRefreshToken {
+            session_id: expired_session_id,
+            presented_verifier: expired_refresh_verifier,
+            new_refresh_token_id: Uuid::now_v7(),
+            new_refresh_token_verifier: vec![44; 32],
+            new_refresh_token_expires_at: OffsetDateTime::now_utc() + TimeDuration::days(30),
+            request_id: Uuid::now_v7(),
+        })
+        .await
+        .expect("expired refresh token should be rejected safely");
+    assert_eq!(expired_refresh, RefreshRotation::Rejected);
+
     let second = provision_login_command(user_id, installation_id);
     let reprovisioned = database
         .provision_login(&second)
