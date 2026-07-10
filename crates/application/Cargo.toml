@@ -1,0 +1,19 @@
+[package]
+name = "jimin-application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+jimin-auth = { path = "../auth" }
+jimin-domain = { path = "../domain" }
+jimin-storage = { path = "../storage" }
+secrecy.workspace = true
+thiserror.workspace = true
+time.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true
