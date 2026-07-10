@@ -1,0 +1,40 @@
+{
+	admin off
+	persist_config off
+	log {
+		output stdout
+		format json
+		level INFO
+	}
+}
+
+http://127.0.0.1:2020 {
+	respond /healthz 200
+}
+
+{$JIMIN_OS_HOSTNAME}:{$JIMIN_GATEWAY_CONTAINER_PORT:8443} {
+	import /etc/caddy/tls/{$JIMIN_TLS_MODE:internal}.caddy
+
+	request_body {
+		max_size 8MB
+	}
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		X-Frame-Options "DENY"
+	}
+
+	reverse_proxy api:8080 {
+		transport http {
+			dial_timeout 3s
+			response_header_timeout 30s
+			keepalive 30s
+		}
+		health_uri /health/live
+		health_interval 30s
+		health_timeout 3s
+	}
+}

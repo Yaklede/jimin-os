@@ -1,0 +1,11 @@
+services:
+  gateway:
+    secrets:
+      - gateway_tls_cert
+      - gateway_tls_key
+
+secrets:
+  gateway_tls_cert:
+    file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/gateway_tls_cert
+  gateway_tls_key:
+    file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/gateway_tls_key

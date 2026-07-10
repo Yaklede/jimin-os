@@ -1,0 +1,9 @@
+services:
+  gateway:
+    pull_policy: always
+  api:
+    pull_policy: always
+  agent:
+    pull_policy: always
+  postgres:
+    pull_policy: always

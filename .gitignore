@@ -5,9 +5,20 @@
 .env
 .env.*
 !.env.example
+deploy/secrets/*
+!deploy/secrets/README.md
 *.pem
 *.key
 *.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
+*.tfstate
+*.tfstate.*
+*service-account*.json
+.netrc
+.envrc
 auth.json
 .codex/
 
@@ -15,9 +26,18 @@ auth.json
 target/
 node_modules/
 dist/
+!schemas/codex/**/dist/
+!schemas/codex/**/dist/**
 build/
 coverage/
 *.log
+*.tsbuildinfo
+.turbo/
+
+# Tauri and mobile generated projects
+apps/desktop/src-tauri/target/
+apps/mobile/src-tauri/target/
+apps/mobile/gen/
 
 # Local runtime data
 *.db
@@ -26,6 +46,9 @@ coverage/
 *.sqlite-*
 data/
 backups/
+
+# Local verification evidence can contain device metadata
+docs/verification/local/
 
 # OpenDock local execution state
 .opendock/workdirs/

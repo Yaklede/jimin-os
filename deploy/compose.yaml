@@ -1,0 +1,199 @@
+name: ${JIMIN_COMPOSE_PROJECT:?set JIMIN_COMPOSE_PROJECT}
+
+x-security: &service-security
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
+x-logging: &service-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+services:
+  gateway:
+    <<: *service-security
+    image: ${JIMIN_GATEWAY_IMAGE:?set JIMIN_GATEWAY_IMAGE}
+    build:
+      context: ./deploy/gateway
+      dockerfile: Dockerfile
+      args:
+        CADDY_BASE_IMAGE: ${CADDY_BASE_IMAGE:?set CADDY_BASE_IMAGE}
+        JIMIN_BUILD_SHA: ${JIMIN_BUILD_SHA:?set JIMIN_BUILD_SHA}
+    user: "65532:65532"
+    restart: unless-stopped
+    environment:
+      JIMIN_GATEWAY_CONTAINER_PORT: ${JIMIN_GATEWAY_CONTAINER_PORT:-8443}
+      JIMIN_OS_HOSTNAME: ${JIMIN_OS_HOSTNAME:?set JIMIN_OS_HOSTNAME}
+      JIMIN_TLS_MODE: ${JIMIN_TLS_MODE:?set JIMIN_TLS_MODE}
+    ports:
+      - target: 8443
+        published: "${JIMIN_GATEWAY_HOST_PORT:?set JIMIN_GATEWAY_HOST_PORT}"
+        host_ip: ${JIMIN_GATEWAY_BIND_ADDRESS:?set JIMIN_GATEWAY_BIND_ADDRESS}
+        protocol: tcp
+    volumes:
+      - type: volume
+        source: caddy_data
+        target: /data
+      - type: volume
+        source: caddy_config
+        target: /config
+    tmpfs:
+      - /tmp:uid=65532,gid=65532,mode=0700,size=16m
+    networks:
+      - gateway_api
+    depends_on:
+      api:
+        condition: service_started
+        restart: true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:2020/healthz"]
+      interval: 15s
+      timeout: 3s
+      start_period: 5s
+      retries: 4
+    logging: *service-logging
+
+  api:
+    <<: *service-security
+    image: ${JIMIN_API_IMAGE:?set JIMIN_API_IMAGE}
+    build:
+      context: .
+      dockerfile: deploy/docker/api.Dockerfile
+      args:
+        DEBIAN_RUNTIME_IMAGE: ${DEBIAN_RUNTIME_IMAGE:?set DEBIAN_RUNTIME_IMAGE}
+        JIMIN_BUILD_SHA: ${JIMIN_BUILD_SHA:?set JIMIN_BUILD_SHA}
+        RUST_BUILDER_IMAGE: ${RUST_BUILDER_IMAGE:?set RUST_BUILDER_IMAGE}
+    user: "10001:10001"
+    restart: unless-stopped
+    environment:
+      DATABASE_URL_FILE: /run/secrets/api_database_url
+      JIMIN_API_BIND_ADDR: ${JIMIN_API_BIND_ADDR:-0.0.0.0:8080}
+      JIMIN_API_PROBE_ADDR: ${JIMIN_API_PROBE_ADDR:-127.0.0.1:8080}
+      JIMIN_BUILD_SHA: ${JIMIN_BUILD_SHA:?set JIMIN_BUILD_SHA}
+      JIMIN_DATABASE_ACQUIRE_TIMEOUT_MS: ${JIMIN_DATABASE_ACQUIRE_TIMEOUT_MS:-2000}
+      JIMIN_DATABASE_MAX_CONNECTIONS: ${JIMIN_DATABASE_MAX_CONNECTIONS:-5}
+      RUST_LOG: ${RUST_LOG:-info}
+    secrets:
+      - api_database_url
+    tmpfs:
+      - /tmp:uid=10001,gid=10001,mode=0700,size=32m
+    networks:
+      - gateway_api
+      - api_database
+      - api_egress
+    depends_on:
+      postgres:
+        condition: service_started
+        restart: true
+    healthcheck:
+      test: ["CMD", "jimin-api", "probe", "ready"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 6
+    stop_grace_period: 20s
+    logging: *service-logging
+
+  agent:
+    <<: *service-security
+    image: ${JIMIN_AGENT_IMAGE:?set JIMIN_AGENT_IMAGE}
+    build:
+      context: .
+      dockerfile: deploy/docker/agent.Dockerfile
+      args:
+        CODEX_NPM_INTEGRITY: ${CODEX_NPM_INTEGRITY:?set CODEX_NPM_INTEGRITY}
+        CODEX_VERSION: ${CODEX_VERSION:?set CODEX_VERSION}
+        JIMIN_BUILD_SHA: ${JIMIN_BUILD_SHA:?set JIMIN_BUILD_SHA}
+        NODE_RUNTIME_IMAGE: ${NODE_RUNTIME_IMAGE:?set NODE_RUNTIME_IMAGE}
+        RUST_BUILDER_IMAGE: ${RUST_BUILDER_IMAGE:?set RUST_BUILDER_IMAGE}
+    user: "1000:1000"
+    restart: "no"
+    environment:
+      CODEX_HOME: /home/node/.codex
+      JIMIN_AGENT_CODEX_BIN: /usr/local/bin/codex
+      JIMIN_AGENT_WORKSPACE: /workspace
+      RUST_LOG: ${RUST_LOG:-info}
+    command:
+      - serve
+    volumes:
+      - type: volume
+        source: codex_home
+        target: /home/node/.codex
+      - type: volume
+        source: agent_workspace
+        target: /workspace/data
+    tmpfs:
+      - /tmp:uid=1000,gid=1000,mode=0700,size=64m
+    networks:
+      - agent_egress
+    healthcheck:
+      test: ["CMD", "jimin-agent", "health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    stop_grace_period: 20s
+    logging: *service-logging
+
+  postgres:
+    <<: *service-security
+    image: ${POSTGRES_IMAGE:?set POSTGRES_IMAGE}
+    user: "999:999"
+    restart: unless-stopped
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+      POSTGRES_DB: ${JIMIN_POSTGRES_DB:-jimin_os}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=trust --data-checksums
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_USER: ${JIMIN_POSTGRES_USER:-jimin_api}
+    command:
+      - postgres
+      - -c
+      - listen_addresses=*
+      - -c
+      - password_encryption=scram-sha-256
+    secrets:
+      - source: postgres_credential
+        target: postgres_password
+    volumes:
+      - type: volume
+        source: postgres_data
+        target: /var/lib/postgresql/data
+    tmpfs:
+      - /tmp:uid=999,gid=999,mode=1777,size=64m
+      - /var/run/postgresql:uid=999,gid=999,mode=0770,size=16m
+    shm_size: 128m
+    networks:
+      - api_database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB} -h 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 6
+    stop_grace_period: 30s
+    logging: *service-logging
+
+networks:
+  gateway_api: {}
+  api_database:
+    internal: true
+  api_egress: {}
+  agent_egress: {}
+
+volumes:
+  agent_workspace: {}
+  caddy_config: {}
+  caddy_data: {}
+  codex_home: {}
+  postgres_data: {}
+
+secrets:
+  api_database_url:
+    file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/api_database_url
+  postgres_credential:
+    file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/postgres_password

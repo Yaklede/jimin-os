@@ -1,0 +1,1 @@
+tls /run/secrets/gateway_tls_cert /run/secrets/gateway_tls_key
