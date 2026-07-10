@@ -1,0 +1,21 @@
+[package]
+name = "jimin-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "jimin-agent"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+jimin-codex-client = { path = "../../crates/codex-client" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

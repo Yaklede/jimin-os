@@ -1,0 +1,199 @@
+use std::{env, net::SocketAddr, process::ExitCode, sync::Arc, time::Duration};
+
+use jimin_api::{
+    ApiState,
+    config::{AppConfig, SecretSetting},
+    probe::{ProbeTarget, run_probe},
+    router, serve_with_shutdown,
+};
+use jimin_observability::init_tracing;
+use jimin_storage::Database;
+use tokio::{net::TcpListener, signal};
+use tracing::{error, info, warn};
+
+const DEFAULT_PROBE_ADDR: &str = "127.0.0.1:8080";
+const MIGRATION_RETRY_INITIAL: Duration = Duration::from_secs(1);
+const MIGRATION_RETRY_MAXIMUM: Duration = Duration::from_secs(30);
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    let arguments: Vec<String> = env::args().skip(1).collect();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "probe")
+    {
+        return run_probe_command(&arguments).await;
+    }
+
+    if init_tracing().is_err() {
+        return ExitCode::FAILURE;
+    }
+
+    match run_server().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error_code) => {
+            error!(event = "api.stopped", error_code);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run_server() -> Result<(), &'static str> {
+    let config = AppConfig::load().map_err(|error| error.code())?;
+
+    let (database, configuration_ready) = match config.database_url() {
+        SecretSetting::Available(database_url) => {
+            if let Ok(database) = Database::connect_lazy(
+                database_url,
+                config.database_max_connections(),
+                config.database_acquire_timeout(),
+            ) {
+                (Some(database), true)
+            } else {
+                warn!(
+                    event = "storage.configuration_invalid",
+                    error_code = "storage.configuration_invalid"
+                );
+                (None, false)
+            }
+        }
+        SecretSetting::Missing => {
+            warn!(
+                event = "storage.configuration_missing",
+                error_code = "storage.configuration_missing"
+            );
+            (None, false)
+        }
+        SecretSetting::Invalid => {
+            warn!(
+                event = "storage.configuration_invalid",
+                error_code = "storage.configuration_invalid"
+            );
+            (None, false)
+        }
+    };
+
+    let readiness_database = database
+        .as_ref()
+        .map(|database| Arc::new(database.clone()) as Arc<dyn jimin_api::ReadinessProbe>);
+    let state = ApiState::new(
+        config.build_sha().to_owned(),
+        configuration_ready,
+        readiness_database,
+    );
+    let listener = TcpListener::bind(config.bind_addr())
+        .await
+        .map_err(|_| "api.bind_failed")?;
+
+    info!(
+        event = "api.started",
+        service = "jimin-api",
+        build_sha = config.build_sha(),
+        port = config.bind_addr().port()
+    );
+
+    let migration_task = database
+        .as_ref()
+        .map(|database| tokio::spawn(reconcile_migrations(database.clone())));
+    let result = serve_with_shutdown(listener, router(state), shutdown_signal())
+        .await
+        .map_err(|_| "api.serve_failed");
+
+    if let Some(migration_task) = migration_task {
+        migration_task.abort();
+        let _ = migration_task.await;
+    }
+    if let Some(database) = database {
+        database.close().await;
+    }
+
+    result
+}
+
+async fn reconcile_migrations(database: Database) {
+    let mut retry_delay = MIGRATION_RETRY_INITIAL;
+    loop {
+        if database.migrate().await.is_ok() {
+            info!(event = "storage.migration_ready");
+            return;
+        }
+        warn!(
+            event = "storage.migration_unavailable",
+            error_code = "storage.migration_unavailable",
+            retry_seconds = retry_delay.as_secs()
+        );
+        tokio::time::sleep(retry_delay).await;
+        retry_delay = next_migration_retry(retry_delay);
+    }
+}
+
+fn next_migration_retry(current: Duration) -> Duration {
+    current.saturating_mul(2).min(MIGRATION_RETRY_MAXIMUM)
+}
+
+async fn run_probe_command(arguments: &[String]) -> ExitCode {
+    let target = match arguments {
+        [command, target] if command == "probe" && target == "live" => ProbeTarget::Live,
+        [command, target] if command == "probe" && target == "ready" => ProbeTarget::Ready,
+        _ => return ExitCode::from(2),
+    };
+    let address = match env::var("JIMIN_API_PROBE_ADDR") {
+        Ok(value) => value.parse::<SocketAddr>(),
+        Err(env::VarError::NotPresent) => DEFAULT_PROBE_ADDR.parse(),
+        Err(env::VarError::NotUnicode(_)) => return ExitCode::FAILURE,
+    };
+    let Ok(address) = address else {
+        return ExitCode::FAILURE;
+    };
+
+    if run_probe(target, address).await.is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut stream) = signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            stream.recv().await;
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
+
+    info!(event = "api.shutdown_requested");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MIGRATION_RETRY_MAXIMUM, next_migration_retry};
+    use std::time::Duration;
+
+    #[test]
+    fn migration_retry_backoff_is_bounded() {
+        assert_eq!(
+            next_migration_retry(Duration::from_secs(1)),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            next_migration_retry(Duration::from_secs(20)),
+            MIGRATION_RETRY_MAXIMUM
+        );
+        assert_eq!(
+            next_migration_retry(MIGRATION_RETRY_MAXIMUM),
+            MIGRATION_RETRY_MAXIMUM
+        );
+    }
+}
