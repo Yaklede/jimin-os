@@ -1,0 +1,22 @@
+[package]
+name = "jimin-google"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+jimin-application = { path = "../application" }
+jimin-domain = { path = "../domain" }
+jsonwebtoken.workspace = true
+reqwest.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
