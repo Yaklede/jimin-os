@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  createUuidV7,
   fetchAgentJob,
   fetchLatestConversationJob,
   queueAgentTurn,
 } from "./agent";
+import { createUuidV7 } from "../uuid";
 
 afterEach(() => {
   vi.unstubAllGlobals();

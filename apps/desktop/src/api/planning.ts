@@ -1,4 +1,8 @@
+import { createUuidV7 } from "../uuid";
+
 export type SessionTokens = Record<"accessToken" | "refreshToken", string>;
+
+type ClientPlatform = "macos" | "ios" | "android";
 
 export interface ScheduleEntry {
   id: string;
@@ -48,7 +52,9 @@ export async function exchangePairingCode(
   pairingCode: string,
   deviceName: string,
 ): Promise<SessionTokens> {
-  const installationId = crypto.randomUUID();
+  const code = pairingTokenFromValue(pairingCode);
+  if (!code) throw new PlanningRequestError("invalid");
+  const pairingCodeField = "pairingToken";
   const response = await fetch(
     `${normalizeBaseUrl(baseUrl)}/v1/auth/pairings/exchange`,
     {
@@ -58,10 +64,10 @@ export async function exchangePairingCode(
         Accept: "application/json",
       },
       body: JSON.stringify({
-        ["pairingToken"]: pairingCode,
+        [pairingCodeField]: code,
         device: {
-          installationId,
-          platform: "macos",
+          installationId: createUuidV7(),
+          platform: clientPlatformForUserAgent(navigator.userAgent),
           name: deviceName,
           appVersion: "0.1.0-dev",
           osVersion: navigator.platform,
@@ -80,6 +86,27 @@ export async function exchangePairingCode(
     ["accessToken"]: body.accessToken,
     ["refreshToken"]: body.refreshToken,
   };
+}
+
+export function pairingTokenFromValue(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("jimin-os://")) return trimmed;
+  try {
+    const pairingUrl = new URL(trimmed);
+    if (pairingUrl.protocol !== "jimin-os:" || pairingUrl.hostname !== "pair") {
+      return "";
+    }
+    return pairingUrl.searchParams.get("token")?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function clientPlatformForUserAgent(userAgent: string): ClientPlatform {
+  const normalized = userAgent.toLowerCase();
+  if (normalized.includes("android")) return "android";
+  if (/iphone|ipad|ipod/.test(normalized)) return "ios";
+  return "macos";
 }
 
 export async function refreshDeviceSession(

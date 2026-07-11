@@ -8,12 +8,12 @@ import {
 import { FormEvent, useRef, useState } from "react";
 
 import {
-  createUuidV7,
   type AgentJob,
   type Conversation,
   type ConversationMessage,
 } from "../api/agent";
 import { copy } from "../copy";
+import { createUuidV7 } from "../uuid";
 
 type ConversationWorkspaceProps = {
   conversations: Conversation[];

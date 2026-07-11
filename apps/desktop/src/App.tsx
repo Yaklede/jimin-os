@@ -702,7 +702,7 @@ function SetupPanel({
           <input
             id="device-name"
             name="deviceName"
-            defaultValue="내 Mac"
+            defaultValue={copy.setup.defaultDeviceName}
             maxLength={80}
           />
           <label htmlFor="pairing-code">{copy.setup.tokenLabel}</label>

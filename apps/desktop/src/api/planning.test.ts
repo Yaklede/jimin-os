@@ -1,9 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { PlanningRequestError, refreshDeviceSession } from "./planning";
+import {
+  PlanningRequestError,
+  clientPlatformForUserAgent,
+  exchangePairingCode,
+  pairingTokenFromValue,
+  refreshDeviceSession,
+} from "./planning";
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("refreshDeviceSession", () => {
@@ -44,5 +51,64 @@ describe("refreshDeviceSession", () => {
     ).rejects.toMatchObject({
       code: "unauthorized",
     } satisfies Partial<PlanningRequestError>);
+  });
+
+  it("accepts the complete pairing URI produced for a QR connection", () => {
+    const code = "jp_019f68cb-9400-7000-8000-000000000000.example";
+    const pairingUri = new URL("jimin-os://pair");
+    pairingUri.searchParams.set("token", code);
+
+    expect(pairingTokenFromValue(pairingUri.toString())).toBe(code);
+  });
+
+  it("uses the client platform for device registration", () => {
+    expect(
+      clientPlatformForUserAgent(
+        "Mozilla/5.0 (Linux; Android 16; Pixel) AppleWebKit/537.36",
+      ),
+    ).toBe("android");
+    expect(
+      clientPlatformForUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)"),
+    ).toBe("ios");
+    expect(
+      clientPlatformForUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X)"),
+    ).toBe("macos");
+  });
+
+  it("sends a version-seven installation ID when a device exchanges a code", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          '{"accessToken":"access-session","refreshToken":"refresh-session","user":{},"device":{},"syncCursor":"0"}',
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("crypto", {
+      getRandomValues: (value: Uint8Array) => value.fill(0),
+    });
+    vi.stubGlobal("navigator", {
+      platform: "Linux armv8l",
+      userAgent: "Mozilla/5.0 (Linux; Android 16; Pixel)",
+    });
+    vi.spyOn(Date, "now").mockReturnValue(1_784_169_600_000);
+    const code = "jp_019f68cb-9400-7000-8000-000000000000.example";
+    const pairingUri = new URL("jimin-os://pair");
+    pairingUri.searchParams.set("token", code);
+
+    await exchangePairingCode(
+      "https://jimin-os.example",
+      pairingUri.toString(),
+      "내 기기",
+    );
+
+    const request = fetchMock.mock.calls[0]?.[1];
+    const body = JSON.parse(String(request?.body));
+    expect(body.pairingToken).toBe(code);
+    expect(body.device.platform).toBe("android");
+    expect(body.device.installationId).toBe(
+      "019f68cb-9400-7000-8000-000000000000",
+    );
   });
 });

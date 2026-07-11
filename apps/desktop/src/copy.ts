@@ -40,6 +40,7 @@ export const copy = {
       "신뢰된 서버에서 만든 기기 연결 코드를 입력하면 일정과 할 일을 이 기기에서 사용할 수 있어요.",
     serverLabel: "서버 주소",
     deviceLabel: "기기 이름",
+    defaultDeviceName: "내 기기",
     tokenLabel: "기기 연결 코드",
   },
   schedule: {
