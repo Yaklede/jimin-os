@@ -1,6 +1,8 @@
 //! Durable, server-owned agent conversation queues. The runtime claims these
 //! jobs later; API requests never connect to Codex directly.
 
+use std::time::Duration;
+
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -8,6 +10,9 @@ use crate::{Database, StorageError, auth::append_change};
 
 const MAX_CONTENT_CHARS: usize = 24_000;
 const MAX_TITLE_CHARS: usize = 200;
+const MAX_RUNNER_ID_CHARS: usize = 200;
+const MIN_CLAIM_LEASE: Duration = Duration::from_secs(5);
+const MAX_CLAIM_LEASE: Duration = Duration::from_mins(5);
 
 pub struct NewConversation {
     pub id: Uuid,
@@ -85,6 +90,17 @@ pub struct QueuedAgentTurn {
     pub message_id: Uuid,
     pub conversation_id: Uuid,
     pub state: AgentJobState,
+    pub version: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedAgentJob {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub conversation_id: Uuid,
+    pub input_message_id: Uuid,
+    pub input_content: String,
+    pub codex_thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +150,17 @@ struct JobRow {
     input_message_id: Uuid,
     conversation_id: Uuid,
     state: String,
+    version: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct ClaimedJobRow {
+    id: Uuid,
+    user_id: Uuid,
+    conversation_id: Uuid,
+    input_message_id: Uuid,
+    input_content: String,
+    codex_thread_id: Option<String>,
 }
 
 impl TryFrom<JobRow> for QueuedAgentTurn {
@@ -146,7 +173,21 @@ impl TryFrom<JobRow> for QueuedAgentTurn {
             message_id: row.input_message_id,
             conversation_id: row.conversation_id,
             state,
+            version: row.version,
         })
+    }
+}
+
+impl From<ClaimedJobRow> for ClaimedAgentJob {
+    fn from(row: ClaimedJobRow) -> Self {
+        Self {
+            id: row.id,
+            user_id: row.user_id,
+            conversation_id: row.conversation_id,
+            input_message_id: row.input_message_id,
+            input_content: row.input_content,
+            codex_thread_id: row.codex_thread_id,
+        }
     }
 }
 
@@ -279,7 +320,7 @@ impl Database {
             "\
             INSERT INTO agent_jobs (id, user_id, conversation_id, input_message_id)
             VALUES ($1, $2, $3, $4)
-            RETURNING id, input_message_id, conversation_id, state",
+            RETURNING id, input_message_id, conversation_id, state, version",
         )
         .bind(turn.job_id)
         .bind(turn.user_id)
@@ -304,6 +345,14 @@ impl Database {
         append_change(
             &mut transaction,
             turn.user_id,
+            "agent_job",
+            queued.job_id,
+            queued.version,
+        )
+        .await?;
+        append_change(
+            &mut transaction,
+            turn.user_id,
             "conversation",
             turn.conversation_id,
             conversation_version,
@@ -314,6 +363,293 @@ impl Database {
             .await
             .map_err(|error| classify(&error))?;
         Ok(queued)
+    }
+
+    /// Claims one queued turn for a named runner with a bounded lease.
+    ///
+    /// An expired `claimed` job is safe to recover because the runner has not
+    /// persisted the transition that permits a provider turn yet. `running`
+    /// jobs are deliberately not reclaimed automatically: their provider side
+    /// effect needs an explicit recovery path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified storage error without exposing message content.
+    pub async fn claim_next_agent_job(
+        &self,
+        runner_id: &str,
+        lease: Duration,
+    ) -> Result<Option<ClaimedAgentJob>, StorageError> {
+        let lease_millis = claim_lease_millis(runner_id, lease)?;
+        let row = sqlx::query_as::<_, ClaimedJobRow>(
+            "\
+            WITH recovered AS (
+                UPDATE agent_jobs
+                SET state = 'queued', phase = NULL, claim_owner = NULL, claim_expires_at = NULL
+                WHERE state = 'claimed' AND claim_expires_at < NOW()
+            ), candidate AS (
+                SELECT id
+                FROM agent_jobs
+                WHERE state IN ('queued', 'retry_wait')
+                ORDER BY created_at ASC, id ASC
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+            ), claimed AS (
+                UPDATE agent_jobs AS job
+                SET state = 'claimed',
+                    phase = 'preparing',
+                    claim_owner = $1,
+                    claim_expires_at = NOW() + ($2 * INTERVAL '1 millisecond'),
+                    attempt_count = attempt_count + 1
+                FROM candidate
+                WHERE job.id = candidate.id
+                RETURNING job.id, job.user_id, job.conversation_id, job.input_message_id
+            )
+            SELECT job.id,
+                   job.user_id,
+                   job.conversation_id,
+                   job.input_message_id,
+                   input.content AS input_content,
+                   conversation.codex_thread_id
+            FROM claimed AS job
+            INNER JOIN messages AS input ON input.id = job.input_message_id
+            INNER JOIN conversations AS conversation ON conversation.id = job.conversation_id",
+        )
+        .bind(runner_id)
+        .bind(lease_millis)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|error| classify(&error))?;
+        Ok(row.map(ClaimedAgentJob::from))
+    }
+
+    /// Marks a lease-owned job as running after its Codex thread is available,
+    /// but before `turn/start` is sent.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified storage error without exposing provider IDs in logs.
+    pub async fn start_agent_job(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+        codex_thread_id: &str,
+        lease: Duration,
+    ) -> Result<bool, StorageError> {
+        if !is_v7(job_id) || !valid_runner_id(runner_id) || !valid_external_id(codex_thread_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let lease_millis = claim_lease_millis(runner_id, lease)?;
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| classify(&error))?;
+        let row = sqlx::query_as::<_, (Uuid, Uuid, i64)>(
+            "\
+            UPDATE agent_jobs
+            SET state = 'running',
+                phase = 'starting_turn',
+                codex_thread_id = $3,
+                claim_expires_at = NOW() + ($4 * INTERVAL '1 millisecond'),
+                started_at = COALESCE(started_at, NOW())
+            WHERE id = $1 AND claim_owner = $2 AND state = 'claimed'
+            RETURNING user_id, conversation_id, version",
+        )
+        .bind(job_id)
+        .bind(runner_id)
+        .bind(codex_thread_id)
+        .bind(lease_millis)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        let Some((user_id, conversation_id, job_version)) = row else {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| classify(&error))?;
+            return Ok(false);
+        };
+        let conversation_version = sqlx::query_scalar::<_, i64>(
+            "\
+            UPDATE conversations
+            SET codex_thread_id = COALESCE(codex_thread_id, $3)
+            WHERE id = $1 AND user_id = $2
+            RETURNING version",
+        )
+        .bind(conversation_id)
+        .bind(user_id)
+        .bind(codex_thread_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        append_change(&mut transaction, user_id, "agent_job", job_id, job_version).await?;
+        append_change(
+            &mut transaction,
+            user_id,
+            "conversation",
+            conversation_id,
+            conversation_version,
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| classify(&error))?;
+        Ok(true)
+    }
+
+    /// Persists the authoritative final assistant message and makes a lease-owned
+    /// running job terminal in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified storage error without exposing assistant content.
+    pub async fn complete_agent_job(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+        assistant_message_id: Uuid,
+        content: &str,
+    ) -> Result<bool, StorageError> {
+        if !is_v7(job_id)
+            || !is_v7(assistant_message_id)
+            || !valid_runner_id(runner_id)
+            || !valid_text(content, MAX_CONTENT_CHARS, false)
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| classify(&error))?;
+        let row = sqlx::query_as::<_, (Uuid, Uuid, i64)>(
+            "\
+            UPDATE agent_jobs
+            SET state = 'completed',
+                phase = NULL,
+                claim_owner = NULL,
+                claim_expires_at = NULL,
+                finished_at = NOW()
+            WHERE id = $1 AND claim_owner = $2 AND state = 'running'
+            RETURNING user_id, conversation_id, version",
+        )
+        .bind(job_id)
+        .bind(runner_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        let Some((user_id, conversation_id, job_version)) = row else {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| classify(&error))?;
+            return Ok(false);
+        };
+        let message_version = sqlx::query_scalar::<_, i64>(
+            "\
+            INSERT INTO messages (
+                id, conversation_id, agent_job_id, role, content, status, completed_at
+            ) VALUES ($1, $2, $3, 'assistant', $4, 'completed', NOW())
+            RETURNING version",
+        )
+        .bind(assistant_message_id)
+        .bind(conversation_id)
+        .bind(job_id)
+        .bind(content.trim())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        let conversation_version = sqlx::query_scalar::<_, i64>(
+            "\
+            UPDATE conversations
+            SET last_message_at = NOW()
+            WHERE id = $1 AND user_id = $2
+            RETURNING version",
+        )
+        .bind(conversation_id)
+        .bind(user_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        append_change(&mut transaction, user_id, "agent_job", job_id, job_version).await?;
+        append_change(
+            &mut transaction,
+            user_id,
+            "message",
+            assistant_message_id,
+            message_version,
+        )
+        .await?;
+        append_change(
+            &mut transaction,
+            user_id,
+            "conversation",
+            conversation_id,
+            conversation_version,
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| classify(&error))?;
+        Ok(true)
+    }
+
+    /// Marks a lease-owned pre-provider or running job as failed using a
+    /// sanitized error code only.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified storage error without retaining provider error text.
+    pub async fn fail_agent_job(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+        error_code: &str,
+    ) -> Result<bool, StorageError> {
+        if !is_v7(job_id) || !valid_runner_id(runner_id) || !valid_error_code(error_code) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| classify(&error))?;
+        let row = sqlx::query_as::<_, (Uuid, i64)>(
+            "\
+            UPDATE agent_jobs
+            SET state = 'failed',
+                phase = NULL,
+                claim_owner = NULL,
+                claim_expires_at = NULL,
+                error_code = $3,
+                finished_at = NOW()
+            WHERE id = $1
+              AND claim_owner = $2
+              AND state IN ('claimed', 'running')
+            RETURNING user_id, version",
+        )
+        .bind(job_id)
+        .bind(runner_id)
+        .bind(error_code)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        let Some((user_id, job_version)) = row else {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| classify(&error))?;
+            return Ok(false);
+        };
+        append_change(&mut transaction, user_id, "agent_job", job_id, job_version).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| classify(&error))?;
+        Ok(true)
     }
 }
 
@@ -340,6 +676,29 @@ fn valid_text(value: &str, maximum: usize, allow_empty: bool) -> bool {
     (allow_empty || !value.trim().is_empty())
         && value.chars().count() <= maximum
         && !value.chars().any(char::is_control)
+}
+
+fn valid_runner_id(value: &str) -> bool {
+    valid_text(value, MAX_RUNNER_ID_CHARS, false)
+}
+
+fn valid_external_id(value: &str) -> bool {
+    valid_text(value, MAX_RUNNER_ID_CHARS, false)
+}
+
+fn valid_error_code(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 120
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.')
+        })
+}
+
+fn claim_lease_millis(runner_id: &str, lease: Duration) -> Result<i64, StorageError> {
+    if !valid_runner_id(runner_id) || !(MIN_CLAIM_LEASE..=MAX_CLAIM_LEASE).contains(&lease) {
+        return Err(StorageError::InvalidConfiguration);
+    }
+    i64::try_from(lease.as_millis()).map_err(|_| StorageError::InvalidConfiguration)
 }
 
 fn classify(error: &sqlx::Error) -> StorageError {
