@@ -461,6 +461,7 @@ pub(crate) fn error_response(
         list_conversations,
         create_conversation,
         list_conversation_messages,
+        get_latest_conversation_job,
         create_agent_turn,
         get_agent_job,
         live,
@@ -536,6 +537,10 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/conversations/{conversation_id}/messages",
             get(list_conversation_messages),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/jobs/latest",
+            get(get_latest_conversation_job),
         )
         .route("/v1/agent/jobs/{job_id}", get(get_agent_job))
         .route("/v1/me", get(me))
@@ -1034,6 +1039,39 @@ async fn list_conversation_messages(
             Err(()) => unavailable_response(request_id),
         },
         Ok(None) => agent_not_found_response(request_id),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/conversations/{conversation_id}/jobs/latest",
+    tag = "agent",
+    params(("conversation_id" = String, Path)),
+    responses((status = 200, body = AgentJobResponse), (status = 204, description = "The conversation has no AI request yet"), (status = 401), (status = 503))
+)]
+async fn get_latest_conversation_job(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(conversation_id): Path<uuid::Uuid>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(agent) = state.agent() else {
+        return unavailable_response(request_id);
+    };
+    match agent
+        .latest_agent_job_for_conversation_for_user(principal.identity().user_id(), conversation_id)
+        .await
+    {
+        Ok(Some(job)) => match agent_job_response(&job) {
+            Ok(response) => Json(response).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Ok(None) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -1803,6 +1841,7 @@ mod tests {
                 "/v1/auth/pairings/exchange",
                 "/v1/auth/refresh",
                 "/v1/conversations",
+                "/v1/conversations/{conversation_id}/jobs/latest",
                 "/v1/conversations/{conversation_id}/messages",
                 "/v1/conversations/{conversation_id}/turns",
                 "/v1/device-pairings",

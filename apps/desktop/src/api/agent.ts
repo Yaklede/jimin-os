@@ -150,6 +150,22 @@ export async function fetchAgentJob(
   return body;
 }
 
+export async function fetchLatestConversationJob(
+  baseUrl: string,
+  access: string,
+  conversationId: string,
+): Promise<AgentJob | undefined> {
+  const response = await fetch(
+    `${normalizeBaseUrl(baseUrl)}/v1/conversations/${conversationId}/jobs/latest`,
+    { headers: authHeaders(access) },
+  );
+  if (response.status === 204) return undefined;
+  const body = await readJson(response);
+  if (!response.ok) throw errorFromStatus(response.status);
+  if (!isAgentJob(body)) throw new AgentRequestError("unavailable");
+  return body;
+}
+
 async function request<T>(
   baseUrl: string,
   access: string,

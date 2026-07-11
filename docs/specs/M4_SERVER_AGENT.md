@@ -344,8 +344,12 @@ Idempotency-Key: <uuidv7>
 
 ```text
 GET  /v1/agent/jobs/{jobId}
+GET  /v1/conversations/{conversationId}/jobs/latest
 POST /v1/agent/jobs/{jobId}/cancel
 ```
+
+`jobs/latest`는 client 재시작이나 다른 기기에서 대화를 다시 열 때 가장 최근
+job state를 복원하는 read model이다. 요청이 한 번도 없으면 `204`를 반환한다.
 
 cancel은 멱등이다. `queued`는 바로 `cancelled`, active turn은 `cancelRequestedAt`을 기록한 뒤 Runner가 `turn/interrupt`를 보내고 확인된 terminal event에서 `cancelled`가 된다.
 

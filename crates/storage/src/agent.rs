@@ -461,6 +461,33 @@ impl Database {
         row.map(AgentJob::try_from).transpose()
     }
 
+    /// Returns the newest job in an owned conversation so a client that was
+    /// restarted or opened on another device can restore its request state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified storage error without exposing another user's job.
+    pub async fn latest_agent_job_for_conversation_for_user(
+        &self,
+        user_id: Uuid,
+        conversation_id: Uuid,
+    ) -> Result<Option<AgentJob>, StorageError> {
+        let row = sqlx::query_as::<_, AgentJobReadRow>(
+            "\
+            SELECT id, conversation_id, state, created_at, finished_at, version
+            FROM agent_jobs
+            WHERE user_id = $1 AND conversation_id = $2
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(conversation_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|error| classify(&error))?;
+        row.map(AgentJob::try_from).transpose()
+    }
+
     /// Atomically records the user message and a queued job for one owned,
     /// active conversation. The unique active-job index turns concurrent turns
     /// into an ordinary conflict rather than a competing provider call.

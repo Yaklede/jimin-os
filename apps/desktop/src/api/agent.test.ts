@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createUuidV7, fetchAgentJob, queueAgentTurn } from "./agent";
+import {
+  createUuidV7,
+  fetchAgentJob,
+  fetchLatestConversationJob,
+  queueAgentTurn,
+} from "./agent";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -63,5 +68,50 @@ describe("agent API", () => {
     );
 
     expect(job.state).toBe("running");
+  });
+
+  it("restores the newest job for a conversation after reopening it", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          '{"id":"job-2","conversationId":"conversation-1","state":"failed","createdAt":"2026-07-11T00:00:00Z","finishedAt":"2026-07-11T00:01:00Z","version":3}',
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const job = await fetchLatestConversationJob(
+      "https://jimin-os.example/",
+      "session-access",
+      "conversation-1",
+    );
+
+    expect(job?.state).toBe("failed");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://jimin-os.example/v1/conversations/conversation-1/jobs/latest",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer session-access",
+        }),
+      }),
+    );
+  });
+
+  it("keeps a conversation without requests free of a status message", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response(null, { status: 204 })),
+    );
+
+    await expect(
+      fetchLatestConversationJob(
+        "https://jimin-os.example",
+        "session-access",
+        "conversation-1",
+      ),
+    ).resolves.toBeUndefined();
   });
 });

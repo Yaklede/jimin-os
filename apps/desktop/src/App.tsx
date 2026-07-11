@@ -26,6 +26,7 @@ import {
   fetchAgentJob,
   fetchConversationMessages,
   fetchConversations,
+  fetchLatestConversationJob,
   queueAgentTurn,
   type AgentJob,
   type Conversation,
@@ -43,6 +44,7 @@ const defaultApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/server";
 
 type AppMode = "setup" | "loading" | "ready" | "error";
 type AppView = "today" | "conversations";
+type ConversationJobs = Record<string, AgentJob>;
 
 export default function App() {
   const [apiBaseUrl, setApiBaseUrl] = useState(defaultApiBaseUrl);
@@ -63,13 +65,9 @@ export default function App() {
   const [conversationError, setConversationError] = useState<
     string | undefined
   >(undefined);
-  const [activeJobId, setActiveJobId] = useState<string | undefined>(undefined);
-  const [activeJobState, setActiveJobState] = useState<
-    AgentJob["state"] | undefined
-  >(undefined);
-  const [activeJobConversationId, setActiveJobConversationId] = useState<
-    string | undefined
-  >(undefined);
+  const [conversationJobs, setConversationJobs] = useState<ConversationJobs>(
+    {},
+  );
   const [message, setMessage] = useState<string | undefined>(undefined);
 
   const refreshConversations = useCallback(async () => {
@@ -164,9 +162,7 @@ export default function App() {
       setConversations([]);
       setConversationMessages([]);
       setSelectedConversationId(undefined);
-      setActiveJobId(undefined);
-      setActiveJobState(undefined);
-      setActiveJobConversationId(undefined);
+      setConversationJobs({});
       setMode("setup");
       setMessage(copy.messages.sessionExpired);
     }
@@ -205,34 +201,48 @@ export default function App() {
     void refresh();
   }, [refresh]);
 
+  const activeJobIds = useMemo(
+    () =>
+      Object.values(conversationJobs)
+        .filter((job) => !isTerminalAgentJob(job.state))
+        .map((job) => job.id)
+        .sort(),
+    [conversationJobs],
+  );
+  const activeJobKey = activeJobIds.join(":");
+
   useEffect(() => {
-    if (!tokens || !activeJobId || !activeJobConversationId) return;
+    if (!tokens || activeJobIds.length === 0) return;
     let current = true;
 
     const poll = async () => {
-      try {
-        const job = await fetchAgentJob(
-          apiBaseUrl,
-          tokens.accessToken,
-          activeJobId,
-        );
-        if (!current) return;
-        setActiveJobState(job.state);
-        if (
-          ["completed", "failed", "cancelled", "declined"].includes(job.state)
-        ) {
-          setActiveJobId(undefined);
-          if (job.state === "completed") setActiveJobState(undefined);
-          if (selectedConversationId === activeJobConversationId) {
-            void loadConversationMessages(activeJobConversationId);
+      const results = await Promise.all(
+        activeJobIds.map(async (jobId) => {
+          try {
+            return await fetchAgentJob(apiBaseUrl, tokens.accessToken, jobId);
+          } catch {
+            return undefined;
           }
-          void refreshConversations();
-        }
-      } catch {
-        if (current) {
-          setConversationError(copy.messages.conversationLoadNotice);
-        }
+        }),
+      );
+      if (!current) return;
+      const jobs = results.filter((job): job is AgentJob => Boolean(job));
+      if (jobs.length !== activeJobIds.length) {
+        setConversationError(copy.messages.conversationLoadNotice);
       }
+      if (jobs.length === 0) return;
+      setConversationJobs((known) => {
+        const next = { ...known };
+        for (const job of jobs) next[job.conversationId] = job;
+        return next;
+      });
+      const finishedConversationIds = jobs
+        .filter((job) => isTerminalAgentJob(job.state))
+        .map((job) => job.conversationId);
+      if (finishedConversationIds.includes(selectedConversationId ?? "")) {
+        void loadConversationMessages(selectedConversationId!);
+      }
+      if (finishedConversationIds.length) void refreshConversations();
     };
 
     void poll();
@@ -242,8 +252,7 @@ export default function App() {
       window.clearInterval(interval);
     };
   }, [
-    activeJobConversationId,
-    activeJobId,
+    activeJobKey,
     apiBaseUrl,
     loadConversationMessages,
     refreshConversations,
@@ -353,6 +362,26 @@ export default function App() {
     setSelectedConversationId(conversationId);
     setConversationMessages([]);
     void loadConversationMessages(conversationId);
+    void restoreConversationJob(conversationId);
+  }
+
+  async function restoreConversationJob(conversationId: string) {
+    if (!tokens) return;
+    try {
+      const job = await fetchLatestConversationJob(
+        apiBaseUrl,
+        tokens.accessToken,
+        conversationId,
+      );
+      if (job) {
+        setConversationJobs((known) => ({
+          ...known,
+          [conversationId]: job,
+        }));
+      }
+    } catch {
+      setConversationError(copy.messages.conversationLoadNotice);
+    }
   }
 
   function startConversation() {
@@ -386,9 +415,17 @@ export default function App() {
         text.trim(),
         clientMessageId,
       );
-      setActiveJobId(queued.jobId);
-      setActiveJobState(queued.state);
-      setActiveJobConversationId(queued.conversationId);
+      setConversationJobs((known) => ({
+        ...known,
+        [queued.conversationId]: {
+          id: queued.jobId,
+          conversationId: queued.conversationId,
+          state: queued.state,
+          createdAt: new Date().toISOString(),
+          finishedAt: null,
+          version: 1,
+        },
+      }));
       await loadConversationMessages(queued.conversationId);
       void refreshConversations();
       return true;
@@ -478,11 +515,17 @@ export default function App() {
             messages={conversationMessages}
             selectedConversationId={selectedConversationId}
             jobState={
-              selectedConversationId === activeJobConversationId
-                ? activeJobState
+              selectedConversationId
+                ? conversationJobs[selectedConversationId]?.state
                 : undefined
             }
-            hasActiveJob={Boolean(activeJobId)}
+            hasActiveJob={Boolean(
+              selectedConversationId &&
+              conversationJobs[selectedConversationId] &&
+              !isTerminalAgentJob(
+                conversationJobs[selectedConversationId].state,
+              ),
+            )}
             loading={conversationLoading}
             error={conversationError}
             onSelect={selectConversation}
@@ -700,4 +743,8 @@ function formatRange(start: string, end: string) {
 function conversationTitle(value: string) {
   const title = value.trim().replace(/\s+/g, " ").slice(0, 36);
   return title || null;
+}
+
+function isTerminalAgentJob(state: AgentJob["state"]) {
+  return ["completed", "failed", "cancelled", "declined"].includes(state);
 }

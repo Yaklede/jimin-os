@@ -460,6 +460,13 @@ async fn queued_agent_turn_is_leased_and_completed_once() {
             .state,
         AgentJobState::Completed
     );
+    let latest = database
+        .latest_agent_job_for_conversation_for_user(provisioned.profile.id, conversation_id)
+        .await
+        .expect("latest job query should succeed")
+        .expect("owner should read the latest conversation job");
+    assert_eq!(latest.id, queued.job_id);
+    assert_eq!(latest.state, AgentJobState::Completed);
     assert!(
         database
             .claim_next_agent_job(runner_id, Duration::from_secs(30))
