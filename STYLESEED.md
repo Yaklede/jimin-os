@@ -25,14 +25,16 @@
 
 1. First gaze: the active request/result; otherwise the assistant composer
 2. Primary action: Jimin OS에 도움 요청하기
-3. Secondary scan: real today-context rows, recent conversations, and active work
-4. Supporting detail: connected source, time, device, and server status only when useful
+3. Secondary scan: recent conversations and actual active work
+4. Supporting detail: connected source, time, device, and server status only when the active
+   request needs it
 
-The assistant home is not a static dashboard. It gives one request surface
-visual priority, then grounds that request in actual schedules, tasks, and
-saved context. The conversation view continues the same request rather than
-switching to an unrelated chat product. Both views use the same accent, radius,
-icon, and border language.
+The assistant home is a conversation entry point, not a static dashboard. It
+offers the composer and a few generic ways to start a request; personal schedule,
+task, and saved context appear only when a request has actually called for them.
+The conversation view continues the same request rather than switching to an
+unrelated chat product. Both views use the same accent, radius, icon, and border
+language.
 
 Only the active request/result and primary action use the accent. Normal
 context rows remain neutral so warning and destructive exceptions retain meaning.
@@ -41,7 +43,7 @@ context rows remain neutral so warning and destructive exceptions retain meaning
 
 - One app chrome with responsive navigation
 - One dominant assistant composer or active-request surface
-- One real context row group
+- Context rows only when a real source is selected for the active request
 - One inline progress/approval/recovery message when needed
 - Content-shaped loading skeletons
 - Conversation list rows, a chronological message stream, and a labelled

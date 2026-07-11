@@ -1,11 +1,4 @@
-import {
-  CalendarDays,
-  CircleAlert,
-  ClipboardCheck,
-  LoaderCircle,
-  Plus,
-  SendHorizontal,
-} from "lucide-react";
+import { CircleAlert, LoaderCircle, Plus, SendHorizontal } from "lucide-react";
 import { FormEvent, useRef, useState } from "react";
 
 import {
@@ -13,15 +6,12 @@ import {
   type Conversation,
   type ConversationMessage,
 } from "../api/agent";
-import { type ScheduleEntry, type Task } from "../api/planning";
 import { copy } from "../copy";
 import { createUuidV7 } from "../uuid";
 
 type ConversationWorkspaceProps = {
   conversations: Conversation[];
   messages: ConversationMessage[];
-  schedule: ScheduleEntry[];
-  tasks: Task[];
   selectedConversationId: string | undefined;
   jobState: AgentJob["state"] | undefined;
   hasActiveJob: boolean;
@@ -35,8 +25,6 @@ type ConversationWorkspaceProps = {
 export function ConversationWorkspace({
   conversations,
   messages,
-  schedule,
-  tasks,
   selectedConversationId,
   jobState,
   hasActiveJob,
@@ -75,6 +63,11 @@ export function ConversationWorkspace({
     pendingMessageId.current = undefined;
     pendingMessageText.current = undefined;
     onStartConversation();
+    composer.current?.focus();
+  }
+
+  function chooseStarter(text: string) {
+    setDraft(text);
     composer.current?.focus();
   }
 
@@ -142,7 +135,7 @@ export function ConversationWorkspace({
           aria-labelledby="assistant-title"
         >
           {isHome ? (
-            <AssistantHome schedule={schedule} tasks={tasks} />
+            <AssistantHome onChooseStarter={chooseStarter} />
           ) : (
             <section className="assistant-thread">
               <header className="assistant-thread__header">
@@ -234,53 +227,32 @@ export function ConversationWorkspace({
 }
 
 function AssistantHome({
-  schedule,
-  tasks,
-}: Pick<ConversationWorkspaceProps, "schedule" | "tasks">) {
-  const nextSchedule = schedule[0];
-  const nextTask = tasks[0];
-
+  onChooseStarter,
+}: {
+  onChooseStarter(text: string): void;
+}) {
   return (
-    <>
+    <section className="assistant-start">
       <header className="assistant-welcome">
         <h1 id="assistant-title">{copy.conversations.title}</h1>
         <span>{copy.conversations.description}</span>
       </header>
-      <section
-        className="assistant-context"
-        aria-labelledby="assistant-context-title"
+      <div
+        className="assistant-starters"
+        aria-label={copy.conversations.startersLabel}
       >
-        <div className="assistant-context__header">
-          <h2 id="assistant-context-title">
-            {copy.conversations.contextTitle}
-          </h2>
-          <p>{copy.conversations.contextDescription}</p>
-        </div>
-        <ul>
-          <li>
-            <CalendarDays aria-hidden="true" />
-            <div>
-              <span>{copy.conversations.nextSchedule}</span>
-              <strong>
-                {nextSchedule?.title ?? copy.conversations.noSchedule}
-              </strong>
-            </div>
-            {nextSchedule && (
-              <time dateTime={nextSchedule.startsAt}>
-                {formatScheduleTime(nextSchedule.startsAt)}
-              </time>
-            )}
-          </li>
-          <li>
-            <ClipboardCheck aria-hidden="true" />
-            <div>
-              <span>{copy.conversations.nextTask}</span>
-              <strong>{nextTask?.title ?? copy.conversations.noTask}</strong>
-            </div>
-          </li>
-        </ul>
-      </section>
-    </>
+        {copy.conversations.starters.map((starter) => (
+          <button
+            className="assistant-starter focus-visible-control"
+            type="button"
+            key={starter}
+            onClick={() => onChooseStarter(starter)}
+          >
+            {starter}
+          </button>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -323,13 +295,6 @@ function formatConversationTime(value: string) {
 }
 
 function formatMessageTime(value: string) {
-  return new Intl.DateTimeFormat("ko-KR", {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
-}
-
-function formatScheduleTime(value: string) {
   return new Intl.DateTimeFormat("ko-KR", {
     hour: "2-digit",
     minute: "2-digit",

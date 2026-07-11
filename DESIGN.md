@@ -139,7 +139,8 @@ The radius personality is small and precise. Controls use 6px, bounded surfaces 
 - Active task: a bounded request/result surface; it is the single focal point while work runs
 - Progress panel: real server-emitted stage, tool, approval, or failure information; never
   simulated thinking text or a fake timer
-- Context list: static schedule, task, memory, or project rows that the assistant can cite
+- Context list: schedule, task, memory, or project rows only after the assistant has selected
+  a real source for the request; it is not a default first-screen dashboard
 - Conversation stream: chronological user and assistant messages with compact metadata
 - Approval panel: explicit action, affected service/data, approve and decline choices
 - Inline notice: bounded status-specific explanation with an accessible live region
@@ -148,7 +149,8 @@ The radius personality is small and precise. Controls use 6px, bounded surfaces 
 
 ## State coverage
 
-- Empty: composer and honest next action; no invented personal data.
+- Empty: composer and a small set of generic request examples; no invented personal data or
+  static personal-data dashboard.
 - Loading: content-shaped skeletons and `aria-busy`; the active action is disabled.
 - Active request: real server-emitted processing state remains readable while navigating away.
 - Ready: result, context rows, and one accent summary marker.
