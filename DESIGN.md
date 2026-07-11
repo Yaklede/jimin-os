@@ -1,15 +1,18 @@
 # Jimin OS Design Contract
 
-Jimin OS의 제품 화면은 개인 데이터와 자동화 상태를 빠르게 판단하는 도구다. 장식보다 상태의 명료함, 높은 정보 밀도, 차분한 상호작용을 우선한다.
+Jimin OS의 제품 화면은 개인 데이터와 연결 서비스를 바탕으로 사용자의 일을
+정리하고 실행을 돕는 AI 비서다. 장식보다 현재 요청의 명료함, 실제 진행 상태,
+높은 정보 밀도, 차분한 상호작용을 우선한다.
 
 ## Product direction
 
-- App type: personal productivity, operator, developer tool
-- Surfaces: macOS desktop shell and responsive mobile client
+- App type: personal AI assistant, productivity, operator, developer tool
+- Surfaces: private web client, macOS companion shell, and responsive mobile client
 - Mood: restrained, compact, calm, precise
 - Visual reference categories: Linear의 정보 밀도, Raycast의 선명한 상태 표현, GitHub의 행 중심 구조
 - Reference assets, 문구, 브랜드 요소를 복사하지 않는다.
-- 첫 화면에서는 아직 구현되지 않은 일정, 기억, AI 데이터를 미리 노출하지 않는다.
+- 첫 화면에서는 아직 구현되지 않은 일정, 기억, AI 도구 사용, 승인 상태를 미리
+  노출하지 않는다.
 
 ## Typography
 
@@ -130,20 +133,27 @@ The radius personality is small and precise. Controls use 6px, bounded surfaces 
 
 ## Components
 
-- App header: product name, current scope, one primary refresh action
-- Connection summary: one dominant status statement with supporting recovery copy
-- Status list: static rows with semantic icon, label, state text, and optional detail
-- Metadata list: build and schema values aligned in compact rows
+- App chrome: product name, current scope, navigation, and one contextual action
+- Assistant composer: one dominant request surface with clear submit, optional attachments,
+  and only the connected sources that the server can actually use
+- Active task: a bounded request/result surface; it is the single focal point while work runs
+- Progress panel: real server-emitted stage, tool, approval, or failure information; never
+  simulated thinking text or a fake timer
+- Context list: static schedule, task, memory, or project rows that the assistant can cite
+- Conversation stream: chronological user and assistant messages with compact metadata
+- Approval panel: explicit action, affected service/data, approve and decline choices
 - Inline notice: bounded status-specific explanation with an accessible live region
 - Skeleton: matches the final row structure and appears after the request begins
-- Buttons: one filled primary action and quiet icon action where space is constrained
+- Buttons: one filled primary action and quiet secondary/icon actions where space is constrained
 
 ## State coverage
 
-- Default: last confirmed server state is readable without animation.
-- Loading: content-shaped skeletons and `aria-busy`; the refresh action is disabled.
-- Ready: neutral detail rows and one accent summary marker.
-- Needs attention: warning summary plus exact failed dependency rows.
+- Empty: composer and honest next action; no invented personal data.
+- Loading: content-shaped skeletons and `aria-busy`; the active action is disabled.
+- Active request: real server-emitted processing state remains readable while navigating away.
+- Ready: result, context rows, and one accent summary marker.
+- Approval needed: action scope and the user's choices are visible together.
+- Needs attention: warning summary plus exact affected row or connected service.
 - Unreachable: destructive summary with a clear next action.
 - Hover and focus: matched feedback on every interactive element.
 - Disabled: reduced emphasis with readable label.
@@ -152,17 +162,21 @@ The radius personality is small and precise. Controls use 6px, bounded surfaces 
 
 ## Do
 
-- Lead with the state and next useful action.
+- Lead with the active request and next useful action.
 - Prefer rows, dividers, and grouped surfaces over a grid of equal cards.
 - Keep diagnostics user-readable; raw codes belong in developer logs.
 - Use one outline icon family with `currentColor`.
 - Show only data returned by the server.
+- Use Apple platform conventions for safe areas, sheets, keyboard focus, and native-feeling
+  transitions; do not copy Apple marketing layouts, assets, or copy.
+- Use Gemini-like assistant interaction only for explicit source selection, plans, background
+  work, and approval; do not copy Gemini's visual identity, gradients, or component layout.
 
 ## Don't
 
-- Do not use a KPI-card dashboard for basic connection status.
+- Do not use a KPI-card dashboard for basic connection status or personal assistant context.
 - Do not add gradients, glass effects, decorative blobs, or emoji icons.
 - Do not use generic pale icon chips on every row.
-- Do not invent schedules, memories, account state, or AI activity.
+- Do not invent schedules, memories, account state, AI activity, tool use, or approval state.
 - Do not expose tokens, internal routes, stack traces, or database terminology.
 - Do not hide recovery actions behind hover or a secondary panel.

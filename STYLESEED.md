@@ -3,10 +3,10 @@
 ## Scope
 
 - App type: personal productivity, operator, developer tool
-- Current surface: personal schedule, task home, and explicit assistant conversations
-- Next surface: memory and connected-data review
-- Platforms: macOS desktop-first responsive UI with a phone-width validation view
-- Layout type: compact operational console, not a marketing page or KPI dashboard
+- Current surface: assistant-first home, active request, and explicit assistant conversations
+- Next surface: plan, memory, connected-data review, and device management
+- Platforms: private web, macOS companion, and phone-width mobile client
+- Layout type: compact assistant work surface, not a marketing page or KPI dashboard
 
 ## Locked axes
 
@@ -23,32 +23,34 @@
 
 ## Hierarchy lock
 
-1. First gaze: current server connection state
-2. Primary action: 상태 다시 확인하기
-3. Secondary scan: process, database, and migration readiness rows
-4. Supporting detail: server address, build, schema, last checked time
+1. First gaze: the active request/result; otherwise the assistant composer
+2. Primary action: Jimin OS에 도움 요청하기
+3. Secondary scan: real today-context rows, recent conversations, and active work
+4. Supporting detail: connected source, time, device, and server status only when useful
 
-The planning home extends this hierarchy after a device has connected: first
-gaze is today's schedule and next task, while adding an item is the one primary
-action. The conversation view has a separate focal point: the latest exchange
-and its request state, with sending one explicit request as the primary action.
-Both views use the same accent, radius, icon, and border language.
+The assistant home is not a static dashboard. It gives one request surface
+visual priority, then grounds that request in actual schedules, tasks, and
+saved context. The conversation view continues the same request rather than
+switching to an unrelated chat product. Both views use the same accent, radius,
+icon, and border language.
 
-Only the overall state marker and primary action use the accent. Healthy detail rows remain neutral so warning and destructive exceptions retain meaning.
+Only the active request/result and primary action use the accent. Normal
+context rows remain neutral so warning and destructive exceptions retain meaning.
 
 ## Component lock
 
-- One app header
-- One connection summary surface
-- One readiness row group
-- One server information group
-- One inline recovery message when needed
+- One app chrome with responsive navigation
+- One dominant assistant composer or active-request surface
+- One real context row group
+- One inline progress/approval/recovery message when needed
 - Content-shaped loading skeletons
-- Planning rows and explicit Field/Label/Input forms for connected devices
 - Conversation list rows, a chronological message stream, and a labelled
   request composer within one work surface
+- Sidebar on desktop and bottom navigation on mobile once top-level assistant,
+  plan, and memory destinations exist
 
-Inputs, charts, KPI tiles, carousels, sidebars, and bottom navigation are outside this first surface because they do not help the current task.
+Charts, KPI tiles, carousels, decorative source chips, and fake tool timelines
+are outside this surface because they do not help the current request.
 
 ## Accessibility lock
 

@@ -64,7 +64,7 @@ export default function App() {
   const [mode, setMode] = useState<AppMode>("loading");
   const [schedule, setSchedule] = useState<ScheduleEntry[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [view, setView] = useState<AppView>("today");
+  const [view, setView] = useState<AppView>("conversations");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState<
     string | undefined
@@ -533,6 +533,8 @@ export default function App() {
           </>
         ) : view === "conversations" ? (
           <ConversationWorkspace
+            schedule={schedule}
+            tasks={tasks}
             conversations={conversations}
             messages={conversationMessages}
             selectedConversationId={selectedConversationId}
