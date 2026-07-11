@@ -2,6 +2,10 @@ export const copy = {
   productName: "Jimin OS",
   scope: "개인 서버",
   title: "오늘의 계획",
+  navigation: {
+    today: "오늘",
+    conversations: "대화",
+  },
   actions: {
     checkAgain: "다시 확인하기",
     checkAgainLabel: "서버 상태 다시 확인하기",
@@ -11,6 +15,9 @@ export const copy = {
     addTask: "할 일 추가하기",
     addSchedule: "일정 추가하기",
     complete: "완료하기",
+    startConversation: "새 대화 시작하기",
+    sendRequest: "요청 보내기",
+    sendingRequest: "요청 보내는 중",
   },
   summary: {
     checkingTitle: "서버 상태를 확인하고 있어요",
@@ -45,6 +52,24 @@ export const copy = {
     description: "완료하지 않은 일을 우선순위대로 보여줘요.",
     empty: "열린 할 일이 없어요. 다음에 할 일을 추가해 보세요.",
   },
+  conversations: {
+    kicker: "개인 요청",
+    title: "대화",
+    listTitle: "대화 목록",
+    listDescription: "최근 대화를 이어서 볼 수 있어요.",
+    newConversation: "새 대화",
+    untitled: "이름 없는 대화",
+    noMessages: "아직 내용이 없어요",
+    empty: "아직 대화가 없어요. 아래에 필요한 내용을 적어 보세요.",
+    threadDescription: "필요한 일을 한 번에 하나씩 요청할 수 있어요.",
+    threadEmpty: "아직 주고받은 내용이 없어요. 지금 필요한 일을 적어 보세요.",
+    userLabel: "나",
+    composerLabel: "요청 내용",
+    composerPlaceholder: "지금 필요한 일을 적어 보세요.",
+    composerHelp: "응답은 개인 서버에서 처리돼요.",
+    processing: "요청을 처리하고 있어요.",
+    failed: "요청을 완료하지 못했어요. 내용을 확인한 뒤 다시 보내 주세요.",
+  },
   forms: {
     taskTitle: "할 일 추가",
     taskLabel: "할 일",
@@ -68,5 +93,13 @@ export const copy = {
     taskChanged:
       "할 일이 다른 기기에서 변경됐어요. 새로고침 후 다시 확인해 주세요.",
     scheduleAdded: "일정을 추가했어요.",
+    conversationLoadNotice:
+      "대화를 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
+    conversationSendNotice:
+      "요청을 보내지 못했어요. 내용을 확인한 뒤 다시 시도해 주세요.",
+    conversationBusy:
+      "이 대화는 다른 요청을 처리하고 있어요. 잠시 후 다시 보내 주세요.",
+    conversationChanged:
+      "다른 기기에서 대화가 변경됐어요. 대화 목록을 다시 확인해 주세요.",
   },
 } as const;

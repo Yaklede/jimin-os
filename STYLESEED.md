@@ -3,8 +3,8 @@
 ## Scope
 
 - App type: personal productivity, operator, developer tool
-- Current surface: server connection and readiness diagnostic
-- Next surface: personal schedule and task home
+- Current surface: personal schedule, task home, and explicit assistant conversations
+- Next surface: memory and connected-data review
 - Platforms: macOS desktop-first responsive UI with a phone-width validation view
 - Layout type: compact operational console, not a marketing page or KPI dashboard
 
@@ -28,7 +28,9 @@
 
 The planning home extends this hierarchy after a device has connected: first
 gaze is today's schedule and next task, while adding an item is the one primary
-action. It uses the same accent, radius, icon, and border language.
+action. The conversation view has a separate focal point: the latest exchange
+and its request state, with sending one explicit request as the primary action.
+Both views use the same accent, radius, icon, and border language.
 
 Only the overall state marker and primary action use the accent. Healthy detail rows remain neutral so warning and destructive exceptions retain meaning.
 
@@ -41,6 +43,8 @@ Only the overall state marker and primary action use the accent. Healthy detail 
 - One inline recovery message when needed
 - Content-shaped loading skeletons
 - Planning rows and explicit Field/Label/Input forms for connected devices
+- Conversation list rows, a chronological message stream, and a labelled
+  request composer within one work surface
 
 Inputs, charts, KPI tiles, carousels, sidebars, and bottom navigation are outside this first surface because they do not help the current task.
 

@@ -20,6 +20,18 @@ import {
   type SessionTokens,
   type Task,
 } from "./api/planning";
+import {
+  AgentRequestError,
+  createConversation,
+  fetchAgentJob,
+  fetchConversationMessages,
+  fetchConversations,
+  queueAgentTurn,
+  type AgentJob,
+  type Conversation,
+  type ConversationMessage,
+} from "./api/agent";
+import { ConversationWorkspace } from "./components/ConversationWorkspace";
 import { copy } from "./copy";
 import {
   clearDeviceSession,
@@ -30,6 +42,7 @@ import {
 const defaultApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/server";
 
 type AppMode = "setup" | "loading" | "ready" | "error";
+type AppView = "today" | "conversations";
 
 export default function App() {
   const [apiBaseUrl, setApiBaseUrl] = useState(defaultApiBaseUrl);
@@ -38,7 +51,68 @@ export default function App() {
   const [mode, setMode] = useState<AppMode>("loading");
   const [schedule, setSchedule] = useState<ScheduleEntry[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [view, setView] = useState<AppView>("today");
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [selectedConversationId, setSelectedConversationId] = useState<
+    string | undefined
+  >(undefined);
+  const [conversationMessages, setConversationMessages] = useState<
+    ConversationMessage[]
+  >([]);
+  const [conversationLoading, setConversationLoading] = useState(false);
+  const [conversationError, setConversationError] = useState<
+    string | undefined
+  >(undefined);
+  const [activeJobId, setActiveJobId] = useState<string | undefined>(undefined);
+  const [activeJobState, setActiveJobState] = useState<
+    AgentJob["state"] | undefined
+  >(undefined);
+  const [activeJobConversationId, setActiveJobConversationId] = useState<
+    string | undefined
+  >(undefined);
   const [message, setMessage] = useState<string | undefined>(undefined);
+
+  const refreshConversations = useCallback(async () => {
+    if (!tokens) return;
+    setConversationLoading(true);
+    setConversationError(undefined);
+    try {
+      setConversations(
+        await fetchConversations(apiBaseUrl, tokens.accessToken),
+      );
+    } catch {
+      setConversationError(copy.messages.conversationLoadNotice);
+    } finally {
+      setConversationLoading(false);
+    }
+  }, [apiBaseUrl, tokens]);
+
+  const loadConversationMessages = useCallback(
+    async (conversationId: string) => {
+      if (!tokens) return;
+      setConversationLoading(true);
+      setConversationError(undefined);
+      try {
+        setConversationMessages(
+          await fetchConversationMessages(
+            apiBaseUrl,
+            tokens.accessToken,
+            conversationId,
+          ),
+        );
+      } catch (error) {
+        setConversationMessages([]);
+        setConversationError(
+          error instanceof AgentRequestError && error.code === "notFound"
+            ? copy.messages.conversationChanged
+            : copy.messages.conversationLoadNotice,
+        );
+      } finally {
+        setConversationLoading(false);
+      }
+    },
+    [apiBaseUrl, tokens],
+  );
 
   const refresh = useCallback(async () => {
     if (!sessionLoaded) return;
@@ -58,6 +132,7 @@ export default function App() {
       setSchedule(data.schedule);
       setTasks(data.tasks);
       setMode("ready");
+      void refreshConversations();
     } catch (error) {
       if (
         error instanceof PlanningRequestError &&
@@ -79,13 +154,19 @@ export default function App() {
       setMode("error");
       setMessage(copy.messages.loadFailed);
     }
-  }, [apiBaseUrl, sessionLoaded, tokens]);
+  }, [apiBaseUrl, refreshConversations, sessionLoaded, tokens]);
 
   async function discardSession() {
     try {
       await clearDeviceSession();
     } finally {
       setTokens(undefined);
+      setConversations([]);
+      setConversationMessages([]);
+      setSelectedConversationId(undefined);
+      setActiveJobId(undefined);
+      setActiveJobState(undefined);
+      setActiveJobConversationId(undefined);
       setMode("setup");
       setMessage(copy.messages.sessionExpired);
     }
@@ -123,6 +204,52 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!tokens || !activeJobId || !activeJobConversationId) return;
+    let current = true;
+
+    const poll = async () => {
+      try {
+        const job = await fetchAgentJob(
+          apiBaseUrl,
+          tokens.accessToken,
+          activeJobId,
+        );
+        if (!current) return;
+        setActiveJobState(job.state);
+        if (
+          ["completed", "failed", "cancelled", "declined"].includes(job.state)
+        ) {
+          setActiveJobId(undefined);
+          if (job.state === "completed") setActiveJobState(undefined);
+          if (selectedConversationId === activeJobConversationId) {
+            void loadConversationMessages(activeJobConversationId);
+          }
+          void refreshConversations();
+        }
+      } catch {
+        if (current) {
+          setConversationError(copy.messages.conversationLoadNotice);
+        }
+      }
+    };
+
+    void poll();
+    const interval = window.setInterval(() => void poll(), 1_500);
+    return () => {
+      current = false;
+      window.clearInterval(interval);
+    };
+  }, [
+    activeJobConversationId,
+    activeJobId,
+    apiBaseUrl,
+    loadConversationMessages,
+    refreshConversations,
+    selectedConversationId,
+    tokens,
+  ]);
 
   const today = useMemo(
     () =>
@@ -222,6 +349,55 @@ export default function App() {
     }
   }
 
+  function selectConversation(conversationId: string) {
+    setSelectedConversationId(conversationId);
+    setConversationMessages([]);
+    void loadConversationMessages(conversationId);
+  }
+
+  function startConversation() {
+    setSelectedConversationId(undefined);
+    setConversationMessages([]);
+    setConversationError(undefined);
+  }
+
+  async function sendConversationRequest(text: string): Promise<boolean> {
+    if (!tokens) return false;
+    let conversationId = selectedConversationId;
+    setConversationError(undefined);
+    try {
+      if (!conversationId) {
+        const conversation = await createConversation(
+          apiBaseUrl,
+          tokens.accessToken,
+          conversationTitle(text),
+        );
+        conversationId = conversation.id;
+        setConversations((current) => [conversation, ...current]);
+        setSelectedConversationId(conversation.id);
+      }
+      const queued = await queueAgentTurn(
+        apiBaseUrl,
+        tokens.accessToken,
+        conversationId,
+        text.trim(),
+      );
+      setActiveJobId(queued.jobId);
+      setActiveJobState(queued.state);
+      setActiveJobConversationId(queued.conversationId);
+      await loadConversationMessages(queued.conversationId);
+      void refreshConversations();
+      return true;
+    } catch (error) {
+      setConversationError(
+        error instanceof AgentRequestError && error.code === "conflict"
+          ? copy.messages.conversationBusy
+          : copy.messages.conversationSendNotice,
+      );
+      return false;
+    }
+  }
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -232,51 +408,110 @@ export default function App() {
             </span>
             <span className="brand__name">Jimin OS</span>
           </div>
-          <button
-            className="quiet-button focus-visible-control"
-            type="button"
-            onClick={() => void refresh()}
-            disabled={!tokens || mode === "loading"}
-          >
-            <RefreshCw aria-hidden="true" />
-            {copy.actions.refresh}
-          </button>
+          <div className="app-header__controls">
+            {tokens && (
+              <nav className="app-nav" aria-label="주요 메뉴">
+                <button
+                  className="app-nav__item focus-visible-control"
+                  data-current={view === "today"}
+                  type="button"
+                  onClick={() => setView("today")}
+                >
+                  {copy.navigation.today}
+                </button>
+                <button
+                  className="app-nav__item focus-visible-control"
+                  data-current={view === "conversations"}
+                  type="button"
+                  onClick={() => setView("conversations")}
+                >
+                  {copy.navigation.conversations}
+                </button>
+              </nav>
+            )}
+            <button
+              className="quiet-button focus-visible-control"
+              type="button"
+              aria-label={copy.actions.refresh}
+              onClick={() => void refresh()}
+              disabled={!tokens || mode === "loading"}
+            >
+              <RefreshCw aria-hidden="true" />
+              <span className="refresh-label">{copy.actions.refresh}</span>
+            </button>
+          </div>
         </div>
       </header>
-      <main className="planning-page">
-        <section className="page-heading">
-          <div>
-            <p className="page-heading__date">{today}</p>
-            <h1>{copy.title}</h1>
-          </div>
-          {tokens && (
-            <button
-              className="primary-button focus-visible-control"
-              type="button"
-              onClick={() => document.getElementById("task-title")?.focus()}
-            >
-              <CirclePlus aria-hidden="true" />
-              {copy.actions.addTask}
-            </button>
-          )}
-        </section>
-        {message && (
-          <p
-            className="inline-alert"
-            role={mode === "error" ? "alert" : "status"}
-            aria-live="polite"
-          >
-            {message}
-          </p>
-        )}
+      <main
+        className={
+          mode === "setup" || view === "today"
+            ? "planning-page"
+            : "conversation-main"
+        }
+      >
         {mode === "setup" ? (
-          <SetupPanel
-            apiBaseUrl={apiBaseUrl}
-            onApiBaseUrlChange={setApiBaseUrl}
-            onSubmit={pairDevice}
+          <>
+            <section className="page-heading">
+              <div>
+                <p className="page-heading__date">{today}</p>
+                <h1>{copy.title}</h1>
+              </div>
+            </section>
+            {message && (
+              <p className="inline-alert" role="status" aria-live="polite">
+                {message}
+              </p>
+            )}
+            <SetupPanel
+              apiBaseUrl={apiBaseUrl}
+              onApiBaseUrlChange={setApiBaseUrl}
+              onSubmit={pairDevice}
+            />
+          </>
+        ) : view === "conversations" ? (
+          <ConversationWorkspace
+            conversations={conversations}
+            messages={conversationMessages}
+            selectedConversationId={selectedConversationId}
+            jobState={
+              selectedConversationId === activeJobConversationId
+                ? activeJobState
+                : undefined
+            }
+            hasActiveJob={Boolean(activeJobId)}
+            loading={conversationLoading}
+            error={conversationError}
+            onSelect={selectConversation}
+            onStartConversation={startConversation}
+            onSend={sendConversationRequest}
           />
         ) : (
           <>
+            <section className="page-heading">
+              <div>
+                <p className="page-heading__date">{today}</p>
+                <h1>{copy.title}</h1>
+              </div>
+              {tokens && (
+                <button
+                  className="primary-button focus-visible-control"
+                  type="button"
+                  onClick={() => document.getElementById("task-title")?.focus()}
+                >
+                  <CirclePlus aria-hidden="true" />
+                  {copy.actions.addTask}
+                </button>
+              )}
+            </section>
+            {message && (
+              <p
+                className="inline-alert"
+                role={mode === "error" ? "alert" : "status"}
+                aria-live="polite"
+              >
+                {message}
+              </p>
+            )}
             <section className="planning-layout" aria-busy={mode === "loading"}>
               <section className="panel" aria-labelledby="schedule-title">
                 <div className="panel__header">
@@ -456,4 +691,9 @@ function formatTime(value: string) {
 }
 function formatRange(start: string, end: string) {
   return `${formatTime(start)} – ${formatTime(end)}`;
+}
+
+function conversationTitle(value: string) {
+  const title = value.trim().replace(/\s+/g, " ").slice(0, 36);
+  return title || null;
 }
