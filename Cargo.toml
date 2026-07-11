@@ -2,6 +2,7 @@
 members = [
   "apps/agent",
   "apps/api",
+  "apps/desktop/src-tauri",
   "crates/application",
   "crates/auth",
   "crates/codex-client",
@@ -46,6 +47,9 @@ tower = { version = "=0.5.3", features = ["util"] }
 tower-http = { version = "=0.7.0", features = ["catch-panic", "request-id", "trace"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt", "json"] }
+keyring = { version = "=4.1.4", default-features = false, features = ["android-native-keyring-store", "v1"] }
+tauri = "=2.11.5"
+tauri-build = "=2.6.3"
 utoipa = { version = "=5.5.0", features = ["axum_extras", "uuid"] }
 uuid = { version = "=1.23.4", features = ["serde", "v7"] }
 

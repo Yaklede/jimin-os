@@ -16,30 +16,31 @@ import {
   exchangePairingCode,
   fetchPlanning,
   type ScheduleEntry,
+  type SessionTokens,
   type Task,
 } from "./api/planning";
 import { copy } from "./copy";
+import {
+  clearDeviceSession,
+  readDeviceSession,
+  saveDeviceSession,
+} from "./device-session";
 
 const defaultApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/server";
-const sessionKey = "jimin-os-dev-session";
 
 type AppMode = "setup" | "loading" | "ready" | "error";
 
 export default function App() {
   const [apiBaseUrl, setApiBaseUrl] = useState(defaultApiBaseUrl);
-  const [tokens, setTokens] = useState<
-    | {
-        accessToken: string;
-        refreshToken: string;
-      }
-    | undefined
-  >(readStoredSession);
-  const [mode, setMode] = useState<AppMode>(tokens ? "loading" : "setup");
+  const [tokens, setTokens] = useState<SessionTokens | undefined>(undefined);
+  const [sessionLoaded, setSessionLoaded] = useState(false);
+  const [mode, setMode] = useState<AppMode>("loading");
   const [schedule, setSchedule] = useState<ScheduleEntry[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [message, setMessage] = useState<string | undefined>(undefined);
 
   const refresh = useCallback(async () => {
+    if (!sessionLoaded) return;
     if (!tokens) return;
     setMode("loading");
     setMessage(undefined);
@@ -61,7 +62,7 @@ export default function App() {
         error instanceof PlanningRequestError &&
         error.code === "unauthorized"
       ) {
-        sessionStorage.removeItem(sessionKey);
+        await clearDeviceSession();
         setTokens(undefined);
         setMode("setup");
         setMessage(copy.messages.sessionExpired);
@@ -70,7 +71,36 @@ export default function App() {
       setMode("error");
       setMessage(copy.messages.loadFailed);
     }
-  }, [apiBaseUrl, tokens]);
+  }, [apiBaseUrl, sessionLoaded, tokens]);
+
+  useEffect(() => {
+    let current = true;
+
+    void readDeviceSession()
+      .then((stored) => {
+        if (!current) return;
+        if (stored) {
+          setApiBaseUrl(stored.apiBaseUrl);
+          setTokens(stored.tokens);
+          setMode("loading");
+        } else {
+          setMode("setup");
+        }
+      })
+      .catch(() => {
+        if (current) {
+          setMode("setup");
+          setMessage(copy.messages.storageNotice);
+        }
+      })
+      .finally(() => {
+        if (current) setSessionLoaded(true);
+      });
+
+    return () => {
+      current = false;
+    };
+  }, []);
 
   useEffect(() => {
     void refresh();
@@ -102,7 +132,10 @@ export default function App() {
         pairingCode,
         deviceName,
       );
-      sessionStorage.setItem(sessionKey, JSON.stringify(nextTokens));
+      await saveDeviceSession({
+        apiBaseUrl,
+        tokens: nextTokens,
+      });
       setTokens(nextTokens);
       setMessage(undefined);
     } catch {
@@ -341,29 +374,6 @@ export default function App() {
       </main>
     </div>
   );
-}
-
-function readStoredSession():
-  { accessToken: string; refreshToken: string } | undefined {
-  const stored = sessionStorage.getItem(sessionKey);
-  if (!stored) return undefined;
-
-  try {
-    const parsed: unknown = JSON.parse(stored);
-    if (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      typeof (parsed as { accessToken?: unknown }).accessToken === "string" &&
-      typeof (parsed as { refreshToken?: unknown }).refreshToken === "string"
-    ) {
-      return parsed as { accessToken: string; refreshToken: string };
-    }
-  } catch {
-    // A malformed preview session is discarded below and the user can reconnect.
-  }
-
-  sessionStorage.removeItem(sessionKey);
-  return undefined;
 }
 
 function SetupPanel({

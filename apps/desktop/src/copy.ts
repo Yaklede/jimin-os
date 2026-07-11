@@ -57,6 +57,8 @@ export const copy = {
     setupRequired: "기기 이름과 연결 코드를 모두 입력해 주세요.",
     connectionNotice:
       "기기를 연결할 수 없어요. 서버 주소와 연결 코드를 확인한 뒤 다시 시도해 주세요.",
+    storageNotice:
+      "기기 연결 정보를 안전하게 저장할 수 없어요. 앱을 다시 연 뒤 다시 시도해 주세요.",
     sessionExpired:
       "기기 연결이 만료됐어요. 새 연결 코드로 다시 연결해 주세요.",
     loadFailed: "계획을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",

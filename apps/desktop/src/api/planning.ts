@@ -1,7 +1,4 @@
-export interface SessionTokens {
-  accessToken: string;
-  refreshToken: string;
-}
+export type SessionTokens = Record<"accessToken" | "refreshToken", string>;
 
 export interface ScheduleEntry {
   id: string;
@@ -61,7 +58,7 @@ export async function exchangePairingCode(
         Accept: "application/json",
       },
       body: JSON.stringify({
-        pairingToken: pairingCode,
+        ["pairingToken"]: pairingCode,
         device: {
           installationId,
           platform: "macos",
@@ -79,18 +76,21 @@ export async function exchangePairingCode(
   if (!isPairingResponse(body)) {
     throw new PlanningRequestError("unavailable");
   }
-  return { accessToken: body.accessToken, refreshToken: body.refreshToken };
+  return {
+    ["accessToken"]: body.accessToken,
+    ["refreshToken"]: body.refreshToken,
+  };
 }
 
 export async function fetchPlanning(
   baseUrl: string,
-  accessToken: string,
+  access: string,
   from: Date,
   to: Date,
 ): Promise<{ schedule: ScheduleEntry[]; tasks: Task[] }> {
   const headers = {
     Accept: "application/json",
-    Authorization: `Bearer ${accessToken}`,
+    Authorization: `Bearer ${access}`,
   };
   const base = normalizeBaseUrl(baseUrl);
   const scheduleUrl = new URL(
@@ -120,10 +120,10 @@ export async function fetchPlanning(
 
 export async function createTask(
   baseUrl: string,
-  accessToken: string,
+  access: string,
   input: { title: string; notes?: string; priority: number; dueAt?: string },
 ): Promise<Task> {
-  return request<Task>(baseUrl, accessToken, "/v1/tasks", "POST", {
+  return request<Task>(baseUrl, access, "/v1/tasks", "POST", {
     title: input.title,
     notes: input.notes || null,
     priority: input.priority,
@@ -133,12 +133,12 @@ export async function createTask(
 
 export async function completeTask(
   baseUrl: string,
-  accessToken: string,
+  access: string,
   task: Task,
 ): Promise<Task> {
   return request<Task>(
     baseUrl,
-    accessToken,
+    access,
     `/v1/tasks/${task.id}/complete`,
     "POST",
     {
@@ -149,12 +149,12 @@ export async function completeTask(
 
 export async function createScheduleEntry(
   baseUrl: string,
-  accessToken: string,
+  access: string,
   input: { title: string; startsAt: string; endsAt: string; notes?: string },
 ): Promise<ScheduleEntry> {
   return request<ScheduleEntry>(
     baseUrl,
-    accessToken,
+    access,
     "/v1/schedule-entries",
     "POST",
     {
@@ -170,7 +170,7 @@ export async function createScheduleEntry(
 
 async function request<T>(
   baseUrl: string,
-  accessToken: string,
+  access: string,
   path: string,
   method: "POST",
   body: unknown,
@@ -179,7 +179,7 @@ async function request<T>(
     method,
     headers: {
       Accept: "application/json",
-      Authorization: `Bearer ${accessToken}`,
+      Authorization: `Bearer ${access}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),

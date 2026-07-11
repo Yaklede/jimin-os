@@ -11,7 +11,7 @@
 
 ## 현재 구현 상태
 
-M0의 서버 수직 슬라이스와 첫 진단 클라이언트가 구현되어 있습니다. Rust API, PostgreSQL migration, Codex App Server adapter, non-root Docker image, TLS gateway, 배포·rollback runbook과 반응형 React 상태 화면이 저장소에 들어 있습니다. 개발 Mac의 local Compose 및 브라우저 검증은 통과했지만 실제 Linux server, ChatGPT device auth, Tauri shell, Mac/개인 휴대폰 실기기 검증 전이므로 M0 전체를 완료로 표시하지 않습니다.
+서버 수직 슬라이스와 첫 개인 계획 클라이언트가 구현되어 있습니다. Rust API, PostgreSQL migration, Codex App Server adapter, QR 기기 등록·세션, 일정·할 일 API, non-root Docker image, TLS gateway, 배포·rollback runbook, React 계획 화면, macOS Tauri 셸과 Android 프로젝트 생성물이 저장소에 들어 있습니다. macOS Tauri 개발 실행과 Keychain adapter의 컴파일은 통과했습니다. 실제 Linux server 배포, ChatGPT device auth, Android APK build 및 개인 휴대폰 실기기 검증은 아직 완료하지 않았으므로 운영 검증 전 단계입니다.
 
 검증 근거와 아직 실행하지 않은 항목은 [M0 로컬 검증 기록](docs/verification/M0_LOCAL_VALIDATION_2026-07-10.md)에 구분해 기록합니다.
 
@@ -27,17 +27,18 @@ cargo test --workspace
 
 ## 프런트엔드 미리보기
 
-로컬 서버를 실행한 뒤 진단 클라이언트를 띄웁니다.
+로컬 서버를 실행한 뒤 계획 클라이언트를 띄웁니다.
 
 ```bash
 ./scripts/deploy-local.sh deploy/env/local.env.example
 pnpm frontend:dev
 ```
 
-- Mac: `http://localhost:1420/`
-- 휴대폰: 개발 서버가 출력한 `Network` 주소를 같은 사설망에서 엽니다.
+- 브라우저 미리보기: `http://localhost:1420/`
+- macOS 네이티브 셸: `pnpm --filter @jimin-os/desktop tauri:dev`
+- Android project 생성: `pnpm --filter @jimin-os/desktop tauri:android:init`
 
-화면은 실제 `/health/live`, `/health/ready` 응답만 사용합니다. 서버를 끄면 연결 안 됨 상태, 다시 켜고 `다시 확인하기`를 누르면 연결됨 상태를 확인할 수 있습니다.
+기기 연결 코드를 교환하면 화면은 실제 `/v1/schedule-entries`, `/v1/tasks` API를 사용합니다. 브라우저 미리보기는 sessionStorage를 개발용 fallback으로만 사용하며, 네이티브 셸은 OS secure store adapter를 사용합니다. 실제 Android build와 설치는 [Tauri Android runbook](docs/runbooks/TAURI_ANDROID.md)의 사전 조건을 만족한 뒤 진행합니다.
 
 프런트엔드 검증 명령은 다음과 같습니다.
 

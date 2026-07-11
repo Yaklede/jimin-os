@@ -36,6 +36,7 @@ coverage/
 
 # Tauri and mobile generated projects
 apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/schemas/
 apps/mobile/src-tauri/target/
 apps/mobile/gen/
 

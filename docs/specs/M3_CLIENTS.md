@@ -8,7 +8,7 @@
 
 M3가 끝나면 사용자는 다음을 할 수 있어야 한다.
 
-1. macOS 앱과 개인 휴대폰에서 같은 Google 계정으로 로그인한다.
+1. macOS 앱과 개인 휴대폰을 QR 기기 연결 코드로 같은 Jimin OS 계정에 등록한다.
 2. Mac이 꺼져 있어도 휴대폰에서 오늘·주간 일정을 보고 생성·수정·삭제한다.
 3. 서버가 일시적으로 보이지 않아도 최근 일정과 할 일을 읽는다.
 4. 오프라인에서 만든 변경을 잃지 않고 재연결 후 한 번만 서버에 반영한다.
@@ -21,7 +21,7 @@ M3가 끝나면 사용자는 다음을 할 수 있어야 한다.
 ## 2. 시작 조건
 
 - M0에서 macOS Tauri shell과 모바일 후보 shell의 debug/release build가 만들어졌다.
-- M1의 Google identity, device session, `/v1/sync/changes`, status API가 고정됐다.
+- M1의 QR 기기 등록, device session, `/v1/sync/changes`, status API가 고정됐다.
 - M2의 일정 CRUD, Google Calendar read model, `expectedVersion`, idempotency 계약이 통과했다.
 - staging hostname과 TLS 인증서를 Mac과 개인 휴대폰이 신뢰한다.
 - 실제 휴대폰 플랫폼, OS version, device model을 검증 기록에 남겼다.
@@ -39,7 +39,7 @@ M3가 끝나면 사용자는 다음을 할 수 있어야 한다.
 - macOS Tauri 2 앱
 - Tauri 2 모바일 우선 구현과 실제 휴대폰 판정
 - React + TypeScript 공통 feature/view-model 계층
-- Google 로그인, device session 발급·갱신·폐기
+- QR 기기 연결, device session 발급·갱신·폐기
 - Google Calendar 추가 권한 연결·재연결·해제 화면
 - 오늘, 일정, 할 일, 설정 화면
 - SQLite cache와 명시적 local migration
@@ -207,7 +207,7 @@ M5의 기억과 M6의 Mac Worker는 각 단계에서 추가한다. 아직 사용
 6. `reauthRequired`면 기존 cache를 유지하면서 `Google Calendar 다시 연결하기`를 제공한다.
 7. 연결 해제는 server read model과 local cache가 지워진다는 결과를 설명하고 `expectedVersion`으로 요청한다.
 
-앱 신원 확인용 Google 로그인과 Calendar 추가 scope 연결은 별도 상태로 관리한다. Jimin OS에 로그인됐지만 Calendar가 연결되지 않은 상태를 정상적인 복구 가능 상태로 지원한다.
+Jimin OS 기기 등록과 Google Calendar 추가 scope 연결은 별도 상태로 관리한다. 기기는 등록됐지만 Calendar가 연결되지 않은 상태를 정상적인 복구 가능 상태로 지원한다.
 
 ### 레이아웃·상태 공통 규칙
 
