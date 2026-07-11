@@ -1,8 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <debug-overrides>
-        <trust-anchors>
-            <certificates src="user" />
-        </trust-anchors>
-    </debug-overrides>
+    <!-- Only the ADB-installed debug APK accepts cleartext. Its test origin is
+         hard-pinned at build time to the USB-reversed loopback address. -->
+    <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

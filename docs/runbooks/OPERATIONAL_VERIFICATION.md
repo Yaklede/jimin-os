@@ -75,6 +75,22 @@ credential로 취급한다.
 Android phone을 USB 또는 wireless debugging으로 연결한 뒤, 생성 APK를
 설치한다. release signing이나 Play 배포는 이 단계의 범위가 아니다.
 
+### 맥 Docker 로컬 테스트
+
+개인 서버 배포 전의 Android 검증은 아래 스크립트로 수행한다. 이 경로는 맥의
+Docker API를 `adb reverse`로만 휴대폰에 연결하고, debug APK에만
+`http://127.0.0.1:8080`을 고정한다. LAN·인터넷에는 HTTP 포트를 열지 않으며,
+Android에 개발 CA 인증서를 설치할 필요도 없다.
+
+```bash
+./scripts/install-local-phone-test.sh /tmp/jimin-os-phone-test.env
+```
+
+USB 또는 wireless debugging 연결이 끊기면 이 테스트 APK는 서버에 연결할 수
+없다. 이는 배포본의 동작이 아니라 맥 loopback을 쓰는 테스트 경계다.
+
+### 개인 서버 배포 검증
+
 ```bash
 adb install -r \
   apps/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
@@ -91,8 +107,8 @@ adb install -r \
 5. 앱을 강제 종료하고 다시 열어 session이 유지되는지 확인한다.
 6. 대화 하나를 열고 완료된 응답과 실패 안내가 이해 가능한지 확인한다.
 
-Android 기기에서 TLS certificate를 신뢰하지 못하면 연결이 실패해야 한다.
-certificate 검증을 끄거나 `http` 주소로 바꾸어 우회하지 않는다.
+개인 서버 배포본에서 Android 기기가 TLS certificate를 신뢰하지 못하면 연결이
+실패해야 한다. certificate 검증을 끄거나 `http` 주소로 바꾸어 우회하지 않는다.
 
 ## 5. 기록과 실패 처리
 

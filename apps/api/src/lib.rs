@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use axum::{
     Extension, Json, Router,
     extract::{Path, Request, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
     middleware,
     response::{IntoResponse, Response},
     routing::get,
@@ -30,6 +30,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::net::TcpListener;
+use tower_http::cors::CorsLayer;
 use utoipa::{OpenApi, ToSchema};
 
 #[async_trait]
@@ -548,6 +549,21 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/devices", get(devices))
         .fallback(not_found)
         .with_state(state)
+        .layer(
+            CorsLayer::new()
+                // The desktop and mobile WebViews use fixed Tauri origins.
+                // Do not widen this to arbitrary web origins: this API accepts
+                // bearer tokens from the installed personal client.
+                .allow_origin([
+                    HeaderValue::from_static("tauri://localhost"),
+                    HeaderValue::from_static("https://tauri.localhost"),
+                ])
+                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_headers([
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::header::CONTENT_TYPE,
+                ]),
+        )
         .layer(middleware::from_fn(request_context))
 }
 
@@ -1873,6 +1889,33 @@ mod tests {
             .expect("handler should respond");
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn tauri_mobile_origin_can_preflight_authenticated_requests() {
+        let state = ApiState::new("test-sha", false, None);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/v1/auth/pairings/exchange")
+                    .header("origin", "https://tauri.localhost")
+                    .header("access-control-request-method", "POST")
+                    .header(
+                        "access-control-request-headers",
+                        "authorization, content-type",
+                    )
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("access-control-allow-origin"),
+            Some(&HeaderValue::from_static("https://tauri.localhost"))
+        );
     }
 
     #[tokio::test]

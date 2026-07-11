@@ -36,4 +36,24 @@ describe("serverBaseUrlFromEnvironment", () => {
     ).toBeUndefined();
     expect(serverBaseUrlFromEnvironment({})).toBeUndefined();
   });
+
+  it("allows HTTP only for the explicit USB loopback test build", () => {
+    expect(
+      serverBaseUrlFromEnvironment({
+        VITE_API_BASE_URL: "http://127.0.0.1:8080",
+        VITE_LOCAL_PHONE_TEST: "1",
+      }),
+    ).toBe("http://127.0.0.1:8080");
+    expect(
+      serverBaseUrlFromEnvironment({
+        VITE_API_BASE_URL: "http://127.0.0.1:8080",
+      }),
+    ).toBeUndefined();
+    expect(
+      serverBaseUrlFromEnvironment({
+        VITE_API_BASE_URL: "http://192.168.0.195:8080",
+        VITE_LOCAL_PHONE_TEST: "1",
+      }),
+    ).toBeUndefined();
+  });
 });
