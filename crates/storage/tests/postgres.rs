@@ -4,7 +4,10 @@ use jimin_auth::SessionIdentity;
 use jimin_domain::{ClientPlatform, DeviceRegistration, EmailAddress, GoogleSubject};
 use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness,
-    auth::{ProvisionLogin, RefreshRotation, RotateRefreshToken},
+    auth::{
+        ConsumeDevicePairing, CreateDevicePairing, PairingConsumption, ProvisionLogin,
+        RefreshRotation, RotateRefreshToken,
+    },
 };
 use secrecy::SecretString;
 use time::{Duration as TimeDuration, OffsetDateTime};
@@ -174,6 +177,104 @@ async fn login_provision_is_atomic_and_the_session_guard_is_user_scoped() {
             .await
             .expect("guard query should succeed")
     );
+
+    database.close().await;
+}
+
+#[tokio::test]
+async fn pairing_consumes_one_short_lived_token_into_one_device_session() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database
+        .migrate()
+        .await
+        .expect("pairing migration should succeed");
+
+    let pairing_id = Uuid::now_v7();
+    let pairing_verifier = vec![71; 32];
+    let created = database
+        .create_device_pairing(&CreateDevicePairing {
+            owner_user_id: Uuid::now_v7(),
+            pairing_id,
+            token_verifier: pairing_verifier.clone(),
+            expires_at: OffsetDateTime::now_utc() + TimeDuration::minutes(10),
+        })
+        .await
+        .expect("trusted server should create pairing");
+    assert_eq!(created.pairing_id, pairing_id);
+
+    let session_id = Uuid::now_v7();
+    let device = DeviceRegistration::new(
+        Uuid::now_v7(),
+        ClientPlatform::Android,
+        "M1 integration test Android",
+        "0.1.0-test",
+        Some("test-os".to_owned()),
+    )
+    .expect("test device should be valid");
+    let consumed = database
+        .consume_device_pairing(&ConsumeDevicePairing {
+            pairing_id,
+            token_verifier: pairing_verifier.clone(),
+            device,
+            session_id,
+            family_id: Uuid::now_v7(),
+            refresh_token_id: Uuid::now_v7(),
+            refresh_token_verifier: vec![72; 32],
+            session_expires_at: OffsetDateTime::now_utc() + TimeDuration::days(30),
+            refresh_token_expires_at: OffsetDateTime::now_utc() + TimeDuration::days(30),
+            request_id: Uuid::now_v7(),
+        })
+        .await
+        .expect("valid pairing should consume safely");
+    let PairingConsumption::Consumed(session) = consumed else {
+        panic!("valid token should issue a session");
+    };
+    assert_eq!(session.profile.email, None);
+    assert_eq!(session.device.platform, ClientPlatform::Android);
+    assert!(
+        database
+            .is_session_active(
+                SessionIdentity::new(
+                    session.profile.id,
+                    session_id,
+                    session.device.id,
+                    Uuid::now_v7(),
+                )
+                .expect("guard identity should be valid"),
+            )
+            .await
+            .expect("guard query should succeed")
+    );
+
+    let replay = database
+        .consume_device_pairing(&ConsumeDevicePairing {
+            pairing_id,
+            token_verifier: pairing_verifier,
+            device: DeviceRegistration::new(
+                Uuid::now_v7(),
+                ClientPlatform::Android,
+                "M1 replay Android",
+                "0.1.0-test",
+                None,
+            )
+            .expect("test device should be valid"),
+            session_id: Uuid::now_v7(),
+            family_id: Uuid::now_v7(),
+            refresh_token_id: Uuid::now_v7(),
+            refresh_token_verifier: vec![73; 32],
+            session_expires_at: OffsetDateTime::now_utc() + TimeDuration::days(30),
+            refresh_token_expires_at: OffsetDateTime::now_utc() + TimeDuration::days(30),
+            request_id: Uuid::now_v7(),
+        })
+        .await
+        .expect("consumed token should reject without leaking state");
+    assert_eq!(replay, PairingConsumption::Rejected);
 
     database.close().await;
 }

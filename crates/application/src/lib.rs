@@ -1,18 +1,22 @@
 //! Application use cases shared by HTTP and future background adapters.
 //!
-//! Google token exchange belongs at the adapter edge. This crate accepts only
-//! a previously verified identity and turns it into a Jimin OS device session.
+//! Device enrollment is explicit and server-owned: a trusted server surface
+//! issues a short-lived QR token, then the new device consumes it once. Google
+//! identity types remain here only for the later Calendar integration edge.
 
 use std::time::{Duration, SystemTime};
 
 use jimin_auth::{
-    AccessTokenIssuer, AuthError, IssuedAccessToken, RefreshToken, RefreshTokenPepper,
-    SessionIdentity,
+    AccessTokenIssuer, AuthError, IssuedAccessToken, PairingToken, PairingTokenPepper,
+    RefreshToken, RefreshTokenPepper, SessionIdentity,
 };
-use jimin_domain::{DeviceRegistration, EmailAddress, EmailAllowlist, GoogleSubject};
+use jimin_domain::{DeviceRegistration, EmailAddress, GoogleSubject};
 use jimin_storage::{
     Database, StorageError,
-    auth::{Device, Profile, ProvisionLogin, RefreshRotation, RotateRefreshToken},
+    auth::{
+        ConsumeDevicePairing, CreateDevicePairing, Device, PairingConsumption, Profile,
+        RefreshRotation, RotateRefreshToken,
+    },
 };
 use secrecy::SecretString;
 use thiserror::Error;
@@ -21,11 +25,11 @@ use uuid::Uuid;
 
 const MINIMUM_SESSION_TTL: Duration = Duration::from_hours(1);
 const MAXIMUM_SESSION_TTL: Duration = Duration::from_hours(2_160);
+const MINIMUM_PAIRING_TTL: Duration = Duration::from_mins(1);
+const MAXIMUM_PAIRING_TTL: Duration = Duration::from_mins(15);
 
 #[derive(Debug, Error)]
 pub enum ApplicationError {
-    #[error("the Google account is not allowed")]
-    AccountNotAllowed,
     #[error("the verified Google identity is invalid")]
     InvalidIdentity,
     #[error("the session lifetime configuration is invalid")]
@@ -34,6 +38,8 @@ pub enum ApplicationError {
     SessionExpired,
     #[error("the refresh token was reused")]
     RefreshReused,
+    #[error("the device pairing token is invalid or no longer available")]
+    PairingRejected,
     #[error("the server session operation is unavailable")]
     Storage(#[source] StorageError),
     #[error("the access token operation is unavailable")]
@@ -118,6 +124,52 @@ impl SessionLifetime {
     }
 }
 
+/// Bounded lifetime for a QR token displayed by the trusted personal server.
+/// The token is deliberately much shorter than a device session and can only
+/// be consumed once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PairingLifetime(Duration);
+
+impl PairingLifetime {
+    /// Creates a QR pairing lifetime between one and fifteen minutes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplicationError::InvalidSessionLifetime`] outside the
+    /// bounded device-enrollment policy.
+    pub fn new(value: Duration) -> Result<Self, ApplicationError> {
+        if !(MINIMUM_PAIRING_TTL..=MAXIMUM_PAIRING_TTL).contains(&value) {
+            return Err(ApplicationError::InvalidSessionLifetime);
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub const fn as_std(self) -> Duration {
+        self.0
+    }
+}
+
+/// A one-time pairing token returned only to the trusted server surface that
+/// renders a QR code. Its secret must never be persisted or sent to another
+/// device except through the pairing scan flow.
+pub struct IssuedDevicePairing {
+    token: PairingToken,
+    expires_at: OffsetDateTime,
+}
+
+impl IssuedDevicePairing {
+    #[must_use]
+    pub const fn token(&self) -> &PairingToken {
+        &self.token
+    }
+
+    #[must_use]
+    pub const fn expires_at(&self) -> OffsetDateTime {
+        self.expires_at
+    }
+}
+
 /// A Jimin OS session response. Raw tokens are represented by secret-aware
 /// types and are intended for immediate HTTPS response serialization only.
 pub struct DeviceSession {
@@ -155,64 +207,93 @@ impl DeviceSession {
     }
 }
 
-/// Coordinates validated identity, device persistence, refresh rotation, and
-/// access-token issuance without knowing anything about an HTTP framework.
+/// Coordinates QR device enrollment, refresh rotation, and access-token
+/// issuance without knowing anything about an HTTP framework.
 pub struct SessionService {
     database: Database,
-    allowlist: EmailAllowlist,
     access_token_issuer: AccessTokenIssuer,
     refresh_token_pepper: RefreshTokenPepper,
+    pairing_token_pepper: PairingTokenPepper,
     session_lifetime: SessionLifetime,
+    pairing_lifetime: PairingLifetime,
 }
 
 impl SessionService {
     #[must_use]
     pub fn new(
         database: Database,
-        allowlist: EmailAllowlist,
         access_token_issuer: AccessTokenIssuer,
         refresh_token_pepper: RefreshTokenPepper,
+        pairing_token_pepper: PairingTokenPepper,
         session_lifetime: SessionLifetime,
+        pairing_lifetime: PairingLifetime,
     ) -> Self {
         Self {
             database,
-            allowlist,
             access_token_issuer,
             refresh_token_pepper,
+            pairing_token_pepper,
             session_lifetime,
+            pairing_lifetime,
         }
     }
 
-    /// Creates a device-specific session after a Google adapter verified the
-    /// authorization-code response. The raw refresh token is returned once and
-    /// never reaches the database.
+    /// Issues a fresh short-lived pairing token from a trusted server surface.
+    /// Creating a newer token revokes any earlier pending token for the same
+    /// personal server owner.
     ///
     /// # Errors
     ///
-    /// Returns a sanitized application error for an unallowed account, storage
-    /// failure, or token issue failure.
-    pub async fn login(
+    /// Returns a sanitized storage or token error; the raw token remains inside
+    /// [`IssuedDevicePairing`] for immediate QR rendering only.
+    pub async fn issue_device_pairing(&self) -> Result<IssuedDevicePairing, ApplicationError> {
+        let pairing_id = Uuid::now_v7();
+        let token = PairingToken::generate(pairing_id).map_err(ApplicationError::AccessToken)?;
+        let now = OffsetDateTime::now_utc();
+        let expires_at = add_pairing_lifetime(now, self.pairing_lifetime)?;
+        self.database
+            .create_device_pairing(&CreateDevicePairing {
+                owner_user_id: Uuid::now_v7(),
+                pairing_id,
+                token_verifier: token
+                    .verifier(&self.pairing_token_pepper)
+                    .as_bytes()
+                    .to_vec(),
+                expires_at,
+            })
+            .await
+            .map_err(ApplicationError::Storage)?;
+        Ok(IssuedDevicePairing { token, expires_at })
+    }
+
+    /// Consumes a scanned QR pairing token and creates one device session. The
+    /// raw pairing token is parsed and HMAC-derived before storage sees it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplicationError::PairingRejected`] for malformed, expired,
+    /// consumed, or unknown pairing tokens.
+    pub async fn consume_device_pairing(
         &self,
-        identity: VerifiedGoogleIdentity,
+        serialized_pairing_token: SecretString,
         device: DeviceRegistration,
         request_id: Uuid,
     ) -> Result<DeviceSession, ApplicationError> {
-        if !self.allowlist.permits(identity.email()) {
-            return Err(ApplicationError::AccountNotAllowed);
-        }
-
+        let pairing = PairingToken::parse(serialized_pairing_token)
+            .map_err(|_| ApplicationError::PairingRejected)?;
         let session_id = Uuid::now_v7();
         let refresh_token =
             RefreshToken::generate(session_id).map_err(ApplicationError::AccessToken)?;
         let now = OffsetDateTime::now_utc();
         let session_expires_at = add_session_lifetime(now, self.session_lifetime)?;
-        let provisioned = self
+        let consumption = self
             .database
-            .provision_login(&ProvisionLogin {
-                user_id: Uuid::now_v7(),
-                google_subject: identity.subject,
-                email: identity.email,
-                display_name: identity.display_name,
+            .consume_device_pairing(&ConsumeDevicePairing {
+                pairing_id: pairing.pairing_id(),
+                token_verifier: pairing
+                    .verifier(&self.pairing_token_pepper)
+                    .as_bytes()
+                    .to_vec(),
                 device,
                 session_id,
                 family_id: Uuid::now_v7(),
@@ -227,6 +308,9 @@ impl SessionService {
             })
             .await
             .map_err(ApplicationError::Storage)?;
+        let PairingConsumption::Consumed(provisioned) = consumption else {
+            return Err(ApplicationError::PairingRejected);
+        };
         let access_token = self.issue_access_token(
             provisioned.profile.id,
             provisioned.session_id,
@@ -326,6 +410,19 @@ fn add_session_lifetime(
         .ok_or(ApplicationError::InvalidSessionLifetime)
 }
 
+fn add_pairing_lifetime(
+    now: OffsetDateTime,
+    lifetime: PairingLifetime,
+) -> Result<OffsetDateTime, ApplicationError> {
+    let seconds: i64 = lifetime
+        .as_std()
+        .as_secs()
+        .try_into()
+        .map_err(|_| ApplicationError::InvalidSessionLifetime)?;
+    now.checked_add(TimeDuration::seconds(seconds))
+        .ok_or(ApplicationError::InvalidSessionLifetime)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +432,13 @@ mod tests {
         assert!(SessionLifetime::new(Duration::from_mins(59)).is_err());
         assert!(SessionLifetime::new(Duration::from_hours(2_184)).is_err());
         assert!(SessionLifetime::new(Duration::from_hours(720)).is_ok());
+    }
+
+    #[test]
+    fn pairing_lifetime_is_short_and_bounded() {
+        assert!(PairingLifetime::new(Duration::from_secs(59)).is_err());
+        assert!(PairingLifetime::new(Duration::from_mins(16)).is_err());
+        assert!(PairingLifetime::new(Duration::from_mins(10)).is_ok());
     }
 
     #[test]

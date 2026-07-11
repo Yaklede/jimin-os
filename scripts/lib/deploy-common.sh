@@ -208,7 +208,7 @@ validate_runtime_secrets() {
   validate_secret_file "${secrets_dir}/auth_signing_key" "access-token signing key file"
   validate_secret_file "${secrets_dir}/auth_verify_key" "access-token verify key file"
   validate_secret_file "${secrets_dir}/auth_refresh_pepper" "refresh-token pepper file"
-  validate_secret_file "${secrets_dir}/auth_allowlist" "Google account allowlist file"
+  validate_secret_file "${secrets_dir}/auth_pairing_pepper" "device-pairing pepper file"
   if [[ "${DEPLOY_TLS_MODE}" == "files" ]]; then
     validate_secret_file "${secrets_dir}/gateway_tls_cert" "gateway certificate"
     validate_secret_file "${secrets_dir}/gateway_tls_key" "gateway private key"

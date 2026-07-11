@@ -14,8 +14,7 @@ use axum::{
     routing::get,
 };
 use jimin_application::{ApplicationError, DeviceSession, SessionService};
-use jimin_domain::{ClientPlatform, DeviceRegistration, PkceVerifier};
-use jimin_google::{GoogleAuthError, GoogleAuthorizationCode, GoogleIdentityAdapter};
+use jimin_domain::{ClientPlatform, DeviceRegistration};
 use jimin_observability::{RequestId, request_context};
 use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness,
@@ -46,7 +45,7 @@ pub struct ApiState {
     database: Option<Arc<dyn ReadinessProbe>>,
     expected_schema_version: i64,
     authentication: Option<Arc<auth::Authentication>>,
-    login: Option<Arc<LoginRuntime>>,
+    pairing: Option<Arc<PairingRuntime>>,
 }
 
 impl ApiState {
@@ -62,7 +61,7 @@ impl ApiState {
             database,
             expected_schema_version: EXPECTED_SCHEMA_VERSION,
             authentication: None,
-            login: None,
+            pairing: None,
         }
     }
 
@@ -78,26 +77,37 @@ impl ApiState {
     }
 
     #[must_use]
-    pub fn with_login(mut self, login: LoginRuntime) -> Self {
-        self.login = Some(Arc::new(login));
+    pub fn with_pairing(mut self, pairing: PairingRuntime) -> Self {
+        self.pairing = Some(Arc::new(pairing));
         self
     }
 
     #[must_use]
-    fn login(&self) -> Option<&Arc<LoginRuntime>> {
-        self.login.as_ref()
+    fn pairing(&self) -> Option<&Arc<PairingRuntime>> {
+        self.pairing.as_ref()
     }
 }
 
-pub struct LoginRuntime {
+pub struct PairingRuntime {
     sessions: SessionService,
-    google: GoogleIdentityAdapter,
 }
 
-impl LoginRuntime {
+impl PairingRuntime {
     #[must_use]
-    pub fn new(sessions: SessionService, google: GoogleIdentityAdapter) -> Self {
-        Self { sessions, google }
+    pub fn new(sessions: SessionService) -> Self {
+        Self { sessions }
+    }
+
+    /// Issues one QR pairing token for a trusted server administrator or an
+    /// already authenticated Jimin OS client.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized application error without logging token material.
+    pub async fn issue_device_pairing(
+        &self,
+    ) -> Result<jimin_application::IssuedDevicePairing, ApplicationError> {
+        self.sessions.issue_device_pairing().await
     }
 }
 
@@ -149,7 +159,7 @@ pub struct ReadyHealthResponse {
 #[serde(rename_all = "camelCase")]
 pub struct MeResponse {
     id: uuid::Uuid,
-    email: String,
+    email: Option<String>,
     display_name: Option<String>,
     time_zone: String,
     version: i64,
@@ -176,7 +186,7 @@ pub struct DeviceListResponse {
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct GoogleExchangeResponse {
+pub struct DeviceSessionResponse {
     access_token: String,
     access_token_expires_at: String,
     refresh_token: String,
@@ -187,14 +197,24 @@ pub struct GoogleExchangeResponse {
 
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct GoogleExchangeRequest {
+struct PairingExchangeRequest {
     #[schema(value_type = String)]
-    client_kind: ClientPlatform,
-    #[schema(value_type = String)]
-    authorization_code: SecretString,
-    code_verifier: Option<String>,
-    redirect_uri: String,
+    pairing_token: SecretString,
     device: DeviceRegistrationRequest,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RefreshSessionRequest {
+    #[schema(value_type = String)]
+    refresh_token: SecretString,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DevicePairingResponse {
+    pairing_token: String,
+    expires_at: String,
 }
 
 #[derive(serde::Deserialize, ToSchema)]
@@ -248,7 +268,7 @@ pub(crate) fn error_response(
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(live, ready, google_exchange, me, devices),
+    paths(pairing_exchange, refresh_session, create_device_pairing, live, ready, me, devices),
     components(schemas(
         LiveStatus,
         ReadyStatus,
@@ -259,7 +279,8 @@ pub(crate) fn error_response(
         MeResponse,
         DeviceResponse,
         DeviceListResponse,
-        GoogleExchangeResponse
+        DeviceSessionResponse,
+        DevicePairingResponse
     )),
     tags((name = "health", description = "Process and dependency health"))
 )]
@@ -275,8 +296,13 @@ pub fn router(state: ApiState) -> Router {
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .route(
-            "/v1/auth/google/exchange",
-            axum::routing::post(google_exchange),
+            "/v1/auth/pairings/exchange",
+            axum::routing::post(pairing_exchange),
+        )
+        .route("/v1/auth/refresh", axum::routing::post(refresh_session))
+        .route(
+            "/v1/device-pairings",
+            axum::routing::post(create_device_pairing),
         )
         .route("/v1/me", get(me))
         .route("/v1/devices", get(devices))
@@ -447,22 +473,21 @@ async fn devices(
 
 #[utoipa::path(
     post,
-    path = "/v1/auth/google/exchange",
+    path = "/v1/auth/pairings/exchange",
     tag = "identity",
     responses(
-        (status = 200, description = "Google identity exchanged for a Jimin OS device session", body = GoogleExchangeResponse),
-        (status = 400, description = "OAuth request or device metadata is invalid"),
-        (status = 401, description = "Google identity verification failed"),
-        (status = 403, description = "Google account is not allowed"),
+        (status = 200, description = "One-time device pairing exchanged for a Jimin OS device session", body = DeviceSessionResponse),
+        (status = 400, description = "Pairing request or device metadata is invalid"),
+        (status = 401, description = "Pairing token is invalid, expired, or already consumed"),
         (status = 503, description = "Authentication service is temporarily unavailable")
     )
 )]
-async fn google_exchange(
+async fn pairing_exchange(
     State(state): State<ApiState>,
     Extension(request_id): Extension<RequestId>,
-    Json(request): Json<GoogleExchangeRequest>,
+    Json(request): Json<PairingExchangeRequest>,
 ) -> Response {
-    let Some(login) = state.login() else {
+    let Some(pairing) = state.pairing() else {
         return error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "service.temporarily_unavailable",
@@ -470,12 +495,6 @@ async fn google_exchange(
             request_id,
             true,
         );
-    };
-    if request.client_kind != request.device.platform {
-        return invalid_request_response(request_id);
-    }
-    let Ok(code_verifier) = request.code_verifier.map(PkceVerifier::parse).transpose() else {
-        return invalid_request_response(request_id);
     };
     let Ok(device) = DeviceRegistration::new(
         request.device.installation_id,
@@ -486,29 +505,16 @@ async fn google_exchange(
     ) else {
         return invalid_request_response(request_id);
     };
-    let identity = match login
-        .google
-        .exchange(GoogleAuthorizationCode {
-            platform: request.client_kind,
-            authorization_code: request.authorization_code,
-            code_verifier,
-            redirect_uri: request.redirect_uri,
-        })
-        .await
-    {
-        Ok(identity) => identity,
-        Err(error) => return google_error_response(error, request_id),
-    };
-    let session = match login
+    let session = match pairing
         .sessions
-        .login(identity, device, uuid::Uuid::now_v7())
+        .consume_device_pairing(request.pairing_token, device, uuid::Uuid::now_v7())
         .await
     {
         Ok(session) => session,
         Err(error) => return application_error_response(&error, request_id),
     };
-    match google_exchange_response(&session) {
-        Ok(response) => Json(response).into_response(),
+    match device_session_response(&session) {
+        Ok(response) => no_store_json(response),
         Err(()) => error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "service.temporarily_unavailable",
@@ -519,12 +525,102 @@ async fn google_exchange(
     }
 }
 
-fn google_exchange_response(session: &DeviceSession) -> Result<GoogleExchangeResponse, ()> {
+#[utoipa::path(
+    post,
+    path = "/v1/auth/refresh",
+    tag = "identity",
+    responses(
+        (status = 200, description = "Refresh token rotated into a new Jimin OS device session", body = DeviceSessionResponse),
+        (status = 401, description = "Refresh token is invalid, expired, or reused"),
+        (status = 503, description = "Authentication service is temporarily unavailable")
+    )
+)]
+async fn refresh_session(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    Json(request): Json<RefreshSessionRequest>,
+) -> Response {
+    let Some(pairing) = state.pairing() else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service.temporarily_unavailable",
+            "잠시 후 다시 시도해 주세요.",
+            request_id,
+            true,
+        );
+    };
+    let session = match pairing
+        .sessions
+        .refresh(request.refresh_token, uuid::Uuid::now_v7())
+        .await
+    {
+        Ok(session) => session,
+        Err(error) => return application_error_response(&error, request_id),
+    };
+    match device_session_response(&session) {
+        Ok(response) => no_store_json(response),
+        Err(()) => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service.temporarily_unavailable",
+            "잠시 후 다시 시도해 주세요.",
+            request_id,
+            true,
+        ),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/device-pairings",
+    tag = "identity",
+    responses(
+        (status = 200, description = "A new one-time QR pairing token", body = DevicePairingResponse),
+        (status = 401, description = "Session is absent, invalid, or expired"),
+        (status = 503, description = "Authentication service is temporarily unavailable")
+    )
+)]
+async fn create_device_pairing(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    request: Request,
+) -> Response {
+    if let Err(failure) = auth::authenticate(&state, request.headers()).await {
+        return failure.into_response(request_id);
+    }
+    let Some(pairing) = state.pairing() else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service.temporarily_unavailable",
+            "잠시 후 다시 시도해 주세요.",
+            request_id,
+            true,
+        );
+    };
+    let issued = match pairing.issue_device_pairing().await {
+        Ok(issued) => issued,
+        Err(error) => return application_error_response(&error, request_id),
+    };
+    let Ok(expires_at) = issued.expires_at().format(&Rfc3339) else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service.temporarily_unavailable",
+            "잠시 후 다시 시도해 주세요.",
+            request_id,
+            true,
+        );
+    };
+    no_store_json(DevicePairingResponse {
+        pairing_token: issued.token().serialized().expose_secret().to_owned(),
+        expires_at,
+    })
+}
+
+fn device_session_response(session: &DeviceSession) -> Result<DeviceSessionResponse, ()> {
     let expires_at = OffsetDateTime::from(session.access_token().expires_at())
         .format(&Rfc3339)
         .map_err(|_| ())?;
     let sync_cursor = session.sync_cursor().ok_or(())?.to_string();
-    Ok(GoogleExchangeResponse {
+    Ok(DeviceSessionResponse {
         access_token: session.access_token().token().expose_secret().to_owned(),
         access_token_expires_at: expires_at,
         refresh_token: session
@@ -548,38 +644,18 @@ fn invalid_request_response(request_id: RequestId) -> Response {
     )
 }
 
-fn google_error_response(error: GoogleAuthError, request_id: RequestId) -> Response {
-    match error {
-        GoogleAuthError::InvalidRequest => invalid_request_response(request_id),
-        GoogleAuthError::ProviderRejected | GoogleAuthError::IdentityRejected => error_response(
-            StatusCode::UNAUTHORIZED,
-            "auth.google_login_failed",
-            "Google 로그인을 다시 진행해 주세요.",
-            request_id,
-            false,
-        ),
-        GoogleAuthError::ProviderUnavailable => error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "service.temporarily_unavailable",
-            "잠시 후 다시 시도해 주세요.",
-            request_id,
-            true,
-        ),
-    }
-}
-
 fn application_error_response(error: &ApplicationError, request_id: RequestId) -> Response {
     match error {
-        ApplicationError::AccountNotAllowed => error_response(
-            StatusCode::FORBIDDEN,
-            "auth.account_not_allowed",
-            "이 계정으로는 로그인할 수 없어요.",
-            request_id,
-            false,
-        ),
         ApplicationError::InvalidIdentity | ApplicationError::InvalidSessionLifetime => {
             invalid_request_response(request_id)
         }
+        ApplicationError::PairingRejected => error_response(
+            StatusCode::UNAUTHORIZED,
+            "auth.pairing_rejected",
+            "기기 연결 코드를 다시 확인해 주세요.",
+            request_id,
+            false,
+        ),
         ApplicationError::SessionExpired => {
             auth::AuthenticationFailure::Unauthorized.into_response(request_id)
         }
@@ -598,6 +674,18 @@ fn application_error_response(error: &ApplicationError, request_id: RequestId) -
             true,
         ),
     }
+}
+
+fn no_store_json<T>(payload: T) -> Response
+where
+    T: Serialize,
+{
+    let mut response = Json(payload).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 fn me_response(profile: Profile) -> MeResponse {
@@ -737,7 +825,7 @@ mod tests {
         .expect("public key should load");
         let profile = Profile {
             id: user_id,
-            email: "owner@example.test".to_owned(),
+            email: Some("owner@example.test".to_owned()),
             display_name: Some("Owner".to_owned()),
             time_zone: "Asia/Seoul".to_owned(),
             version: 1,
@@ -860,7 +948,7 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_slice(&body).expect("profile body should be JSON");
         assert_eq!(value["id"], profile.id.to_string());
-        assert_eq!(value["email"], profile.email);
+        assert_eq!(value["email"], serde_json::json!(profile.email));
     }
 
     #[tokio::test]
@@ -901,7 +989,9 @@ mod tests {
             [
                 "/health/live",
                 "/health/ready",
-                "/v1/auth/google/exchange",
+                "/v1/auth/pairings/exchange",
+                "/v1/auth/refresh",
+                "/v1/device-pairings",
                 "/v1/devices",
                 "/v1/me"
             ]

@@ -1244,7 +1244,6 @@ dependencies = [
  "jimin-application",
  "jimin-auth",
  "jimin-domain",
- "jimin-google",
  "jimin-observability",
  "jimin-storage",
  "pkcs8 0.11.0",

@@ -1,16 +1,17 @@
 use std::{env, net::SocketAddr, process::ExitCode, sync::Arc, time::Duration};
 
 use jimin_api::{
-    ApiState, LoginRuntime,
+    ApiState, PairingRuntime,
     auth::Authentication,
     config::{AppConfig, AuthenticationSetting, AuthenticationSettings, SecretSetting},
     probe::{ProbeTarget, run_probe},
     router, serve_with_shutdown,
 };
-use jimin_application::{SessionLifetime, SessionService};
-use jimin_auth::{AccessTokenIssuer, AccessTokenSettings, AccessTokenVerifier, RefreshTokenPepper};
-use jimin_domain::EmailAllowlist;
-use jimin_google::{GoogleIdentityAdapter, GoogleOAuthProfile};
+use jimin_application::{PairingLifetime, SessionLifetime, SessionService};
+use jimin_auth::{
+    AccessTokenIssuer, AccessTokenSettings, AccessTokenVerifier, PairingTokenPepper,
+    RefreshTokenPepper,
+};
 use jimin_observability::init_tracing;
 use jimin_storage::Database;
 use secrecy::ExposeSecret;
@@ -29,6 +30,11 @@ async fn main() -> ExitCode {
         .is_some_and(|argument| argument == "probe")
     {
         return run_probe_command(&arguments).await;
+    }
+
+    if matches!(arguments.as_slice(), [command, action] if command == "pairing" && action == "create")
+    {
+        return run_pairing_create_command().await;
     }
 
     if init_tracing().is_err() {
@@ -107,9 +113,9 @@ async fn run_server() -> Result<(), &'static str> {
         configuration_ready,
         readiness_database,
     );
-    if let Some((authentication, login)) = runtime {
+    if let Some((authentication, pairing)) = runtime {
         state = state.with_authentication(authentication);
-        state = state.with_login(login);
+        state = state.with_pairing(pairing);
     }
     let listener = TcpListener::bind(config.bind_addr())
         .await
@@ -143,7 +149,7 @@ async fn run_server() -> Result<(), &'static str> {
 fn build_authentication(
     settings: &AuthenticationSettings,
     database: &Database,
-) -> Option<(Authentication, LoginRuntime)> {
+) -> Option<(Authentication, PairingRuntime)> {
     let access_settings = AccessTokenSettings::new(
         settings.issuer(),
         settings.key_id(),
@@ -154,18 +160,7 @@ fn build_authentication(
         AccessTokenIssuer::from_ed25519_pem(access_settings.clone(), settings.signing_key())
             .ok()?;
     let refresh_pepper = RefreshTokenPepper::new(settings.refresh_pepper().clone()).ok()?;
-    let allowlist_entries: Vec<_> = settings
-        .allowlist()
-        .expose_secret()
-        .lines()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .collect();
-    if allowlist_entries.is_empty() {
-        return None;
-    }
-    let allowlist = EmailAllowlist::from_entries(allowlist_entries).ok()?;
+    let pairing_pepper = PairingTokenPepper::new(settings.pairing_pepper().clone()).ok()?;
     let verifier = AccessTokenVerifier::from_ed25519_pems(
         settings.issuer(),
         [(
@@ -174,26 +169,72 @@ fn build_authentication(
         )],
     )
     .ok()?;
-    let google_profile = GoogleOAuthProfile::new(
-        jimin_domain::ClientPlatform::Macos,
-        env::var("JIMIN_GOOGLE_MACOS_CLIENT_ID").ok()?,
-        [env::var("JIMIN_GOOGLE_MACOS_REDIRECT_URI").ok()?],
-        true,
-    )
-    .ok()?;
-    let google = GoogleIdentityAdapter::new([google_profile]).ok()?;
     let session_lifetime = SessionLifetime::new(settings.session_ttl()).ok()?;
+    let pairing_lifetime = PairingLifetime::new(Duration::from_mins(10)).ok()?;
     let sessions = SessionService::new(
         database.clone(),
-        allowlist,
         access_issuer,
         refresh_pepper,
+        pairing_pepper,
         session_lifetime,
+        pairing_lifetime,
     );
     Some((
         Authentication::new(verifier, Arc::new(database.clone())),
-        LoginRuntime::new(sessions, google),
+        PairingRuntime::new(sessions),
     ))
+}
+
+async fn run_pairing_create_command() -> ExitCode {
+    if init_tracing().is_err() {
+        return ExitCode::FAILURE;
+    }
+    let Ok(config) = AppConfig::load() else {
+        return ExitCode::FAILURE;
+    };
+    let (SecretSetting::Available(database_url), AuthenticationSetting::Available(settings)) =
+        (config.database_url(), config.authentication())
+    else {
+        return ExitCode::FAILURE;
+    };
+    let Ok(database) = Database::connect_lazy(
+        database_url,
+        config.database_max_connections(),
+        config.database_acquire_timeout(),
+    ) else {
+        return ExitCode::FAILURE;
+    };
+    let Some((_, pairing)) = build_authentication(settings, &database) else {
+        return ExitCode::FAILURE;
+    };
+    if !matches!(
+        database
+            .readiness(jimin_storage::EXPECTED_SCHEMA_VERSION)
+            .await,
+        jimin_storage::Readiness::Ready { .. }
+    ) {
+        database.close().await;
+        return ExitCode::FAILURE;
+    }
+    let result = pairing.issue_device_pairing().await;
+    database.close().await;
+    let Ok(issued) = result else {
+        return ExitCode::FAILURE;
+    };
+    let Ok(expires_at) = issued
+        .expires_at()
+        .format(&time::format_description::well_known::Rfc3339)
+    else {
+        return ExitCode::FAILURE;
+    };
+    // This command is a trusted-server bootstrap surface. Do not route this
+    // value through structured logging: it is intentionally the only place
+    // where a raw pairing token may be written for QR rendering.
+    println!(
+        "jimin-os://pair?token={}\nexpires_at={expires_at}",
+        issued.token().serialized().expose_secret()
+    );
+    ExitCode::SUCCESS
 }
 
 async fn reconcile_migrations(database: Database) {

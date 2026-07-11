@@ -1,7 +1,7 @@
-//! `PostgreSQL` persistence for authenticated M1 users, devices, and sessions.
+//! `PostgreSQL` persistence for Jimin OS users, paired devices, and sessions.
 //!
 //! All methods in this module are intentionally scoped by internal `user_id`
-//! and never accept a Google email as an authorization key.
+//! and never accept a client-provided identity as an authorization key.
 
 use jimin_auth::SessionIdentity;
 use jimin_domain::{ClientPlatform, DeviceRegistration, EmailAddress, GoogleSubject};
@@ -58,11 +58,91 @@ impl ProvisionLogin {
     }
 }
 
+/// Validated input for issuing one short-lived QR pairing token from a trusted
+/// server-side surface. The raw pairing token never reaches this command.
+pub struct CreateDevicePairing {
+    pub owner_user_id: Uuid,
+    pub pairing_id: Uuid,
+    pub token_verifier: Vec<u8>,
+    pub expires_at: OffsetDateTime,
+}
+
+impl CreateDevicePairing {
+    /// Validates generated IDs, verifier length, and expiry before storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed input.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        if !all_version_seven(&[self.owner_user_id, self.pairing_id])
+            || !valid_refresh_verifier(&self.token_verifier)
+            || self.expires_at <= OffsetDateTime::now_utc()
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
+/// Safe metadata returned when the trusted server creates a QR pairing token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedDevicePairing {
+    pub pairing_id: Uuid,
+    pub owner_user_id: Uuid,
+    pub expires_at: OffsetDateTime,
+}
+
+/// Validated inputs for consuming an enrolled-device pairing token. All token
+/// values have already been HMAC-derived with a server-only pairing pepper.
+pub struct ConsumeDevicePairing {
+    pub pairing_id: Uuid,
+    pub token_verifier: Vec<u8>,
+    pub device: DeviceRegistration,
+    pub session_id: Uuid,
+    pub family_id: Uuid,
+    pub refresh_token_id: Uuid,
+    pub refresh_token_verifier: Vec<u8>,
+    pub session_expires_at: OffsetDateTime,
+    pub refresh_token_expires_at: OffsetDateTime,
+    pub request_id: Uuid,
+}
+
+impl ConsumeDevicePairing {
+    /// Validates generated IDs and verifier lengths before acquiring the
+    /// one-time-token lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed input.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        if !all_version_seven(&[
+            self.pairing_id,
+            self.session_id,
+            self.family_id,
+            self.refresh_token_id,
+        ]) || !valid_refresh_verifier(&self.token_verifier)
+            || !valid_refresh_verifier(&self.refresh_token_verifier)
+            || self.refresh_token_expires_at < self.session_expires_at
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
+/// A pairing outcome deliberately does not tell an untrusted client whether a
+/// token existed, was already consumed, or expired.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PairingConsumption {
+    Consumed(Box<ProvisionedLogin>),
+    Rejected,
+}
+
 /// The safe subset of a user row returned to the API and client cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Profile {
     pub id: Uuid,
-    pub email: String,
+    pub email: Option<String>,
     pub display_name: Option<String>,
     pub time_zone: String,
     pub version: i64,
@@ -156,7 +236,7 @@ pub struct RotatedRefreshToken {
 #[derive(sqlx::FromRow)]
 struct ProfileRow {
     id: Uuid,
-    email: String,
+    email: Option<String>,
     display_name: Option<String>,
     time_zone: String,
     status: String,
@@ -203,6 +283,14 @@ struct SessionLockRow {
 #[derive(sqlx::FromRow)]
 struct RefreshTokenRow {
     id: Uuid,
+    token_verifier: Vec<u8>,
+    status: String,
+    expires_at: OffsetDateTime,
+}
+
+#[derive(sqlx::FromRow)]
+struct PairingTokenLockRow {
+    owner_user_id: Uuid,
     token_verifier: Vec<u8>,
     status: String,
     expires_at: OffsetDateTime,
@@ -374,6 +462,273 @@ impl Database {
             family_id: command.family_id,
             sync_cursor,
         })
+    }
+
+    /// Creates a fresh one-time pairing record for the single local Jimin OS
+    /// owner. Any earlier pending token is revoked before the new token is
+    /// stored, so a QR image cannot be used after a replacement is generated.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified storage error without exposing token material.
+    pub async fn create_device_pairing(
+        &self,
+        command: &CreateDevicePairing,
+    ) -> Result<CreatedDevicePairing, StorageError> {
+        command.validate()?;
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| classify_database_error(&error))?;
+
+        let created_owner = sqlx::query_scalar::<_, Uuid>(
+            "\
+            INSERT INTO users (
+                id, google_sub, email, normalized_email, display_name, last_login_at,
+                status, identity_kind
+            ) VALUES ($1, NULL, NULL, NULL, 'Jimin OS', NOW(), 'active', 'local_device')
+            ON CONFLICT DO NOTHING
+            RETURNING id",
+        )
+        .bind(command.owner_user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| classify_database_error(&error))?;
+
+        let owner_user_id = match created_owner {
+            Some(user_id) => user_id,
+            None => sqlx::query_scalar::<_, Uuid>(
+                "\
+                SELECT id
+                FROM users
+                WHERE identity_kind = 'local_device' AND status = 'active'
+                FOR UPDATE",
+            )
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|error| classify_database_error(&error))?
+            .ok_or(StorageError::IdentityConflict)?,
+        };
+
+        sqlx::query(
+            "\
+            UPDATE device_pairing_tokens
+            SET status = 'revoked'
+            WHERE owner_user_id = $1 AND status = 'pending'",
+        )
+        .bind(owner_user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| classify_database_error(&error))?;
+        sqlx::query(
+            "\
+            INSERT INTO device_pairing_tokens (
+                id, owner_user_id, token_verifier, status, expires_at
+            ) VALUES ($1, $2, $3, 'pending', $4)",
+        )
+        .bind(command.pairing_id)
+        .bind(owner_user_id)
+        .bind(&command.token_verifier)
+        .bind(command.expires_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| classify_database_error(&error))?;
+        sqlx::query(
+            "\
+            INSERT INTO audit_logs (
+                id, actor_user_id, action, target_type, target_id, outcome, metadata
+            ) VALUES ($1, $2, 'auth.pairing.issued', 'device_pairing', $3, 'success', '{}')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(owner_user_id)
+        .bind(command.pairing_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| classify_database_error(&error))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| classify_database_error(&error))?;
+
+        Ok(CreatedDevicePairing {
+            pairing_id: command.pairing_id,
+            owner_user_id,
+            expires_at: command.expires_at,
+        })
+    }
+
+    /// Consumes a QR pairing token exactly once and atomically creates the
+    /// requesting device's session and refresh-token verifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PairingConsumption::Rejected`] for every invalid, expired,
+    /// revoked, or previously consumed token without revealing its state.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Pairing consumption must visibly hold one transaction from token lock to session creation."
+    )]
+    pub async fn consume_device_pairing(
+        &self,
+        command: &ConsumeDevicePairing,
+    ) -> Result<PairingConsumption, StorageError> {
+        command.validate()?;
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| classify_database_error(&error))?;
+        let pairing = sqlx::query_as::<_, PairingTokenLockRow>(
+            "\
+            SELECT owner_user_id, token_verifier, status, expires_at
+            FROM device_pairing_tokens
+            WHERE id = $1
+            FOR UPDATE",
+        )
+        .bind(command.pairing_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| classify_database_error(&error))?;
+        let Some(pairing) = pairing else {
+            return Ok(PairingConsumption::Rejected);
+        };
+        let valid_verifier = pairing
+            .token_verifier
+            .ct_eq(&command.token_verifier)
+            .unwrap_u8()
+            == 1;
+        if !valid_verifier
+            || pairing.status != "pending"
+            || pairing.expires_at <= OffsetDateTime::now_utc()
+        {
+            if pairing.status == "pending" && pairing.expires_at <= OffsetDateTime::now_utc() {
+                sqlx::query("UPDATE device_pairing_tokens SET status = 'expired' WHERE id = $1")
+                    .bind(command.pairing_id)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|error| classify_database_error(&error))?;
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|error| classify_database_error(&error))?;
+            }
+            return Ok(PairingConsumption::Rejected);
+        }
+
+        let profile =
+            active_profile_in_transaction(&mut transaction, pairing.owner_user_id).await?;
+        let Some(profile) = profile else {
+            return Ok(PairingConsumption::Rejected);
+        };
+        let device = sqlx::query_as::<_, DeviceRow>(
+            "\
+            INSERT INTO devices (
+                id, user_id, installation_id, platform, name, app_version, os_version,
+                status, last_seen_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', NOW())
+            ON CONFLICT (user_id, installation_id) DO UPDATE
+            SET platform = EXCLUDED.platform,
+                name = EXCLUDED.name,
+                app_version = EXCLUDED.app_version,
+                os_version = EXCLUDED.os_version,
+                status = 'active',
+                revoked_at = NULL,
+                last_seen_at = NOW()
+            RETURNING id, platform, name, app_version, os_version, status, version",
+        )
+        .bind(Uuid::now_v7())
+        .bind(profile.id)
+        .bind(command.device.installation_id())
+        .bind(command.device.platform().as_str())
+        .bind(command.device.name())
+        .bind(command.device.app_version())
+        .bind(command.device.os_version())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| classify_database_error(&error))
+        .and_then(Device::try_from)?;
+        sqlx::query(
+            "\
+            INSERT INTO sessions (
+                id, user_id, device_id, family_id, status, expires_at, last_used_at
+            ) VALUES ($1, $2, $3, $4, 'active', $5, NOW())",
+        )
+        .bind(command.session_id)
+        .bind(profile.id)
+        .bind(device.id)
+        .bind(command.family_id)
+        .bind(command.session_expires_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| classify_database_error(&error))?;
+        sqlx::query(
+            "\
+            INSERT INTO session_refresh_tokens (
+                id, session_id, token_verifier, status, expires_at
+            ) VALUES ($1, $2, $3, 'active', $4)",
+        )
+        .bind(command.refresh_token_id)
+        .bind(command.session_id)
+        .bind(&command.refresh_token_verifier)
+        .bind(command.refresh_token_expires_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| classify_database_error(&error))?;
+        sqlx::query(
+            "\
+            UPDATE device_pairing_tokens
+            SET status = 'consumed', consumed_at = NOW()
+            WHERE id = $1 AND status = 'pending'",
+        )
+        .bind(command.pairing_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| classify_database_error(&error))?;
+        append_change(
+            &mut transaction,
+            profile.id,
+            "user",
+            profile.id,
+            profile.version,
+        )
+        .await?;
+        append_change(
+            &mut transaction,
+            profile.id,
+            "device",
+            device.id,
+            device.version,
+        )
+        .await?;
+        write_pairing_audit(
+            &mut transaction,
+            profile.id,
+            device.id,
+            command.pairing_id,
+            command.session_id,
+            command.request_id,
+        )
+        .await?;
+        let sync_cursor = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(MAX(sequence), 0) FROM sync_changes WHERE user_id = $1",
+        )
+        .bind(profile.id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| classify_database_error(&error))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| classify_database_error(&error))?;
+
+        Ok(PairingConsumption::Consumed(Box::new(ProvisionedLogin {
+            profile,
+            device,
+            session_id: command.session_id,
+            family_id: command.family_id,
+            sync_cursor,
+        })))
     }
 
     /// Rotates one device refresh token while holding the session and all
@@ -806,6 +1161,36 @@ async fn write_login_audit(
     .bind(device_id)
     .bind(session_id)
     .bind(request_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| classify_database_error(&error))?;
+    Ok(())
+}
+
+async fn write_pairing_audit(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    device_id: Uuid,
+    pairing_id: Uuid,
+    session_id: Uuid,
+    request_id: Uuid,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "\
+        INSERT INTO audit_logs (
+            id, actor_user_id, actor_device_id, action, target_type, target_id,
+            outcome, request_id, metadata
+        ) VALUES (
+            $1, $2, $3, 'auth.pairing.consumed', 'session', $4, 'success', $5,
+            jsonb_build_object('pairing_id', $6::text)
+        )",
+    )
+    .bind(Uuid::now_v7())
+    .bind(user_id)
+    .bind(device_id)
+    .bind(session_id)
+    .bind(request_id)
+    .bind(pairing_id)
     .execute(&mut **transaction)
     .await
     .map_err(|error| classify_database_error(&error))?;

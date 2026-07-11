@@ -40,7 +40,7 @@ pub struct AuthenticationSettings {
     signing_key: SecretString,
     verify_key: SecretString,
     refresh_pepper: SecretString,
-    allowlist: SecretString,
+    pairing_pepper: SecretString,
 }
 
 pub enum AuthenticationSetting {
@@ -163,9 +163,9 @@ impl AuthenticationSetting {
         let signing_key = secret_from_environment("JIMIN_AUTH_SIGNING_KEY")?;
         let verify_key = secret_from_environment("JIMIN_AUTH_VERIFY_KEY")?;
         let refresh_pepper = secret_from_environment("JIMIN_AUTH_REFRESH_PEPPER")?;
-        let allowlist = secret_from_environment("JIMIN_AUTH_ALLOWLIST")?;
+        let pairing_pepper = secret_from_environment("JIMIN_AUTH_PAIRING_PEPPER")?;
 
-        let any_invalid = [&signing_key, &verify_key, &refresh_pepper, &allowlist]
+        let any_invalid = [&signing_key, &verify_key, &refresh_pepper, &pairing_pepper]
             .iter()
             .any(|setting| matches!(setting, SecretSetting::Invalid));
         if any_invalid {
@@ -178,8 +178,8 @@ impl AuthenticationSetting {
             SecretSetting::Available(signing_key),
             SecretSetting::Available(verify_key),
             SecretSetting::Available(refresh_pepper),
-            SecretSetting::Available(allowlist),
-        ) = (signing_key, verify_key, refresh_pepper, allowlist)
+            SecretSetting::Available(pairing_pepper),
+        ) = (signing_key, verify_key, refresh_pepper, pairing_pepper)
         else {
             return Ok(Self::Missing);
         };
@@ -209,7 +209,7 @@ impl AuthenticationSetting {
             signing_key,
             verify_key,
             refresh_pepper,
-            allowlist,
+            pairing_pepper,
         }))
     }
 }
@@ -251,8 +251,8 @@ impl AuthenticationSettings {
     }
 
     #[must_use]
-    pub const fn allowlist(&self) -> &SecretString {
-        &self.allowlist
+    pub const fn pairing_pepper(&self) -> &SecretString {
+        &self.pairing_pepper
     }
 }
 

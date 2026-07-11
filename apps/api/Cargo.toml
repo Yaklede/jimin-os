@@ -13,7 +13,6 @@ jimin-observability = { path = "../../crates/observability" }
 jimin-auth = { path = "../../crates/auth" }
 jimin-application = { path = "../../crates/application" }
 jimin-domain = { path = "../../crates/domain" }
-jimin-google = { path = "../../crates/google" }
 jimin-storage = { path = "../../crates/storage" }
 secrecy.workspace = true
 serde.workspace = true

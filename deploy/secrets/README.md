@@ -5,9 +5,10 @@ M1 adds four API authentication secret files alongside the database files:
 - `auth_signing_key`: Ed25519 PKCS#8 private key used only for access-token signing.
 - `auth_verify_key`: matching Ed25519 public key used for bearer-token verification.
 - `auth_refresh_pepper`: at least 32 random bytes used as the server HMAC pepper.
-- `auth_allowlist`: one permitted verified Google email per line.
+- `auth_pairing_pepper`: at least 32 random bytes used only to derive
+  short-lived QR device-pairing token verifiers.
 
-Generate the Ed25519 pair outside the repository, store both files at mode `0600`, and never copy the private key or pepper into `.env` files. The API will remain unready if any file is missing or invalid.
+Generate the Ed25519 pair outside the repository, store both files at mode `0600`, and never copy the private key or pepper into `.env` files. The API will remain unready if any file is missing or invalid. Google OAuth client secrets do not belong here: Google is introduced later only for the Calendar integration, not for Jimin OS device enrollment.
 
 실제 secret은 이 디렉터리 아래의 환경별 하위 디렉터리에만 만들고 Git에 추가하지 않는다.
 

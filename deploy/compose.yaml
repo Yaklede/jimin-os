@@ -83,16 +83,14 @@ services:
       JIMIN_AUTH_SIGNING_KEY_FILE: /run/secrets/auth_signing_key
       JIMIN_AUTH_VERIFY_KEY_FILE: /run/secrets/auth_verify_key
       JIMIN_AUTH_REFRESH_PEPPER_FILE: /run/secrets/auth_refresh_pepper
-      JIMIN_AUTH_ALLOWLIST_FILE: /run/secrets/auth_allowlist
-      JIMIN_GOOGLE_MACOS_CLIENT_ID: ${JIMIN_GOOGLE_MACOS_CLIENT_ID:?set JIMIN_GOOGLE_MACOS_CLIENT_ID}
-      JIMIN_GOOGLE_MACOS_REDIRECT_URI: ${JIMIN_GOOGLE_MACOS_REDIRECT_URI:?set JIMIN_GOOGLE_MACOS_REDIRECT_URI}
+      JIMIN_AUTH_PAIRING_PEPPER_FILE: /run/secrets/auth_pairing_pepper
       RUST_LOG: ${RUST_LOG:-info}
     secrets:
       - api_database_url
       - auth_signing_key
       - auth_verify_key
       - auth_refresh_pepper
-      - auth_allowlist
+      - auth_pairing_pepper
     tmpfs:
       - /tmp:uid=10001,gid=10001,mode=0700,size=32m
     networks:
@@ -217,5 +215,5 @@ secrets:
     file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/auth_verify_key
   auth_refresh_pepper:
     file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/auth_refresh_pepper
-  auth_allowlist:
-    file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/auth_allowlist
+  auth_pairing_pepper:
+    file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/auth_pairing_pepper
