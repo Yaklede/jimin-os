@@ -2,8 +2,9 @@
   font-family:
     "Pretendard Variable", Pretendard, "Apple SD Gothic Neo", system-ui,
     sans-serif;
-  color: #34413c;
-  background: #f3f5f2;
+  color: var(--text-primary);
+  background: var(--canvas);
+  color-scheme: light dark;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -32,6 +33,34 @@
   --radius-surface: 8px;
   --duration-fast: 140ms;
   --duration-normal: 180ms;
+  --safe-area-top: env(safe-area-inset-top, 0px);
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --canvas: #171c19;
+    --surface: #202722;
+    --surface-subtle: #272f29;
+    --text-strong: #f0f5f1;
+    --text-primary: #d8e1db;
+    --text-muted: #aab8af;
+    --text-faint: #819087;
+    --border: #3a463f;
+    --border-strong: #536258;
+    --accent: #57a78e;
+    --accent-hover: #68b79f;
+    --accent-tint: #203b31;
+    --focus: #8fd3bb;
+    --warning: #d9af6d;
+    --warning-tint: #423822;
+    --destructive: #df8e8e;
+    --destructive-hover: #eca2a2;
+    --destructive-tint: #452a2a;
+    --disabled-surface: #313b34;
+    --disabled-text: #9aa79f;
+    --overlay-text: #112019;
+  }
 }
 
 * {
@@ -76,6 +105,7 @@ textarea:focus-visible {
 
 .app-shell {
   min-height: 100vh;
+  padding-bottom: var(--safe-area-bottom);
   background: var(--canvas);
 }
 
@@ -84,6 +114,7 @@ textarea:focus-visible {
   z-index: 10;
   top: 0;
   border-bottom: 1px solid var(--border);
+  padding-top: var(--safe-area-top);
   background: color-mix(in srgb, var(--canvas) 92%, transparent);
 }
 
@@ -852,40 +883,116 @@ textarea:focus-visible {
   flex: 0 0 auto;
   min-width: 112px;
 }
+.setup-main {
+  width: min(100% - 48px, 680px);
+  margin: 0 auto;
+  padding: 64px 0;
+}
+
 .setup-panel {
   display: grid;
-  grid-template-columns: 48px minmax(0, 560px);
-  gap: 20px;
+  gap: 32px;
   border: 1px solid var(--border);
   border-radius: var(--radius-surface);
   padding: 32px;
   background: var(--surface);
 }
-.setup-panel > svg {
+
+.setup-panel__intro > svg {
   width: 28px;
   height: 28px;
+  margin-bottom: 20px;
   color: var(--accent);
+  stroke-width: 2;
 }
-.setup-panel h2 {
+
+.setup-panel__eyebrow {
+  margin: 0 0 8px;
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.setup-panel h1 {
   margin: 0;
   color: var(--text-strong);
-  font-size: 20px;
+  font-size: 24px;
   font-weight: 600;
   line-height: 1.25;
 }
-.setup-panel p {
-  margin: 8px 0 20px;
+
+.setup-panel__description {
+  max-width: 560px;
+  margin: 12px 0 0;
   color: var(--text-muted);
   font-size: 16px;
   line-height: 1.5;
 }
-.setup-panel form {
+
+.setup-panel__scope {
+  border-left: 2px solid var(--accent);
+  padding-left: 16px;
+}
+
+.setup-panel__scope strong,
+.setup-steps strong {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.setup-panel__scope p,
+.setup-steps p {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.setup-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--border);
+}
+
+.setup-steps li {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 12px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.setup-steps li > span {
+  color: var(--accent);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.setup-form {
+  display: grid;
+  gap: 24px;
+}
+
+.field {
   display: grid;
   gap: 8px;
 }
-.setup-panel .primary-button {
+
+.field__hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.setup-form .primary-button {
   justify-self: start;
-  margin-top: 8px;
 }
 @media (max-width: 760px) {
   .planning-page {
@@ -906,9 +1013,12 @@ textarea:focus-visible {
     gap: 16px;
   }
   .setup-panel {
-    grid-template-columns: 1fr;
-    gap: 12px;
     padding: 24px;
+  }
+
+  .setup-main {
+    width: min(100% - 32px, 680px);
+    padding: 32px 0 48px;
   }
   .form-action,
   .date-fields {

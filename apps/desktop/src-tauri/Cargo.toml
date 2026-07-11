@@ -15,8 +15,12 @@ tauri-build.workspace = true
 
 [dependencies]
 keyring.workspace = true
+keyring-core.workspace = true
 tauri.workspace = true
 uuid.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-native-keyring-store.workspace = true
 
 [lints]
 workspace = true

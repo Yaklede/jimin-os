@@ -11,6 +11,8 @@
 ## Locked axes
 
 - Key color/accent: muted pine #287c68
+- Appearance: follow the operating system; light and dark semantic tokens are
+  defined in DESIGN.md
 - Neutral direction: cool green-tinted graphite on #f3f5f2 canvas
 - Radius personality: small and precise; 6px controls, 8px surfaces
 - Shadow language: flat hairline separation; elevation only for future overlays

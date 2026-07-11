@@ -49,7 +49,7 @@ import {
 } from "./device-session";
 import { createUuidV7 } from "./uuid";
 
-const defaultApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/server";
+const defaultApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "";
 
 type AppMode = "setup" | "loading" | "ready" | "error";
 type AppView = "today" | "conversations";
@@ -286,7 +286,7 @@ export default function App() {
     const form = new FormData(event.currentTarget);
     const pairingCode = String(form.get("pairingCode") ?? "").trim();
     const deviceName = String(form.get("deviceName") ?? "").trim();
-    if (!pairingCode || !deviceName) {
+    if (!apiBaseUrl.trim() || !pairingCode || !deviceName) {
       setMessage(copy.messages.setupRequired);
       return;
     }
@@ -503,21 +503,17 @@ export default function App() {
       </header>
       <main
         className={
-          mode === "setup" || view === "today"
-            ? "planning-page"
-            : "conversation-main"
+          mode === "setup"
+            ? "setup-main"
+            : view === "today"
+              ? "planning-page"
+              : "conversation-main"
         }
       >
         {mode === "setup" ? (
           <>
-            <section className="page-heading">
-              <div>
-                <p className="page-heading__date">{today}</p>
-                <h1>{copy.title}</h1>
-              </div>
-            </section>
             {message && (
-              <p className="inline-alert" role="status" aria-live="polite">
+              <p className="inline-alert" role="alert">
                 {message}
               </p>
             )}
@@ -704,35 +700,79 @@ function SetupPanel({
   onSubmit(event: FormEvent<HTMLFormElement>): void;
 }) {
   return (
-    <section className="setup-panel">
-      <Server aria-hidden="true" />
-      <div>
-        <h2>{copy.setup.title}</h2>
-        <p>{copy.setup.description}</p>
-        <form onSubmit={onSubmit}>
+    <section className="setup-panel" aria-labelledby="setup-title">
+      <div className="setup-panel__intro">
+        <Server aria-hidden="true" />
+        <p className="setup-panel__eyebrow">{copy.setup.eyebrow}</p>
+        <h1 id="setup-title">{copy.setup.title}</h1>
+        <p className="setup-panel__description">{copy.setup.description}</p>
+      </div>
+      <aside className="setup-panel__scope" aria-label={copy.setup.scopeTitle}>
+        <strong>{copy.setup.scopeTitle}</strong>
+        <p>{copy.setup.scopeDescription}</p>
+      </aside>
+      <ol className="setup-steps" aria-label={copy.setup.preparationLabel}>
+        <li>
+          <span aria-hidden="true">1</span>
+          <div>
+            <strong>{copy.setup.prepareServerTitle}</strong>
+            <p>{copy.setup.prepareServerDescription}</p>
+          </div>
+        </li>
+        <li>
+          <span aria-hidden="true">2</span>
+          <div>
+            <strong>{copy.setup.prepareCodeTitle}</strong>
+            <p>{copy.setup.prepareCodeDescription}</p>
+          </div>
+        </li>
+      </ol>
+      <form className="setup-form" onSubmit={onSubmit}>
+        <div className="field">
           <label htmlFor="server-url">{copy.setup.serverLabel}</label>
+          <p id="server-url-hint" className="field__hint">
+            {copy.setup.serverHint}
+          </p>
           <input
             id="server-url"
+            type="url"
             value={apiBaseUrl}
+            required
+            aria-describedby="server-url-hint"
             onChange={(event) => onApiBaseUrlChange(event.target.value)}
           />
+        </div>
+        <div className="field">
           <label htmlFor="device-name">{copy.setup.deviceLabel}</label>
+          <p id="device-name-hint" className="field__hint">
+            {copy.setup.deviceHint}
+          </p>
           <input
             id="device-name"
             name="deviceName"
             defaultValue={copy.setup.defaultDeviceName}
             maxLength={80}
+            required
+            aria-describedby="device-name-hint"
           />
+        </div>
+        <div className="field">
           <label htmlFor="pairing-code">{copy.setup.tokenLabel}</label>
-          <textarea id="pairing-code" name="pairingCode" required rows={3} />
-          <button
-            className="primary-button focus-visible-control"
-            type="submit"
-          >
-            {copy.actions.connect}
-          </button>
-        </form>
-      </div>
+          <p id="pairing-code-hint" className="field__hint">
+            {copy.setup.tokenHint}
+          </p>
+          <textarea
+            id="pairing-code"
+            name="pairingCode"
+            required
+            rows={3}
+            aria-describedby="pairing-code-hint"
+          />
+        </div>
+        <button className="primary-button focus-visible-control" type="submit">
+          {copy.actions.connect}
+        </button>
+      </form>
     </section>
   );
 }

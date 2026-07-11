@@ -53,13 +53,27 @@ fn read_or_create_installation_id() -> Result<String, String> {
 }
 
 fn session_entry() -> Result<Entry, String> {
+    #[cfg(target_os = "android")]
+    configure_platform_store()?;
     Entry::new(SESSION_SERVICE, SESSION_ACCOUNT)
         .map_err(|_| "The device secure store is unavailable.".to_owned())
 }
 
 fn installation_entry() -> Result<Entry, String> {
+    #[cfg(target_os = "android")]
+    configure_platform_store()?;
     Entry::new(SESSION_SERVICE, INSTALLATION_ACCOUNT)
         .map_err(|_| "The device secure store is unavailable.".to_owned())
+}
+
+#[cfg(target_os = "android")]
+fn configure_platform_store() -> Result<(), String> {
+    if keyring_core::get_default_store().is_none() {
+        let store = android_native_keyring_store::Store::new()
+            .map_err(|_| "The device secure store is unavailable.".to_owned())?;
+        keyring_core::set_default_store(store);
+    }
+    Ok(())
 }
 
 fn valid_installation_id(value: &str) -> bool {

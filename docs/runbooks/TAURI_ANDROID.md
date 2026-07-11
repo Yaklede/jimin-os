@@ -53,5 +53,8 @@ pnpm --filter @jimin-os/desktop tauri android build --debug --apk --target aarch
 
 2026-07-11 기준 개발 Mac에서 NDK `27.1.12297006`을 지정해 arm64 debug APK
 생성까지 통과했다. 생성 APK 안의 launcher resource도 Jimin OS 아이콘 원본과
-SHA-256이 일치한다. 다만 연결된 `adb` 개인 기기가 없으므로 설치, QR 기기
-연결, TLS 신뢰, cold start 검증은 아직 통과로 기록하지 않는다.
+SHA-256이 일치한다. 개인 Android 기기(`SM-S948N`)에는 debug APK 설치와 앱
+기동까지 확인했다.
+
+기기 연결, TLS 신뢰, 일정·할 일 동기화, 서버 Agent 대화는 개인 서버 배포와
+일회용 연결 값 생성 후 운영 검증 절차에서 확인한다.

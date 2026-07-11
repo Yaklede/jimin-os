@@ -2563,7 +2563,9 @@ dependencies = [
 name = "jimin-desktop"
 version = "0.1.0"
 dependencies = [
+ "android-native-keyring-store",
  "keyring",
+ "keyring-core",
  "tauri",
  "tauri-build",
  "uuid",

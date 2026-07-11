@@ -11,7 +11,7 @@ export const copy = {
     checkAgainLabel: "서버 상태 다시 확인하기",
     checking: "확인하고 있어요",
     refresh: "새로고침",
-    connect: "기기 연결하기",
+    connect: "서버 연결하기",
     addTask: "할 일 추가하기",
     addSchedule: "일정 추가하기",
     complete: "완료하기",
@@ -35,13 +35,27 @@ export const copy = {
     disconnected: "연결 안 됨",
   },
   setup: {
-    title: "개인 서버에 기기를 연결해요",
+    eyebrow: "Jimin OS 시작하기",
+    title: "개인 서버와 연결해요",
     description:
-      "신뢰된 서버에서 만든 기기 연결 코드를 입력하면 일정과 할 일을 이 기기에서 사용할 수 있어요.",
-    serverLabel: "서버 주소",
-    deviceLabel: "기기 이름",
+      "이 기기를 등록하면 일정, 할 일, 대화를 개인 서버에서 안전하게 사용할 수 있어요.",
+    scopeTitle: "연결하는 대상",
+    scopeDescription:
+      "이 화면에서는 휴대폰과 개인 서버만 연결해요. ChatGPT 계정은 개인 서버에서 따로 관리돼요.",
+    prepareServerTitle: "개인 서버 주소를 준비해요",
+    prepareServerDescription:
+      "개인 서버의 HTTPS 주소가 필요해요. 예: https://jimin.example.com",
+    prepareCodeTitle: "일회용 연결 코드를 준비해요",
+    prepareCodeDescription:
+      "서버에서 만든 연결 코드 또는 QR에서 읽은 전체 주소를 붙여 넣을 수 있어요.",
+    preparationLabel: "연결 준비",
+    serverLabel: "개인 서버 주소",
+    serverHint: "개인 서버의 HTTPS 주소를 입력해 주세요.",
+    deviceLabel: "이 기기 이름",
+    deviceHint: "다른 기기와 구분할 수 있는 이름을 적어 주세요.",
     defaultDeviceName: "내 기기",
-    tokenLabel: "기기 연결 코드",
+    tokenLabel: "일회용 연결 코드",
+    tokenHint: "서버에서 만든 코드나 QR에서 읽은 전체 주소를 붙여 넣어 주세요.",
   },
   schedule: {
     title: "다가오는 일정",
@@ -80,9 +94,10 @@ export const copy = {
     endsAt: "종료 시간",
   },
   messages: {
-    setupRequired: "기기 이름과 연결 코드를 모두 입력해 주세요.",
+    setupRequired:
+      "개인 서버 주소, 기기 이름, 일회용 연결 코드를 모두 입력해 주세요.",
     connectionNotice:
-      "기기를 연결할 수 없어요. 서버 주소와 연결 코드를 확인한 뒤 다시 시도해 주세요.",
+      "서버와 연결할 수 없어요. 개인 서버 주소와 일회용 연결 코드를 확인한 뒤 다시 시도해 주세요.",
     storageNotice:
       "기기 연결 정보를 안전하게 저장할 수 없어요. 앱을 다시 연 뒤 다시 시도해 주세요.",
     sessionExpired:
