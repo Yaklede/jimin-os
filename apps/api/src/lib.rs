@@ -18,6 +18,10 @@ use jimin_domain::{ClientPlatform, DeviceRegistration};
 use jimin_observability::{RequestId, request_context};
 use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness, StorageError,
+    agent::{
+        AgentJobState, Conversation, ConversationStatus, NewAgentTurn, NewConversation,
+        QueuedAgentTurn,
+    },
     auth::{Device, DeviceStatus, Profile},
     planning::{NewScheduleEntry, NewTask, ScheduleEntry, ScheduleStatus, Task, TaskStatus},
 };
@@ -48,6 +52,7 @@ pub struct ApiState {
     authentication: Option<Arc<auth::Authentication>>,
     pairing: Option<Arc<PairingRuntime>>,
     planning: Option<Database>,
+    agent: Option<Database>,
 }
 
 impl ApiState {
@@ -65,6 +70,7 @@ impl ApiState {
             authentication: None,
             pairing: None,
             planning: None,
+            agent: None,
         }
     }
 
@@ -99,6 +105,17 @@ impl ApiState {
     #[must_use]
     fn planning(&self) -> Option<&Database> {
         self.planning.as_ref()
+    }
+
+    #[must_use]
+    pub fn with_agent(mut self, agent: Database) -> Self {
+        self.agent = Some(agent);
+        self
+    }
+
+    #[must_use]
+    fn agent(&self) -> Option<&Database> {
+        self.agent.as_ref()
     }
 }
 
@@ -240,6 +257,32 @@ pub struct TaskListResponse {
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct ConversationResponse {
+    id: uuid::Uuid,
+    title: Option<String>,
+    status: String,
+    last_message_at: Option<String>,
+    version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationListResponse {
+    items: Vec<ConversationResponse>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct QueuedAgentTurnResponse {
+    job_id: uuid::Uuid,
+    message_id: uuid::Uuid,
+    conversation_id: uuid::Uuid,
+    state: String,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceSessionResponse {
     access_token: String,
     access_token_expires_at: String,
@@ -310,6 +353,27 @@ struct CreateTaskRequest {
 
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CreateConversationRequest {
+    title: Option<String>,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CreateAgentTurnRequest {
+    client_message_id: uuid::Uuid,
+    input: Vec<AgentTurnInput>,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct AgentTurnInput {
+    #[serde(rename = "type")]
+    kind: String,
+    text: String,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CompleteTaskRequest {
     expected_version: i64,
 }
@@ -363,6 +427,9 @@ pub(crate) fn error_response(
         list_open_tasks,
         create_task,
         complete_task,
+        list_conversations,
+        create_conversation,
+        create_agent_turn,
         live,
         ready,
         me,
@@ -383,7 +450,13 @@ pub(crate) fn error_response(
         ScheduleEntryResponse,
         ScheduleListResponse,
         TaskResponse,
-        TaskListResponse
+        TaskListResponse,
+        ConversationResponse,
+        ConversationListResponse,
+        QueuedAgentTurnResponse,
+        CreateConversationRequest,
+        CreateAgentTurnRequest,
+        AgentTurnInput
     )),
     tags((name = "health", description = "Process and dependency health"))
 )]
@@ -415,6 +488,14 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/tasks/{task_id}/complete",
             axum::routing::post(complete_task),
+        )
+        .route(
+            "/v1/conversations",
+            get(list_conversations).post(create_conversation),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/turns",
+            axum::routing::post(create_agent_turn),
         )
         .route("/v1/me", get(me))
         .route("/v1/devices", get(devices))
@@ -802,6 +883,140 @@ async fn complete_task(
 }
 
 #[utoipa::path(
+    get,
+    path = "/v1/conversations",
+    tag = "agent",
+    responses((status = 200, body = ConversationListResponse), (status = 401), (status = 503))
+)]
+async fn list_conversations(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(agent) = state.agent() else {
+        return unavailable_response(request_id);
+    };
+    match agent
+        .active_conversations_for_user(principal.identity().user_id())
+        .await
+    {
+        Ok(conversations) => match conversations
+            .into_iter()
+            .map(conversation_response)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(items) => Json(ConversationListResponse {
+                items,
+                next_cursor: None,
+            })
+            .into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/conversations",
+    tag = "agent",
+    request_body = CreateConversationRequest,
+    responses((status = 201, body = ConversationResponse), (status = 400), (status = 401), (status = 503))
+)]
+async fn create_conversation(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Json(body): Json<CreateConversationRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(agent) = state.agent() else {
+        return unavailable_response(request_id);
+    };
+    match agent
+        .create_conversation(&NewConversation {
+            id: uuid::Uuid::now_v7(),
+            user_id: principal.identity().user_id(),
+            title: body.title,
+        })
+        .await
+    {
+        Ok(conversation) => match conversation_response(conversation) {
+            Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/conversations/{conversation_id}/turns",
+    tag = "agent",
+    params(("conversation_id" = String, Path)),
+    request_body = CreateAgentTurnRequest,
+    responses((status = 202, body = QueuedAgentTurnResponse), (status = 400), (status = 401), (status = 409), (status = 503))
+)]
+async fn create_agent_turn(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(conversation_id): Path<uuid::Uuid>,
+    Json(body): Json<CreateAgentTurnRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(agent) = state.agent() else {
+        return unavailable_response(request_id);
+    };
+    let mut input = body.input;
+    if input.len() != 1 {
+        return invalid_request_response(request_id);
+    }
+    let Some(input) = input.pop() else {
+        return invalid_request_response(request_id);
+    };
+    if input.kind != "text" {
+        return invalid_request_response(request_id);
+    }
+
+    match agent
+        .enqueue_agent_turn(&NewAgentTurn {
+            job_id: uuid::Uuid::now_v7(),
+            message_id: uuid::Uuid::now_v7(),
+            client_message_id: body.client_message_id,
+            user_id: principal.identity().user_id(),
+            conversation_id,
+            content: input.text,
+        })
+        .await
+    {
+        Ok(queued) => (
+            StatusCode::ACCEPTED,
+            Json(queued_agent_turn_response(&queued)),
+        )
+            .into_response(),
+        Err(StorageError::IdentityConflict) => error_response(
+            StatusCode::CONFLICT,
+            "conversation.unavailable",
+            "이 대화는 다른 요청을 처리 중이에요. 잠시 후 다시 시도해 주세요.",
+            request_id,
+            false,
+        ),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
     post,
     path = "/v1/auth/pairings/exchange",
     tag = "identity",
@@ -1076,6 +1291,42 @@ fn task_response(task: Task) -> Result<TaskResponse, ()> {
             .transpose()?,
         version: task.version,
     })
+}
+
+fn conversation_response(conversation: Conversation) -> Result<ConversationResponse, ()> {
+    Ok(ConversationResponse {
+        id: conversation.id,
+        title: conversation.title,
+        status: match conversation.status {
+            ConversationStatus::Active => "active".to_owned(),
+            ConversationStatus::Archived => "archived".to_owned(),
+        },
+        last_message_at: conversation
+            .last_message_at
+            .map(|value| value.format(&Rfc3339).map_err(|_| ()))
+            .transpose()?,
+        version: conversation.version,
+    })
+}
+
+fn queued_agent_turn_response(queued: &QueuedAgentTurn) -> QueuedAgentTurnResponse {
+    QueuedAgentTurnResponse {
+        job_id: queued.job_id,
+        message_id: queued.message_id,
+        conversation_id: queued.conversation_id,
+        state: match queued.state {
+            AgentJobState::Queued => "queued",
+            AgentJobState::Claimed => "claimed",
+            AgentJobState::Running => "running",
+            AgentJobState::WaitingApproval => "waiting_approval",
+            AgentJobState::RetryWait => "retry_wait",
+            AgentJobState::Completed => "completed",
+            AgentJobState::Failed => "failed",
+            AgentJobState::Cancelled => "cancelled",
+            AgentJobState::Declined => "declined",
+        }
+        .to_owned(),
+    }
 }
 
 fn me_response(profile: Profile) -> MeResponse {
@@ -1381,6 +1632,8 @@ mod tests {
                 "/health/ready",
                 "/v1/auth/pairings/exchange",
                 "/v1/auth/refresh",
+                "/v1/conversations",
+                "/v1/conversations/{conversation_id}/turns",
                 "/v1/device-pairings",
                 "/v1/devices",
                 "/v1/me",
@@ -1389,6 +1642,24 @@ mod tests {
                 "/v1/tasks/{task_id}/complete"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn conversation_endpoints_require_a_live_signed_session() {
+        let (state, _, _) = signed_auth_state(true);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/conversations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"title":null}"#))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

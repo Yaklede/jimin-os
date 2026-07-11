@@ -23,6 +23,7 @@ impl NewConversation {
     /// Returns [`StorageError::InvalidConfiguration`] for malformed IDs or text.
     pub fn validate(&self) -> Result<(), StorageError> {
         if !is_v7(self.id)
+            || !is_v7(self.user_id)
             || !self
                 .title
                 .as_deref()
@@ -53,6 +54,7 @@ impl NewAgentTurn {
         if !is_v7(self.job_id)
             || !is_v7(self.message_id)
             || !is_v7(self.client_message_id)
+            || !is_v7(self.user_id)
             || !is_v7(self.conversation_id)
             || !valid_text(&self.content, MAX_CONTENT_CHARS, false)
         {
@@ -160,7 +162,11 @@ impl Database {
     ) -> Result<Conversation, StorageError> {
         conversation.validate()?;
         let user_id = conversation.user_id;
-        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| classify(&error))?;
         let row = sqlx::query_as::<_, ConversationRow>(
             "\
             INSERT INTO conversations (id, user_id, title)
@@ -178,7 +184,7 @@ impl Database {
         )
         .fetch_one(&mut *transaction)
         .await
-        .map_err(classify)?;
+        .map_err(|error| classify(&error))?;
         let conversation = Conversation::try_from(row)?;
         append_change(
             &mut transaction,
@@ -188,7 +194,10 @@ impl Database {
             conversation.version,
         )
         .await?;
-        transaction.commit().await.map_err(classify)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| classify(&error))?;
         Ok(conversation)
     }
 
@@ -211,7 +220,7 @@ impl Database {
         .bind(user_id)
         .fetch_all(self.pool())
         .await
-        .map_err(classify)?;
+        .map_err(|error| classify(&error))?;
         rows.into_iter().map(Conversation::try_from).collect()
     }
 
@@ -228,7 +237,11 @@ impl Database {
         turn: &NewAgentTurn,
     ) -> Result<QueuedAgentTurn, StorageError> {
         turn.validate()?;
-        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| classify(&error))?;
         let exists = sqlx::query_scalar::<_, bool>(
             "\
             SELECT EXISTS(
@@ -240,7 +253,7 @@ impl Database {
         .bind(turn.user_id)
         .fetch_one(&mut *transaction)
         .await
-        .map_err(classify)?;
+        .map_err(|error| classify(&error))?;
         if !exists {
             return Err(StorageError::IdentityConflict);
         }
@@ -257,7 +270,7 @@ impl Database {
         .bind(turn.client_message_id)
         .execute(&mut *transaction)
         .await
-        .map_err(classify)?;
+        .map_err(|error| classify(&error))?;
         if inserted.rows_affected() != 1 {
             return Err(StorageError::PersistenceUnavailable);
         }
@@ -274,7 +287,7 @@ impl Database {
         .bind(turn.message_id)
         .fetch_one(&mut *transaction)
         .await
-        .map_err(classify)?;
+        .map_err(|error| classify(&error))?;
         let conversation_version = sqlx::query_scalar::<_, i64>(
             "\
             UPDATE conversations
@@ -286,7 +299,7 @@ impl Database {
         .bind(turn.user_id)
         .fetch_one(&mut *transaction)
         .await
-        .map_err(classify)?;
+        .map_err(|error| classify(&error))?;
         let queued = QueuedAgentTurn::try_from(row)?;
         append_change(
             &mut transaction,
@@ -296,7 +309,10 @@ impl Database {
             conversation_version,
         )
         .await?;
-        transaction.commit().await.map_err(classify)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| classify(&error))?;
         Ok(queued)
     }
 }
@@ -326,7 +342,12 @@ fn valid_text(value: &str, maximum: usize, allow_empty: bool) -> bool {
         && !value.chars().any(char::is_control)
 }
 
-fn classify(_error: sqlx::Error) -> StorageError {
+fn classify(error: &sqlx::Error) -> StorageError {
+    if let sqlx::Error::Database(database_error) = &error
+        && database_error.code().as_deref() == Some("23505")
+    {
+        return StorageError::IdentityConflict;
+    }
     StorageError::PersistenceUnavailable
 }
 

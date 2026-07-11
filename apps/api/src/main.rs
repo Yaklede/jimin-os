@@ -119,6 +119,7 @@ async fn run_server() -> Result<(), &'static str> {
     }
     if let Some(database) = database.as_ref() {
         state = state.with_planning(database.clone());
+        state = state.with_agent(database.clone());
     }
     let listener = TcpListener::bind(config.bind_addr())
         .await
