@@ -1,4 +1,4 @@
-import { createUuidV7 } from "../uuid";
+import { isUuidV7 } from "../uuid";
 
 export type SessionTokens = Record<"accessToken" | "refreshToken", string>;
 
@@ -51,9 +51,12 @@ export async function exchangePairingCode(
   baseUrl: string,
   pairingCode: string,
   deviceName: string,
+  installationId: string,
 ): Promise<SessionTokens> {
   const code = pairingTokenFromValue(pairingCode);
-  if (!code) throw new PlanningRequestError("invalid");
+  if (!code || !isUuidV7(installationId)) {
+    throw new PlanningRequestError("invalid");
+  }
   const pairingCodeField = "pairingToken";
   const response = await fetch(
     `${normalizeBaseUrl(baseUrl)}/v1/auth/pairings/exchange`,
@@ -66,7 +69,7 @@ export async function exchangePairingCode(
       body: JSON.stringify({
         [pairingCodeField]: code,
         device: {
-          installationId: createUuidV7(),
+          installationId,
           platform: clientPlatformForUserAgent(navigator.userAgent),
           name: deviceName,
           appVersion: "0.1.0-dev",

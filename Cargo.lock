@@ -2566,6 +2566,7 @@ dependencies = [
  "keyring",
  "tauri",
  "tauri-build",
+ "uuid",
 ]
 
 [[package]]

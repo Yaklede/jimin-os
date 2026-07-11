@@ -37,6 +37,7 @@ import { copy } from "./copy";
 import {
   clearDeviceSession,
   readDeviceSession,
+  readOrCreateInstallationId,
   saveDeviceSession,
 } from "./device-session";
 
@@ -285,6 +286,7 @@ export default function App() {
         apiBaseUrl,
         pairingCode,
         deviceName,
+        await readOrCreateInstallationId(),
       );
       await saveDeviceSession({
         apiBaseUrl,

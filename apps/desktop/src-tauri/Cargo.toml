@@ -16,6 +16,7 @@ tauri-build.workspace = true
 [dependencies]
 keyring.workspace = true
 tauri.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

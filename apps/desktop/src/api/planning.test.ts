@@ -75,7 +75,7 @@ describe("refreshDeviceSession", () => {
     ).toBe("macos");
   });
 
-  it("sends a version-seven installation ID when a device exchanges a code", async () => {
+  it("sends the stable version-seven installation ID when a device exchanges a code", async () => {
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockResolvedValue(
@@ -85,15 +85,12 @@ describe("refreshDeviceSession", () => {
         ),
       );
     vi.stubGlobal("fetch", fetchMock);
-    vi.stubGlobal("crypto", {
-      getRandomValues: (value: Uint8Array) => value.fill(0),
-    });
     vi.stubGlobal("navigator", {
       platform: "Linux armv8l",
       userAgent: "Mozilla/5.0 (Linux; Android 16; Pixel)",
     });
-    vi.spyOn(Date, "now").mockReturnValue(1_784_169_600_000);
     const code = "jp_019f68cb-9400-7000-8000-000000000000.example";
+    const installationId = "019f68cb-9400-7000-8000-000000000000";
     const pairingUri = new URL("jimin-os://pair");
     pairingUri.searchParams.set("token", code);
 
@@ -101,14 +98,30 @@ describe("refreshDeviceSession", () => {
       "https://jimin-os.example",
       pairingUri.toString(),
       "내 기기",
+      installationId,
     );
 
     const request = fetchMock.mock.calls[0]?.[1];
     const body = JSON.parse(String(request?.body));
     expect(body.pairingToken).toBe(code);
     expect(body.device.platform).toBe("android");
-    expect(body.device.installationId).toBe(
-      "019f68cb-9400-7000-8000-000000000000",
-    );
+    expect(body.device.installationId).toBe(installationId);
+  });
+
+  it("rejects a malformed installation ID before sending a pairing request", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      exchangePairingCode(
+        "https://jimin-os.example",
+        "pairing-code",
+        "내 기기",
+        "550e8400-e29b-41d4-a716-446655440000",
+      ),
+    ).rejects.toMatchObject({
+      code: "invalid",
+    } satisfies Partial<PlanningRequestError>);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

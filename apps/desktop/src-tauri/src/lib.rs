@@ -1,6 +1,8 @@
 use keyring::{Entry, Error as KeyringError};
+use uuid::Uuid;
 
 const SESSION_ACCOUNT: &str = "device-session";
+const INSTALLATION_ACCOUNT: &str = "device-installation";
 const SESSION_SERVICE: &str = "io.jimin.os";
 const MAX_SESSION_BYTES: usize = 8 * 1024;
 
@@ -34,9 +36,34 @@ fn clear_device_session() -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+fn read_or_create_installation_id() -> Result<String, String> {
+    let entry = installation_entry()?;
+    match entry.get_password() {
+        Ok(value) if valid_installation_id(&value) => Ok(value),
+        Err(KeyringError::NoEntry) => {
+            let installation_id = Uuid::now_v7().to_string();
+            entry
+                .set_password(&installation_id)
+                .map_err(|_| "The device identity could not be saved safely.".to_owned())?;
+            Ok(installation_id)
+        }
+        Ok(_) | Err(_) => Err("The device identity could not be read safely.".to_owned()),
+    }
+}
+
 fn session_entry() -> Result<Entry, String> {
     Entry::new(SESSION_SERVICE, SESSION_ACCOUNT)
         .map_err(|_| "The device secure store is unavailable.".to_owned())
+}
+
+fn installation_entry() -> Result<Entry, String> {
+    Entry::new(SESSION_SERVICE, INSTALLATION_ACCOUNT)
+        .map_err(|_| "The device secure store is unavailable.".to_owned())
+}
+
+fn valid_installation_id(value: &str) -> bool {
+    Uuid::parse_str(value).is_ok_and(|id| id.get_version_num() == 7)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -45,12 +72,29 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             read_device_session,
             save_device_session,
-            clear_device_session
+            clear_device_session,
+            read_or_create_installation_id
         ])
         .run(tauri::generate_context!());
 
     if let Err(error) = result {
         eprintln!("Jimin OS could not start: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_installation_id;
+
+    #[test]
+    fn accepts_only_version_seven_installation_ids() {
+        assert!(valid_installation_id(
+            "019f68cb-9400-7000-8000-000000000000"
+        ));
+        assert!(!valid_installation_id(
+            "550e8400-e29b-41d4-a716-446655440000"
+        ));
+        assert!(!valid_installation_id("not-an-installation-id"));
     }
 }

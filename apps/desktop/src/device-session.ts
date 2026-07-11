@@ -1,8 +1,10 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
 import type { SessionTokens } from "./api/planning";
+import { createUuidV7, isUuidV7 } from "./uuid";
 
 const previewSessionKey = "jimin-os-dev-session";
+const previewInstallationKey = "jimin-os-dev-installation";
 
 export interface StoredDeviceSession {
   apiBaseUrl: string;
@@ -42,6 +44,24 @@ export async function clearDeviceSession(): Promise<void> {
     return;
   }
   sessionStorage.removeItem(previewSessionKey);
+}
+
+export async function readOrCreateInstallationId(): Promise<string> {
+  const value = isTauri()
+    ? await invoke<string>("read_or_create_installation_id")
+    : readOrCreatePreviewInstallationId();
+  if (!isUuidV7(value)) {
+    throw new Error("The device identity is invalid.");
+  }
+  return value;
+}
+
+function readOrCreatePreviewInstallationId(): string {
+  const existing = localStorage.getItem(previewInstallationKey);
+  if (existing && isUuidV7(existing)) return existing;
+  const installationId = createUuidV7();
+  localStorage.setItem(previewInstallationKey, installationId);
+  return installationId;
 }
 
 function parseSession(value: string): StoredDeviceSession | undefined {
