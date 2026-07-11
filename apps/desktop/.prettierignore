@@ -2,3 +2,6 @@ dist
 node_modules
 *.tsbuildinfo
 src-tauri/gen/schemas/
+src-tauri/gen/android/build/
+src-tauri/gen/android/app/build/
+src-tauri/gen/android/app/src/main/assets/tauri.conf.json

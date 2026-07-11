@@ -51,4 +51,7 @@ pnpm --filter @jimin-os/desktop tauri android build --debug --apk --target aarch
 
 ## 현재 알려진 검증 제한
 
-2026-07-11 기준 개발 Mac은 Android SDK와 NDK를 찾았고 Android Studio project까지 생성했다. 연결된 `adb` 개인 기기가 없으며, 설치된 NDK가 Apple Silicon native host toolchain으로 인식되지 않아 Android APK build는 아직 통과하지 않았다. NDK를 host architecture에 맞게 설치한 뒤 위 명령으로 다시 검증한다.
+2026-07-11 기준 개발 Mac에서 NDK `27.1.12297006`을 지정해 arm64 debug APK
+생성까지 통과했다. 생성 APK 안의 launcher resource도 Jimin OS 아이콘 원본과
+SHA-256이 일치한다. 다만 연결된 `adb` 개인 기기가 없으므로 설치, QR 기기
+연결, TLS 신뢰, cold start 검증은 아직 통과로 기록하지 않는다.
