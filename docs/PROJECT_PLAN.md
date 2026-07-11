@@ -6,6 +6,12 @@
 >
 > 목표: 로컬 서버에 배포하고 Mac과 개인 휴대폰에서 실제 검증할 수 있는 `v0.1`
 
+> 2026-07-11 정정: 이 문서의 초기 Google OAuth 기반 앱 로그인 계획은
+> [ADR-0004](adr/ADR-0004-device-pairing-app-identity.md)로 대체됐다. 현재
+> 앱 접근은 QR 기기 등록과 Jimin OS session으로 처리하며, Google OAuth는
+> M2 Google Calendar 연결에만 사용한다. ChatGPT 계정은 개인 서버의 Codex
+> App Server가 별도 managed device-code 로그인으로 관리한다.
+
 ## 1. 제품 목표
 
 Jimin OS는 개인의 일정, 할 일, 프로젝트, 결정과 대화를 한곳에 연결하고 과거 맥락을 현재 판단과 다음 행동으로 이어 주는 개인 AI 운영체제다.
