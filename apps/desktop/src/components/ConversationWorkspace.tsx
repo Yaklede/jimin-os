@@ -8,6 +8,8 @@ import {
   Sparkles,
 } from "lucide-react";
 import { FormEvent, useRef, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
   type AgentAuthentication,
@@ -316,6 +318,7 @@ function AssistantAuthenticationGate({
   onStartAuthentication(): Promise<void>;
 }) {
   const [copied, setCopied] = useState(false);
+  const [browserOpenFailed, setBrowserOpenFailed] = useState(false);
   const awaitingAuthorization =
     authentication?.state === "awaiting_authorization" &&
     authentication.verificationUrl &&
@@ -334,13 +337,22 @@ function AssistantAuthenticationGate({
     }
   }
 
-  function openChatgpt() {
+  async function openChatgpt() {
     if (!authentication?.verificationUrl) return;
-    window.open(
-      authentication.verificationUrl,
-      "_blank",
-      "noopener,noreferrer",
-    );
+    setBrowserOpenFailed(false);
+    try {
+      if (isTauri()) {
+        await openUrl(authentication.verificationUrl);
+      } else {
+        window.open(
+          authentication.verificationUrl,
+          "_blank",
+          "noopener,noreferrer",
+        );
+      }
+    } catch {
+      setBrowserOpenFailed(true);
+    }
   }
 
   return (
@@ -355,6 +367,11 @@ function AssistantAuthenticationGate({
             {copy.authentication.awaitingTitle}
           </AuthenticationHeading>
           <p>{copy.authentication.awaitingDescription}</p>
+          {browserOpenFailed && (
+            <p className="inline-alert" role="alert">
+              {copy.authentication.browserOpenFailed}
+            </p>
+          )}
           <div className="assistant-authentication__code">
             <span>{copy.authentication.codeLabel}</span>
             <output>{authentication.userCode}</output>
@@ -372,7 +389,7 @@ function AssistantAuthenticationGate({
           <button
             className="primary-button focus-visible-control"
             type="button"
-            onClick={openChatgpt}
+            onClick={() => void openChatgpt()}
           >
             <ExternalLink aria-hidden="true" />
             {copy.actions.openChatgpt}

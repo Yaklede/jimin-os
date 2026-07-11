@@ -53,6 +53,7 @@ keyring-core = "=1.0.0"
 android-native-keyring-store = "=1.0.0"
 tauri = "=2.11.5"
 tauri-build = "=2.6.3"
+tauri-plugin-opener = "=2.5.4"
 utoipa = { version = "=5.5.0", features = ["axum_extras", "uuid"] }
 uuid = { version = "=1.23.4", features = ["serde", "v7"] }
 

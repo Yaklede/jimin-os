@@ -130,6 +130,7 @@ fn init_qr_scanner<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
 pub fn run() {
     let result = tauri::Builder::default()
         .plugin(init_qr_scanner())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             read_device_session,
             save_device_session,
