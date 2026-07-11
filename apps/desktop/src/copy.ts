@@ -1,10 +1,11 @@
 export const copy = {
   productName: "Jimin OS",
   scope: "개인 서버",
-  title: "오늘의 맥락",
+  title: "오늘",
   navigation: {
+    label: "주요 메뉴",
     today: "오늘",
-    conversations: "Jimin에게 요청",
+    conversations: "Jimin",
   },
   actions: {
     checkAgain: "다시 확인하기",
@@ -73,11 +74,10 @@ export const copy = {
     empty: "열린 할 일이 없어요. 다음에 할 일을 추가해 보세요.",
   },
   conversations: {
-    kicker: "개인 AI 비서",
     title: "무엇을 도와드릴까요?",
     description: "일정, 할 일, 프로젝트를 바탕으로 필요한 일을 함께 정리해요.",
-    contextTitle: "오늘의 맥락",
-    contextDescription: "현재 저장된 일정과 열린 할 일을 살펴볼 수 있어요.",
+    contextTitle: "현재 맥락",
+    contextDescription: "오늘 바로 참고할 수 있는 정보예요.",
     nextSchedule: "다음 일정",
     nextTask: "다음 할 일",
     noSchedule: "예정된 일정이 없어요.",

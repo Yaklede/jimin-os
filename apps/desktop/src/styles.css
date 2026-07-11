@@ -1712,3 +1712,474 @@ textarea:focus-visible {
     grid-column: 2;
   }
 }
+
+/* Application reframe: one compact work surface, with the current request
+   remaining visually dominant. These overrides intentionally retire the
+   previous collection of independent dashboard cards. */
+.app-shell {
+  background: var(--canvas);
+}
+
+.app-header {
+  background: var(--canvas);
+}
+
+.app-header__inner {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 24px;
+}
+
+.app-header__controls {
+  justify-self: end;
+}
+
+.app-nav {
+  justify-self: center;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: 2px;
+  background: var(--surface);
+}
+
+.app-nav__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  border: 0;
+  border-radius: 4px;
+  padding: 0 12px;
+}
+
+.app-nav__item svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: 2;
+}
+
+.app-nav__item:hover,
+.app-nav__item:focus-visible,
+.app-nav__item[data-current="true"] {
+  border: 0;
+  color: var(--text-strong);
+  background: var(--accent-tint);
+}
+
+.mobile-app-nav {
+  display: none;
+}
+
+.planning-page,
+.assistant-page {
+  width: min(100% - 48px, 1040px);
+  padding: 40px 0 72px;
+}
+
+.page-heading {
+  align-items: center;
+  margin-bottom: 32px;
+}
+
+.page-heading__date {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.page-heading h1 {
+  font-size: 28px;
+}
+
+.planning-layout {
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.9fr);
+  gap: 16px;
+}
+
+.entry-forms {
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 1fr);
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.planning-page .panel,
+.entry-forms .panel {
+  border-color: var(--border);
+}
+
+.planning-layout .panel:first-child {
+  min-height: 0;
+}
+
+.planning-layout .panel:last-child {
+  background: var(--surface-subtle);
+}
+
+.planning-layout .empty-state {
+  min-height: 92px;
+  padding: 20px;
+}
+
+.panel__header {
+  min-height: 72px;
+  padding: 16px 20px;
+}
+
+.panel__header h2,
+.compact-form h2 {
+  font-size: 16px;
+}
+
+.schedule-row,
+.task-row {
+  min-height: 68px;
+  padding-right: 20px;
+  padding-left: 20px;
+}
+
+.schedule-row time {
+  color: var(--text-strong);
+}
+
+.task-row button {
+  width: 40px;
+  height: 40px;
+  background: transparent;
+}
+
+.task-row button:hover {
+  background: var(--surface);
+}
+
+.compact-form {
+  gap: 10px;
+  padding: 20px;
+}
+
+.assistant-layout {
+  grid-template-columns: minmax(224px, 0.62fr) minmax(0, 1.78fr);
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-surface);
+  background: var(--surface);
+}
+
+.assistant-directory,
+.assistant-workspace {
+  border: 0;
+  border-radius: 0;
+}
+
+.assistant-directory {
+  min-height: 620px;
+  border-right: 1px solid var(--border);
+  background: var(--surface-subtle);
+}
+
+.assistant-directory__header {
+  align-items: center;
+  min-height: 64px;
+  padding: 12px 12px 12px 16px;
+}
+
+.assistant-directory__header h2 {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.assistant-directory__header p,
+.assistant-thread__header > p,
+.assistant-welcome > p {
+  display: none;
+}
+
+.assistant-workspace {
+  min-height: 620px;
+  background: var(--surface);
+}
+
+.assistant-welcome {
+  padding: 40px 40px 28px;
+}
+
+.assistant-welcome h1,
+.assistant-thread__header h1 {
+  max-width: 560px;
+  font-size: 28px;
+}
+
+.assistant-welcome > span,
+.assistant-thread__header > span {
+  max-width: 520px;
+  margin-top: 8px;
+  font-size: 15px;
+}
+
+.assistant-context {
+  margin: 0;
+  border-right: 0;
+  border-left: 0;
+  border-radius: 0;
+  background: var(--surface-subtle);
+}
+
+.assistant-context__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 40px;
+}
+
+.assistant-context__header p {
+  margin: 0;
+  font-size: 13px;
+  text-align: right;
+}
+
+.assistant-context li {
+  min-height: 60px;
+  padding: 10px 40px;
+}
+
+.assistant-thread__header {
+  padding: 32px 40px 24px;
+}
+
+.assistant-thread .message-stream {
+  min-height: 300px;
+}
+
+.message-row {
+  padding: 20px 40px;
+}
+
+.message-row[data-role="assistant"] {
+  background: var(--surface-subtle);
+}
+
+.assistant-progress {
+  min-height: 48px;
+  margin: 20px 40px 0;
+  border: 0;
+  border-left: 2px solid var(--accent);
+  border-radius: 0;
+  padding: 8px 12px;
+  background: var(--surface-subtle);
+}
+
+.assistant-progress--error {
+  border-left-color: var(--destructive);
+}
+
+.assistant-composer {
+  gap: 10px;
+  margin-top: auto;
+  border-top: 1px solid var(--border);
+  padding: 24px 40px 32px;
+  background: var(--surface);
+}
+
+.assistant-composer textarea {
+  min-height: 120px;
+  border-color: var(--border-strong);
+  border-radius: var(--radius-surface);
+  padding: 14px 16px;
+  background: var(--surface-subtle);
+}
+
+.assistant-composer textarea:focus-visible {
+  border-color: var(--accent);
+}
+
+.assistant-composer__actions p {
+  font-size: 13px;
+}
+
+.conversation-list__row {
+  min-height: 60px;
+  padding: 12px 16px;
+  background: transparent;
+}
+
+.conversation-list__row:hover,
+.conversation-list__row[data-selected="true"] {
+  background: var(--surface);
+}
+
+.conversation-list__row[data-selected="true"] {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.setup-main {
+  padding-top: 56px;
+}
+
+.setup-panel {
+  gap: 28px;
+  padding: 36px;
+}
+
+.setup-panel__intro > svg {
+  width: 24px;
+  height: 24px;
+  margin-bottom: 16px;
+}
+
+.setup-panel h1 {
+  font-size: 28px;
+}
+
+@media (max-width: 760px) {
+  .app-header__inner {
+    grid-template-columns: minmax(0, 1fr) auto;
+    width: min(100% - 32px, 1040px);
+    height: 56px;
+  }
+
+  .app-header > .app-header__inner > .app-nav {
+    display: none;
+  }
+
+  .brand {
+    gap: 8px;
+  }
+
+  .brand__mark {
+    width: 28px;
+    height: 28px;
+    font-size: 14px;
+  }
+
+  .mobile-app-nav {
+    position: sticky;
+    z-index: 9;
+    top: calc(56px + var(--safe-area-top));
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    border-bottom: 1px solid var(--border);
+    background: var(--canvas);
+  }
+
+  .mobile-app-nav button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 48px;
+    gap: 6px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    color: var(--text-muted);
+    background: transparent;
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .mobile-app-nav button svg {
+    width: 18px;
+    height: 18px;
+    stroke-width: 2;
+  }
+
+  .mobile-app-nav button[data-current="true"] {
+    border-bottom-color: var(--accent);
+    color: var(--text-strong);
+  }
+
+  .planning-page,
+  .assistant-page {
+    width: min(100% - 32px, 1040px);
+    padding-top: 24px;
+    padding-bottom: 48px;
+  }
+
+  .planning-layout,
+  .entry-forms {
+    grid-template-columns: 1fr;
+  }
+
+  .page-heading {
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+
+  .page-heading .primary-button {
+    width: 100%;
+  }
+
+  .assistant-layout {
+    display: flex;
+    gap: 0;
+    flex-direction: column;
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+  }
+
+  .assistant-workspace {
+    order: 1;
+    min-height: 0;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-surface);
+  }
+
+  .assistant-directory {
+    order: 2;
+    min-height: 0;
+    margin-top: 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-surface);
+  }
+
+  .assistant-welcome,
+  .assistant-thread__header {
+    padding: 28px 24px 24px;
+  }
+
+  .assistant-welcome h1,
+  .assistant-thread__header h1 {
+    font-size: 24px;
+  }
+
+  .assistant-context__header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+    padding: 14px 24px;
+  }
+
+  .assistant-context__header p {
+    text-align: left;
+  }
+
+  .assistant-context li {
+    padding-right: 24px;
+    padding-left: 24px;
+  }
+
+  .message-row {
+    padding-right: 24px;
+    padding-left: 24px;
+  }
+
+  .assistant-progress {
+    margin: 16px 24px 0;
+  }
+
+  .assistant-composer {
+    padding: 20px 24px 24px;
+  }
+
+  .setup-main {
+    padding-top: 32px;
+  }
+
+  .setup-panel {
+    padding: 24px;
+  }
+}

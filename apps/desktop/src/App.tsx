@@ -3,6 +3,7 @@ import {
   Check,
   CirclePlus,
   ListTodo,
+  MessageSquare,
   RefreshCw,
   ScanLine,
   Server,
@@ -312,6 +313,7 @@ export default function App() {
       await saveDeviceSession({ tokens: nextTokens });
       setTokens(nextTokens);
       setMessage(undefined);
+      scrollToTop();
     } catch {
       setMode("setup");
       setMessage(copy.messages.connectionNotice);
@@ -411,6 +413,11 @@ export default function App() {
     pendingConversationId.current = undefined;
   }
 
+  function selectView(nextView: AppView) {
+    setView(nextView);
+    scrollToTop();
+  }
+
   async function sendConversationRequest(
     text: string,
     clientMessageId: string,
@@ -475,27 +482,29 @@ export default function App() {
             </span>
             <span className="brand__name">Jimin OS</span>
           </div>
+          {tokens && (
+            <nav className="app-nav" aria-label={copy.navigation.label}>
+              <button
+                className="app-nav__item focus-visible-control"
+                data-current={view === "conversations"}
+                type="button"
+                onClick={() => selectView("conversations")}
+              >
+                <MessageSquare aria-hidden="true" />
+                {copy.navigation.conversations}
+              </button>
+              <button
+                className="app-nav__item focus-visible-control"
+                data-current={view === "today"}
+                type="button"
+                onClick={() => selectView("today")}
+              >
+                <CalendarDays aria-hidden="true" />
+                {copy.navigation.today}
+              </button>
+            </nav>
+          )}
           <div className="app-header__controls">
-            {tokens && (
-              <nav className="app-nav" aria-label="주요 메뉴">
-                <button
-                  className="app-nav__item focus-visible-control"
-                  data-current={view === "today"}
-                  type="button"
-                  onClick={() => setView("today")}
-                >
-                  {copy.navigation.today}
-                </button>
-                <button
-                  className="app-nav__item focus-visible-control"
-                  data-current={view === "conversations"}
-                  type="button"
-                  onClick={() => setView("conversations")}
-                >
-                  {copy.navigation.conversations}
-                </button>
-              </nav>
-            )}
             {tokens && (
               <button
                 className="quiet-button focus-visible-control"
@@ -511,6 +520,28 @@ export default function App() {
           </div>
         </div>
       </header>
+      {tokens && (
+        <nav className="mobile-app-nav" aria-label={copy.navigation.label}>
+          <button
+            className="focus-visible-control"
+            data-current={view === "conversations"}
+            type="button"
+            onClick={() => selectView("conversations")}
+          >
+            <MessageSquare aria-hidden="true" />
+            <span>{copy.navigation.conversations}</span>
+          </button>
+          <button
+            className="focus-visible-control"
+            data-current={view === "today"}
+            type="button"
+            onClick={() => selectView("today")}
+          >
+            <CalendarDays aria-hidden="true" />
+            <span>{copy.navigation.today}</span>
+          </button>
+        </nav>
+      )}
       <main
         className={
           mode === "setup" || mode === "configuration"
@@ -889,6 +920,10 @@ function conversationTitle(value: string) {
 
 function isTerminalAgentJob(state: AgentJob["state"]) {
   return ["completed", "failed", "cancelled", "declined"].includes(state);
+}
+
+function scrollToTop() {
+  window.scrollTo(0, 0);
 }
 
 interface QrScanResponse {

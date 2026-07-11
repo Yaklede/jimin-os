@@ -3,10 +3,8 @@ import {
   CircleAlert,
   ClipboardCheck,
   LoaderCircle,
-  MessageSquare,
   Plus,
   SendHorizontal,
-  Sparkles,
 } from "lucide-react";
 import { FormEvent, useRef, useState } from "react";
 
@@ -94,12 +92,7 @@ export function ConversationWorkspace({
           aria-labelledby="conversation-list-title"
         >
           <div className="assistant-directory__header">
-            <div>
-              <p>{copy.conversations.kicker}</p>
-              <h2 id="conversation-list-title">
-                {copy.conversations.listTitle}
-              </h2>
-            </div>
+            <h2 id="conversation-list-title">{copy.conversations.listTitle}</h2>
             <button
               className="quiet-icon-button focus-visible-control"
               type="button"
@@ -153,7 +146,6 @@ export function ConversationWorkspace({
           ) : (
             <section className="assistant-thread">
               <header className="assistant-thread__header">
-                <p>{copy.conversations.kicker}</p>
                 <h1 id="assistant-title">
                   {selectedTitle(conversations, selectedConversationId)}
                 </h1>
@@ -251,8 +243,6 @@ function AssistantHome({
   return (
     <>
       <header className="assistant-welcome">
-        <Sparkles aria-hidden="true" />
-        <p>{copy.conversations.kicker}</p>
         <h1 id="assistant-title">{copy.conversations.title}</h1>
         <span>{copy.conversations.description}</span>
       </header>
