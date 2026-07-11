@@ -7,6 +7,9 @@ const serverTarget =
 export default defineConfig({
   plugins: [react()],
   server: {
+    watch: {
+      ignored: ["**/src-tauri/**"],
+    },
     port: 1420,
     strictPort: true,
     proxy: {
