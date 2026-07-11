@@ -10,7 +10,9 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 
 import {
+  bootstrapLocalPhoneTestSession,
   exchangePairingCode,
+  isLocalPhoneTest,
   pairingTokenFromScannedQr,
   refreshDeviceSession,
   type SessionTokens,
@@ -41,7 +43,13 @@ import {
 import { personalServerBaseUrl } from "./server-config";
 import { createUuidV7 } from "./uuid";
 
-type AppMode = "configuration" | "setup" | "loading" | "ready" | "error";
+type AppMode =
+  | "configuration"
+  | "setup"
+  | "local-test-error"
+  | "loading"
+  | "ready"
+  | "error";
 type ConversationJobs = Record<string, AgentJob>;
 
 export default function App() {
@@ -70,6 +78,24 @@ export default function App() {
     useState(false);
   const pendingConversationId = useRef<string | undefined>(undefined);
   const [message, setMessage] = useState<string | undefined>(undefined);
+
+  const bootstrapLocalPhoneTestDevice = useCallback(async () => {
+    setMode("loading");
+    setMessage(undefined);
+    try {
+      const installationId = await readOrCreateInstallationId();
+      const testTokens = await bootstrapLocalPhoneTestSession(
+        apiBaseUrl,
+        copy.localPhoneTest.deviceName,
+        installationId,
+      );
+      await saveDeviceSession({ tokens: testTokens });
+      setTokens(testTokens);
+    } catch {
+      setMode("local-test-error");
+      setMessage(copy.messages.localPhoneTestUnavailable);
+    }
+  }, [apiBaseUrl]);
 
   const refreshConversations = useCallback(async () => {
     if (!tokens) return;
@@ -174,11 +200,13 @@ export default function App() {
     }
 
     void readDeviceSession()
-      .then((stored) => {
+      .then(async (stored) => {
         if (!current) return;
         if (stored) {
           setTokens(stored.tokens);
           setMode("loading");
+        } else if (isLocalPhoneTest()) {
+          await bootstrapLocalPhoneTestDevice();
         } else {
           setMode("setup");
         }
@@ -196,7 +224,7 @@ export default function App() {
     return () => {
       current = false;
     };
-  }, []);
+  }, [apiBaseUrl, bootstrapLocalPhoneTestDevice]);
 
   useEffect(() => {
     void refresh();
@@ -453,13 +481,20 @@ export default function App() {
       </header>
       <main
         className={
-          mode === "setup" || mode === "configuration"
+          mode === "setup" ||
+          mode === "configuration" ||
+          mode === "local-test-error"
             ? "setup-main"
             : "conversation-main"
         }
       >
         {mode === "configuration" ? (
           <ServerConfigurationPanel />
+        ) : mode === "local-test-error" ? (
+          <LocalPhoneTestRecoveryPanel
+            message={message ?? copy.messages.localPhoneTestUnavailable}
+            onRetry={() => void bootstrapLocalPhoneTestDevice()}
+          />
         ) : mode === "setup" ? (
           <>
             {message && (
@@ -500,6 +535,31 @@ export default function App() {
         )}
       </main>
     </div>
+  );
+}
+
+function LocalPhoneTestRecoveryPanel({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry(): void;
+}) {
+  return (
+    <section className="setup-panel" aria-labelledby="local-test-title">
+      <div className="setup-panel__intro">
+        <Server aria-hidden="true" />
+        <h1 id="local-test-title">{copy.localPhoneTest.title}</h1>
+        <p className="setup-panel__description">{message}</p>
+      </div>
+      <button
+        className="primary-button focus-visible-control"
+        type="button"
+        onClick={onRetry}
+      >
+        {copy.actions.retryLocalPhoneTest}
+      </button>
+    </section>
   );
 }
 

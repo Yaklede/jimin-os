@@ -32,6 +32,10 @@ interface PairingResponse extends SessionTokens {
   syncCursor: string;
 }
 
+interface ClientEnvironment {
+  readonly VITE_LOCAL_PHONE_TEST?: string;
+}
+
 interface ListResponse<T> {
   items: T[];
   nextCursor: string | null;
@@ -57,7 +61,6 @@ export async function exchangePairingCode(
   if (!code || !isUuidV7(installationId)) {
     throw new PlanningRequestError("invalid");
   }
-  const pairingCodeField = "pairingToken";
   const response = await fetch(
     `${normalizeBaseUrl(baseUrl)}/v1/auth/pairings/exchange`,
     {
@@ -67,7 +70,7 @@ export async function exchangePairingCode(
         Accept: "application/json",
       },
       body: JSON.stringify({
-        [pairingCodeField]: code,
+        pairingToken: code,
         device: {
           installationId,
           platform: clientPlatformForUserAgent(navigator.userAgent),
@@ -75,6 +78,51 @@ export async function exchangePairingCode(
           appVersion: "0.1.0-dev",
           osVersion: navigator.platform,
         },
+      }),
+    },
+  );
+  const body = await readJson(response);
+  if (!response.ok) {
+    throw errorFromStatus(response.status);
+  }
+  if (!isPairingResponse(body)) {
+    throw new PlanningRequestError("unavailable");
+  }
+  return {
+    ["accessToken"]: body.accessToken,
+    ["refreshToken"]: body.refreshToken,
+  };
+}
+
+export function isLocalPhoneTest(
+  environment?: ClientEnvironment,
+): boolean {
+  const configured = environment ?? (import.meta.env as ClientEnvironment);
+  return configured.VITE_LOCAL_PHONE_TEST === "1";
+}
+
+export async function bootstrapLocalPhoneTestSession(
+  baseUrl: string,
+  deviceName: string,
+  installationId: string,
+): Promise<SessionTokens> {
+  if (!isUuidV7(installationId) || !deviceName.trim()) {
+    throw new PlanningRequestError("invalid");
+  }
+  const response = await fetch(
+    `${normalizeBaseUrl(baseUrl)}/v1/testing/local-phone-bootstrap`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        installationId,
+        platform: clientPlatformForUserAgent(navigator.userAgent),
+        name: deviceName,
+        appVersion: "0.1.0-dev",
+        osVersion: navigator.platform,
       }),
     },
   );

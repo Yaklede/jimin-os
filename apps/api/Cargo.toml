@@ -6,6 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# Compiles an unauthenticated route only for the loopback local-phone test
+# image. Deployed server images must not enable this feature.
+local-phone-test = []
+
 [dependencies]
 async-trait.workspace = true
 axum.workspace = true

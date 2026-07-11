@@ -142,6 +142,18 @@ impl PairingRuntime {
     ) -> Result<jimin_application::IssuedDevicePairing, ApplicationError> {
         self.sessions.issue_device_pairing().await
     }
+
+    #[cfg(feature = "local-phone-test")]
+    async fn provision_local_phone_test_device(
+        &self,
+        device: DeviceRegistration,
+        request_id: uuid::Uuid,
+    ) -> Result<DeviceSession, ApplicationError> {
+        let pairing = self.sessions.issue_device_pairing().await?;
+        self.sessions
+            .consume_device_pairing(pairing.token().serialized().clone(), device, request_id)
+            .await
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, ToSchema, PartialEq, Eq)]
@@ -518,7 +530,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
 }
 
 pub fn router(state: ApiState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .route(
@@ -561,7 +573,15 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/v1/agent/jobs/{job_id}", get(get_agent_job))
         .route("/v1/me", get(me))
-        .route("/v1/devices", get(devices))
+        .route("/v1/devices", get(devices));
+
+    #[cfg(feature = "local-phone-test")]
+    let router = router.route(
+        "/v1/testing/local-phone-bootstrap",
+        axum::routing::post(local_phone_test_bootstrap),
+    );
+
+    router
         .fallback(not_found)
         .with_state(state)
         .layer(
@@ -1314,6 +1334,37 @@ async fn pairing_exchange(
     }
 }
 
+#[cfg(feature = "local-phone-test")]
+async fn local_phone_test_bootstrap(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    Json(request): Json<DeviceRegistrationRequest>,
+) -> Response {
+    let Some(pairing) = state.pairing() else {
+        return unavailable_response(request_id);
+    };
+    let Ok(device) = DeviceRegistration::new(
+        request.installation_id,
+        request.platform,
+        request.name,
+        request.app_version,
+        request.os_version,
+    ) else {
+        return invalid_request_response(request_id);
+    };
+    let session = match pairing
+        .provision_local_phone_test_device(device, uuid::Uuid::now_v7())
+        .await
+    {
+        Ok(session) => session,
+        Err(error) => return application_error_response(&error, request_id),
+    };
+    match device_session_response(&session) {
+        Ok(response) => no_store_json(response),
+        Err(()) => unavailable_response(request_id),
+    }
+}
+
 #[utoipa::path(
     post,
     path = "/v1/auth/refresh",
@@ -2044,6 +2095,46 @@ mod tests {
             response.headers().get("access-control-allow-origin"),
             Some(&HeaderValue::from_static("http://tauri.localhost"))
         );
+    }
+
+    #[cfg(not(feature = "local-phone-test"))]
+    #[tokio::test]
+    async fn local_phone_bootstrap_is_not_routable_in_a_standard_build() {
+        let state = ApiState::new("test-sha", false, None);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/testing/local-phone-bootstrap")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(feature = "local-phone-test")]
+    #[tokio::test]
+    async fn local_phone_bootstrap_is_available_only_in_the_test_image() {
+        let state = ApiState::new("test-sha", false, None);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/testing/local-phone-bootstrap")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"installationId":"019f68cb-9400-7000-8000-000000000000","platform":"android","name":"개발용 Android","appVersion":"0.1.0-dev","osVersion":"Android"}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

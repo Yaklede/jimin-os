@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   PlanningRequestError,
+  bootstrapLocalPhoneTestSession,
   clientPlatformForUserAgent,
   exchangePairingCode,
+  isLocalPhoneTest,
   pairingTokenFromScannedQr,
   pairingTokenFromValue,
   refreshDeviceSession,
@@ -15,6 +17,44 @@ afterEach(() => {
 });
 
 describe("refreshDeviceSession", () => {
+  it("enables automatic setup only for the explicit local phone test build", () => {
+    expect(isLocalPhoneTest({ VITE_LOCAL_PHONE_TEST: "1" })).toBe(true);
+    expect(isLocalPhoneTest({ VITE_LOCAL_PHONE_TEST: "true" })).toBe(false);
+    expect(isLocalPhoneTest({})).toBe(false);
+  });
+
+  it("bootstraps a debug device through the local test-only route", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          '{"accessToken":"access-session","refreshToken":"refresh-session","user":{},"device":{},"syncCursor":"0"}',
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("navigator", {
+      platform: "Linux armv8l",
+      userAgent: "Mozilla/5.0 (Linux; Android 16; Pixel)",
+    });
+
+    await expect(
+      bootstrapLocalPhoneTestSession(
+        "http://127.0.0.1:8080",
+        "개발용 Android",
+        "019f68cb-9400-7000-8000-000000000000",
+      ),
+    ).resolves.toEqual({
+      ["accessToken"]: "access-session",
+      ["refreshToken"]: "refresh-session",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8080/v1/testing/local-phone-bootstrap",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
   it("rotates a device session through the server refresh endpoint", async () => {
     const fetchMock = vi
       .fn<typeof fetch>()

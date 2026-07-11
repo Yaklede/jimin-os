@@ -20,6 +20,7 @@ export const copy = {
     retryChatgptConnection: "다시 연결하기",
     openChatgpt: "ChatGPT 열기",
     copyAuthenticationCode: "코드 복사하기",
+    retryLocalPhoneTest: "다시 연결하기",
   },
   summary: {
     checkingTitle: "서버 상태를 확인하고 있어요",
@@ -60,6 +61,10 @@ export const copy = {
     nextTitle: "서버 주소를 입력할 필요는 없어요",
     nextDescription:
       "개인 서버가 설정된 설치본으로 다시 설치한 뒤 이 기기를 등록해 주세요.",
+  },
+  localPhoneTest: {
+    title: "테스트 서버에 연결하지 못했어요",
+    deviceName: "개발용 Android",
   },
   schedule: {
     title: "다가오는 일정",
@@ -134,6 +139,7 @@ export const copy = {
       "기기 연결 정보를 안전하게 저장할 수 없어요. 앱을 다시 연 뒤 다시 시도해 주세요.",
     sessionExpired:
       "기기 연결이 만료됐어요. 새 연결 코드로 다시 연결해 주세요.",
+    localPhoneTestUnavailable: "맥에서 실행 중인 테스트 서버를 확인한 뒤 다시 연결해 주세요.",
     loadFailed: "계획을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
     saveFailed: "변경 내용을 저장하지 못했어요. 다시 시도해 주세요.",
     taskAdded: "할 일을 추가했어요.",
