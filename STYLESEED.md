@@ -43,6 +43,7 @@ context rows remain neutral so warning and destructive exceptions retain meaning
 
 - One app chrome with responsive navigation
 - One dominant assistant composer or active-request surface
+- One compact ChatGPT account connection gate when the managed runtime is not ready
 - Context rows only when a real source is selected for the active request
 - One inline progress/approval/recovery message when needed
 - Content-shaped loading skeletons

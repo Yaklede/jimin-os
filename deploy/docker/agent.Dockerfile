@@ -34,6 +34,7 @@ LABEL org.opencontainers.image.title="Jimin OS Agent" \
       io.jimin-os.codex.version="${CODEX_VERSION}"
 
 COPY --from=codex-installer /usr/local/lib/node_modules/@openai /usr/local/lib/node_modules/@openai
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder --chown=node:node /workspace/target/release/jimin-agent /usr/local/bin/jimin-agent
 COPY --chown=node:node apps/agent/tests/fixtures/generic-prompt.txt /opt/jimin-agent/fixtures/generic-prompt.txt
 
@@ -48,7 +49,8 @@ RUN rm -rf /usr/local/lib/node_modules/npm \
 ENV CODEX_HOME=/home/node/.codex \
     JIMIN_AGENT_CODEX_BIN=/usr/local/bin/codex \
     JIMIN_AGENT_WORKSPACE=/workspace \
-    HOME=/home/node
+    HOME=/home/node \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
 USER node:node
 WORKDIR /workspace

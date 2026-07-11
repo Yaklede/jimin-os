@@ -19,9 +19,9 @@ use jimin_observability::{RequestId, request_context};
 use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness, StorageError,
     agent::{
-        AgentJob, AgentJobState, Conversation, ConversationMessage, ConversationMessageRole,
-        ConversationMessageStatus, ConversationStatus, NewAgentTurn, NewConversation,
-        QueuedAgentTurn,
+        AgentAuthentication, AgentAuthenticationState, AgentJob, AgentJobState, Conversation,
+        ConversationMessage, ConversationMessageRole, ConversationMessageStatus,
+        ConversationStatus, NewAgentTurn, NewConversation, QueuedAgentTurn,
     },
     auth::{Device, DeviceStatus, Profile},
     planning::{NewScheduleEntry, NewTask, ScheduleEntry, ScheduleStatus, Task, TaskStatus},
@@ -315,6 +315,14 @@ pub struct AgentJobResponse {
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentAuthenticationResponse {
+    state: String,
+    verification_url: Option<String>,
+    user_code: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceSessionResponse {
     access_token: String,
     access_token_expires_at: String,
@@ -466,6 +474,8 @@ pub(crate) fn error_response(
         get_latest_conversation_job,
         create_agent_turn,
         get_agent_job,
+        get_agent_authentication,
+        request_agent_authentication,
         live,
         ready,
         me,
@@ -493,6 +503,7 @@ pub(crate) fn error_response(
         ConversationMessageResponse,
         ConversationMessageListResponse,
         AgentJobResponse,
+        AgentAuthenticationResponse,
         CreateConversationRequest,
         CreateAgentTurnRequest,
         AgentTurnInput
@@ -543,6 +554,10 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/conversations/{conversation_id}/jobs/latest",
             get(get_latest_conversation_job),
+        )
+        .route(
+            "/v1/agent/authentication",
+            get(get_agent_authentication).post(request_agent_authentication),
         )
         .route("/v1/agent/jobs/{job_id}", get(get_agent_job))
         .route("/v1/me", get(me))
@@ -1156,6 +1171,64 @@ async fn create_agent_turn(
 
 #[utoipa::path(
     get,
+    path = "/v1/agent/authentication",
+    tag = "agent",
+    responses((status = 200, body = AgentAuthenticationResponse), (status = 401), (status = 503))
+)]
+async fn get_agent_authentication(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(agent) = state.agent() else {
+        return unavailable_response(request_id);
+    };
+    match agent
+        .agent_authentication_for_user(principal.identity().user_id())
+        .await
+    {
+        Ok(authentication) => no_store_json(agent_authentication_response(authentication)),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/agent/authentication",
+    tag = "agent",
+    responses((status = 202, body = AgentAuthenticationResponse), (status = 401), (status = 503))
+)]
+async fn request_agent_authentication(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(agent) = state.agent() else {
+        return unavailable_response(request_id);
+    };
+    match agent
+        .request_agent_authentication(principal.identity().user_id(), uuid::Uuid::now_v7())
+        .await
+    {
+        Ok(authentication) => {
+            let mut response = no_store_json(agent_authentication_response(Some(authentication)));
+            *response.status_mut() = StatusCode::ACCEPTED;
+            response
+        }
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    get,
     path = "/v1/agent/jobs/{job_id}",
     tag = "agent",
     params(("job_id" = String, Path)),
@@ -1540,6 +1613,29 @@ fn agent_job_response(job: &AgentJob) -> Result<AgentJobResponse, ()> {
     })
 }
 
+fn agent_authentication_response(
+    authentication: Option<AgentAuthentication>,
+) -> AgentAuthenticationResponse {
+    let Some(authentication) = authentication else {
+        return AgentAuthenticationResponse {
+            state: "needs_login".to_owned(),
+            verification_url: None,
+            user_code: None,
+        };
+    };
+    AgentAuthenticationResponse {
+        state: match authentication.state {
+            AgentAuthenticationState::Requested => "requested",
+            AgentAuthenticationState::AwaitingAuthorization => "awaiting_authorization",
+            AgentAuthenticationState::Ready => "ready",
+            AgentAuthenticationState::Failed => "failed",
+        }
+        .to_owned(),
+        verification_url: authentication.verification_url,
+        user_code: authentication.user_code,
+    }
+}
+
 const fn agent_job_state_name(state: AgentJobState) -> &'static str {
     match state {
         AgentJobState::Queued => "queued",
@@ -1855,6 +1951,7 @@ mod tests {
             [
                 "/health/live",
                 "/health/ready",
+                "/v1/agent/authentication",
                 "/v1/agent/jobs/{job_id}",
                 "/v1/auth/pairings/exchange",
                 "/v1/auth/refresh",
@@ -1890,6 +1987,36 @@ mod tests {
             .expect("handler should respond");
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn agent_authentication_endpoints_require_a_live_signed_session() {
+        let (state, _, _) = signed_auth_state(true);
+        for request in [
+            Request::builder()
+                .uri("/v1/agent/authentication")
+                .body(Body::empty())
+                .expect("request should be valid"),
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agent/authentication")
+                .body(Body::empty())
+                .expect("request should be valid"),
+        ] {
+            let response = router(state.clone())
+                .oneshot(request)
+                .await
+                .expect("handler should respond");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[test]
+    fn missing_agent_authentication_maps_to_a_login_request_without_code() {
+        let response = agent_authentication_response(None);
+        assert_eq!(response.state, "needs_login");
+        assert_eq!(response.verification_url, None);
+        assert_eq!(response.user_code, None);
     }
 
     #[tokio::test]

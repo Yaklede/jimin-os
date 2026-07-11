@@ -16,6 +16,10 @@ export const copy = {
     startConversation: "새 요청",
     sendRequest: "보내기",
     sendingRequest: "보내는 중",
+    connectChatgpt: "ChatGPT 연결하기",
+    retryChatgptConnection: "다시 연결하기",
+    openChatgpt: "ChatGPT 열기",
+    copyAuthenticationCode: "코드 복사하기",
   },
   summary: {
     checkingTitle: "서버 상태를 확인하고 있어요",
@@ -68,13 +72,14 @@ export const copy = {
     empty: "열린 할 일이 없어요. 다음에 할 일을 추가해 보세요.",
   },
   conversations: {
-    title: "무엇이든 말씀해 주세요.",
-    description: "정리할 일이나 확인할 내용을 자연스럽게 적어 주세요.",
+    identity: "Jimin, 개인 AI 비서",
+    title: "무엇을 도와드릴까요?",
+    description: "일정, 생각, 해야 할 일을 말하듯이 적어 주세요.",
     startersLabel: "요청 예시",
     starters: [
-      "오늘 해야 할 일의 우선순위를 정리해 줘",
-      "이번 주 일정을 확인해서 준비할 일을 알려 줘",
-      "지금 진행 중인 작업의 다음 행동을 제안해 줘",
+      "내일 해야 할 일을 정리해 줘",
+      "이번 주에 놓치면 안 되는 일을 알려 줘",
+      "지금 고민 중인 일을 같이 정리해 줘",
     ],
     listTitle: "대화 기록",
     listDescription: "이전 대화를 이어서 볼 수 있어요.",
@@ -87,11 +92,26 @@ export const copy = {
     userLabel: "나",
     composerLabel: "Jimin에게 메시지 보내기",
     composerPlaceholder: "예: 내일 오후 2시에 운동 일정 잡아 줘",
-    composerHelp: "정리하거나 실행할 일을 편하게 적어 주세요.",
+    composerHelp: "한 번에 하나의 요청을 처리해요.",
     preparing: "요청을 준비하고 있어요.",
     processing: "요청을 처리하고 있어요.",
     waitingApproval: "승인이 필요한 작업을 확인하고 있어요.",
     failed: "요청을 완료하지 못했어요. 내용을 확인한 뒤 다시 보내 주세요.",
+  },
+  authentication: {
+    title: "ChatGPT를 연결하면 바로 대화를 시작할 수 있어요.",
+    description:
+      "한 번 연결하면 이 기기와 다른 기기에서 같은 대화를 이어갈 수 있어요.",
+    prepareTitle: "ChatGPT 연결을 준비하고 있어요.",
+    prepareDescription: "잠시 후 ChatGPT에서 입력할 연결 코드가 표시돼요.",
+    preparing: "연결 코드를 준비하고 있어요.",
+    awaitingTitle: "ChatGPT에서 연결을 마쳐 주세요.",
+    awaitingDescription:
+      "ChatGPT를 연 뒤 아래 코드를 입력해 주세요. 완료되면 이 앱에서 자동으로 대화를 시작할 수 있어요.",
+    codeLabel: "연결 코드",
+    copiedCode: "코드를 복사했어요",
+    failedTitle: "ChatGPT 연결을 시작하지 못했어요. 다시 시도해 주세요.",
+    recoveryDescription: "문제가 계속되면 앱을 다시 열어 주세요.",
   },
   forms: {
     taskTitle: "할 일 추가",
@@ -129,5 +149,10 @@ export const copy = {
       "이 요청을 처리하고 있어요. 끝난 뒤 새 요청을 보낼 수 있어요.",
     conversationChanged:
       "다른 기기에서 대화가 변경됐어요. 대화 목록을 다시 확인해 주세요.",
+    authenticationLoadNotice:
+      "ChatGPT 연결 상태를 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
+    authenticationStartNotice:
+      "ChatGPT 연결을 시작하지 못했어요. 잠시 후 다시 시도해 주세요.",
+    authenticationRequired: "ChatGPT 계정을 연결한 뒤 메시지를 보낼 수 있어요.",
   },
 } as const;

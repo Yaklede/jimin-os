@@ -217,6 +217,34 @@ struct ServeStartFailure {
     process: Option<AppServerProcess>,
 }
 
+enum AuthenticationWaitOutcome {
+    Authenticated,
+    ShutdownRequested,
+}
+
+enum AuthenticationWaitError {
+    Codex(Error),
+    Storage,
+    Signal,
+}
+
+impl AuthenticationWaitError {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::Codex(error) => error.code(),
+            Self::Storage => "agent_authentication_unavailable",
+            Self::Signal => "agent_signal_failed",
+        }
+    }
+
+    fn codex_error(&self) -> Option<&Error> {
+        match self {
+            Self::Codex(error) => Some(error),
+            Self::Storage | Self::Signal => None,
+        }
+    }
+}
+
 impl CrashBudget {
     fn new(maximum: u8, stable_window: Duration) -> Self {
         Self {
@@ -308,7 +336,7 @@ async fn run_serve(codex_binary: &Path, marker_path: &Path) -> ExitCode {
             startup = tokio::time::timeout(SERVE_START_TIMEOUT, start_serve(codex_binary)) => startup,
         };
 
-        let (mut process, state) = match startup {
+        let (mut process, mut state) = match startup {
             Ok(Ok(startup)) => startup,
             Ok(Err(failure)) => {
                 let ServeStartFailure { error, process } = failure;
@@ -350,6 +378,56 @@ async fn run_serve(codex_binary: &Path, marker_path: &Path) -> ExitCode {
         }
 
         write_serve_ready(state);
+
+        if state == HealthState::AuthRequired {
+            match wait_for_chatgpt_authorization(&mut process, &database, config.poll_interval())
+                .await
+            {
+                Ok(AuthenticationWaitOutcome::Authenticated) => {
+                    state = HealthState::Ready;
+                    if let Err(error) = marker.write(state) {
+                        let stderr = process.shutdown().await.ok();
+                        if let Some(exit_code) = handle_serve_failure(
+                            &marker,
+                            &mut budget,
+                            error.code(),
+                            stderr.as_ref(),
+                            None,
+                        )
+                        .await
+                        {
+                            return exit_code;
+                        }
+                        continue;
+                    }
+                    write_serve_ready(state);
+                }
+                Ok(AuthenticationWaitOutcome::ShutdownRequested) => {
+                    let shutdown = process.shutdown().await;
+                    let _ = marker.remove();
+                    if shutdown.is_ok() {
+                        return ExitCode::SUCCESS;
+                    }
+                    write_serve_failure("codex_shutdown_failed", None, None);
+                    return ExitCode::FAILURE;
+                }
+                Err(error) => {
+                    let terminal_state = error.codex_error().and_then(terminal_state_for_error);
+                    let code = error.code();
+                    let stderr = process.shutdown().await.ok();
+                    if let Some(state) = terminal_state {
+                        return hold_terminal_state(&marker, state).await;
+                    }
+                    if let Some(exit_code) =
+                        handle_serve_failure(&marker, &mut budget, code, stderr.as_ref(), None)
+                            .await
+                    {
+                        return exit_code;
+                    }
+                    continue;
+                }
+            }
+        }
 
         if state != HealthState::Ready {
             let run_started_at = Instant::now();
@@ -559,6 +637,114 @@ fn health_state_for_account(account: &AccountSummary) -> Result<HealthState, Err
     } else {
         Err(Error::UnsupportedAccountType)
     }
+}
+
+async fn wait_for_chatgpt_authorization(
+    process: &mut AppServerProcess,
+    database: &Database,
+    poll_interval: Duration,
+) -> Result<AuthenticationWaitOutcome, AuthenticationWaitError> {
+    database
+        .invalidate_ready_agent_authentication()
+        .await
+        .map_err(|_| AuthenticationWaitError::Storage)?;
+    database
+        .restart_pending_agent_authentication()
+        .await
+        .map_err(|_| AuthenticationWaitError::Storage)?;
+    let mut active_attempt_id = None;
+
+    loop {
+        if active_attempt_id.is_none() {
+            let request = database
+                .next_requested_agent_authentication()
+                .await
+                .map_err(|_| AuthenticationWaitError::Storage)?;
+            if let Some(request) = request {
+                write_agent_authentication_event("requested");
+                let login = match process.client_mut().start_chatgpt_device_code_login().await {
+                    Ok(login) => login,
+                    Err(error) => {
+                        database
+                            .fail_agent_authentication(request.id, error.code())
+                            .await
+                            .map_err(|_| AuthenticationWaitError::Storage)?;
+                        return Err(AuthenticationWaitError::Codex(error));
+                    }
+                };
+                let started = database
+                    .begin_agent_authentication(
+                        request.id,
+                        &login.login_id,
+                        &login.verification_url,
+                        &login.user_code,
+                    )
+                    .await
+                    .map_err(|_| AuthenticationWaitError::Storage)?;
+                if started {
+                    active_attempt_id = Some(request.id);
+                    write_agent_authentication_event("awaiting_authorization");
+                }
+            }
+        }
+
+        // Before the user has asked to connect an account, do not keep an
+        // App Server account request in flight. It can outlive a normal
+        // account read while the runtime is unauthenticated and delay the
+        // database poll that notices a newly requested device-code ceremony.
+        // The operational device-auth runbook restarts this process after an
+        // out-of-band login, so readiness remains exact without this probe.
+        if active_attempt_id.is_none() {
+            let shutdown = wait_for_shutdown_or_delay(poll_interval)
+                .await
+                .map_err(|_| AuthenticationWaitError::Signal)?;
+            if shutdown {
+                return Ok(AuthenticationWaitOutcome::ShutdownRequested);
+            }
+            continue;
+        }
+
+        let account = process
+            .client_mut()
+            .read_account()
+            .await
+            .map_err(AuthenticationWaitError::Codex)?;
+        match health_state_for_account(&account).map_err(AuthenticationWaitError::Codex)? {
+            HealthState::Ready => {
+                if let Some(attempt_id) = active_attempt_id {
+                    let completed = database
+                        .complete_agent_authentication(attempt_id)
+                        .await
+                        .map_err(|_| AuthenticationWaitError::Storage)?;
+                    if !completed {
+                        return Err(AuthenticationWaitError::Storage);
+                    }
+                }
+                return Ok(AuthenticationWaitOutcome::Authenticated);
+            }
+            HealthState::AuthRequired => {}
+            HealthState::Incompatible | HealthState::UnsupportedAccount => {
+                return Err(AuthenticationWaitError::Codex(
+                    Error::UnsupportedAccountType,
+                ));
+            }
+        }
+
+        let shutdown = wait_for_shutdown_or_delay(poll_interval)
+            .await
+            .map_err(|_| AuthenticationWaitError::Signal)?;
+        if shutdown {
+            return Ok(AuthenticationWaitOutcome::ShutdownRequested);
+        }
+    }
+}
+
+fn write_agent_authentication_event(state: &'static str) {
+    write_single_json_line(&serde_json::json!({
+        "ok": true,
+        "mode": "serve",
+        "authentication": state
+    }));
 }
 
 fn write_serve_failure(

@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createConversation,
+  fetchAgentAuthentication,
   fetchAgentJob,
   fetchLatestConversationJob,
   queueAgentTurn,
+  requestAgentAuthentication,
 } from "./agent";
 import { createUuidV7 } from "../uuid";
 
@@ -72,6 +74,56 @@ describe("agent API", () => {
       clientConversationId: "019f68cb-9400-7000-8000-000000000000",
       title: "오늘 일정",
     });
+  });
+
+  it("reads the managed ChatGPT connection state before enabling requests", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          '{"state":"needs_login","verificationUrl":null,"userCode":null}',
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const authentication = await fetchAgentAuthentication(
+      "https://jimin-os.example/",
+      "session-access",
+    );
+
+    expect(authentication.state).toBe("needs_login");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://jimin-os.example/v1/agent/authentication",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer session-access",
+        }),
+      }),
+    );
+  });
+
+  it("starts official sign-in without sending a credential from the app", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          '{"state":"requested","verificationUrl":null,"userCode":null}',
+          { status: 202, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const authentication = await requestAgentAuthentication(
+      "https://jimin-os.example",
+      "session-access",
+    );
+
+    expect(authentication.state).toBe("requested");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://jimin-os.example/v1/agent/authentication",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 
   it("returns the current job state without exposing server internals", async () => {

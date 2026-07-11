@@ -136,6 +136,9 @@ The radius personality is small and precise. Controls use 6px, bounded surfaces 
 - App chrome: product name, current scope, navigation, and one contextual action
 - Assistant composer: one dominant request surface with clear submit, optional attachments,
   and only the connected sources that the server can actually use
+- Account connection gate: a compact, factual ChatGPT sign-in state shown only while the
+  managed agent cannot answer; it presents the official link and device code without turning
+  the home screen into a settings form
 - Active task: a bounded request/result surface; it is the single focal point while work runs
 - Progress panel: real server-emitted stage, tool, approval, or failure information; never
   simulated thinking text or a fake timer
@@ -151,6 +154,8 @@ The radius personality is small and precise. Controls use 6px, bounded surfaces 
 
 - Empty: composer and a small set of generic request examples; no invented personal data or
   static personal-data dashboard.
+- Account connection: a real server state keeps the composer unavailable until the managed
+  ChatGPT connection is ready; the one-time code is presented with an explicit open action.
 - Loading: content-shaped skeletons and `aria-busy`; the active action is disabled.
 - Active request: real server-emitted processing state remains readable while navigating away.
 - Ready: result, context rows, and one accent summary marker.

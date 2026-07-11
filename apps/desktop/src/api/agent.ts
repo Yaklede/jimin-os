@@ -41,6 +41,13 @@ export interface QueuedAgentTurn {
   state: AgentJob["state"];
 }
 
+export interface AgentAuthentication {
+  state:
+    "needs_login" | "requested" | "awaiting_authorization" | "ready" | "failed";
+  verificationUrl: string | null;
+  userCode: string | null;
+}
+
 interface ListResponse<T> {
   items: T[];
   nextCursor: string | null;
@@ -73,6 +80,39 @@ export async function fetchConversations(
     throw new AgentRequestError("unavailable");
   }
   return body.items;
+}
+
+export async function fetchAgentAuthentication(
+  baseUrl: string,
+  access: string,
+): Promise<AgentAuthentication> {
+  const response = await fetch(
+    `${normalizeBaseUrl(baseUrl)}/v1/agent/authentication`,
+    { headers: authHeaders(access) },
+  );
+  const body = await readJson(response);
+  if (!response.ok || !isAgentAuthentication(body)) {
+    throw errorFromStatus(response.status);
+  }
+  return body;
+}
+
+export async function requestAgentAuthentication(
+  baseUrl: string,
+  access: string,
+): Promise<AgentAuthentication> {
+  const response = await fetch(
+    `${normalizeBaseUrl(baseUrl)}/v1/agent/authentication`,
+    {
+      method: "POST",
+      headers: { ...authHeaders(access), "Content-Type": "application/json" },
+    },
+  );
+  const body = await readJson(response);
+  if (!response.ok || !isAgentAuthentication(body)) {
+    throw errorFromStatus(response.status);
+  }
+  return body;
 }
 
 export async function createConversation(
@@ -205,6 +245,16 @@ function isAgentJob(value: unknown): value is AgentJob {
     typeof value.id === "string" &&
     typeof value.conversationId === "string" &&
     typeof value.state === "string"
+  );
+}
+
+function isAgentAuthentication(value: unknown): value is AgentAuthentication {
+  return (
+    isRecord(value) &&
+    typeof value.state === "string" &&
+    (value.verificationUrl === null ||
+      typeof value.verificationUrl === "string") &&
+    (value.userCode === null || typeof value.userCode === "string")
   );
 }
 

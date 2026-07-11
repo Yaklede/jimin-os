@@ -11,6 +11,8 @@ use crate::{Database, StorageError, auth::append_change};
 const MAX_CONTENT_CHARS: usize = 24_000;
 const MAX_TITLE_CHARS: usize = 200;
 const MAX_RUNNER_ID_CHARS: usize = 200;
+const MAX_AUTH_URL_CHARS: usize = 2_048;
+const MAX_AUTH_USER_CODE_CHARS: usize = 256;
 const MIN_CLAIM_LEASE: Duration = Duration::from_secs(5);
 const MAX_CLAIM_LEASE: Duration = Duration::from_mins(5);
 
@@ -153,6 +155,34 @@ pub struct AgentJob {
     pub version: i64,
 }
 
+/// The safe, client-visible state of the managed `ChatGPT` sign-in ceremony.
+/// OAuth access and refresh tokens remain in the Codex runtime and are never
+/// represented in this persistence model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentAuthentication {
+    pub id: Uuid,
+    pub state: AgentAuthenticationState,
+    pub verification_url: Option<String>,
+    pub user_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentAuthenticationState {
+    Requested,
+    AwaitingAuthorization,
+    Ready,
+    Failed,
+}
+
+/// A request the agent runtime may turn into a Codex-managed device-code
+/// login. It deliberately excludes the presentable code so the agent never
+/// needs to log or cache it after persisting it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestedAgentAuthentication {
+    pub id: Uuid,
+    pub user_id: Uuid,
+}
+
 #[derive(sqlx::FromRow)]
 struct ConversationRow {
     id: Uuid,
@@ -229,6 +259,20 @@ struct AgentJobReadRow {
     created_at: OffsetDateTime,
     finished_at: Option<OffsetDateTime>,
     version: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct AgentAuthenticationRow {
+    id: Uuid,
+    state: String,
+    verification_url: Option<String>,
+    user_code: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct RequestedAgentAuthenticationRow {
+    id: Uuid,
+    user_id: Uuid,
 }
 
 impl TryFrom<JobRow> for QueuedAgentTurn {
@@ -318,7 +362,301 @@ impl TryFrom<AgentJobReadRow> for AgentJob {
     }
 }
 
+impl TryFrom<AgentAuthenticationRow> for AgentAuthentication {
+    type Error = StorageError;
+
+    fn try_from(row: AgentAuthenticationRow) -> Result<Self, Self::Error> {
+        let state = parse_agent_authentication_state(&row.state)?;
+        let has_device_code = row.verification_url.is_some() && row.user_code.is_some();
+        if matches!(state, AgentAuthenticationState::AwaitingAuthorization) != has_device_code {
+            return Err(StorageError::PersistenceUnavailable);
+        }
+        Ok(Self {
+            id: row.id,
+            state,
+            verification_url: row.verification_url,
+            user_code: row.user_code,
+        })
+    }
+}
+
+impl From<RequestedAgentAuthenticationRow> for RequestedAgentAuthentication {
+    fn from(row: RequestedAgentAuthenticationRow) -> Self {
+        Self {
+            id: row.id,
+            user_id: row.user_id,
+        }
+    }
+}
+
 impl Database {
+    /// Returns the newest authentication state owned by this personal user.
+    /// The row carries only presentation fields for the official device-code
+    /// flow; Codex owns the actual OAuth credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for a non-version-seven
+    /// user identifier and a classified storage error when persistence fails.
+    pub async fn agent_authentication_for_user(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Option<AgentAuthentication>, StorageError> {
+        if !is_v7(user_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let row = sqlx::query_as::<_, AgentAuthenticationRow>(
+            "\
+            SELECT id, state, verification_url, user_code
+            FROM agent_auth_attempts
+            WHERE user_id = $1
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1",
+        )
+        .bind(user_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|error| classify(&error))?;
+        row.map(AgentAuthentication::try_from).transpose()
+    }
+
+    /// Starts or returns the current personal sign-in request. A successful
+    /// `ready` row is stable across agent restarts because Codex persists the
+    /// managed credential separately in `CODEX_HOME`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed identifiers
+    /// and a classified storage error when persistence fails.
+    pub async fn request_agent_authentication(
+        &self,
+        user_id: Uuid,
+        attempt_id: Uuid,
+    ) -> Result<AgentAuthentication, StorageError> {
+        if !is_v7(user_id) || !is_v7(attempt_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| classify(&error))?;
+        let existing = sqlx::query_as::<_, AgentAuthenticationRow>(
+            "\
+            SELECT id, state, verification_url, user_code
+            FROM agent_auth_attempts
+            WHERE user_id = $1
+              AND state IN ('requested', 'awaiting_authorization', 'ready')
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            FOR UPDATE",
+        )
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        if let Some(existing) = existing {
+            let authentication = AgentAuthentication::try_from(existing)?;
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| classify(&error))?;
+            return Ok(authentication);
+        }
+
+        let row = sqlx::query_as::<_, AgentAuthenticationRow>(
+            "\
+            INSERT INTO agent_auth_attempts (id, user_id, state)
+            VALUES ($1, $2, 'requested')
+            RETURNING id, state, verification_url, user_code",
+        )
+        .bind(attempt_id)
+        .bind(user_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| classify(&error))?;
+        AgentAuthentication::try_from(row)
+    }
+
+    /// Finds one requested ceremony for the single trusted agent process.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified storage error when persistence fails.
+    pub async fn next_requested_agent_authentication(
+        &self,
+    ) -> Result<Option<RequestedAgentAuthentication>, StorageError> {
+        let row = sqlx::query_as::<_, RequestedAgentAuthenticationRow>(
+            "\
+            SELECT id, user_id
+            FROM agent_auth_attempts
+            WHERE state = 'requested'
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1",
+        )
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|error| classify(&error))?;
+        Ok(row.map(RequestedAgentAuthentication::from))
+    }
+
+    /// A device-code ceremony is bound to one App Server process. If that
+    /// process restarted before completion, discard the stale presentation
+    /// code and let the agent issue a fresh official code.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified storage error when persistence fails.
+    pub async fn restart_pending_agent_authentication(&self) -> Result<(), StorageError> {
+        sqlx::query(
+            "\
+            UPDATE agent_auth_attempts
+            SET state = 'requested',
+                login_id = NULL,
+                verification_url = NULL,
+                user_code = NULL
+            WHERE state = 'awaiting_authorization'",
+        )
+        .execute(self.pool())
+        .await
+        .map_err(|error| classify(&error))?;
+        Ok(())
+    }
+
+    /// A persisted ready marker is only valid while the managed Codex process
+    /// can still read its `ChatGPT` account. When startup reports no account,
+    /// clear that stale marker so the paired user can start a fresh ceremony.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified storage error when persistence fails.
+    pub async fn invalidate_ready_agent_authentication(&self) -> Result<(), StorageError> {
+        sqlx::query(
+            "\
+            UPDATE agent_auth_attempts
+            SET state = 'failed',
+                login_id = NULL,
+                verification_url = NULL,
+                user_code = NULL,
+                error_code = 'agent_authentication_required',
+                completed_at = NOW()
+            WHERE state = 'ready'",
+        )
+        .execute(self.pool())
+        .await
+        .map_err(|error| classify(&error))?;
+        Ok(())
+    }
+
+    /// Stores only the URL and one-time user code returned by the managed
+    /// runtime. Both values are intentionally bounded and never emitted by
+    /// server logs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed values and
+    /// a classified storage error when persistence fails.
+    pub async fn begin_agent_authentication(
+        &self,
+        attempt_id: Uuid,
+        login_id: &str,
+        verification_url: &str,
+        user_code: &str,
+    ) -> Result<bool, StorageError> {
+        if !is_v7(attempt_id)
+            || !valid_external_id(login_id)
+            || !valid_text(verification_url, MAX_AUTH_URL_CHARS, false)
+            || !valid_text(user_code, MAX_AUTH_USER_CODE_CHARS, false)
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let result = sqlx::query(
+            "\
+            UPDATE agent_auth_attempts
+            SET state = 'awaiting_authorization',
+                login_id = $2,
+                verification_url = $3,
+                user_code = $4
+            WHERE id = $1 AND state = 'requested'",
+        )
+        .bind(attempt_id)
+        .bind(login_id)
+        .bind(verification_url)
+        .bind(user_code)
+        .execute(self.pool())
+        .await
+        .map_err(|error| classify(&error))?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Marks the specific owned ceremony complete after Codex reports a
+    /// managed `ChatGPT` account. The device code is cleared immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for a malformed attempt
+    /// identifier and a classified storage error when persistence fails.
+    pub async fn complete_agent_authentication(
+        &self,
+        attempt_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        if !is_v7(attempt_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let result = sqlx::query(
+            "\
+            UPDATE agent_auth_attempts
+            SET state = 'ready',
+                verification_url = NULL,
+                user_code = NULL,
+                completed_at = NOW()
+            WHERE id = $1 AND state = 'awaiting_authorization'",
+        )
+        .bind(attempt_id)
+        .execute(self.pool())
+        .await
+        .map_err(|error| classify(&error))?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Retains a short safe reason when the runtime cannot start the official
+    /// sign-in ceremony. The device code is never retained on a failure path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed values and
+    /// a classified storage error when persistence fails.
+    pub async fn fail_agent_authentication(
+        &self,
+        attempt_id: Uuid,
+        error_code: &str,
+    ) -> Result<bool, StorageError> {
+        if !is_v7(attempt_id) || !valid_error_code(error_code) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let result = sqlx::query(
+            "\
+            UPDATE agent_auth_attempts
+            SET state = 'failed',
+                login_id = NULL,
+                verification_url = NULL,
+                user_code = NULL,
+                error_code = $2,
+                completed_at = NOW()
+            WHERE id = $1 AND state IN ('requested', 'awaiting_authorization')",
+        )
+        .bind(attempt_id)
+        .bind(error_code)
+        .execute(self.pool())
+        .await
+        .map_err(|error| classify(&error))?;
+        Ok(result.rows_affected() == 1)
+    }
+
     /// Creates an active conversation and emits one sync upsert transactionally.
     ///
     /// # Errors
@@ -962,6 +1300,16 @@ fn parse_job_state(value: &str) -> Result<AgentJobState, StorageError> {
         "failed" => Ok(AgentJobState::Failed),
         "cancelled" => Ok(AgentJobState::Cancelled),
         "declined" => Ok(AgentJobState::Declined),
+        _ => Err(StorageError::PersistenceUnavailable),
+    }
+}
+
+fn parse_agent_authentication_state(value: &str) -> Result<AgentAuthenticationState, StorageError> {
+    match value {
+        "requested" => Ok(AgentAuthenticationState::Requested),
+        "awaiting_authorization" => Ok(AgentAuthenticationState::AwaitingAuthorization),
+        "ready" => Ok(AgentAuthenticationState::Ready),
+        "failed" => Ok(AgentAuthenticationState::Failed),
         _ => Err(StorageError::PersistenceUnavailable),
     }
 }

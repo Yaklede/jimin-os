@@ -18,11 +18,14 @@ import {
 import {
   AgentRequestError,
   createConversation,
+  fetchAgentAuthentication,
   fetchAgentJob,
   fetchConversationMessages,
   fetchConversations,
   fetchLatestConversationJob,
   queueAgentTurn,
+  requestAgentAuthentication,
+  type AgentAuthentication,
   type AgentJob,
   type Conversation,
   type ConversationMessage,
@@ -60,6 +63,11 @@ export default function App() {
   const [conversationJobs, setConversationJobs] = useState<ConversationJobs>(
     {},
   );
+  const [agentAuthentication, setAgentAuthentication] = useState<
+    AgentAuthentication | undefined
+  >(undefined);
+  const [authenticationRequesting, setAuthenticationRequesting] =
+    useState(false);
   const pendingConversationId = useRef<string | undefined>(undefined);
   const [message, setMessage] = useState<string | undefined>(undefined);
 
@@ -111,9 +119,12 @@ export default function App() {
     setMode("loading");
     setMessage(undefined);
     try {
-      setConversations(
-        await fetchConversations(apiBaseUrl, tokens.accessToken),
-      );
+      const [nextConversations, authentication] = await Promise.all([
+        fetchConversations(apiBaseUrl, tokens.accessToken),
+        fetchAgentAuthentication(apiBaseUrl, tokens.accessToken),
+      ]);
+      setConversations(nextConversations);
+      setAgentAuthentication(authentication);
       setMode("ready");
     } catch (error) {
       if (error instanceof AgentRequestError && error.code === "unauthorized") {
@@ -133,7 +144,7 @@ export default function App() {
       setMode("error");
       setMessage(copy.messages.conversationLoadNotice);
     }
-  }, [apiBaseUrl, refreshConversations, sessionLoaded, tokens]);
+  }, [apiBaseUrl, sessionLoaded, tokens]);
 
   async function discardSession() {
     try {
@@ -144,6 +155,7 @@ export default function App() {
       setConversationMessages([]);
       setSelectedConversationId(undefined);
       setConversationJobs({});
+      setAgentAuthentication(undefined);
       pendingConversationId.current = undefined;
       setMode("setup");
       setMessage(copy.messages.sessionExpired);
@@ -189,6 +201,36 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (
+      !tokens ||
+      !agentAuthentication ||
+      !["requested", "awaiting_authorization"].includes(
+        agentAuthentication.state,
+      )
+    ) {
+      return;
+    }
+    let current = true;
+    const poll = async () => {
+      try {
+        const authentication = await fetchAgentAuthentication(
+          apiBaseUrl,
+          tokens.accessToken,
+        );
+        if (current) setAgentAuthentication(authentication);
+      } catch {
+        if (current)
+          setConversationError(copy.messages.authenticationLoadNotice);
+      }
+    };
+    const interval = window.setInterval(() => void poll(), 1_500);
+    return () => {
+      current = false;
+      window.clearInterval(interval);
+    };
+  }, [agentAuthentication, apiBaseUrl, tokens]);
 
   const activeJobIds = useMemo(
     () =>
@@ -311,11 +353,29 @@ export default function App() {
     pendingConversationId.current = undefined;
   }
 
+  async function beginAgentAuthentication(): Promise<void> {
+    if (!tokens || authenticationRequesting) return;
+    setAuthenticationRequesting(true);
+    setConversationError(undefined);
+    try {
+      setAgentAuthentication(
+        await requestAgentAuthentication(apiBaseUrl, tokens.accessToken),
+      );
+    } catch {
+      setConversationError(copy.messages.authenticationStartNotice);
+    } finally {
+      setAuthenticationRequesting(false);
+    }
+  }
+
   async function sendConversationRequest(
     text: string,
     clientMessageId: string,
   ): Promise<boolean> {
-    if (!tokens) return false;
+    if (!tokens || agentAuthentication?.state !== "ready") {
+      setConversationError(copy.messages.authenticationRequired);
+      return false;
+    }
     let conversationId = selectedConversationId;
     setConversationError(undefined);
     try {
@@ -426,12 +486,15 @@ export default function App() {
                 conversationJobs[selectedConversationId].state,
               ),
             )}
+            authentication={agentAuthentication}
+            authenticationRequesting={authenticationRequesting}
             loading={conversationLoading}
             error={
               conversationError ?? (mode === "error" ? message : undefined)
             }
             onSelect={selectConversation}
             onStartConversation={startConversation}
+            onStartAuthentication={beginAgentAuthentication}
             onSend={sendConversationRequest}
           />
         )}
