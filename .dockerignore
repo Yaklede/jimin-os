@@ -1,0 +1,24 @@
+# Local build output and package caches are never Docker build inputs.
+target/
+node_modules/
+**/node_modules/
+**/dist/
+**/*.tsbuildinfo
+
+# The server images compile only the Rust API and Agent applications.
+apps/desktop/
+
+# Development metadata, local automation output, and documentation are not
+# required by either server Dockerfile.
+.git/
+.github/
+.agents/
+.opendock/
+docs/
+
+# Never send local configuration or credentials to a Docker build context.
+.env
+.env.*
+deploy/secrets/
+*.log
+.DS_Store
