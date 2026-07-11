@@ -4,6 +4,7 @@ import {
   CirclePlus,
   ListTodo,
   RefreshCw,
+  ScanLine,
   Server,
 } from "lucide-react";
 import {
@@ -14,6 +15,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 import {
   PlanningRequestError,
@@ -22,6 +24,7 @@ import {
   createTask,
   exchangePairingCode,
   fetchPlanning,
+  pairingTokenFromScannedQr,
   refreshDeviceSession,
   type ScheduleEntry,
   type SessionTokens,
@@ -287,16 +290,14 @@ export default function App() {
     [],
   );
 
-  async function pairDevice(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function pairDevice(pairingCode: string, deviceName: string) {
     if (!apiBaseUrl) {
       setMode("configuration");
       return;
     }
-    const form = new FormData(event.currentTarget);
-    const pairingCode = String(form.get("pairingCode") ?? "").trim();
-    const deviceName = String(form.get("deviceName") ?? "").trim();
-    if (!pairingCode || !deviceName) {
+    const normalizedCode = pairingCode.trim();
+    const normalizedDeviceName = deviceName.trim();
+    if (!normalizedCode || !normalizedDeviceName) {
       setMessage(copy.messages.setupRequired);
       return;
     }
@@ -304,8 +305,8 @@ export default function App() {
     try {
       const nextTokens = await exchangePairingCode(
         apiBaseUrl,
-        pairingCode,
-        deviceName,
+        normalizedCode,
+        normalizedDeviceName,
         await readOrCreateInstallationId(),
       );
       await saveDeviceSession({ tokens: nextTokens });
@@ -528,7 +529,7 @@ export default function App() {
                 {message}
               </p>
             )}
-            <SetupPanel onSubmit={pairDevice} />
+            <SetupPanel onPairingCode={pairDevice} />
           </>
         ) : view === "conversations" ? (
           <ConversationWorkspace
@@ -698,10 +699,64 @@ export default function App() {
 }
 
 function SetupPanel({
-  onSubmit,
+  onPairingCode,
 }: {
-  onSubmit(event: FormEvent<HTMLFormElement>): void;
+  onPairingCode(pairingCode: string, deviceName: string): void;
 }) {
+  const [deviceName, setDeviceName] = useState<string>(
+    copy.setup.defaultDeviceName,
+  );
+  const [manualCode, setManualCode] = useState("");
+  const [manualEntryVisible, setManualEntryVisible] = useState(false);
+  const [scannerPending, setScannerPending] = useState(false);
+  const [setupNotice, setSetupNotice] = useState<string | undefined>(undefined);
+
+  function validateDeviceName(): boolean {
+    if (deviceName.trim()) return true;
+    setSetupNotice(copy.messages.deviceNameRequired);
+    return false;
+  }
+
+  async function startQrScan() {
+    if (!validateDeviceName()) return;
+    if (!("__TAURI_INTERNALS__" in window)) {
+      setManualEntryVisible(true);
+      setSetupNotice(copy.messages.cameraUnavailable);
+      return;
+    }
+
+    setScannerPending(true);
+    setSetupNotice(undefined);
+
+    try {
+      const scanned = await invoke<QrScanResponse>("scan_qr_code");
+      if (!scanned.content) return;
+      if (!pairingTokenFromScannedQr(scanned.content)) {
+        setManualEntryVisible(true);
+        setSetupNotice(copy.messages.qrCodeNeedsAnotherScan);
+        return;
+      }
+
+      onPairingCode(scanned.content, deviceName);
+    } catch {
+      setManualEntryVisible(true);
+      setSetupNotice(copy.messages.cameraUnavailable);
+    } finally {
+      setScannerPending(false);
+    }
+  }
+
+  function submitManualCode(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!validateDeviceName()) return;
+    if (!manualCode.trim()) {
+      setSetupNotice(copy.messages.manualCodeRequired);
+      return;
+    }
+    setSetupNotice(undefined);
+    onPairingCode(manualCode, deviceName);
+  }
+
   return (
     <section className="setup-panel" aria-labelledby="setup-title">
       <div className="setup-panel__intro">
@@ -714,7 +769,7 @@ function SetupPanel({
         <strong>{copy.setup.scopeTitle}</strong>
         <p>{copy.setup.scopeDescription}</p>
       </aside>
-      <form className="setup-form" onSubmit={onSubmit}>
+      <form className="setup-form" onSubmit={submitManualCode}>
         <div className="field">
           <label htmlFor="device-name">{copy.setup.deviceLabel}</label>
           <p id="device-name-hint" className="field__hint">
@@ -723,28 +778,60 @@ function SetupPanel({
           <input
             id="device-name"
             name="deviceName"
-            defaultValue={copy.setup.defaultDeviceName}
+            value={deviceName}
             maxLength={80}
             required
             aria-describedby="device-name-hint"
+            onChange={(event) => setDeviceName(event.target.value)}
           />
         </div>
-        <div className="field">
-          <label htmlFor="pairing-code">{copy.setup.tokenLabel}</label>
-          <p id="pairing-code-hint" className="field__hint">
-            {copy.setup.tokenHint}
-          </p>
-          <textarea
-            id="pairing-code"
-            name="pairingCode"
-            required
-            rows={3}
-            aria-describedby="pairing-code-hint"
-          />
+        <div className="setup-scan-action">
+          <button
+            className="primary-button focus-visible-control"
+            type="button"
+            onClick={() => void startQrScan()}
+            disabled={scannerPending}
+          >
+            <ScanLine aria-hidden="true" />
+            {scannerPending ? copy.actions.openingScanner : copy.actions.scanQr}
+          </button>
+          <p>{copy.setup.scanHint}</p>
         </div>
-        <button className="primary-button focus-visible-control" type="submit">
-          {copy.actions.connect}
-        </button>
+        {setupNotice && (
+          <div className="setup-inline-alert" role="alert">
+            <p>{setupNotice}</p>
+          </div>
+        )}
+        {!manualEntryVisible ? (
+          <button
+            className="setup-manual-toggle focus-visible-control"
+            type="button"
+            onClick={() => setManualEntryVisible(true)}
+          >
+            {copy.actions.enterCode}
+          </button>
+        ) : (
+          <div className="field setup-manual-entry">
+            <label htmlFor="pairing-code">{copy.setup.tokenLabel}</label>
+            <p id="pairing-code-hint" className="field__hint">
+              {copy.setup.tokenHint}
+            </p>
+            <textarea
+              id="pairing-code"
+              name="pairingCode"
+              value={manualCode}
+              rows={3}
+              aria-describedby="pairing-code-hint"
+              onChange={(event) => setManualCode(event.target.value)}
+            />
+            <button
+              className="secondary-button focus-visible-control"
+              type="submit"
+            >
+              {copy.actions.connect}
+            </button>
+          </div>
+        )}
       </form>
     </section>
   );
@@ -800,4 +887,8 @@ function conversationTitle(value: string) {
 
 function isTerminalAgentJob(state: AgentJob["state"]) {
   return ["completed", "failed", "cancelled", "declined"].includes(state);
+}
+
+interface QrScanResponse {
+  content: string | null;
 }

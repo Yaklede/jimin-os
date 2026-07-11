@@ -36,32 +36,37 @@ Agent가 `auth_required` 상태이면 일정과 할 일은 계속 사용할 수 
 요청은 처리되지 않는다. 대화 검증 전에 device auth와 turn probe가 성공해야
 한다.
 
-## 2. 기기 연결 코드 만들기
+## 2. 기기 연결 QR 코드 만들기
 
-신뢰된 서버에서 API container를 통해 일회용 기기 연결 값을 만든다. Compose
+신뢰된 서버에서 API container를 통해 일회용 기기 연결 QR 코드를 만든다. Compose
 인자는 각 배포 runbook의 실제 환경 파일과 동일해야 한다.
 
 ```bash
 docker compose <compose-args> exec -T api jimin-api pairing create
 ```
 
-명령은 `jimin-os://pair?token=...` 형태의 한 번만 쓸 수 있는 값을 출력한다.
-이 값은 credential로 취급한다.
+명령은 터미널에 한 번만 쓸 수 있는 QR 코드를 출력한다. 이 QR 코드는
+credential로 취급한다.
 
 - terminal history, chat, issue, screenshot, 검증 기록에 남기지 않는다.
-- QR 앱으로 읽어 URI 전체를 붙여 넣거나, 안전한 동일 기기 채널로 전달한다.
-- Jimin OS setup 화면은 URI 전체와 token 값만 모두 받을 수 있다.
+- Android의 Jimin OS setup 화면에서 **QR 코드 스캔하기**를 눌러 화면의 QR
+  코드를 읽는다.
+- macOS 또는 Android의 예외 복구에는 `jimin-api pairing create --code`로 만든
+  일회용 코드를 **코드 직접 입력하기**에 입력한다. 이 명령의 출력도 credential로
+  취급한다.
 - 만료·소비된 값은 재사용하지 않고 새로 만든다.
 
 ## 3. Mac 검증
 
 1. 현재 commit에서 만든 `Jimin OS_0.1.0_aarch64.dmg`를 열어 앱을 실행한다.
-2. 개인 서버 주소가 포함된 설치본의 setup 화면에서 기기 이름과 일회용 연결 값을 입력한다.
+2. 개인 서버 주소가 포함된 설치본의 setup 화면에서 기기 이름을 확인하고,
+   `jimin-api pairing create --code`로 만든 일회용 코드를 **코드 직접 입력하기**에
+   입력한다.
 3. 연결 후 오늘 화면에서 할 일 하나와 일정 하나를 만든다.
 4. 할 일을 완료하고 일정·할 일이 화면에 맞게 갱신되는지 확인한다.
 5. 앱을 완전히 종료한 뒤 다시 열어 session과 오늘 데이터가 유지되는지 확인한다.
 6. 대화 화면에서 비민감 요청 하나를 보낸다. 예: `오늘 일정과 열린 할 일을
-   간단히 정리해줘`.
+간단히 정리해줘`.
 7. 응답이 끝난 뒤 앱을 다시 열고 같은 대화를 선택한다. 마지막 message와 job
    terminal state가 유지되어야 한다.
 
@@ -79,7 +84,7 @@ adb install -r \
 
 1. launcher에 Jimin OS 아이콘과 앱 이름이 보인다.
 2. cold start에서 setup 화면이 표시된다.
-3. 새 일회용 연결 값으로 Android를 등록한다. 등록값은 Mac에서 사용한 값과
+3. 새 일회용 연결 QR 코드로 Android를 등록한다. 연결 QR 코드는 Mac에서 사용한 값과
    별도로 만든다.
 4. 오늘 화면에서 Mac이 만든 일정·할 일을 읽고, Android에서 한 변경이 Mac에
    반영되는지 확인한다.

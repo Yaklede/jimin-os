@@ -105,6 +105,12 @@ export function pairingTokenFromValue(value: string): string {
   }
 }
 
+export function pairingTokenFromScannedQr(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("jimin-os://")) return "";
+  return pairingTokenFromValue(trimmed);
+}
+
 export function clientPlatformForUserAgent(userAgent: string): ClientPlatform {
   const normalized = userAgent.toLowerCase();
   if (normalized.includes("android")) return "android";

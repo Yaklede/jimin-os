@@ -12,6 +12,9 @@ export const copy = {
     checking: "확인하고 있어요",
     refresh: "새로고침",
     connect: "이 기기 연결하기",
+    scanQr: "QR 코드 스캔하기",
+    openingScanner: "스캐너 여는 중",
+    enterCode: "코드 직접 입력하기",
     addTask: "할 일 추가하기",
     addSchedule: "일정 추가하기",
     complete: "완료하기",
@@ -47,7 +50,9 @@ export const copy = {
     deviceHint: "다른 기기와 구분할 수 있는 이름을 적어 주세요.",
     defaultDeviceName: "내 기기",
     tokenLabel: "일회용 연결 코드",
-    tokenHint: "서버에서 만든 코드나 QR에서 읽은 전체 주소를 붙여 넣어 주세요.",
+    tokenHint:
+      "QR 코드를 스캔할 수 없을 때만 서버에서 받은 코드를 입력해 주세요.",
+    scanHint: "스캐너가 열리면 일회용 QR 코드를 비춰 주세요.",
   },
   configuration: {
     eyebrow: "Jimin OS 설정 확인",
@@ -95,8 +100,13 @@ export const copy = {
   },
   messages: {
     setupRequired: "기기 이름과 일회용 연결 코드를 모두 입력해 주세요.",
+    deviceNameRequired: "이 기기의 이름을 먼저 입력해 주세요.",
+    manualCodeRequired: "일회용 연결 코드를 입력해 주세요.",
     connectionNotice:
       "이 기기를 연결할 수 없어요. 새 일회용 연결 코드를 만든 뒤 다시 시도해 주세요.",
+    qrCodeNeedsAnotherScan:
+      "Jimin OS QR 코드가 아니에요. 개인 서버 QR 코드를 다시 스캔해 주세요.",
+    cameraUnavailable: "스캐너를 열 수 없어요. 코드를 직접 입력해 주세요.",
     storageNotice:
       "기기 연결 정보를 안전하게 저장할 수 없어요. 앱을 다시 연 뒤 다시 시도해 주세요.",
     sessionExpired:

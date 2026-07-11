@@ -4,6 +4,7 @@ import {
   PlanningRequestError,
   clientPlatformForUserAgent,
   exchangePairingCode,
+  pairingTokenFromScannedQr,
   pairingTokenFromValue,
   refreshDeviceSession,
 } from "./planning";
@@ -59,6 +60,13 @@ describe("refreshDeviceSession", () => {
     pairingUri.searchParams.set("token", code);
 
     expect(pairingTokenFromValue(pairingUri.toString())).toBe(code);
+    expect(pairingTokenFromScannedQr(pairingUri.toString())).toBe(code);
+  });
+
+  it("rejects a non-pairing QR value before it reaches the server", () => {
+    expect(pairingTokenFromScannedQr("https://example.com/invitation")).toBe(
+      "",
+    );
   });
 
   it("uses the client platform for device registration", () => {

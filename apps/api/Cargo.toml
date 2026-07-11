@@ -14,6 +14,7 @@ jimin-auth = { path = "../../crates/auth" }
 jimin-application = { path = "../../crates/application" }
 jimin-domain = { path = "../../crates/domain" }
 jimin-storage = { path = "../../crates/storage" }
+qrcode.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
