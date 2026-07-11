@@ -556,6 +556,7 @@ pub fn router(state: ApiState) -> Router {
                 // bearer tokens from the installed personal client.
                 .allow_origin([
                     HeaderValue::from_static("tauri://localhost"),
+                    HeaderValue::from_static("http://tauri.localhost"),
                     HeaderValue::from_static("https://tauri.localhost"),
                 ])
                 .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
@@ -1899,7 +1900,7 @@ mod tests {
                 Request::builder()
                     .method(Method::OPTIONS)
                     .uri("/v1/auth/pairings/exchange")
-                    .header("origin", "https://tauri.localhost")
+                    .header("origin", "http://tauri.localhost")
                     .header("access-control-request-method", "POST")
                     .header(
                         "access-control-request-headers",
@@ -1914,7 +1915,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers().get("access-control-allow-origin"),
-            Some(&HeaderValue::from_static("https://tauri.localhost"))
+            Some(&HeaderValue::from_static("http://tauri.localhost"))
         );
     }
 

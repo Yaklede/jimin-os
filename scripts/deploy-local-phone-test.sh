@@ -22,7 +22,9 @@ compose config --quiet
 info "Building local phone-test images"
 compose build --pull gateway api agent
 info "Starting local phone-test services"
-compose up --detach --remove-orphans --wait --wait-timeout 180
+# Local images intentionally keep stable development tags. Recreate services
+# after every build so the emulator never tests an older API container.
+compose up --detach --remove-orphans --force-recreate --wait --wait-timeout 180
 
 curl --fail --silent --show-error \
   "http://127.0.0.1:${JIMIN_LOCAL_PHONE_TEST_PORT}/health/ready" >/dev/null
