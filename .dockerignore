@@ -7,6 +7,7 @@ node_modules/
 
 # The server images compile only the Rust API and Agent applications.
 apps/desktop/
+apps/desktop/**
 
 # Development metadata, local automation output, and documentation are not
 # required by either server Dockerfile.
