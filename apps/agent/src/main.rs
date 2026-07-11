@@ -8,13 +8,18 @@ use jimin_codex_client::{
     AccountSummary, AppServerProcess, Error, ProcessEnd, StderrStreamState, StderrSummary,
     probe_compatibility,
 };
+use jimin_storage::Database;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::io::AsyncReadExt;
 
+mod config;
 mod health;
+mod worker_loop;
 
+use config::{AgentConfig, ConfigError};
 use health::{HealthMarker, HealthMarkerError, HealthState};
+use worker_loop::WorkerExit;
 
 const MAX_PROMPT_BYTES: u64 = 64 * 1024;
 const MAX_MODEL_ID_BYTES: usize = 128;
@@ -270,6 +275,10 @@ fn run_health(marker_path: &Path) -> ExitCode {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "The restart budget and Codex process lifecycle share one explicit state boundary."
+)]
 async fn run_serve(codex_binary: &Path, marker_path: &Path) -> ExitCode {
     let marker = match initialize_health_marker(marker_path) {
         Ok(marker) => marker,
@@ -278,7 +287,13 @@ async fn run_serve(codex_binary: &Path, marker_path: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-
+    let (config, database) = match load_agent_runtime() {
+        Ok(runtime) => runtime,
+        Err(code) => {
+            write_serve_failure(code, None, None);
+            return ExitCode::FAILURE;
+        }
+    };
     let mut budget = CrashBudget::new(SERVE_FAILURE_BUDGET, SERVE_STABLE_WINDOW);
     loop {
         let startup = tokio::select! {
@@ -293,7 +308,7 @@ async fn run_serve(codex_binary: &Path, marker_path: &Path) -> ExitCode {
             startup = tokio::time::timeout(SERVE_START_TIMEOUT, start_serve(codex_binary)) => startup,
         };
 
-        let (process, state) = match startup {
+        let (mut process, state) = match startup {
             Ok(Ok(startup)) => startup,
             Ok(Err(failure)) => {
                 let ServeStartFailure { error, process } = failure;
@@ -334,37 +349,68 @@ async fn run_serve(codex_binary: &Path, marker_path: &Path) -> ExitCode {
             continue;
         }
 
-        write_single_json_line(&serde_json::json!({
-            "ok": true,
-            "mode": "serve",
-            "state": state.as_str()
-        }));
+        write_serve_ready(state);
 
-        let run_started_at = Instant::now();
-        match process.run_until_shutdown().await {
-            Ok(outcome) if outcome.end == ProcessEnd::ShutdownSignal => {
-                let _ = marker.remove();
-                return ExitCode::SUCCESS;
-            }
-            Ok(outcome) => {
-                if let Some(exit_code) = handle_serve_failure(
-                    &marker,
-                    &mut budget,
-                    Error::AppServerExited.code(),
-                    Some(&outcome.stderr),
-                    Some(run_started_at.elapsed()),
-                )
-                .await
-                {
-                    return exit_code;
+        if state != HealthState::Ready {
+            let run_started_at = Instant::now();
+            match process.run_until_shutdown().await {
+                Ok(outcome) if outcome.end == ProcessEnd::ShutdownSignal => {
+                    let _ = marker.remove();
+                    return ExitCode::SUCCESS;
+                }
+                Ok(outcome) => {
+                    if let Some(exit_code) = handle_serve_failure(
+                        &marker,
+                        &mut budget,
+                        Error::AppServerExited.code(),
+                        Some(&outcome.stderr),
+                        Some(run_started_at.elapsed()),
+                    )
+                    .await
+                    {
+                        return exit_code;
+                    }
+                }
+                Err(error) => {
+                    if let Some(exit_code) = handle_serve_failure(
+                        &marker,
+                        &mut budget,
+                        error.code(),
+                        None,
+                        Some(run_started_at.elapsed()),
+                    )
+                    .await
+                    {
+                        return exit_code;
+                    }
                 }
             }
+            continue;
+        }
+
+        let run_started_at = Instant::now();
+        match run_agent_jobs(&mut process, &database, &config).await {
+            Ok(WorkerExit::ShutdownRequested) => {
+                let shutdown = process.shutdown().await;
+                let _ = marker.remove();
+                if let Err(error) = shutdown {
+                    write_serve_failure(error.code(), None, None);
+                    return ExitCode::FAILURE;
+                }
+                return ExitCode::SUCCESS;
+            }
             Err(error) => {
+                let terminal_state = error.codex_error().and_then(terminal_state_for_error);
+                let code = error.code();
+                let stderr = process.shutdown().await.ok();
+                if let Some(state) = terminal_state {
+                    return hold_terminal_state(&marker, state).await;
+                }
                 if let Some(exit_code) = handle_serve_failure(
                     &marker,
                     &mut budget,
-                    error.code(),
-                    None,
+                    code,
+                    stderr.as_ref(),
                     Some(run_started_at.elapsed()),
                 )
                 .await
@@ -374,6 +420,37 @@ async fn run_serve(codex_binary: &Path, marker_path: &Path) -> ExitCode {
             }
         }
     }
+}
+
+fn load_agent_runtime() -> Result<(AgentConfig, Database), &'static str> {
+    let config = AgentConfig::load().map_err(ConfigError::code)?;
+    let database = config.database().map_err(ConfigError::code)?;
+    Ok((config, database))
+}
+
+async fn run_agent_jobs(
+    process: &mut AppServerProcess,
+    database: &Database,
+    config: &AgentConfig,
+) -> Result<WorkerExit, worker_loop::WorkerError> {
+    let workspace = process.workspace().to_path_buf();
+    worker_loop::run_until_shutdown(
+        process.client_mut(),
+        database,
+        config.runner_id(),
+        config.claim_lease(),
+        config.poll_interval(),
+        &workspace,
+    )
+    .await
+}
+
+fn write_serve_ready(state: HealthState) {
+    write_single_json_line(&serde_json::json!({
+        "ok": true,
+        "mode": "serve",
+        "state": state.as_str()
+    }));
 }
 
 fn initialize_health_marker(marker_path: &Path) -> Result<HealthMarker, HealthMarkerError> {

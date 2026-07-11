@@ -2483,9 +2483,13 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "jimin-codex-client",
+ "jimin-storage",
+ "secrecy",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

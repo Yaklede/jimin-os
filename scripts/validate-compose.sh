@@ -129,6 +129,7 @@ done
 
 assert_dependency_condition gateway api service_started
 assert_dependency_condition api postgres service_started
+assert_dependency_condition agent postgres service_started
 
 for dockerfile in \
   "${REPO_ROOT}/deploy/docker/api.Dockerfile" \

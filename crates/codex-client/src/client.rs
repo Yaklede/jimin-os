@@ -224,6 +224,45 @@ where
         Ok(response.thread.id)
     }
 
+    /// Rejoins a previously persisted, read-only conversation thread in the
+    /// trusted agent workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed protocol or workspace error without executing tools.
+    pub async fn resume_persistent_thread_in(
+        &mut self,
+        thread_id: &str,
+        cwd: &Path,
+        model: Option<&str>,
+    ) -> Result<String> {
+        self.require_initialized()?;
+        if thread_id.is_empty() || thread_id.len() > MAX_LOGIN_FIELD_BYTES {
+            return Err(Error::InvalidProtocolMessage);
+        }
+        let cwd = cwd.to_str().ok_or(Error::InvalidWorkspace)?;
+        let response: ThreadStartResponse = self
+            .connection
+            .request(
+                "thread/resume",
+                json!({
+                    "threadId": thread_id,
+                    "approvalPolicy": "never",
+                    "sandbox": "read-only",
+                    "cwd": cwd,
+                    "model": model,
+                    "serviceTier": null
+                }),
+            )
+            .await?;
+        if response.thread.id.is_empty() || response.thread.id != thread_id {
+            return Err(Error::InvalidResponse {
+                method: "thread/resume",
+            });
+        }
+        Ok(response.thread.id)
+    }
+
     async fn start_ephemeral_thread_with_options(
         &mut self,
         cwd: Option<&str>,
@@ -805,6 +844,42 @@ mod tests {
             .discard_next_notification()
             .await
             .expect("notification drain");
+        server_task.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn resumes_a_persisted_thread_with_the_read_only_contract() {
+        let (client, server) = tokio::io::duplex(16 * 1024);
+        let (client_reader, client_writer) = split(client);
+        let mut client = AppServerClient::new(BufReader::new(client_reader), client_writer);
+
+        let server_task = tokio::spawn(async move {
+            let (server_reader, mut server_writer) = split(server);
+            let mut server_reader = BufReader::new(server_reader);
+            let _initialize = read_json_line(&mut server_reader).await;
+            server_writer
+                .write_all(b"{\"id\":1,\"result\":{\"userAgent\":\"fixture\",\"codexHome\":\"/tmp\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}\n")
+                .await
+                .expect("initialize response");
+            let _initialized = read_json_line(&mut server_reader).await;
+            let request = read_json_line(&mut server_reader).await;
+            assert_eq!(request["method"], "thread/resume");
+            assert_eq!(request["params"]["threadId"], "thread-1");
+            assert_eq!(request["params"]["sandbox"], "read-only");
+            assert_eq!(request["params"]["approvalPolicy"], "never");
+            assert_eq!(request["params"]["cwd"], "/tmp/fixture-workspace");
+            server_writer
+                .write_all(b"{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}\n")
+                .await
+                .expect("thread response");
+        });
+
+        client.initialize().await.expect("initialize");
+        let thread_id = client
+            .resume_persistent_thread_in("thread-1", Path::new("/tmp/fixture-workspace"), None)
+            .await
+            .expect("thread should resume");
+        assert_eq!(thread_id, "thread-1");
         server_task.await.expect("server task");
     }
 

@@ -4,6 +4,7 @@ use jimin_auth::SessionIdentity;
 use jimin_domain::{ClientPlatform, DeviceRegistration, EmailAddress, GoogleSubject};
 use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness,
+    agent::{NewAgentTurn, NewConversation},
     auth::{
         ConsumeDevicePairing, CreateDevicePairing, PairingConsumption, ProvisionLogin,
         RefreshRotation, RotateRefreshToken,
@@ -353,6 +354,84 @@ async fn manual_schedule_and_tasks_are_scoped_and_emit_current_state() {
             .expect("stale completion should not fail")
             .is_none()
     );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn queued_agent_turn_is_leased_and_completed_once() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database
+        .migrate()
+        .await
+        .expect("agent migration should succeed");
+    let provisioned = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let conversation_id = Uuid::now_v7();
+    database
+        .create_conversation(&NewConversation {
+            id: conversation_id,
+            user_id: provisioned.profile.id,
+            title: Some("개인 운영체제".to_owned()),
+        })
+        .await
+        .expect("conversation should persist");
+    let queued = database
+        .enqueue_agent_turn(&NewAgentTurn {
+            job_id: Uuid::now_v7(),
+            message_id: Uuid::now_v7(),
+            client_message_id: Uuid::now_v7(),
+            user_id: provisioned.profile.id,
+            conversation_id,
+            content: "오늘 일정을 정리해줘".to_owned(),
+        })
+        .await
+        .expect("turn should queue");
+    let runner_id = "integration-agent";
+    let claim = database
+        .claim_next_agent_job(runner_id, Duration::from_secs(30))
+        .await
+        .expect("claim query should succeed")
+        .expect("queued job should be claimed");
+    assert_eq!(claim.id, queued.job_id);
+    assert_eq!(claim.input_content, "오늘 일정을 정리해줘");
+    assert!(claim.codex_thread_id.is_none());
+    assert!(
+        database
+            .start_agent_job(
+                claim.id,
+                runner_id,
+                "thread-integration-1",
+                Duration::from_secs(30),
+            )
+            .await
+            .expect("job should start")
+    );
+    assert!(
+        database
+            .complete_agent_job(
+                claim.id,
+                runner_id,
+                Uuid::now_v7(),
+                "오늘 일정은 오후 3시에 하나 있어요.",
+            )
+            .await
+            .expect("job should complete")
+    );
+    assert!(
+        database
+            .claim_next_agent_job(runner_id, Duration::from_secs(30))
+            .await
+            .expect("claim query should succeed")
+            .is_none()
+    );
+
     database.close().await;
 }
 

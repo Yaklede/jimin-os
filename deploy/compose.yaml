@@ -123,11 +123,16 @@ services:
         NODE_RUNTIME_IMAGE: ${NODE_RUNTIME_IMAGE:?set NODE_RUNTIME_IMAGE}
         RUST_BUILDER_IMAGE: ${RUST_BUILDER_IMAGE:?set RUST_BUILDER_IMAGE}
     user: "1000:1000"
-    restart: "no"
+    restart: unless-stopped
     environment:
       CODEX_HOME: /home/node/.codex
+      DATABASE_URL_FILE: /run/secrets/api_database_url
       JIMIN_AGENT_CODEX_BIN: /usr/local/bin/codex
       JIMIN_AGENT_WORKSPACE: /workspace
+      JIMIN_AGENT_DATABASE_ACQUIRE_TIMEOUT_MS: ${JIMIN_AGENT_DATABASE_ACQUIRE_TIMEOUT_MS:-2000}
+      JIMIN_AGENT_DATABASE_MAX_CONNECTIONS: ${JIMIN_AGENT_DATABASE_MAX_CONNECTIONS:-2}
+      JIMIN_AGENT_CLAIM_LEASE_SECONDS: ${JIMIN_AGENT_CLAIM_LEASE_SECONDS:-30}
+      JIMIN_AGENT_POLL_INTERVAL_MS: ${JIMIN_AGENT_POLL_INTERVAL_MS:-500}
       RUST_LOG: ${RUST_LOG:-info}
     command:
       - serve
@@ -138,10 +143,17 @@ services:
       - type: volume
         source: agent_workspace
         target: /workspace/data
+    secrets:
+      - api_database_url
     tmpfs:
       - /tmp:uid=1000,gid=1000,mode=0700,size=64m
     networks:
       - agent_egress
+      - api_database
+    depends_on:
+      postgres:
+        condition: service_started
+        restart: true
     healthcheck:
       test: ["CMD", "jimin-agent", "health"]
       interval: 30s
