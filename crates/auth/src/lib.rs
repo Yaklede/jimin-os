@@ -25,6 +25,8 @@ const ACCESS_TOKEN_AUDIENCE: &str = "jimin-os";
 const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
 const REFRESH_TOKEN_PREFIX: &str = "josr_";
 const REFRESH_TOKEN_SECRET_BYTES: usize = 32;
+const PAIRING_TOKEN_PREFIX: &str = "josp_";
+const PAIRING_TOKEN_SECRET_BYTES: usize = 32;
 const MINIMUM_PEPPER_BYTES: usize = 32;
 const MAX_ACCESS_TOKEN_TTL: Duration = Duration::from_mins(15);
 
@@ -44,6 +46,10 @@ pub enum AuthError {
     InvalidRefreshTokenConfiguration,
     #[error("refresh token is invalid")]
     InvalidRefreshToken,
+    #[error("pairing-token configuration is invalid")]
+    InvalidPairingTokenConfiguration,
+    #[error("pairing token is invalid")]
+    InvalidPairingToken,
     #[error("the system clock cannot produce a token timestamp")]
     InvalidSystemTime,
 }
@@ -449,6 +455,130 @@ impl std::fmt::Debug for RefreshTokenVerifier {
     }
 }
 
+/// Server-only HMAC key for deriving one-time device-pairing verifiers.
+///
+/// Pairing uses a distinct pepper from refresh tokens so a database leak or a
+/// configuration mistake cannot make the two credential classes comparable.
+pub struct PairingTokenPepper(SecretString);
+
+impl PairingTokenPepper {
+    /// Builds a pairing-token pepper from mounted secret material.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidPairingTokenConfiguration`] when the secret
+    /// is too short or contains a NUL byte.
+    pub fn new(value: SecretString) -> Result<Self, AuthError> {
+        let exposed = value.expose_secret();
+        if exposed.len() < MINIMUM_PEPPER_BYTES || exposed.contains('\0') {
+            return Err(AuthError::InvalidPairingTokenConfiguration);
+        }
+        Ok(Self(value))
+    }
+
+    fn verifier_for(&self, token: &PairingToken) -> PairingTokenVerifier {
+        let mut mac = HmacSha256::new_from_slice(self.0.expose_secret().as_bytes())
+            .expect("HMAC accepts every key length");
+        mac.update(token.serialized.expose_secret().as_bytes());
+        PairingTokenVerifier(mac.finalize().into_bytes().to_vec())
+    }
+}
+
+/// A short-lived, single-use token used only to enroll a trusted Jimin OS
+/// device. The raw value is transferred through a QR code and never reaches
+/// the database, logs, access tokens, or ChatGPT/Codex runtime.
+pub struct PairingToken {
+    serialized: SecretString,
+    pairing_id: Uuid,
+}
+
+impl PairingToken {
+    /// Generates a pairing token bound to one `UUIDv7` pairing record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidPairingToken`] when `pairing_id` is not a
+    /// `UUIDv7` value.
+    pub fn generate(pairing_id: Uuid) -> Result<Self, AuthError> {
+        if pairing_id.get_version_num() != 7 {
+            return Err(AuthError::InvalidPairingToken);
+        }
+        let mut secret = [0_u8; PAIRING_TOKEN_SECRET_BYTES];
+        rand::rng().fill_bytes(&mut secret);
+        let encoded_secret = URL_SAFE_NO_PAD.encode(secret);
+        let serialized = format!("{PAIRING_TOKEN_PREFIX}{pairing_id}.{encoded_secret}");
+        Ok(Self {
+            serialized: SecretString::from(serialized),
+            pairing_id,
+        })
+    }
+
+    /// Parses a pairing token from the encrypted device-registration channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidPairingToken`] for malformed prefixes, IDs,
+    /// separators, encodings, or secrets.
+    pub fn parse(serialized: SecretString) -> Result<Self, AuthError> {
+        let value = serialized.expose_secret();
+        let remainder = value
+            .strip_prefix(PAIRING_TOKEN_PREFIX)
+            .ok_or(AuthError::InvalidPairingToken)?;
+        let (pairing_id, encoded_secret) = remainder
+            .split_once('.')
+            .ok_or(AuthError::InvalidPairingToken)?;
+        if encoded_secret.contains('.') {
+            return Err(AuthError::InvalidPairingToken);
+        }
+        let pairing_id = Uuid::parse_str(pairing_id).map_err(|_| AuthError::InvalidPairingToken)?;
+        if pairing_id.get_version_num() != 7 {
+            return Err(AuthError::InvalidPairingToken);
+        }
+        let secret = URL_SAFE_NO_PAD
+            .decode(encoded_secret)
+            .map_err(|_| AuthError::InvalidPairingToken)?;
+        if secret.len() != PAIRING_TOKEN_SECRET_BYTES {
+            return Err(AuthError::InvalidPairingToken);
+        }
+        Ok(Self {
+            serialized,
+            pairing_id,
+        })
+    }
+
+    #[must_use]
+    pub const fn serialized(&self) -> &SecretString {
+        &self.serialized
+    }
+
+    #[must_use]
+    pub const fn pairing_id(&self) -> Uuid {
+        self.pairing_id
+    }
+
+    #[must_use]
+    pub fn verifier(&self, pepper: &PairingTokenPepper) -> PairingTokenVerifier {
+        pepper.verifier_for(self)
+    }
+}
+
+/// The HMAC verifier persisted in `device_pairing_tokens.token_verifier`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PairingTokenVerifier(Vec<u8>);
+
+impl PairingTokenVerifier {
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for PairingTokenVerifier {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PairingTokenVerifier([REDACTED])")
+    }
+}
+
 fn validate_identifier(value: String) -> Result<String, AuthError> {
     if value.trim().is_empty() || value.len() > 255 || value.chars().any(char::is_control) {
         return Err(AuthError::InvalidAccessTokenConfiguration);
@@ -596,6 +726,37 @@ mod tests {
         assert!(matches!(
             RefreshToken::generate(Uuid::nil()),
             Err(AuthError::InvalidRefreshToken)
+        ));
+    }
+
+    #[test]
+    fn pairing_tokens_are_opaque_short_lived_credentials() {
+        let pepper = PairingTokenPepper::new(SecretString::from(
+            "test-only-pairing-token-pepper-material-32",
+        ))
+        .expect("pepper should be valid");
+        let other_pepper =
+            PairingTokenPepper::new(SecretString::from("different-test-pairing-token-pepper-32"))
+                .expect("pepper should be valid");
+        let token = PairingToken::generate(version_seven_uuid()).expect("token should generate");
+        let parsed = PairingToken::parse(SecretString::from(token.serialized().expose_secret()))
+            .expect("generated token should parse");
+
+        assert_eq!(token.pairing_id(), parsed.pairing_id());
+        assert_eq!(token.verifier(&pepper), parsed.verifier(&pepper));
+        assert_ne!(token.verifier(&pepper), token.verifier(&other_pepper));
+        assert_eq!(token.verifier(&pepper).as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn pairing_tokens_reject_invalid_or_non_v7_pairing_ids() {
+        assert!(matches!(
+            PairingToken::parse(SecretString::from("josp_not-a-uuid.invalid")),
+            Err(AuthError::InvalidPairingToken)
+        ));
+        assert!(matches!(
+            PairingToken::generate(Uuid::nil()),
+            Err(AuthError::InvalidPairingToken)
         ));
     }
 
