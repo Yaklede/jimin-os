@@ -4,10 +4,11 @@ use secrecy::{ExposeSecret, SecretString};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use thiserror::Error;
 
+pub mod agent;
 pub mod auth;
 pub mod planning;
 
-pub const EXPECTED_SCHEMA_VERSION: i64 = 4;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 5;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
