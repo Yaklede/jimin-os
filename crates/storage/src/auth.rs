@@ -1116,7 +1116,7 @@ async fn write_refresh_audit(
     Ok(())
 }
 
-async fn append_change(
+pub(crate) async fn append_change(
     transaction: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
     entity_type: &str,

@@ -117,6 +117,9 @@ async fn run_server() -> Result<(), &'static str> {
         state = state.with_authentication(authentication);
         state = state.with_pairing(pairing);
     }
+    if let Some(database) = database.as_ref() {
+        state = state.with_planning(database.clone());
+    }
     let listener = TcpListener::bind(config.bind_addr())
         .await
         .map_err(|_| "api.bind_failed")?;

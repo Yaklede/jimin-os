@@ -8,6 +8,7 @@ use jimin_storage::{
         ConsumeDevicePairing, CreateDevicePairing, PairingConsumption, ProvisionLogin,
         RefreshRotation, RotateRefreshToken,
     },
+    planning::{NewScheduleEntry, NewTask, TaskStatus},
 };
 use secrecy::SecretString;
 use time::{Duration as TimeDuration, OffsetDateTime};
@@ -276,6 +277,82 @@ async fn pairing_consumes_one_short_lived_token_into_one_device_session() {
         .expect("consumed token should reject without leaking state");
     assert_eq!(replay, PairingConsumption::Rejected);
 
+    database.close().await;
+}
+
+#[tokio::test]
+async fn manual_schedule_and_tasks_are_scoped_and_emit_current_state() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database
+        .migrate()
+        .await
+        .expect("planning migration should succeed");
+    let provisioned = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let now = OffsetDateTime::now_utc();
+    let schedule = database
+        .create_schedule_entry(&NewScheduleEntry {
+            id: Uuid::now_v7(),
+            user_id: provisioned.profile.id,
+            title: "개인 일정".to_owned(),
+            notes: Some("직접 등록한 일정".to_owned()),
+            starts_at: now + TimeDuration::hours(1),
+            ends_at: now + TimeDuration::hours(2),
+            time_zone: "Asia/Seoul".to_owned(),
+        })
+        .await
+        .expect("manual schedule should persist");
+    let listed = database
+        .schedule_entries_in_range(provisioned.profile.id, now, now + TimeDuration::days(1))
+        .await
+        .expect("schedule query should succeed");
+    assert_eq!(listed, vec![schedule]);
+
+    let task = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id: provisioned.profile.id,
+            title: "오늘 할 일".to_owned(),
+            notes: None,
+            priority: 3,
+            due_at: Some(now + TimeDuration::days(1)),
+        })
+        .await
+        .expect("task should persist");
+    assert_eq!(
+        database
+            .open_tasks_for_user(provisioned.profile.id)
+            .await
+            .expect("open task query should succeed"),
+        vec![task.clone()]
+    );
+    let completed = database
+        .complete_task(provisioned.profile.id, task.id, task.version)
+        .await
+        .expect("complete should succeed")
+        .expect("open task should complete");
+    assert_eq!(completed.status, TaskStatus::Completed);
+    assert!(
+        database
+            .open_tasks_for_user(provisioned.profile.id)
+            .await
+            .expect("open task query should succeed")
+            .is_empty()
+    );
+    assert!(
+        database
+            .complete_task(provisioned.profile.id, task.id, task.version)
+            .await
+            .expect("stale completion should not fail")
+            .is_none()
+    );
     database.close().await;
 }
 

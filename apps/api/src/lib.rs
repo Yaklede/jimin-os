@@ -7,8 +7,8 @@ use std::{collections::BTreeMap, future::Future, sync::Arc};
 use async_trait::async_trait;
 use axum::{
     Extension, Json, Router,
-    extract::{Request, State},
-    http::StatusCode,
+    extract::{Path, Request, State},
+    http::{HeaderMap, StatusCode},
     middleware,
     response::{IntoResponse, Response},
     routing::get,
@@ -17,8 +17,9 @@ use jimin_application::{ApplicationError, DeviceSession, SessionService};
 use jimin_domain::{ClientPlatform, DeviceRegistration};
 use jimin_observability::{RequestId, request_context};
 use jimin_storage::{
-    Database, EXPECTED_SCHEMA_VERSION, Readiness,
+    Database, EXPECTED_SCHEMA_VERSION, Readiness, StorageError,
     auth::{Device, DeviceStatus, Profile},
+    planning::{NewScheduleEntry, NewTask, ScheduleEntry, ScheduleStatus, Task, TaskStatus},
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
@@ -46,6 +47,7 @@ pub struct ApiState {
     expected_schema_version: i64,
     authentication: Option<Arc<auth::Authentication>>,
     pairing: Option<Arc<PairingRuntime>>,
+    planning: Option<Database>,
 }
 
 impl ApiState {
@@ -62,6 +64,7 @@ impl ApiState {
             expected_schema_version: EXPECTED_SCHEMA_VERSION,
             authentication: None,
             pairing: None,
+            planning: None,
         }
     }
 
@@ -85,6 +88,17 @@ impl ApiState {
     #[must_use]
     fn pairing(&self) -> Option<&Arc<PairingRuntime>> {
         self.pairing.as_ref()
+    }
+
+    #[must_use]
+    pub fn with_planning(mut self, planning: Database) -> Self {
+        self.planning = Some(planning);
+        self
+    }
+
+    #[must_use]
+    fn planning(&self) -> Option<&Database> {
+        self.planning.as_ref()
     }
 }
 
@@ -186,6 +200,46 @@ pub struct DeviceListResponse {
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct ScheduleEntryResponse {
+    id: uuid::Uuid,
+    title: String,
+    notes: Option<String>,
+    starts_at: String,
+    ends_at: String,
+    time_zone: String,
+    status: String,
+    version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleListResponse {
+    items: Vec<ScheduleEntryResponse>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskResponse {
+    id: uuid::Uuid,
+    title: String,
+    notes: Option<String>,
+    status: String,
+    priority: i16,
+    due_at: Option<String>,
+    completed_at: Option<String>,
+    version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskListResponse {
+    items: Vec<TaskResponse>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceSessionResponse {
     access_token: String,
     access_token_expires_at: String,
@@ -228,6 +282,38 @@ struct DeviceRegistrationRequest {
     os_version: Option<String>,
 }
 
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ScheduleRangeQuery {
+    from: String,
+    to: String,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CreateScheduleRequest {
+    title: String,
+    notes: Option<String>,
+    starts_at: String,
+    ends_at: String,
+    time_zone: String,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CreateTaskRequest {
+    title: String,
+    notes: Option<String>,
+    priority: i16,
+    due_at: Option<String>,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CompleteTaskRequest {
+    expected_version: i64,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ErrorEnvelope {
@@ -268,7 +354,20 @@ pub(crate) fn error_response(
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(pairing_exchange, refresh_session, create_device_pairing, live, ready, me, devices),
+    paths(
+        pairing_exchange,
+        refresh_session,
+        create_device_pairing,
+        list_schedule_entries,
+        create_schedule_entry,
+        list_open_tasks,
+        create_task,
+        complete_task,
+        live,
+        ready,
+        me,
+        devices
+    ),
     components(schemas(
         LiveStatus,
         ReadyStatus,
@@ -280,7 +379,11 @@ pub(crate) fn error_response(
         DeviceResponse,
         DeviceListResponse,
         DeviceSessionResponse,
-        DevicePairingResponse
+        DevicePairingResponse,
+        ScheduleEntryResponse,
+        ScheduleListResponse,
+        TaskResponse,
+        TaskListResponse
     )),
     tags((name = "health", description = "Process and dependency health"))
 )]
@@ -303,6 +406,15 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/device-pairings",
             axum::routing::post(create_device_pairing),
+        )
+        .route(
+            "/v1/schedule-entries",
+            get(list_schedule_entries).post(create_schedule_entry),
+        )
+        .route("/v1/tasks", get(list_open_tasks).post(create_task))
+        .route(
+            "/v1/tasks/{task_id}/complete",
+            axum::routing::post(complete_task),
         )
         .route("/v1/me", get(me))
         .route("/v1/devices", get(devices))
@@ -469,6 +581,224 @@ async fn devices(
         next_cursor: None,
     })
     .into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/schedule-entries",
+    tag = "planning",
+    params(("from" = String, Query), ("to" = String, Query)),
+    responses((status = 200, body = ScheduleListResponse), (status = 400), (status = 401), (status = 503))
+)]
+async fn list_schedule_entries(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    axum::extract::Query(query): axum::extract::Query<ScheduleRangeQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let (Ok(from), Ok(to)) = (
+        OffsetDateTime::parse(&query.from, &Rfc3339),
+        OffsetDateTime::parse(&query.to, &Rfc3339),
+    ) else {
+        return invalid_request_response(request_id);
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .schedule_entries_in_range(principal.identity().user_id(), from, to)
+        .await
+    {
+        Ok(entries) => match entries
+            .into_iter()
+            .map(schedule_entry_response)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(items) => Json(ScheduleListResponse {
+                items,
+                next_cursor: None,
+            })
+            .into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/schedule-entries",
+    tag = "planning",
+    responses((status = 201, body = ScheduleEntryResponse), (status = 400), (status = 401), (status = 503))
+)]
+async fn create_schedule_entry(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Json(body): Json<CreateScheduleRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let (Ok(starts_at), Ok(ends_at)) = (
+        OffsetDateTime::parse(&body.starts_at, &Rfc3339),
+        OffsetDateTime::parse(&body.ends_at, &Rfc3339),
+    ) else {
+        return invalid_request_response(request_id);
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .create_schedule_entry(&NewScheduleEntry {
+            id: uuid::Uuid::now_v7(),
+            user_id: principal.identity().user_id(),
+            title: body.title,
+            notes: body.notes,
+            starts_at,
+            ends_at,
+            time_zone: body.time_zone,
+        })
+        .await
+    {
+        Ok(entry) => match schedule_entry_response(entry) {
+            Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/tasks",
+    tag = "planning",
+    responses((status = 200, body = TaskListResponse), (status = 401), (status = 503))
+)]
+async fn list_open_tasks(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .open_tasks_for_user(principal.identity().user_id())
+        .await
+    {
+        Ok(tasks) => match tasks
+            .into_iter()
+            .map(task_response)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(items) => Json(TaskListResponse {
+                items,
+                next_cursor: None,
+            })
+            .into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/tasks",
+    tag = "planning",
+    responses((status = 201, body = TaskResponse), (status = 400), (status = 401), (status = 503))
+)]
+async fn create_task(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Json(body): Json<CreateTaskRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let due_at = match body.due_at {
+        Some(value) => match OffsetDateTime::parse(&value, &Rfc3339) {
+            Ok(value) => Some(value),
+            Err(_) => return invalid_request_response(request_id),
+        },
+        None => None,
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .create_task(&NewTask {
+            id: uuid::Uuid::now_v7(),
+            user_id: principal.identity().user_id(),
+            title: body.title,
+            notes: body.notes,
+            priority: body.priority,
+            due_at,
+        })
+        .await
+    {
+        Ok(task) => match task_response(task) {
+            Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/tasks/{task_id}/complete",
+    tag = "planning",
+    params(("task_id" = String, Path)),
+    responses((status = 200, body = TaskResponse), (status = 400), (status = 401), (status = 409), (status = 503))
+)]
+async fn complete_task(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(task_id): Path<uuid::Uuid>,
+    Json(body): Json<CompleteTaskRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .complete_task(
+            principal.identity().user_id(),
+            task_id,
+            body.expected_version,
+        )
+        .await
+    {
+        Ok(Some(task)) => match task_response(task) {
+            Ok(response) => Json(response).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Ok(None) => error_response(
+            StatusCode::CONFLICT,
+            "task.version_conflict",
+            "할 일이 다른 기기에서 변경되었어요. 최신 상태를 확인해 주세요.",
+            request_id,
+            false,
+        ),
+        Err(error) => storage_error_response(&error, request_id),
+    }
 }
 
 #[utoipa::path(
@@ -686,6 +1016,66 @@ where
         axum::http::HeaderValue::from_static("no-store"),
     );
     response
+}
+
+fn unavailable_response(request_id: RequestId) -> Response {
+    error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "service.temporarily_unavailable",
+        "잠시 후 다시 시도해 주세요.",
+        request_id,
+        true,
+    )
+}
+
+fn storage_error_response(error: &StorageError, request_id: RequestId) -> Response {
+    match error {
+        StorageError::InvalidConfiguration | StorageError::IdentityConflict => {
+            invalid_request_response(request_id)
+        }
+        StorageError::MigrationUnavailable | StorageError::PersistenceUnavailable => {
+            unavailable_response(request_id)
+        }
+    }
+}
+
+fn schedule_entry_response(entry: ScheduleEntry) -> Result<ScheduleEntryResponse, ()> {
+    Ok(ScheduleEntryResponse {
+        id: entry.id,
+        title: entry.title,
+        notes: entry.notes,
+        starts_at: entry.starts_at.format(&Rfc3339).map_err(|_| ())?,
+        ends_at: entry.ends_at.format(&Rfc3339).map_err(|_| ())?,
+        time_zone: entry.time_zone,
+        status: match entry.status {
+            ScheduleStatus::Confirmed => "confirmed".to_owned(),
+            ScheduleStatus::Cancelled => "cancelled".to_owned(),
+        },
+        version: entry.version,
+    })
+}
+
+fn task_response(task: Task) -> Result<TaskResponse, ()> {
+    Ok(TaskResponse {
+        id: task.id,
+        title: task.title,
+        notes: task.notes,
+        status: match task.status {
+            TaskStatus::Open => "open".to_owned(),
+            TaskStatus::Completed => "completed".to_owned(),
+            TaskStatus::Cancelled => "cancelled".to_owned(),
+        },
+        priority: task.priority,
+        due_at: task
+            .due_at
+            .map(|value| value.format(&Rfc3339).map_err(|_| ()))
+            .transpose()?,
+        completed_at: task
+            .completed_at
+            .map(|value| value.format(&Rfc3339).map_err(|_| ()))
+            .transpose()?,
+        version: task.version,
+    })
 }
 
 fn me_response(profile: Profile) -> MeResponse {
@@ -993,7 +1383,10 @@ mod tests {
                 "/v1/auth/refresh",
                 "/v1/device-pairings",
                 "/v1/devices",
-                "/v1/me"
+                "/v1/me",
+                "/v1/schedule-entries",
+                "/v1/tasks",
+                "/v1/tasks/{task_id}/complete"
             ]
         );
     }

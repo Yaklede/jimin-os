@@ -5,8 +5,9 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use thiserror::Error;
 
 pub mod auth;
+pub mod planning;
 
-pub const EXPECTED_SCHEMA_VERSION: i64 = 3;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 4;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
