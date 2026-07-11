@@ -1,5 +1,9 @@
 {
 	admin off
+	# This deployment serves exactly one private hostname. Some mobile TLS
+	# clients omit SNI for an IP-based test URL, so select that hostname's
+	# managed certificate instead of failing the handshake.
+	default_sni {$JIMIN_OS_HOSTNAME}
 	persist_config off
 	log {
 		output stdout
