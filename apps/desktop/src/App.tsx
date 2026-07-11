@@ -47,16 +47,15 @@ import {
   readOrCreateInstallationId,
   saveDeviceSession,
 } from "./device-session";
+import { personalServerBaseUrl } from "./server-config";
 import { createUuidV7 } from "./uuid";
 
-const defaultApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "";
-
-type AppMode = "setup" | "loading" | "ready" | "error";
+type AppMode = "configuration" | "setup" | "loading" | "ready" | "error";
 type AppView = "today" | "conversations";
 type ConversationJobs = Record<string, AgentJob>;
 
 export default function App() {
-  const [apiBaseUrl, setApiBaseUrl] = useState(defaultApiBaseUrl);
+  const apiBaseUrl = personalServerBaseUrl ?? "";
   const [tokens, setTokens] = useState<SessionTokens | undefined>(undefined);
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [mode, setMode] = useState<AppMode>("loading");
@@ -151,7 +150,7 @@ export default function App() {
             apiBaseUrl,
             tokens.refreshToken,
           );
-          await saveDeviceSession({ apiBaseUrl, tokens: refreshed });
+          await saveDeviceSession({ tokens: refreshed });
           setTokens(refreshed);
           return;
         } catch {
@@ -182,11 +181,18 @@ export default function App() {
   useEffect(() => {
     let current = true;
 
+    if (!apiBaseUrl) {
+      setMode("configuration");
+      setSessionLoaded(true);
+      return () => {
+        current = false;
+      };
+    }
+
     void readDeviceSession()
       .then((stored) => {
         if (!current) return;
         if (stored) {
-          setApiBaseUrl(stored.apiBaseUrl);
           setTokens(stored.tokens);
           setMode("loading");
         } else {
@@ -283,10 +289,14 @@ export default function App() {
 
   async function pairDevice(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!apiBaseUrl) {
+      setMode("configuration");
+      return;
+    }
     const form = new FormData(event.currentTarget);
     const pairingCode = String(form.get("pairingCode") ?? "").trim();
     const deviceName = String(form.get("deviceName") ?? "").trim();
-    if (!apiBaseUrl.trim() || !pairingCode || !deviceName) {
+    if (!pairingCode || !deviceName) {
       setMessage(copy.messages.setupRequired);
       return;
     }
@@ -298,10 +308,7 @@ export default function App() {
         deviceName,
         await readOrCreateInstallationId(),
       );
-      await saveDeviceSession({
-        apiBaseUrl,
-        tokens: nextTokens,
-      });
+      await saveDeviceSession({ tokens: nextTokens });
       setTokens(nextTokens);
       setMessage(undefined);
     } catch {
@@ -488,40 +495,40 @@ export default function App() {
                 </button>
               </nav>
             )}
-            <button
-              className="quiet-button focus-visible-control"
-              type="button"
-              aria-label={copy.actions.refresh}
-              onClick={() => void refresh()}
-              disabled={!tokens || mode === "loading"}
-            >
-              <RefreshCw aria-hidden="true" />
-              <span className="refresh-label">{copy.actions.refresh}</span>
-            </button>
+            {tokens && (
+              <button
+                className="quiet-button focus-visible-control"
+                type="button"
+                aria-label={copy.actions.refresh}
+                onClick={() => void refresh()}
+                disabled={mode === "loading"}
+              >
+                <RefreshCw aria-hidden="true" />
+                <span className="refresh-label">{copy.actions.refresh}</span>
+              </button>
+            )}
           </div>
         </div>
       </header>
       <main
         className={
-          mode === "setup"
+          mode === "setup" || mode === "configuration"
             ? "setup-main"
             : view === "today"
               ? "planning-page"
               : "conversation-main"
         }
       >
-        {mode === "setup" ? (
+        {mode === "configuration" ? (
+          <ServerConfigurationPanel />
+        ) : mode === "setup" ? (
           <>
             {message && (
               <p className="inline-alert" role="alert">
                 {message}
               </p>
             )}
-            <SetupPanel
-              apiBaseUrl={apiBaseUrl}
-              onApiBaseUrlChange={setApiBaseUrl}
-              onSubmit={pairDevice}
-            />
+            <SetupPanel onSubmit={pairDevice} />
           </>
         ) : view === "conversations" ? (
           <ConversationWorkspace
@@ -691,12 +698,8 @@ export default function App() {
 }
 
 function SetupPanel({
-  apiBaseUrl,
-  onApiBaseUrlChange,
   onSubmit,
 }: {
-  apiBaseUrl: string;
-  onApiBaseUrlChange(value: string): void;
   onSubmit(event: FormEvent<HTMLFormElement>): void;
 }) {
   return (
@@ -711,37 +714,7 @@ function SetupPanel({
         <strong>{copy.setup.scopeTitle}</strong>
         <p>{copy.setup.scopeDescription}</p>
       </aside>
-      <ol className="setup-steps" aria-label={copy.setup.preparationLabel}>
-        <li>
-          <span aria-hidden="true">1</span>
-          <div>
-            <strong>{copy.setup.prepareServerTitle}</strong>
-            <p>{copy.setup.prepareServerDescription}</p>
-          </div>
-        </li>
-        <li>
-          <span aria-hidden="true">2</span>
-          <div>
-            <strong>{copy.setup.prepareCodeTitle}</strong>
-            <p>{copy.setup.prepareCodeDescription}</p>
-          </div>
-        </li>
-      </ol>
       <form className="setup-form" onSubmit={onSubmit}>
-        <div className="field">
-          <label htmlFor="server-url">{copy.setup.serverLabel}</label>
-          <p id="server-url-hint" className="field__hint">
-            {copy.setup.serverHint}
-          </p>
-          <input
-            id="server-url"
-            type="url"
-            value={apiBaseUrl}
-            required
-            aria-describedby="server-url-hint"
-            onChange={(event) => onApiBaseUrlChange(event.target.value)}
-          />
-        </div>
         <div className="field">
           <label htmlFor="device-name">{copy.setup.deviceLabel}</label>
           <p id="device-name-hint" className="field__hint">
@@ -773,6 +746,28 @@ function SetupPanel({
           {copy.actions.connect}
         </button>
       </form>
+    </section>
+  );
+}
+
+function ServerConfigurationPanel() {
+  return (
+    <section className="setup-panel" aria-labelledby="configuration-title">
+      <div className="setup-panel__intro">
+        <Server aria-hidden="true" />
+        <p className="setup-panel__eyebrow">{copy.configuration.eyebrow}</p>
+        <h1 id="configuration-title">{copy.configuration.title}</h1>
+        <p className="setup-panel__description">
+          {copy.configuration.description}
+        </p>
+      </div>
+      <aside
+        className="setup-panel__scope"
+        aria-label={copy.configuration.nextTitle}
+      >
+        <strong>{copy.configuration.nextTitle}</strong>
+        <p>{copy.configuration.nextDescription}</p>
+      </aside>
     </section>
   );
 }

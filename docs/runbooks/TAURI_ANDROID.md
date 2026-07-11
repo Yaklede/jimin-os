@@ -34,6 +34,9 @@ pnpm --filter @jimin-os/desktop tauri android dev --target aarch64
 
 ## Debug APK build
 
+Android 패키지를 만들기 전에는 [클라이언트 빌드 설정](CLIENT_BUILD_CONFIGURATION.md)을
+따라 개인 서버 origin을 고정한다. 앱은 기기 등록 화면에서 이 주소를 입력받지 않는다.
+
 ```bash
 pnpm --filter @jimin-os/desktop tauri android build --debug --apk --target aarch64 --ci
 ```

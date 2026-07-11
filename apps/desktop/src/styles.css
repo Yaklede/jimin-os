@@ -935,43 +935,18 @@ textarea:focus-visible {
   padding-left: 16px;
 }
 
-.setup-panel__scope strong,
-.setup-steps strong {
+.setup-panel__scope strong {
   color: var(--text-primary);
   font-size: 14px;
   font-weight: 600;
   line-height: 1.4;
 }
 
-.setup-panel__scope p,
-.setup-steps p {
+.setup-panel__scope p {
   margin: 4px 0 0;
   color: var(--text-muted);
   font-size: 14px;
   line-height: 1.5;
-}
-
-.setup-steps {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  border-top: 1px solid var(--border);
-}
-
-.setup-steps li {
-  display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
-  gap: 12px;
-  padding: 16px 0;
-  border-bottom: 1px solid var(--border);
-}
-
-.setup-steps li > span {
-  color: var(--accent);
-  font-size: 14px;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-  line-height: 1.4;
 }
 
 .setup-form {

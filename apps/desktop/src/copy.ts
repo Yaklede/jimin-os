@@ -11,7 +11,7 @@ export const copy = {
     checkAgainLabel: "서버 상태 다시 확인하기",
     checking: "확인하고 있어요",
     refresh: "새로고침",
-    connect: "서버 연결하기",
+    connect: "이 기기 연결하기",
     addTask: "할 일 추가하기",
     addSchedule: "일정 추가하기",
     complete: "완료하기",
@@ -27,7 +27,8 @@ export const copy = {
     attentionTitle: "서버 준비가 더 필요해요",
     attentionBody: "필요한 항목을 확인한 뒤 다시 시도해 주세요.",
     disconnectedTitle: "서버에 연결하지 못했어요",
-    disconnectedBody: "서버 주소와 실행 상태를 확인한 뒤 다시 시도해 주세요.",
+    disconnectedBody:
+      "개인 서버 실행 상태와 네트워크 연결을 확인한 뒤 다시 시도해 주세요.",
   },
   checks: {
     ready: "준비됨",
@@ -36,26 +37,25 @@ export const copy = {
   },
   setup: {
     eyebrow: "Jimin OS 시작하기",
-    title: "개인 서버와 연결해요",
+    title: "이 기기를 등록해요",
     description:
-      "이 기기를 등록하면 일정, 할 일, 대화를 개인 서버에서 안전하게 사용할 수 있어요.",
-    scopeTitle: "연결하는 대상",
+      "개인 서버에 연결하면 일정, 할 일, 대화를 이 기기에서도 사용할 수 있어요.",
+    scopeTitle: "개인 서버가 설정되어 있어요",
     scopeDescription:
-      "이 화면에서는 휴대폰과 개인 서버만 연결해요. ChatGPT 계정은 개인 서버에서 따로 관리돼요.",
-    prepareServerTitle: "개인 서버 주소를 준비해요",
-    prepareServerDescription:
-      "개인 서버의 HTTPS 주소가 필요해요. 예: https://jimin.example.com",
-    prepareCodeTitle: "일회용 연결 코드를 준비해요",
-    prepareCodeDescription:
-      "서버에서 만든 연결 코드 또는 QR에서 읽은 전체 주소를 붙여 넣을 수 있어요.",
-    preparationLabel: "연결 준비",
-    serverLabel: "개인 서버 주소",
-    serverHint: "개인 서버의 HTTPS 주소를 입력해 주세요.",
+      "이 앱은 하나의 개인 서버에만 연결돼요. 여기서는 이 기기만 등록해요.",
     deviceLabel: "이 기기 이름",
     deviceHint: "다른 기기와 구분할 수 있는 이름을 적어 주세요.",
     defaultDeviceName: "내 기기",
     tokenLabel: "일회용 연결 코드",
     tokenHint: "서버에서 만든 코드나 QR에서 읽은 전체 주소를 붙여 넣어 주세요.",
+  },
+  configuration: {
+    eyebrow: "Jimin OS 설정 확인",
+    title: "개인 서버 설정이 필요해요",
+    description: "이 설치본에는 연결할 개인 서버가 아직 설정되지 않았어요.",
+    nextTitle: "서버 주소를 입력할 필요는 없어요",
+    nextDescription:
+      "개인 서버가 설정된 설치본으로 다시 설치한 뒤 이 기기를 등록해 주세요.",
   },
   schedule: {
     title: "다가오는 일정",
@@ -94,10 +94,9 @@ export const copy = {
     endsAt: "종료 시간",
   },
   messages: {
-    setupRequired:
-      "개인 서버 주소, 기기 이름, 일회용 연결 코드를 모두 입력해 주세요.",
+    setupRequired: "기기 이름과 일회용 연결 코드를 모두 입력해 주세요.",
     connectionNotice:
-      "서버와 연결할 수 없어요. 개인 서버 주소와 일회용 연결 코드를 확인한 뒤 다시 시도해 주세요.",
+      "이 기기를 연결할 수 없어요. 새 일회용 연결 코드를 만든 뒤 다시 시도해 주세요.",
     storageNotice:
       "기기 연결 정보를 안전하게 저장할 수 없어요. 앱을 다시 연 뒤 다시 시도해 주세요.",
     sessionExpired:

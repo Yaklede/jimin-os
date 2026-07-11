@@ -7,7 +7,6 @@ const previewSessionKey = "jimin-os-dev-session";
 const previewInstallationKey = "jimin-os-dev-installation";
 
 export interface StoredDeviceSession {
-  apiBaseUrl: string;
   tokens: SessionTokens;
 }
 
@@ -70,7 +69,6 @@ function parseSession(value: string): StoredDeviceSession | undefined {
     if (
       typeof parsed !== "object" ||
       parsed === null ||
-      typeof (parsed as { apiBaseUrl?: unknown }).apiBaseUrl !== "string" ||
       typeof (parsed as { tokens?: { accessToken?: unknown } }).tokens
         ?.accessToken !== "string" ||
       typeof (parsed as { tokens?: { refreshToken?: unknown } }).tokens
@@ -79,7 +77,9 @@ function parseSession(value: string): StoredDeviceSession | undefined {
       return undefined;
     }
 
-    return parsed as StoredDeviceSession;
+    return {
+      tokens: (parsed as { tokens: SessionTokens }).tokens,
+    };
   } catch {
     return undefined;
   }

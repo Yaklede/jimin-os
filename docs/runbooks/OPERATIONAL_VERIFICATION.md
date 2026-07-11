@@ -56,7 +56,7 @@ docker compose <compose-args> exec -T api jimin-api pairing create
 ## 3. Mac 검증
 
 1. 현재 commit에서 만든 `Jimin OS_0.1.0_aarch64.dmg`를 열어 앱을 실행한다.
-2. setup 화면에 private HTTPS 서버 주소, 기기 이름, 일회용 연결 값을 입력한다.
+2. 개인 서버 주소가 포함된 설치본의 setup 화면에서 기기 이름과 일회용 연결 값을 입력한다.
 3. 연결 후 오늘 화면에서 할 일 하나와 일정 하나를 만든다.
 4. 할 일을 완료하고 일정·할 일이 화면에 맞게 갱신되는지 확인한다.
 5. 앱을 완전히 종료한 뒤 다시 열어 session과 오늘 데이터가 유지되는지 확인한다.
