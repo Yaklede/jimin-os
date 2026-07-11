@@ -361,7 +361,10 @@ export default function App() {
     setConversationError(undefined);
   }
 
-  async function sendConversationRequest(text: string): Promise<boolean> {
+  async function sendConversationRequest(
+    text: string,
+    clientMessageId: string,
+  ): Promise<boolean> {
     if (!tokens) return false;
     let conversationId = selectedConversationId;
     setConversationError(undefined);
@@ -381,6 +384,7 @@ export default function App() {
         tokens.accessToken,
         conversationId,
         text.trim(),
+        clientMessageId,
       );
       setActiveJobId(queued.jobId);
       setActiveJobState(queued.state);

@@ -201,6 +201,16 @@ struct ClaimedJobRow {
 }
 
 #[derive(sqlx::FromRow)]
+struct ExistingAgentTurnRow {
+    id: Uuid,
+    input_message_id: Uuid,
+    conversation_id: Uuid,
+    state: String,
+    version: i64,
+    content: String,
+}
+
+#[derive(sqlx::FromRow)]
 struct ConversationMessageRow {
     id: Uuid,
     role: String,
@@ -246,6 +256,20 @@ impl From<ClaimedJobRow> for ClaimedAgentJob {
             input_content: row.input_content,
             codex_thread_id: row.codex_thread_id,
         }
+    }
+}
+
+impl TryFrom<ExistingAgentTurnRow> for QueuedAgentTurn {
+    type Error = StorageError;
+
+    fn try_from(row: ExistingAgentTurnRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            job_id: row.id,
+            message_id: row.input_message_id,
+            conversation_id: row.conversation_id,
+            state: parse_job_state(&row.state)?,
+            version: row.version,
+        })
     }
 }
 
@@ -455,20 +479,26 @@ impl Database {
             .begin()
             .await
             .map_err(|error| classify(&error))?;
-        let exists = sqlx::query_scalar::<_, bool>(
-            "\
-            SELECT EXISTS(
-                SELECT 1 FROM conversations
-                WHERE id = $1 AND user_id = $2 AND status = 'active'
-            )",
-        )
-        .bind(turn.conversation_id)
-        .bind(turn.user_id)
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(|error| classify(&error))?;
-        if !exists {
+        if !owns_active_conversation(&mut transaction, turn.user_id, turn.conversation_id).await? {
             return Err(StorageError::IdentityConflict);
+        }
+
+        let existing = existing_agent_turn(
+            &mut transaction,
+            turn.conversation_id,
+            turn.client_message_id,
+        )
+        .await?;
+        if let Some(existing) = existing {
+            if existing.content != turn.content.trim() {
+                return Err(StorageError::IdentityConflict);
+            }
+            let queued = QueuedAgentTurn::try_from(existing)?;
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| classify(&error))?;
+            return Ok(queued);
         }
 
         let inserted = sqlx::query(
@@ -823,6 +853,50 @@ impl Database {
             .map_err(|error| classify(&error))?;
         Ok(true)
     }
+}
+
+async fn existing_agent_turn(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    conversation_id: Uuid,
+    client_message_id: Uuid,
+) -> Result<Option<ExistingAgentTurnRow>, StorageError> {
+    sqlx::query_as::<_, ExistingAgentTurnRow>(
+        "\
+        SELECT job.id,
+               job.input_message_id,
+               job.conversation_id,
+               job.state,
+               job.version,
+               message.content
+        FROM messages AS message
+        INNER JOIN agent_jobs AS job ON job.input_message_id = message.id
+        WHERE message.conversation_id = $1
+          AND message.client_message_id = $2",
+    )
+    .bind(conversation_id)
+    .bind(client_message_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| classify(&error))
+}
+
+async fn owns_active_conversation(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    conversation_id: Uuid,
+) -> Result<bool, StorageError> {
+    sqlx::query_scalar::<_, bool>(
+        "\
+        SELECT EXISTS(
+            SELECT 1 FROM conversations
+            WHERE id = $1 AND user_id = $2 AND status = 'active'
+        )",
+    )
+    .bind(conversation_id)
+    .bind(user_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|error| classify(&error))
 }
 
 fn parse_job_state(value: &str) -> Result<AgentJobState, StorageError> {

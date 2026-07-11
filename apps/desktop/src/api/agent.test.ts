@@ -1,12 +1,22 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { fetchAgentJob, queueAgentTurn } from "./agent";
+import { createUuidV7, fetchAgentJob, queueAgentTurn } from "./agent";
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("agent API", () => {
+  it("creates version-seven IDs for retry-safe client turns", () => {
+    vi.stubGlobal("crypto", {
+      getRandomValues: (value: Uint8Array) => value.fill(0),
+    });
+    vi.spyOn(Date, "now").mockReturnValue(1_784_169_600_000);
+
+    expect(createUuidV7()).toMatch(/^019f68cb-9400-7000-8000-000000000000$/);
+  });
+
   it("queues a text turn against the selected conversation", async () => {
     const fetchMock = vi
       .fn<typeof fetch>()
@@ -17,13 +27,13 @@ describe("agent API", () => {
         ),
       );
     vi.stubGlobal("fetch", fetchMock);
-    vi.stubGlobal("crypto", { randomUUID: () => "message-client-1" });
 
     const queued = await queueAgentTurn(
       "https://jimin-os.example/",
       "session-access",
       "conversation-1",
       "오늘 할 일을 정리해줘",
+      "message-client-1",
     );
 
     expect(queued.state).toBe("queued");

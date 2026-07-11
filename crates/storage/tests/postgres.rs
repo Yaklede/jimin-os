@@ -358,6 +358,10 @@ async fn manual_schedule_and_tasks_are_scoped_and_emit_current_state() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The integration test verifies one durable agent turn lifecycle and its replay path."
+)]
 async fn queued_agent_turn_is_leased_and_completed_once() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;
@@ -374,6 +378,7 @@ async fn queued_agent_turn_is_leased_and_completed_once() {
         .await
         .expect("fixture owner should exist");
     let conversation_id = Uuid::now_v7();
+    let client_message_id = Uuid::now_v7();
     database
         .create_conversation(&NewConversation {
             id: conversation_id,
@@ -386,13 +391,26 @@ async fn queued_agent_turn_is_leased_and_completed_once() {
         .enqueue_agent_turn(&NewAgentTurn {
             job_id: Uuid::now_v7(),
             message_id: Uuid::now_v7(),
-            client_message_id: Uuid::now_v7(),
+            client_message_id,
             user_id: provisioned.profile.id,
             conversation_id,
             content: "오늘 일정을 정리해줘".to_owned(),
         })
         .await
         .expect("turn should queue");
+    let replayed = database
+        .enqueue_agent_turn(&NewAgentTurn {
+            job_id: Uuid::now_v7(),
+            message_id: Uuid::now_v7(),
+            client_message_id,
+            user_id: provisioned.profile.id,
+            conversation_id,
+            content: "오늘 일정을 정리해줘".to_owned(),
+        })
+        .await
+        .expect("same client turn should be replayed");
+    assert_eq!(replayed.job_id, queued.job_id);
+    assert_eq!(replayed.message_id, queued.message_id);
     let runner_id = "integration-agent";
     let claim = database
         .claim_next_agent_job(runner_id, Duration::from_secs(30))

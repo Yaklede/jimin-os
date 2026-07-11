@@ -7,7 +7,12 @@ import {
 } from "lucide-react";
 import { FormEvent, useRef, useState } from "react";
 
-import type { AgentJob, Conversation, ConversationMessage } from "../api/agent";
+import {
+  createUuidV7,
+  type AgentJob,
+  type Conversation,
+  type ConversationMessage,
+} from "../api/agent";
 import { copy } from "../copy";
 
 type ConversationWorkspaceProps = {
@@ -20,7 +25,7 @@ type ConversationWorkspaceProps = {
   error: string | undefined;
   onSelect(conversationId: string): void;
   onStartConversation(): void;
-  onSend(text: string): Promise<boolean>;
+  onSend(text: string, clientMessageId: string): Promise<boolean>;
 };
 
 export function ConversationWorkspace({
@@ -37,12 +42,18 @@ export function ConversationWorkspace({
 }: ConversationWorkspaceProps) {
   const [draft, setDraft] = useState("");
   const composer = useRef<HTMLTextAreaElement>(null);
+  const pendingMessageId = useRef<string | undefined>(undefined);
   const isWaiting = hasActiveJob;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const sent = await onSend(draft);
-    if (sent) setDraft("");
+    const clientMessageId = pendingMessageId.current ?? createUuidV7();
+    pendingMessageId.current = clientMessageId;
+    const sent = await onSend(draft, clientMessageId);
+    if (sent) {
+      pendingMessageId.current = undefined;
+      setDraft("");
+    }
   }
 
   function startConversation() {
