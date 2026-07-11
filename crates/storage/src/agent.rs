@@ -335,24 +335,49 @@ impl Database {
             .begin()
             .await
             .map_err(|error| classify(&error))?;
-        let row = sqlx::query_as::<_, ConversationRow>(
+        let normalized_title = conversation
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let inserted = sqlx::query_as::<_, ConversationRow>(
             "\
             INSERT INTO conversations (id, user_id, title)
             VALUES ($1, $2, $3)
+            ON CONFLICT (id) DO NOTHING
             RETURNING id, title, status, last_message_at, version",
         )
         .bind(conversation.id)
         .bind(conversation.user_id)
-        .bind(
-            conversation
-                .title
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty()),
-        )
-        .fetch_one(&mut *transaction)
+        .bind(normalized_title)
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(|error| classify(&error))?;
+        let Some(row) = inserted else {
+            let existing = sqlx::query_as::<_, ConversationRow>(
+                "\
+                SELECT id, title, status, last_message_at, version
+                FROM conversations
+                WHERE id = $1 AND user_id = $2",
+            )
+            .bind(conversation.id)
+            .bind(conversation.user_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|error| classify(&error))?;
+            let Some(existing) = existing else {
+                return Err(StorageError::IdentityConflict);
+            };
+            if existing.title.as_deref() != normalized_title {
+                return Err(StorageError::IdentityConflict);
+            }
+            let conversation = Conversation::try_from(existing)?;
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| classify(&error))?;
+            return Ok(conversation);
+        };
         let conversation = Conversation::try_from(row)?;
         append_change(
             &mut transaction,

@@ -43,20 +43,29 @@ export function ConversationWorkspace({
   const [draft, setDraft] = useState("");
   const composer = useRef<HTMLTextAreaElement>(null);
   const pendingMessageId = useRef<string | undefined>(undefined);
+  const pendingMessageText = useRef<string | undefined>(undefined);
   const isWaiting = hasActiveJob;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const clientMessageId = pendingMessageId.current ?? createUuidV7();
+    const text = draft.trim();
+    const clientMessageId =
+      pendingMessageId.current && pendingMessageText.current === text
+        ? pendingMessageId.current
+        : createUuidV7();
     pendingMessageId.current = clientMessageId;
-    const sent = await onSend(draft, clientMessageId);
+    pendingMessageText.current = text;
+    const sent = await onSend(text, clientMessageId);
     if (sent) {
       pendingMessageId.current = undefined;
+      pendingMessageText.current = undefined;
       setDraft("");
     }
   }
 
   function startConversation() {
+    pendingMessageId.current = undefined;
+    pendingMessageText.current = undefined;
     onStartConversation();
     composer.current?.focus();
   }

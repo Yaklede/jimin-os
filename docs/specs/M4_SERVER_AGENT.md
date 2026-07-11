@@ -320,11 +320,14 @@ POST /v1/conversations
 Idempotency-Key: <uuidv7>
 
 {
+  "clientConversationId": "019...",
   "title": null
 }
 ```
 
-`201`로 Jimin OS conversation을 반환한다. Codex thread는 첫 turn을 실행할 때 lazy create한다.
+`201`로 Jimin OS conversation을 반환한다. 같은 `clientConversationId`와 같은
+title을 재전송하면 기존 conversation을 반환한다. Codex thread는 첫 turn을 실행할
+때 lazy create한다.
 
 ### turn 생성
 

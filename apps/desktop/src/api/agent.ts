@@ -78,9 +78,11 @@ export async function fetchConversations(
 export async function createConversation(
   baseUrl: string,
   access: string,
+  clientConversationId: string,
   title: string | null,
 ): Promise<Conversation> {
   return request<Conversation>(baseUrl, access, "/v1/conversations", {
+    clientConversationId,
     title,
   });
 }

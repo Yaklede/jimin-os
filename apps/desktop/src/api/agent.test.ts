@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  createConversation,
   fetchAgentJob,
   fetchLatestConversationJob,
   queueAgentTurn,
@@ -46,6 +47,31 @@ describe("agent API", () => {
       "https://jimin-os.example/v1/conversations/conversation-1/turns",
       expect.objectContaining({ method: "POST" }),
     );
+  });
+
+  it("creates a conversation with a client-held retry identifier", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          '{"id":"conversation-1","title":"오늘 일정","status":"active","lastMessageAt":null,"version":1}',
+          { status: 201, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createConversation(
+      "https://jimin-os.example/",
+      "session-access",
+      "019f68cb-9400-7000-8000-000000000000",
+      "오늘 일정",
+    );
+
+    const request = fetchMock.mock.calls[0]?.[1];
+    expect(JSON.parse(String(request?.body))).toMatchObject({
+      clientConversationId: "019f68cb-9400-7000-8000-000000000000",
+      title: "오늘 일정",
+    });
   });
 
   it("returns the current job state without exposing server internals", async () => {

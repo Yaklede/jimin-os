@@ -6,7 +6,14 @@ import {
   RefreshCw,
   Server,
 } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import {
   PlanningRequestError,
@@ -40,6 +47,7 @@ import {
   readOrCreateInstallationId,
   saveDeviceSession,
 } from "./device-session";
+import { createUuidV7 } from "./uuid";
 
 const defaultApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/server";
 
@@ -69,6 +77,7 @@ export default function App() {
   const [conversationJobs, setConversationJobs] = useState<ConversationJobs>(
     {},
   );
+  const pendingConversationId = useRef<string | undefined>(undefined);
   const [message, setMessage] = useState<string | undefined>(undefined);
 
   const refreshConversations = useCallback(async () => {
@@ -164,6 +173,7 @@ export default function App() {
       setConversationMessages([]);
       setSelectedConversationId(undefined);
       setConversationJobs({});
+      pendingConversationId.current = undefined;
       setMode("setup");
       setMessage(copy.messages.sessionExpired);
     }
@@ -390,6 +400,7 @@ export default function App() {
     setSelectedConversationId(undefined);
     setConversationMessages([]);
     setConversationError(undefined);
+    pendingConversationId.current = undefined;
   }
 
   async function sendConversationRequest(
@@ -401,11 +412,16 @@ export default function App() {
     setConversationError(undefined);
     try {
       if (!conversationId) {
+        const clientConversationId =
+          pendingConversationId.current ?? createUuidV7();
+        pendingConversationId.current = clientConversationId;
         const conversation = await createConversation(
           apiBaseUrl,
           tokens.accessToken,
+          clientConversationId,
           conversationTitle(text),
         );
+        pendingConversationId.current = undefined;
         conversationId = conversation.id;
         setConversations((current) => [conversation, ...current]);
         setSelectedConversationId(conversation.id);

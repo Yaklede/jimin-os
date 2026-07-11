@@ -385,6 +385,7 @@ struct CreateTaskRequest {
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CreateConversationRequest {
+    client_conversation_id: uuid::Uuid,
     title: Option<String>,
 }
 
@@ -988,7 +989,7 @@ async fn create_conversation(
     };
     match agent
         .create_conversation(&NewConversation {
-            id: uuid::Uuid::now_v7(),
+            id: body.client_conversation_id,
             user_id: principal.identity().user_id(),
             title: body.title,
         })
@@ -1863,7 +1864,9 @@ mod tests {
                     .method("POST")
                     .uri("/v1/conversations")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"title":null}"#))
+                    .body(Body::from(
+                        r#"{"clientConversationId":"019f68cb-9400-7000-8000-000000000000","title":null}"#,
+                    ))
                     .expect("request should be valid"),
             )
             .await

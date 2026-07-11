@@ -379,7 +379,7 @@ async fn queued_agent_turn_is_leased_and_completed_once() {
         .expect("fixture owner should exist");
     let conversation_id = Uuid::now_v7();
     let client_message_id = Uuid::now_v7();
-    database
+    let created_conversation = database
         .create_conversation(&NewConversation {
             id: conversation_id,
             user_id: provisioned.profile.id,
@@ -387,6 +387,15 @@ async fn queued_agent_turn_is_leased_and_completed_once() {
         })
         .await
         .expect("conversation should persist");
+    let replayed_conversation = database
+        .create_conversation(&NewConversation {
+            id: conversation_id,
+            user_id: provisioned.profile.id,
+            title: Some("개인 운영체제".to_owned()),
+        })
+        .await
+        .expect("same client conversation should be replayed");
+    assert_eq!(replayed_conversation.id, created_conversation.id);
     let queued = database
         .enqueue_agent_turn(&NewAgentTurn {
             job_id: Uuid::now_v7(),
