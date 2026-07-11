@@ -1,0 +1,226 @@
+export interface SessionTokens {
+  accessToken: string;
+  refreshToken: string;
+}
+
+export interface ScheduleEntry {
+  id: string;
+  title: string;
+  notes: string | null;
+  startsAt: string;
+  endsAt: string;
+  timeZone: string;
+  status: "confirmed" | "cancelled";
+  version: number;
+}
+
+export interface Task {
+  id: string;
+  title: string;
+  notes: string | null;
+  status: "open" | "completed" | "cancelled";
+  priority: number;
+  dueAt: string | null;
+  completedAt: string | null;
+  version: number;
+}
+
+interface PairingResponse extends SessionTokens {
+  user: unknown;
+  device: unknown;
+  syncCursor: string;
+}
+
+interface ListResponse<T> {
+  items: T[];
+  nextCursor: string | null;
+}
+
+export class PlanningRequestError extends Error {
+  readonly code: "unauthorized" | "invalid" | "conflict" | "unavailable";
+
+  constructor(code: PlanningRequestError["code"]) {
+    super(code);
+    this.name = "PlanningRequestError";
+    this.code = code;
+  }
+}
+
+export async function exchangePairingCode(
+  baseUrl: string,
+  pairingCode: string,
+  deviceName: string,
+): Promise<SessionTokens> {
+  const installationId = crypto.randomUUID();
+  const response = await fetch(
+    `${normalizeBaseUrl(baseUrl)}/v1/auth/pairings/exchange`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        pairingToken: pairingCode,
+        device: {
+          installationId,
+          platform: "macos",
+          name: deviceName,
+          appVersion: "0.1.0-dev",
+          osVersion: navigator.platform,
+        },
+      }),
+    },
+  );
+  const body = await readJson(response);
+  if (!response.ok) {
+    throw errorFromStatus(response.status);
+  }
+  if (!isPairingResponse(body)) {
+    throw new PlanningRequestError("unavailable");
+  }
+  return { accessToken: body.accessToken, refreshToken: body.refreshToken };
+}
+
+export async function fetchPlanning(
+  baseUrl: string,
+  accessToken: string,
+  from: Date,
+  to: Date,
+): Promise<{ schedule: ScheduleEntry[]; tasks: Task[] }> {
+  const headers = {
+    Accept: "application/json",
+    Authorization: `Bearer ${accessToken}`,
+  };
+  const base = normalizeBaseUrl(baseUrl);
+  const scheduleUrl = new URL(
+    `${base}/v1/schedule-entries`,
+    window.location.origin,
+  );
+  scheduleUrl.searchParams.set("from", from.toISOString());
+  scheduleUrl.searchParams.set("to", to.toISOString());
+  const [scheduleResponse, taskResponse] = await Promise.all([
+    fetch(scheduleUrl.toString(), { headers }),
+    fetch(`${base}/v1/tasks`, { headers }),
+  ]);
+  const [scheduleBody, taskBody] = await Promise.all([
+    readJson(scheduleResponse),
+    readJson(taskResponse),
+  ]);
+  if (!scheduleResponse.ok) throw errorFromStatus(scheduleResponse.status);
+  if (!taskResponse.ok) throw errorFromStatus(taskResponse.status);
+  if (
+    !isListResponse<ScheduleEntry>(scheduleBody) ||
+    !isListResponse<Task>(taskBody)
+  ) {
+    throw new PlanningRequestError("unavailable");
+  }
+  return { schedule: scheduleBody.items, tasks: taskBody.items };
+}
+
+export async function createTask(
+  baseUrl: string,
+  accessToken: string,
+  input: { title: string; notes?: string; priority: number; dueAt?: string },
+): Promise<Task> {
+  return request<Task>(baseUrl, accessToken, "/v1/tasks", "POST", {
+    title: input.title,
+    notes: input.notes || null,
+    priority: input.priority,
+    dueAt: input.dueAt || null,
+  });
+}
+
+export async function completeTask(
+  baseUrl: string,
+  accessToken: string,
+  task: Task,
+): Promise<Task> {
+  return request<Task>(
+    baseUrl,
+    accessToken,
+    `/v1/tasks/${task.id}/complete`,
+    "POST",
+    {
+      expectedVersion: task.version,
+    },
+  );
+}
+
+export async function createScheduleEntry(
+  baseUrl: string,
+  accessToken: string,
+  input: { title: string; startsAt: string; endsAt: string; notes?: string },
+): Promise<ScheduleEntry> {
+  return request<ScheduleEntry>(
+    baseUrl,
+    accessToken,
+    "/v1/schedule-entries",
+    "POST",
+    {
+      title: input.title,
+      notes: input.notes || null,
+      startsAt: new Date(input.startsAt).toISOString(),
+      endsAt: new Date(input.endsAt).toISOString(),
+      timeZone:
+        Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Seoul",
+    },
+  );
+}
+
+async function request<T>(
+  baseUrl: string,
+  accessToken: string,
+  path: string,
+  method: "POST",
+  body: unknown,
+): Promise<T> {
+  const response = await fetch(`${normalizeBaseUrl(baseUrl)}${path}`, {
+    method,
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const payload = await readJson(response);
+  if (!response.ok || !isRecord(payload))
+    throw errorFromStatus(response.status);
+  return payload as T;
+}
+
+function normalizeBaseUrl(value: string): string {
+  return value.replace(/\/$/, "");
+}
+
+async function readJson(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+function errorFromStatus(status: number): PlanningRequestError {
+  if (status === 401) return new PlanningRequestError("unauthorized");
+  if (status === 409) return new PlanningRequestError("conflict");
+  if (status >= 400 && status < 500) return new PlanningRequestError("invalid");
+  return new PlanningRequestError("unavailable");
+}
+
+function isPairingResponse(value: unknown): value is PairingResponse {
+  return (
+    isRecord(value) &&
+    typeof value.accessToken === "string" &&
+    typeof value.refreshToken === "string"
+  );
+}
+
+function isListResponse<T>(value: unknown): value is ListResponse<T> {
+  return isRecord(value) && Array.isArray(value.items);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
