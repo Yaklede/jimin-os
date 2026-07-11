@@ -116,6 +116,43 @@ pub enum AgentJobState {
     Declined,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationMessage {
+    pub id: Uuid,
+    pub role: ConversationMessageRole,
+    pub content: String,
+    pub status: ConversationMessageStatus,
+    pub created_at: OffsetDateTime,
+    pub completed_at: Option<OffsetDateTime>,
+    pub version: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationMessageRole {
+    User,
+    Assistant,
+    SystemEvent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationMessageStatus {
+    Pending,
+    Streaming,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentJob {
+    pub id: Uuid,
+    pub conversation_id: Uuid,
+    pub state: AgentJobState,
+    pub created_at: OffsetDateTime,
+    pub finished_at: Option<OffsetDateTime>,
+    pub version: i64,
+}
+
 #[derive(sqlx::FromRow)]
 struct ConversationRow {
     id: Uuid,
@@ -163,6 +200,27 @@ struct ClaimedJobRow {
     codex_thread_id: Option<String>,
 }
 
+#[derive(sqlx::FromRow)]
+struct ConversationMessageRow {
+    id: Uuid,
+    role: String,
+    content: String,
+    status: String,
+    created_at: OffsetDateTime,
+    completed_at: Option<OffsetDateTime>,
+    version: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct AgentJobReadRow {
+    id: Uuid,
+    conversation_id: Uuid,
+    state: String,
+    created_at: OffsetDateTime,
+    finished_at: Option<OffsetDateTime>,
+    version: i64,
+}
+
 impl TryFrom<JobRow> for QueuedAgentTurn {
     type Error = StorageError;
 
@@ -188,6 +246,51 @@ impl From<ClaimedJobRow> for ClaimedAgentJob {
             input_content: row.input_content,
             codex_thread_id: row.codex_thread_id,
         }
+    }
+}
+
+impl TryFrom<ConversationMessageRow> for ConversationMessage {
+    type Error = StorageError;
+
+    fn try_from(row: ConversationMessageRow) -> Result<Self, Self::Error> {
+        let role = match row.role.as_str() {
+            "user" => ConversationMessageRole::User,
+            "assistant" => ConversationMessageRole::Assistant,
+            "system_event" => ConversationMessageRole::SystemEvent,
+            _ => return Err(StorageError::PersistenceUnavailable),
+        };
+        let status = match row.status.as_str() {
+            "pending" => ConversationMessageStatus::Pending,
+            "streaming" => ConversationMessageStatus::Streaming,
+            "completed" => ConversationMessageStatus::Completed,
+            "failed" => ConversationMessageStatus::Failed,
+            "cancelled" => ConversationMessageStatus::Cancelled,
+            _ => return Err(StorageError::PersistenceUnavailable),
+        };
+        Ok(Self {
+            id: row.id,
+            role,
+            content: row.content,
+            status,
+            created_at: row.created_at,
+            completed_at: row.completed_at,
+            version: row.version,
+        })
+    }
+}
+
+impl TryFrom<AgentJobReadRow> for AgentJob {
+    type Error = StorageError;
+
+    fn try_from(row: AgentJobReadRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: row.id,
+            conversation_id: row.conversation_id,
+            state: parse_job_state(&row.state)?,
+            created_at: row.created_at,
+            finished_at: row.finished_at,
+            version: row.version,
+        })
     }
 }
 
@@ -263,6 +366,75 @@ impl Database {
         .await
         .map_err(|error| classify(&error))?;
         rows.into_iter().map(Conversation::try_from).collect()
+    }
+
+    /// Returns the ordered message history only when the conversation belongs
+    /// to the supplied user. An inaccessible conversation is indistinguishable
+    /// from a missing one.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified storage error without exposing message text in logs.
+    pub async fn conversation_messages_for_user(
+        &self,
+        user_id: Uuid,
+        conversation_id: Uuid,
+    ) -> Result<Option<Vec<ConversationMessage>>, StorageError> {
+        let owns_conversation = sqlx::query_scalar::<_, bool>(
+            "\
+            SELECT EXISTS(
+                SELECT 1 FROM conversations
+                WHERE id = $1 AND user_id = $2
+            )",
+        )
+        .bind(conversation_id)
+        .bind(user_id)
+        .fetch_one(self.pool())
+        .await
+        .map_err(|error| classify(&error))?;
+        if !owns_conversation {
+            return Ok(None);
+        }
+        let rows = sqlx::query_as::<_, ConversationMessageRow>(
+            "\
+            SELECT id, role, content, status, created_at, completed_at, version
+            FROM messages
+            WHERE conversation_id = $1
+            ORDER BY created_at ASC, id ASC",
+        )
+        .bind(conversation_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(|error| classify(&error))?;
+        rows.into_iter()
+            .map(ConversationMessage::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
+    }
+
+    /// Returns one agent job only when it belongs to the supplied user.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified storage error without exposing job metadata for
+    /// inaccessible conversations.
+    pub async fn agent_job_for_user(
+        &self,
+        user_id: Uuid,
+        job_id: Uuid,
+    ) -> Result<Option<AgentJob>, StorageError> {
+        let row = sqlx::query_as::<_, AgentJobReadRow>(
+            "\
+            SELECT id, conversation_id, state, created_at, finished_at, version
+            FROM agent_jobs
+            WHERE id = $1 AND user_id = $2",
+        )
+        .bind(job_id)
+        .bind(user_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|error| classify(&error))?;
+        row.map(AgentJob::try_from).transpose()
     }
 
     /// Atomically records the user message and a queued job for one owned,

@@ -4,7 +4,7 @@ use jimin_auth::SessionIdentity;
 use jimin_domain::{ClientPlatform, DeviceRegistration, EmailAddress, GoogleSubject};
 use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness,
-    agent::{NewAgentTurn, NewConversation},
+    agent::{AgentJobState, ConversationMessageRole, NewAgentTurn, NewConversation},
     auth::{
         ConsumeDevicePairing, CreateDevicePairing, PairingConsumption, ProvisionLogin,
         RefreshRotation, RotateRefreshToken,
@@ -423,6 +423,24 @@ async fn queued_agent_turn_is_leased_and_completed_once() {
             )
             .await
             .expect("job should complete")
+    );
+    let messages = database
+        .conversation_messages_for_user(provisioned.profile.id, conversation_id)
+        .await
+        .expect("message query should succeed")
+        .expect("owner should read messages");
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].role, ConversationMessageRole::User);
+    assert_eq!(messages[1].role, ConversationMessageRole::Assistant);
+    assert_eq!(messages[1].content, "오늘 일정은 오후 3시에 하나 있어요.");
+    assert_eq!(
+        database
+            .agent_job_for_user(provisioned.profile.id, claim.id)
+            .await
+            .expect("job query should succeed")
+            .expect("owner should read job")
+            .state,
+        AgentJobState::Completed
     );
     assert!(
         database

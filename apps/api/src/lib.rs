@@ -19,7 +19,8 @@ use jimin_observability::{RequestId, request_context};
 use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness, StorageError,
     agent::{
-        AgentJobState, Conversation, ConversationStatus, NewAgentTurn, NewConversation,
+        AgentJob, AgentJobState, Conversation, ConversationMessage, ConversationMessageRole,
+        ConversationMessageStatus, ConversationStatus, NewAgentTurn, NewConversation,
         QueuedAgentTurn,
     },
     auth::{Device, DeviceStatus, Profile},
@@ -283,6 +284,36 @@ pub struct QueuedAgentTurnResponse {
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct ConversationMessageResponse {
+    id: uuid::Uuid,
+    role: String,
+    content: String,
+    status: String,
+    created_at: String,
+    completed_at: Option<String>,
+    version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationMessageListResponse {
+    items: Vec<ConversationMessageResponse>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentJobResponse {
+    id: uuid::Uuid,
+    conversation_id: uuid::Uuid,
+    state: String,
+    created_at: String,
+    finished_at: Option<String>,
+    version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceSessionResponse {
     access_token: String,
     access_token_expires_at: String,
@@ -429,7 +460,9 @@ pub(crate) fn error_response(
         complete_task,
         list_conversations,
         create_conversation,
+        list_conversation_messages,
         create_agent_turn,
+        get_agent_job,
         live,
         ready,
         me,
@@ -454,6 +487,9 @@ pub(crate) fn error_response(
         ConversationResponse,
         ConversationListResponse,
         QueuedAgentTurnResponse,
+        ConversationMessageResponse,
+        ConversationMessageListResponse,
+        AgentJobResponse,
         CreateConversationRequest,
         CreateAgentTurnRequest,
         AgentTurnInput
@@ -497,6 +533,11 @@ pub fn router(state: ApiState) -> Router {
             "/v1/conversations/{conversation_id}/turns",
             axum::routing::post(create_agent_turn),
         )
+        .route(
+            "/v1/conversations/{conversation_id}/messages",
+            get(list_conversation_messages),
+        )
+        .route("/v1/agent/jobs/{job_id}", get(get_agent_job))
         .route("/v1/me", get(me))
         .route("/v1/devices", get(devices))
         .fallback(not_found)
@@ -957,6 +998,47 @@ async fn create_conversation(
 }
 
 #[utoipa::path(
+    get,
+    path = "/v1/conversations/{conversation_id}/messages",
+    tag = "agent",
+    params(("conversation_id" = String, Path)),
+    responses((status = 200, body = ConversationMessageListResponse), (status = 401), (status = 404), (status = 503))
+)]
+async fn list_conversation_messages(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(conversation_id): Path<uuid::Uuid>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(agent) = state.agent() else {
+        return unavailable_response(request_id);
+    };
+    match agent
+        .conversation_messages_for_user(principal.identity().user_id(), conversation_id)
+        .await
+    {
+        Ok(Some(messages)) => match messages
+            .into_iter()
+            .map(conversation_message_response)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(items) => Json(ConversationMessageListResponse {
+                items,
+                next_cursor: None,
+            })
+            .into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Ok(None) => agent_not_found_response(request_id),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
     post,
     path = "/v1/conversations/{conversation_id}/turns",
     tag = "agent",
@@ -1012,6 +1094,39 @@ async fn create_agent_turn(
             request_id,
             false,
         ),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/agent/jobs/{job_id}",
+    tag = "agent",
+    params(("job_id" = String, Path)),
+    responses((status = 200, body = AgentJobResponse), (status = 401), (status = 404), (status = 503))
+)]
+async fn get_agent_job(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(job_id): Path<uuid::Uuid>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(agent) = state.agent() else {
+        return unavailable_response(request_id);
+    };
+    match agent
+        .agent_job_for_user(principal.identity().user_id(), job_id)
+        .await
+    {
+        Ok(Some(job)) => match agent_job_response(&job) {
+            Ok(response) => Json(response).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Ok(None) => agent_not_found_response(request_id),
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -1243,6 +1358,16 @@ fn unavailable_response(request_id: RequestId) -> Response {
     )
 }
 
+fn agent_not_found_response(request_id: RequestId) -> Response {
+    error_response(
+        StatusCode::NOT_FOUND,
+        "agent.not_found",
+        "대화 정보를 찾을 수 없어요. 대화 목록을 다시 확인해 주세요.",
+        request_id,
+        false,
+    )
+}
+
 fn storage_error_response(error: &StorageError, request_id: RequestId) -> Response {
     match error {
         StorageError::InvalidConfiguration | StorageError::IdentityConflict => {
@@ -1314,18 +1439,62 @@ fn queued_agent_turn_response(queued: &QueuedAgentTurn) -> QueuedAgentTurnRespon
         job_id: queued.job_id,
         message_id: queued.message_id,
         conversation_id: queued.conversation_id,
-        state: match queued.state {
-            AgentJobState::Queued => "queued",
-            AgentJobState::Claimed => "claimed",
-            AgentJobState::Running => "running",
-            AgentJobState::WaitingApproval => "waiting_approval",
-            AgentJobState::RetryWait => "retry_wait",
-            AgentJobState::Completed => "completed",
-            AgentJobState::Failed => "failed",
-            AgentJobState::Cancelled => "cancelled",
-            AgentJobState::Declined => "declined",
-        }
-        .to_owned(),
+        state: agent_job_state_name(queued.state).to_owned(),
+    }
+}
+
+fn conversation_message_response(
+    message: ConversationMessage,
+) -> Result<ConversationMessageResponse, ()> {
+    Ok(ConversationMessageResponse {
+        id: message.id,
+        role: match message.role {
+            ConversationMessageRole::User => "user".to_owned(),
+            ConversationMessageRole::Assistant => "assistant".to_owned(),
+            ConversationMessageRole::SystemEvent => "system_event".to_owned(),
+        },
+        content: message.content,
+        status: match message.status {
+            ConversationMessageStatus::Pending => "pending".to_owned(),
+            ConversationMessageStatus::Streaming => "streaming".to_owned(),
+            ConversationMessageStatus::Completed => "completed".to_owned(),
+            ConversationMessageStatus::Failed => "failed".to_owned(),
+            ConversationMessageStatus::Cancelled => "cancelled".to_owned(),
+        },
+        created_at: message.created_at.format(&Rfc3339).map_err(|_| ())?,
+        completed_at: message
+            .completed_at
+            .map(|value| value.format(&Rfc3339).map_err(|_| ()))
+            .transpose()?,
+        version: message.version,
+    })
+}
+
+fn agent_job_response(job: &AgentJob) -> Result<AgentJobResponse, ()> {
+    Ok(AgentJobResponse {
+        id: job.id,
+        conversation_id: job.conversation_id,
+        state: agent_job_state_name(job.state).to_owned(),
+        created_at: job.created_at.format(&Rfc3339).map_err(|_| ())?,
+        finished_at: job
+            .finished_at
+            .map(|value| value.format(&Rfc3339).map_err(|_| ()))
+            .transpose()?,
+        version: job.version,
+    })
+}
+
+const fn agent_job_state_name(state: AgentJobState) -> &'static str {
+    match state {
+        AgentJobState::Queued => "queued",
+        AgentJobState::Claimed => "claimed",
+        AgentJobState::Running => "running",
+        AgentJobState::WaitingApproval => "waiting_approval",
+        AgentJobState::RetryWait => "retry_wait",
+        AgentJobState::Completed => "completed",
+        AgentJobState::Failed => "failed",
+        AgentJobState::Cancelled => "cancelled",
+        AgentJobState::Declined => "declined",
     }
 }
 
@@ -1630,9 +1799,11 @@ mod tests {
             [
                 "/health/live",
                 "/health/ready",
+                "/v1/agent/jobs/{job_id}",
                 "/v1/auth/pairings/exchange",
                 "/v1/auth/refresh",
                 "/v1/conversations",
+                "/v1/conversations/{conversation_id}/messages",
                 "/v1/conversations/{conversation_id}/turns",
                 "/v1/device-pairings",
                 "/v1/devices",
