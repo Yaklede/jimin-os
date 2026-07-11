@@ -279,11 +279,7 @@ fn pairing_output_for(arguments: &[String]) -> Option<PairingOutput> {
 }
 
 fn render_pairing_qr(pairing_uri: &str) -> Result<String, qrcode::types::QrError> {
-    QrCode::new(pairing_uri.as_bytes()).map(|code| {
-        code.render::<unicode::Dense1x2>()
-            .module_dimensions(2, 1)
-            .build()
-    })
+    QrCode::new(pairing_uri.as_bytes()).map(|code| code.render::<unicode::Dense1x2>().build())
 }
 
 async fn reconcile_migrations(database: Database) {
