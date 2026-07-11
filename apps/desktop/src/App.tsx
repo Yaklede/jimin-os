@@ -15,6 +15,7 @@ import {
   createTask,
   exchangePairingCode,
   fetchPlanning,
+  refreshDeviceSession,
   type ScheduleEntry,
   type SessionTokens,
   type Task,
@@ -62,16 +63,33 @@ export default function App() {
         error instanceof PlanningRequestError &&
         error.code === "unauthorized"
       ) {
-        await clearDeviceSession();
-        setTokens(undefined);
-        setMode("setup");
-        setMessage(copy.messages.sessionExpired);
+        try {
+          const refreshed = await refreshDeviceSession(
+            apiBaseUrl,
+            tokens.refreshToken,
+          );
+          await saveDeviceSession({ apiBaseUrl, tokens: refreshed });
+          setTokens(refreshed);
+          return;
+        } catch {
+          await discardSession();
+        }
         return;
       }
       setMode("error");
       setMessage(copy.messages.loadFailed);
     }
   }, [apiBaseUrl, sessionLoaded, tokens]);
+
+  async function discardSession() {
+    try {
+      await clearDeviceSession();
+    } finally {
+      setTokens(undefined);
+      setMode("setup");
+      setMessage(copy.messages.sessionExpired);
+    }
+  }
 
   useEffect(() => {
     let current = true;

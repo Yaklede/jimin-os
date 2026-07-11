@@ -82,6 +82,31 @@ export async function exchangePairingCode(
   };
 }
 
+export async function refreshDeviceSession(
+  baseUrl: string,
+  refresh: string,
+): Promise<SessionTokens> {
+  const response = await fetch(`${normalizeBaseUrl(baseUrl)}/v1/auth/refresh`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ ["refreshToken"]: refresh }),
+  });
+  const body = await readJson(response);
+  if (!response.ok) {
+    throw errorFromStatus(response.status);
+  }
+  if (!isPairingResponse(body)) {
+    throw new PlanningRequestError("unavailable");
+  }
+  return {
+    ["accessToken"]: body.accessToken,
+    ["refreshToken"]: body.refreshToken,
+  };
+}
+
 export async function fetchPlanning(
   baseUrl: string,
   access: string,
