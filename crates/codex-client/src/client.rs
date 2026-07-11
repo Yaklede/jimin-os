@@ -13,6 +13,8 @@ use crate::protocol::{Notification, RpcConnection};
 const CLIENT_NAME: &str = "jimin-agent";
 const CLIENT_TITLE: &str = "Jimin OS Agent";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const MAX_LOGIN_FIELD_BYTES: usize = 4 * 1024;
+const MAX_AGENT_RESPONSE_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +37,25 @@ pub struct TurnSummary {
     pub unknown_notifications: u64,
     pub response_bytes: u64,
     pub response_sha256: String,
+}
+
+/// Device-code details that are safe to present to the personal app. The
+/// managed Codex runtime owns the `ChatGPT` OAuth tokens and refresh lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatgptDeviceCode {
+    pub login_id: String,
+    pub verification_url: String,
+    pub user_code: String,
+}
+
+/// A completed personal-agent turn. The answer is intentionally available only
+/// to the authenticated caller; logs and health probes use [`TurnSummary`]
+/// instead and never retain the response content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedTurn {
+    pub response: String,
+    pub summary: TurnSummary,
 }
 
 pub struct AppServerClient<R, W> {
@@ -104,6 +125,38 @@ where
         Ok(summarize_account(response))
     }
 
+    /// Starts Codex-managed `ChatGPT` device-code login. The caller shows the
+    /// returned URL and code, while Codex persists and refreshes the resulting
+    /// tokens inside `CODEX_HOME`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed protocol error without returning any OAuth token.
+    pub async fn start_chatgpt_device_code_login(&mut self) -> Result<ChatgptDeviceCode> {
+        self.require_initialized()?;
+        let response: DeviceCodeLoginResponse = self
+            .connection
+            .request(
+                "account/login/start",
+                json!({ "type": "chatgptDeviceCode" }),
+            )
+            .await?;
+        if response.login_type != "chatgptDeviceCode"
+            || !valid_login_field(&response.login_id)
+            || !valid_login_field(&response.verification_url)
+            || !valid_login_field(&response.user_code)
+        {
+            return Err(Error::InvalidResponse {
+                method: "account/login/start",
+            });
+        }
+        Ok(ChatgptDeviceCode {
+            login_id: response.login_id,
+            verification_url: response.verification_url,
+            user_code: response.user_code,
+        })
+    }
+
     pub(crate) async fn discard_next_notification(&mut self) -> Result<()> {
         self.require_initialized()?;
         let _notification = self.connection.next_notification().await?;
@@ -134,6 +187,41 @@ where
         let cwd = cwd.to_str().ok_or(Error::InvalidWorkspace)?;
         self.start_ephemeral_thread_with_options(Some(cwd), model)
             .await
+    }
+
+    /// Starts a persistent, read-only conversation thread in the trusted agent
+    /// workspace. The returned ID can be used for future turns after a client
+    /// reconnects to the same Codex-managed `CODEX_HOME`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed protocol or workspace error without executing tools.
+    pub async fn start_persistent_thread_in(
+        &mut self,
+        cwd: &Path,
+        model: Option<&str>,
+    ) -> Result<String> {
+        self.require_initialized()?;
+        let cwd = cwd.to_str().ok_or(Error::InvalidWorkspace)?;
+        let response: ThreadStartResponse = self
+            .connection
+            .request(
+                "thread/start",
+                json!({
+                    "approvalPolicy": "never",
+                    "sandbox": "read-only",
+                    "cwd": cwd,
+                    "model": model,
+                    "serviceTier": null
+                }),
+            )
+            .await?;
+        if response.thread.id.is_empty() {
+            return Err(Error::InvalidResponse {
+                method: "thread/start",
+            });
+        }
+        Ok(response.thread.id)
     }
 
     async fn start_ephemeral_thread_with_options(
@@ -172,6 +260,25 @@ where
     /// Returns a typed transport or protocol error when streaming fails, when
     /// the turn does not complete, or when no authoritative final agent message arrives.
     pub async fn run_turn(&mut self, thread_id: &str, prompt: &str) -> Result<TurnSummary> {
+        Ok(self
+            .run_turn_with_response(thread_id, prompt)
+            .await?
+            .summary)
+    }
+
+    /// Runs a conversation turn and returns its authoritative final message to
+    /// the caller. Tool execution remains disabled by the thread's read-only,
+    /// no-approval policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for protocol failures, failed turns, or a final
+    /// answer exceeding the bounded private-response payload.
+    pub async fn run_turn_with_response(
+        &mut self,
+        thread_id: &str,
+        prompt: &str,
+    ) -> Result<CompletedTurn> {
         self.require_initialized()?;
         if thread_id.is_empty() || prompt.is_empty() {
             return Err(Error::InvalidProtocolMessage);
@@ -209,7 +316,7 @@ where
         }
     }
 
-    async fn collect_turn(&mut self, thread_id: &str, turn_id: &str) -> Result<TurnSummary> {
+    async fn collect_turn(&mut self, thread_id: &str, turn_id: &str) -> Result<CompletedTurn> {
         let mut delta_notifications = 0_u64;
         let mut delta_bytes = 0_u64;
         let mut retry_notifications = 0_u64;
@@ -256,17 +363,26 @@ where
                         return Err(Error::TurnFailed { reason });
                     }
                     let response = final_response.ok_or(Error::MissingFinalAgentMessage)?;
+                    if response.len() > MAX_AGENT_RESPONSE_BYTES {
+                        return Err(Error::AgentResponseTooLarge {
+                            max_bytes: MAX_AGENT_RESPONSE_BYTES,
+                        });
+                    }
                     let response_bytes = response.len() as u64;
                     let response_sha256 = sha256_hex(&response);
-                    return Ok(TurnSummary {
-                        status: "completed",
-                        delta_notifications,
-                        delta_bytes,
-                        retry_notifications,
-                        agent_message_items,
-                        unknown_notifications,
-                        response_bytes,
-                        response_sha256,
+                    let response = String::from_utf8(response).map_err(|_| Error::InvalidUtf8)?;
+                    return Ok(CompletedTurn {
+                        response,
+                        summary: TurnSummary {
+                            status: "completed",
+                            delta_notifications,
+                            delta_bytes,
+                            retry_notifications,
+                            agent_message_items,
+                            unknown_notifications,
+                            response_bytes,
+                            response_sha256,
+                        },
                     });
                 }
                 "error" => {
@@ -358,6 +474,12 @@ fn safe_plan_type(value: &str) -> &'static str {
         "edu" => "edu",
         _ => "unknown",
     }
+}
+
+fn valid_login_field(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_LOGIN_FIELD_BYTES
+        && !value.chars().any(char::is_control)
 }
 
 fn safe_turn_error_reason(error: Option<&TurnError>) -> &'static str {
@@ -458,6 +580,16 @@ struct AccountResponse {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceCodeLoginResponse {
+    #[serde(rename = "type")]
+    login_type: String,
+    login_id: String,
+    verification_url: String,
+    user_code: String,
+}
+
+#[derive(Deserialize)]
 struct ThreadStartResponse {
     thread: ThreadReference,
 }
@@ -506,11 +638,11 @@ enum ThreadItem {
 #[serde(rename_all = "camelCase")]
 struct TurnCompleted {
     thread_id: String,
-    turn: CompletedTurn,
+    turn: AppServerCompletedTurn,
 }
 
 #[derive(Deserialize)]
-struct CompletedTurn {
+struct AppServerCompletedTurn {
     id: String,
     status: String,
     error: Option<TurnError>,
@@ -603,6 +735,47 @@ mod tests {
         assert_eq!(summary.account_type, "chatgpt");
         assert_eq!(summary.plan_type, Some("plus"));
         assert!(!encoded.contains("private@example.com"));
+        server_task.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn device_code_login_returns_only_presentable_login_fields() {
+        let (client, server) = tokio::io::duplex(16 * 1024);
+        let (client_reader, client_writer) = split(client);
+        let mut client = AppServerClient::new(BufReader::new(client_reader), client_writer);
+
+        let server_task = tokio::spawn(async move {
+            let (server_reader, mut server_writer) = split(server);
+            let mut server_reader = BufReader::new(server_reader);
+            let _initialize = read_json_line(&mut server_reader).await;
+            server_writer
+                .write_all(b"{\"id\":1,\"result\":{\"userAgent\":\"fixture\",\"codexHome\":\"/tmp\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}\n")
+                .await
+                .expect("initialize response");
+            let _initialized = read_json_line(&mut server_reader).await;
+            let login_request = read_json_line(&mut server_reader).await;
+            assert_eq!(login_request["method"], "account/login/start");
+            assert_eq!(
+                login_request["params"],
+                json!({"type": "chatgptDeviceCode"})
+            );
+            server_writer
+                .write_all(b"{\"id\":2,\"result\":{\"type\":\"chatgptDeviceCode\",\"loginId\":\"login-1\",\"verificationUrl\":\"https://auth.openai.com/codex/device\",\"userCode\":\"ABCD-1234\"}}\n")
+                .await
+                .expect("login response");
+        });
+
+        client.initialize().await.expect("initialize");
+        let login = client
+            .start_chatgpt_device_code_login()
+            .await
+            .expect("device login should start");
+        assert_eq!(login.login_id, "login-1");
+        assert_eq!(login.user_code, "ABCD-1234");
+        assert_eq!(
+            login.verification_url,
+            "https://auth.openai.com/codex/device"
+        );
         server_task.await.expect("server task");
     }
 

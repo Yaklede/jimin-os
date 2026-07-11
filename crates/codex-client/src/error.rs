@@ -42,6 +42,8 @@ pub enum Error {
     TurnFailed { reason: &'static str },
     #[error("Codex App Server turn completed without a final agent message")]
     MissingFinalAgentMessage,
+    #[error("Codex App Server final response exceeded {max_bytes} bytes")]
+    AgentResponseTooLarge { max_bytes: usize },
     #[error("Codex CLI could not be started")]
     Spawn(#[source] io::Error),
     #[error("Codex CLI version check failed")]
@@ -89,6 +91,7 @@ impl Error {
             Self::NotInitialized => "app_server_not_initialized",
             Self::TurnFailed { reason } => reason,
             Self::MissingFinalAgentMessage => "app_server_missing_final_message",
+            Self::AgentResponseTooLarge { .. } => "app_server_response_too_large",
             Self::Spawn(_) => "codex_spawn_failed",
             Self::VersionCheck(_) => "codex_version_check_failed",
             Self::MalformedVersionOutput => "codex_version_output_malformed",

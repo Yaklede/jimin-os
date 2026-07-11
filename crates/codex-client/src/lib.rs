@@ -5,7 +5,7 @@ mod process;
 mod protocol;
 mod version;
 
-pub use client::{AccountSummary, AppServerClient, TurnSummary};
+pub use client::{AccountSummary, AppServerClient, ChatgptDeviceCode, CompletedTurn, TurnSummary};
 pub use codec::DEFAULT_MAX_LINE_BYTES;
 pub use error::{Error, Result};
 pub use process::{AppServerProcess, ProcessEnd, ProcessOutcome, StderrStreamState, StderrSummary};
