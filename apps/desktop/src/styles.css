@@ -1017,6 +1017,11 @@ svg {
   margin: 0 auto;
 }
 
+.assistant-page--conversation {
+  height: calc(100dvh - 108px);
+  min-height: 0;
+}
+
 .assistant-inline-alert {
   margin-bottom: 12px;
 }
@@ -1024,7 +1029,8 @@ svg {
 .assistant-workbench {
   display: grid;
   grid-template-columns: 212px minmax(0, 1fr);
-  min-height: calc(100dvh - 108px);
+  height: 100%;
+  min-height: 0;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius-panel);
@@ -1135,6 +1141,8 @@ svg {
 .assistant-conversation {
   display: flex;
   flex-direction: column;
+  height: 100%;
+  min-height: 0;
   min-width: 0;
   padding: 24px;
 }
@@ -1154,11 +1162,14 @@ svg {
 
 .assistant-welcome-panel {
   display: grid;
+  flex: 1;
   align-content: start;
+  min-height: 0;
   gap: 24px;
   max-width: 640px;
   margin: auto;
   padding: 32px 12px;
+  overflow-y: auto;
 }
 
 .assistant-welcome-panel header,
@@ -1245,6 +1256,7 @@ svg {
   flex: 1;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
 }
 
 .assistant-thread-header {
@@ -1254,8 +1266,11 @@ svg {
 
 .assistant-transcript {
   flex: 1;
-  min-height: 260px;
+  min-height: 0;
   padding: 20px 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .assistant-message-list {
@@ -1325,7 +1340,7 @@ svg {
 }
 
 .assistant-job-state {
-  margin: 12px 0;
+  margin: 16px 0;
 }
 
 .assistant-job-state--error {
@@ -1335,6 +1350,60 @@ svg {
 
 .assistant-job-state--error svg {
   color: var(--danger);
+}
+
+.assistant-request-recovery {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 8px 10px;
+  margin: 16px 0;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+  border-radius: var(--radius-panel);
+  padding: 12px;
+  background: var(--danger-tint);
+  color: var(--text);
+}
+
+.assistant-request-recovery > svg {
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  color: var(--danger);
+}
+
+.assistant-request-recovery strong,
+.assistant-request-recovery p {
+  margin: 0;
+}
+
+.assistant-request-recovery strong {
+  color: var(--text-strong);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.assistant-request-recovery p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.assistant-request-recovery__retry {
+  grid-column: 2;
+  justify-self: start;
+  min-height: 44px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-control);
+  padding: 10px 12px;
+  background: transparent;
+  color: var(--danger);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.assistant-request-recovery__retry:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 
 .assistant-action-approval {
@@ -1423,8 +1492,9 @@ svg {
 
 .assistant-request-field {
   display: grid;
+  flex: 0 0 auto;
   gap: 8px;
-  margin-top: auto;
+  margin-top: 12px;
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 12px;
@@ -1710,8 +1780,11 @@ svg {
   }
 
   .os-shell[data-destination="chat"] .os-content {
+    height: 100dvh;
+    min-height: 0;
     padding-top: var(--mobile-top-clearance);
     padding-bottom: calc(140px + var(--safe-area-bottom));
+    overflow: hidden;
   }
 
   .home-page,
@@ -1891,10 +1964,17 @@ svg {
     min-height: calc(100dvh - 124px);
   }
 
+  .assistant-page--conversation {
+    height: 100%;
+    min-height: 0;
+  }
+
   .assistant-workbench {
-    display: block;
-    min-height: auto;
-    overflow: visible;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
     border: 0;
     border-radius: 0;
     background: transparent;
@@ -1906,15 +1986,14 @@ svg {
   }
 
   .assistant-conversation {
-    min-height: calc(100dvh - 132px);
+    height: 100%;
+    min-height: 0;
     padding: 0;
     background: transparent;
   }
 
   .assistant-mobile-identity {
-    position: sticky;
-    top: var(--mobile-top-clearance);
-    z-index: 3;
+    position: relative;
     display: grid;
     grid-template-columns: 34px minmax(0, 1fr) 44px;
     align-items: center;
@@ -1978,6 +2057,7 @@ svg {
     flex: 1;
     width: 100%;
     margin: 0;
+    min-height: 0;
     gap: 20px;
     padding: 24px 0 20px;
   }
@@ -2045,8 +2125,8 @@ svg {
   }
 
   .assistant-transcript {
-    min-height: 250px;
-    padding: 20px 0 32px;
+    min-height: 0;
+    padding: 20px 0 16px;
   }
 
   .assistant-message {
@@ -2058,8 +2138,7 @@ svg {
   }
 
   .assistant-request-field {
-    position: sticky;
-    bottom: calc(124px + var(--safe-area-bottom));
+    position: static;
     grid-template-columns: minmax(0, 1fr) 44px;
     align-items: center;
     margin-top: 16px;

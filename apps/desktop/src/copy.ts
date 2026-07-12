@@ -14,6 +14,7 @@ export const copy = {
     startConversation: "새 요청",
     sendRequest: "보내기",
     sendingRequest: "보내는 중",
+    retryRequest: "다시 보내기",
     connectChatgpt: "ChatGPT 연결하기",
     retryChatgptConnection: "다시 연결하기",
     openChatgpt: "브라우저에서 ChatGPT 열기",
@@ -201,7 +202,8 @@ export const copy = {
     approvalTaskDescription: "{title} 할 일을 추가해요.",
     approvalScheduleDescription: "{title} 일정을 등록해요.",
     approvalScheduleWithTime: "{time}에 {title} 일정을 등록해요.",
-    failed: "답변이 중단됐어요. 같은 요청을 다시 보내 주세요.",
+    failed: "답변을 만들지 못했어요. 다시 보내 주세요.",
+    failedDescription: "내용을 조금 바꿔서 다시 보내도 돼요.",
   },
   authentication: {
     title: "ChatGPT를 연결하면 바로 대화를 시작할 수 있어요.",

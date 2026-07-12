@@ -75,9 +75,20 @@ export function ConversationWorkspace({
   const pendingMessageId = useRef<string | undefined>(undefined);
   const pendingMessageText = useRef<string | undefined>(undefined);
   const appliedInitialDraftId = useRef<string | undefined>(undefined);
+  const transcriptEnd = useRef<HTMLDivElement>(null);
   const isWaiting = hasActiveJob;
   const isNewConversation = !selectedConversationId;
   const canSend = authentication?.state === "ready";
+
+  useEffect(() => {
+    if (isNewConversation) return;
+    transcriptEnd.current?.scrollIntoView({
+      block: "end",
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? "auto"
+        : "smooth",
+    });
+  }, [isNewConversation, job?.state, messages]);
 
   async function sendText(value: string): Promise<boolean> {
     const text = value.trim();
@@ -129,6 +140,11 @@ export function ConversationWorkspace({
     requestAnimationFrame(() => composer.current?.focus());
   }
 
+  async function retryLastRequest(text: string) {
+    await sendText(text);
+    requestAnimationFrame(() => composer.current?.focus());
+  }
+
   return (
     <section
       className="assistant-page assistant-page--conversation"
@@ -168,30 +184,13 @@ export function ConversationWorkspace({
               conversations={conversations}
               conversationId={selectedConversationId}
               messages={messages}
+              job={job}
               loading={loading}
               onStartConversation={startConversation}
+              onResolveAction={onResolveAction}
+              onRetry={retryLastRequest}
+              transcriptEnd={transcriptEnd}
             />
-          )}
-
-          {job?.state === "waiting_approval" && job.pendingAction ? (
-            <ActionApprovalPanel
-              action={job.pendingAction}
-              submitting={loading}
-              onResolve={onResolveAction}
-            />
-          ) : (
-            isWaiting &&
-            job &&
-            !isTerminalJob(job.state) && <AgentProgress state={job.state} />
-          )}
-          {job && isFailedJob(job.state) && (
-            <p
-              className="assistant-job-state assistant-job-state--error"
-              role="alert"
-            >
-              <CircleAlert aria-hidden="true" />
-              {copy.conversations.failed}
-            </p>
           )}
 
           {canSend ? (
@@ -373,20 +372,30 @@ function ConversationThread({
   conversations,
   conversationId,
   messages,
+  job,
   loading,
   onStartConversation,
+  onResolveAction,
+  onRetry,
+  transcriptEnd,
 }: Pick<
   ConversationWorkspaceProps,
-  "conversations" | "messages" | "loading"
+  "conversations" | "messages" | "job" | "loading"
 > & {
   conversationId: string;
   onStartConversation(): void;
+  onResolveAction(decision: "approve" | "decline"): Promise<void>;
+  onRetry(text: string): Promise<void>;
+  transcriptEnd: RefObject<HTMLDivElement | null>;
 }) {
+  const lastUserRequest = [...messages]
+    .reverse()
+    .find((message) => message.role === "user")?.content;
+
   return (
     <section className="assistant-thread-panel">
       <header className="assistant-thread-header">
         <div>
-          <p>{copy.conversations.threadEyebrow}</p>
           <h1 id="assistant-title">
             {selectedTitle(conversations, conversationId)}
           </h1>
@@ -454,6 +463,24 @@ function ConversationThread({
             {copy.conversations.threadEmpty}
           </p>
         )}
+        {job?.state === "waiting_approval" && job.pendingAction ? (
+          <ActionApprovalPanel
+            action={job.pendingAction}
+            submitting={loading}
+            onResolve={onResolveAction}
+          />
+        ) : (
+          job &&
+          !isTerminalJob(job.state) && <AgentProgress state={job.state} />
+        )}
+        {job && isFailedJob(job.state) && lastUserRequest && (
+          <AgentFailure
+            disabled={loading}
+            request={lastUserRequest}
+            onRetry={onRetry}
+          />
+        )}
+        <div className="assistant-transcript__end" ref={transcriptEnd} />
       </div>
     </section>
   );
@@ -662,6 +689,34 @@ function AgentProgress({ state }: { state: AgentJob["state"] }) {
       <LoaderCircle aria-hidden="true" className="spin" />
       {message}
     </p>
+  );
+}
+
+function AgentFailure({
+  disabled,
+  request,
+  onRetry,
+}: {
+  disabled: boolean;
+  request: string;
+  onRetry(text: string): Promise<void>;
+}) {
+  return (
+    <section className="assistant-request-recovery" role="alert">
+      <CircleAlert aria-hidden="true" />
+      <div>
+        <strong>{copy.conversations.failed}</strong>
+        <p>{copy.conversations.failedDescription}</p>
+      </div>
+      <button
+        className="assistant-request-recovery__retry focus-visible-control"
+        type="button"
+        disabled={disabled}
+        onClick={() => void onRetry(request)}
+      >
+        {copy.actions.retryRequest}
+      </button>
+    </section>
   );
 }
 
