@@ -1,4 +1,4 @@
-import { Server } from "lucide-react";
+import { Server, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -623,9 +623,21 @@ export default function App() {
     }
   }
 
+  const showLaunchSplash =
+    !sessionLoaded ||
+    (mode === "loading" &&
+      homeSnapshot === undefined &&
+      agentAuthentication === undefined &&
+      conversations.length === 0);
+
   return (
-    <div className="app-shell">
-      {mode === "configuration" ? (
+    <div
+      className="app-shell"
+      data-app-state={showLaunchSplash ? "launching" : "active"}
+    >
+      {showLaunchSplash ? (
+        <LaunchSplash />
+      ) : mode === "configuration" ? (
         <main className="setup-main">
           <ServerConfigurationPanel />
         </main>
@@ -715,6 +727,27 @@ export default function App() {
         </OsShell>
       )}
     </div>
+  );
+}
+
+function LaunchSplash() {
+  return (
+    <main className="launch-splash" aria-busy="true">
+      <div className="launch-splash__content">
+        <span className="launch-splash__mark" aria-hidden="true">
+          <Sparkles />
+        </span>
+        <div className="launch-splash__copy">
+          <strong>{copy.productName}</strong>
+          <p role="status" aria-live="polite">
+            {copy.launch.loading}
+          </p>
+        </div>
+        <div className="launch-splash__progress" aria-hidden="true">
+          <span />
+        </div>
+      </div>
+    </main>
   );
 }
 

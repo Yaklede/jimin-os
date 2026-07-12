@@ -3,6 +3,9 @@ const settingsTab = "설정";
 export const copy = {
   productName: "Jimin OS",
   scope: "개인 서버",
+  launch: {
+    loading: "개인 비서를 준비하고 있어요.",
+  },
   actions: {
     checkAgain: "다시 확인하기",
     checkAgainLabel: "서버 상태 다시 확인하기",
