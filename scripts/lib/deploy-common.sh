@@ -123,6 +123,13 @@ init_deployment() {
   if [[ "${DEPLOY_TLS_MODE}" == "files" ]]; then
     COMPOSE_ARGS+=(--file "${REPO_ROOT}/deploy/compose.tls-files.yaml")
   fi
+  calendar_oauth_enabled="$(effective_value JIMIN_GOOGLE_CALENDAR_OAUTH_ENABLED)"
+  calendar_oauth_enabled="${calendar_oauth_enabled:-0}"
+  [[ "${calendar_oauth_enabled}" =~ ^[01]$ ]] \
+    || die "JIMIN_GOOGLE_CALENDAR_OAUTH_ENABLED must be 0 or 1"
+  if [[ "${calendar_oauth_enabled}" == "1" ]]; then
+    COMPOSE_ARGS+=(--file "${REPO_ROOT}/deploy/compose.google-calendar.yaml")
+  fi
   if [[ -n "${JIMIN_RELEASE_ENV:-}" ]]; then
     [[ -f "${JIMIN_RELEASE_ENV}" ]] || die "release env not found: ${JIMIN_RELEASE_ENV}"
     COMPOSE_ARGS+=(--env-file "${JIMIN_RELEASE_ENV}")
@@ -209,6 +216,10 @@ validate_runtime_secrets() {
   validate_secret_file "${secrets_dir}/auth_verify_key" "access-token verify key file"
   validate_secret_file "${secrets_dir}/auth_refresh_pepper" "refresh-token pepper file"
   validate_secret_file "${secrets_dir}/auth_pairing_pepper" "device-pairing pepper file"
+  if [[ "$(effective_value JIMIN_GOOGLE_CALENDAR_OAUTH_ENABLED)" == "1" ]]; then
+    validate_secret_file "${secrets_dir}/google_calendar_client_secret" "Google Calendar client secret file"
+    validate_secret_file "${secrets_dir}/calendar_encryption_key" "Calendar encryption key file"
+  fi
   if [[ "${DEPLOY_TLS_MODE}" == "files" ]]; then
     validate_secret_file "${secrets_dir}/gateway_tls_cert" "gateway certificate"
     validate_secret_file "${secrets_dir}/gateway_tls_key" "gateway private key"

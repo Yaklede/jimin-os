@@ -8,7 +8,7 @@ M1 adds four API authentication secret files alongside the database files:
 - `auth_pairing_pepper`: at least 32 random bytes used only to derive
   short-lived QR device-pairing token verifiers.
 
-Generate the Ed25519 pair outside the repository, store both files at mode `0600`, and never copy the private key or pepper into `.env` files. The API will remain unready if any file is missing or invalid. Google OAuth client secrets do not belong here: Google is introduced later only for the Calendar integration, not for Jimin OS device enrollment.
+Generate the Ed25519 pair outside the repository, store both files at mode `0600`, and never copy the private key or pepper into `.env` files. The API will remain unready if any file is missing or invalid.
 
 실제 secret은 이 디렉터리 아래의 환경별 하위 디렉터리에만 만들고 Git에 추가하지 않는다.
 
@@ -23,6 +23,8 @@ deploy/secrets/staging/
 |---|---|---|
 | `postgres_password` | PostgreSQL용 무작위 password 한 줄 | postgres |
 | `api_database_url` | 같은 password를 사용한 전체 PostgreSQL URL 한 줄 | api |
+| `google_calendar_client_secret` | Google OAuth web client secret 한 줄 | api, Calendar OAuth를 켠 경우만 |
+| `calendar_encryption_key` | Calendar refresh/PKCE token을 암호화할 32바이트 이상 무작위 값 한 줄 | api, Calendar OAuth를 켠 경우만 |
 | `gateway_tls_cert` | PEM certificate chain; `JIMIN_TLS_MODE=files`에서만 필요 | gateway |
 | `gateway_tls_key` | PEM private key; `JIMIN_TLS_MODE=files`에서만 필요 | gateway |
 
@@ -33,3 +35,5 @@ postgres://jimin_api:<password>@postgres:5432/jimin_os
 ```
 
 두 DB secret의 password가 다르면 API readiness가 실패한다. TLS가 `internal`이면 certificate와 key 파일을 만들지 않는다. 검증 script는 임시 디렉터리의 비밀이 아닌 fixture만 사용하며 이 경로에 실제 값을 생성하지 않는다.
+
+Google Calendar는 `JIMIN_GOOGLE_CALENDAR_OAUTH_ENABLED=1`일 때만 위 두 파일을 mount한다. 이때 `JIMIN_GOOGLE_CALENDAR_REDIRECT_URI`와 Google Cloud Console의 OAuth web-client redirect URI는 정확히 같아야 한다. client credential이나 encryption key를 환경 파일·앱·로그에 넣지 않는다.

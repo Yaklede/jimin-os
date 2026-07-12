@@ -3,7 +3,11 @@ use std::{env, net::SocketAddr, process::ExitCode, sync::Arc, time::Duration};
 use jimin_api::{
     ApiState, PairingRuntime,
     auth::Authentication,
-    config::{AppConfig, AuthenticationSetting, AuthenticationSettings, SecretSetting},
+    calendar_oauth::CalendarOAuthRuntime,
+    config::{
+        AppConfig, AuthenticationSetting, AuthenticationSettings, CalendarOAuthSetting,
+        SecretSetting,
+    },
     probe::{ProbeTarget, run_probe},
     router, serve_with_shutdown,
 };
@@ -45,6 +49,10 @@ async fn main() -> ExitCode {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Startup keeps dependency, optional integration, and shutdown lifetimes visible in one audited sequence."
+)]
 async fn run_server() -> Result<(), &'static str> {
     let config = AppConfig::load().map_err(|error| error.code())?;
 
@@ -112,6 +120,26 @@ async fn run_server() -> Result<(), &'static str> {
     if let Some((authentication, pairing)) = runtime {
         state = state.with_authentication(authentication);
         state = state.with_pairing(pairing);
+    }
+    match config.calendar_oauth() {
+        CalendarOAuthSetting::Available(settings) => {
+            if let Ok(calendar_oauth) = CalendarOAuthRuntime::new(settings) {
+                state = state.with_calendar_oauth(calendar_oauth);
+            } else {
+                warn!(
+                    event = "calendar.configuration_invalid",
+                    error_code = "calendar.configuration_invalid"
+                );
+            }
+        }
+        CalendarOAuthSetting::Missing => info!(
+            event = "calendar.configuration_missing",
+            error_code = "calendar.configuration_missing"
+        ),
+        CalendarOAuthSetting::Invalid => warn!(
+            event = "calendar.configuration_invalid",
+            error_code = "calendar.configuration_invalid"
+        ),
     }
     if let Some(database) = database.as_ref() {
         state = state.with_planning(database.clone());

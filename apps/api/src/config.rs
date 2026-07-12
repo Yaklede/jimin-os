@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
@@ -16,6 +16,8 @@ const DEFAULT_ACQUIRE_TIMEOUT_MS: u64 = 2_000;
 const DEFAULT_ACCESS_TOKEN_TTL_SECONDS: u64 = 10 * 60;
 const DEFAULT_SESSION_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
 const MAX_SECRET_FILE_BYTES: u64 = 16 * 1024;
+const MAX_CALENDAR_KEY_BYTES: usize = 16 * 1024;
+const DEFAULT_CALENDAR_ENCRYPTION_KEY_VERSION: i32 = 1;
 
 pub struct AppConfig {
     bind_addr: SocketAddr,
@@ -25,6 +27,7 @@ pub struct AppConfig {
     database_acquire_timeout: Duration,
     trusted_network: bool,
     authentication: AuthenticationSetting,
+    calendar_oauth: CalendarOAuthSetting,
 }
 
 pub enum SecretSetting {
@@ -46,6 +49,23 @@ pub struct AuthenticationSettings {
 
 pub enum AuthenticationSetting {
     Available(AuthenticationSettings),
+    Missing,
+    Invalid,
+}
+
+/// Deployment-owned Google Calendar OAuth configuration. It is optional so a
+/// personal server can start before Google credentials have been provisioned,
+/// but partial configuration is never treated as usable.
+pub struct CalendarOAuthSettings {
+    client_id: String,
+    client_secret: SecretString,
+    redirect_uri: String,
+    encryption_key: SecretString,
+    encryption_key_version: i32,
+}
+
+pub enum CalendarOAuthSetting {
+    Available(CalendarOAuthSettings),
     Missing,
     Invalid,
 }
@@ -120,6 +140,7 @@ impl AppConfig {
             _ => SecretSetting::Invalid,
         };
         let authentication = AuthenticationSetting::load()?;
+        let calendar_oauth = CalendarOAuthSetting::load()?;
 
         Ok(Self {
             bind_addr,
@@ -129,6 +150,7 @@ impl AppConfig {
             database_acquire_timeout: Duration::from_millis(acquire_timeout_ms),
             trusted_network,
             authentication,
+            calendar_oauth,
         })
     }
 
@@ -165,6 +187,86 @@ impl AppConfig {
     #[must_use]
     pub const fn authentication(&self) -> &AuthenticationSetting {
         &self.authentication
+    }
+
+    #[must_use]
+    pub const fn calendar_oauth(&self) -> &CalendarOAuthSetting {
+        &self.calendar_oauth
+    }
+}
+
+impl CalendarOAuthSetting {
+    fn load() -> Result<Self, ConfigError> {
+        let client_id = env_string("JIMIN_GOOGLE_CALENDAR_CLIENT_ID")?;
+        let redirect_uri = env_string("JIMIN_GOOGLE_CALENDAR_REDIRECT_URI")?;
+        let encryption_key_version = env_string("JIMIN_CALENDAR_ENCRYPTION_KEY_VERSION")?;
+        let client_secret = secret_from_environment("JIMIN_GOOGLE_CALENDAR_CREDENTIAL")?;
+        let encryption_key = secret_from_environment("JIMIN_CALENDAR_ENCRYPTION_KEY")?;
+
+        let any_value_present = client_id.is_some()
+            || redirect_uri.is_some()
+            || encryption_key_version.is_some()
+            || !matches!(client_secret, SecretSetting::Missing)
+            || !matches!(encryption_key, SecretSetting::Missing);
+        if !any_value_present {
+            return Ok(Self::Missing);
+        }
+        let (Some(client_id), Some(redirect_uri)) = (client_id, redirect_uri) else {
+            return Ok(Self::Invalid);
+        };
+        let (SecretSetting::Available(client_secret), SecretSetting::Available(encryption_key)) =
+            (client_secret, encryption_key)
+        else {
+            return Ok(Self::Invalid);
+        };
+        let encryption_key_version = encryption_key_version
+            .map_or(Some(DEFAULT_CALENDAR_ENCRYPTION_KEY_VERSION), |value| {
+                value.parse::<i32>().ok()
+            })
+            .filter(|value| *value > 0);
+        let Some(encryption_key_version) = encryption_key_version else {
+            return Ok(Self::Invalid);
+        };
+        if !valid_google_client_id(&client_id)
+            || !valid_calendar_redirect_uri(&redirect_uri)
+            || !valid_calendar_key(&encryption_key)
+        {
+            return Ok(Self::Invalid);
+        }
+        Ok(Self::Available(CalendarOAuthSettings {
+            client_id,
+            client_secret,
+            redirect_uri,
+            encryption_key,
+            encryption_key_version,
+        }))
+    }
+}
+
+impl CalendarOAuthSettings {
+    #[must_use]
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+
+    #[must_use]
+    pub const fn client_secret(&self) -> &SecretString {
+        &self.client_secret
+    }
+
+    #[must_use]
+    pub fn redirect_uri(&self) -> &str {
+        &self.redirect_uri
+    }
+
+    #[must_use]
+    pub const fn encryption_key(&self) -> &SecretString {
+        &self.encryption_key
+    }
+
+    #[must_use]
+    pub const fn encryption_key_version(&self) -> i32 {
+        self.encryption_key_version
     }
 }
 
@@ -330,6 +432,25 @@ fn valid_build_sha(value: &str) -> bool {
 
 fn valid_auth_text(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= 255 && !value.chars().any(char::is_control)
+}
+
+fn valid_google_client_id(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= 255
+        && !value.chars().any(char::is_control)
+        && !value.chars().any(char::is_whitespace)
+}
+
+fn valid_calendar_redirect_uri(value: &str) -> bool {
+    value.len() <= 2_048
+        && !value.chars().any(char::is_control)
+        && (value.starts_with("https://") || value.starts_with("http://localhost"))
+        && !value.contains('#')
+}
+
+fn valid_calendar_key(value: &SecretString) -> bool {
+    let value = value.expose_secret();
+    value.len() >= 32 && value.len() <= MAX_CALENDAR_KEY_BYTES && !value.contains('\0')
 }
 
 fn parse_boolean(value: Option<&str>, default: bool) -> Result<bool, ConfigError> {

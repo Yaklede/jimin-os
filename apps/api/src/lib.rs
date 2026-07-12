@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod calendar_oauth;
 pub mod config;
 pub mod probe;
 mod voice_command;
@@ -8,14 +9,14 @@ use std::{collections::BTreeMap, convert::Infallible, future::Future, sync::Arc,
 use async_trait::async_trait;
 use axum::{
     Extension, Json, Router,
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     middleware,
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
-    routing::get,
+    routing::{get, post},
 };
 use jimin_application::{ApplicationError, DeviceSession, SessionService};
 use jimin_domain::{ClientPlatform, DeviceRegistration};
@@ -29,17 +30,20 @@ use jimin_storage::{
         PendingAgentActionDecision, QueuedAgentTurn,
     },
     auth::{Device, DeviceStatus, Profile},
-    calendar::{CalendarAccount, CalendarAccountStatus},
+    calendar::{CalendarAccount, CalendarAccountStatus, CreateCalendarOAuthAuthorization},
     planning::{NewScheduleEntry, NewTask, ScheduleEntry, ScheduleStatus, Task, TaskStatus},
 };
 use secrecy::{ExposeSecret, SecretString};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use utoipa::{OpenApi, ToSchema};
 
-use crate::voice_command::{VoiceCommand, VoiceCommandError};
+use crate::{
+    calendar_oauth::{CalendarOAuthError, CalendarOAuthRuntime, storage_failure_code},
+    voice_command::{VoiceCommand, VoiceCommandError},
+};
 
 #[async_trait]
 pub trait ReadinessProbe: Send + Sync {
@@ -63,6 +67,7 @@ pub struct ApiState {
     authentication: Option<Arc<auth::Authentication>>,
     pairing: Option<Arc<PairingRuntime>>,
     planning: Option<Database>,
+    calendar_oauth: Option<Arc<CalendarOAuthRuntime>>,
     agent: Option<Database>,
 }
 
@@ -82,6 +87,7 @@ impl ApiState {
             authentication: None,
             pairing: None,
             planning: None,
+            calendar_oauth: None,
             agent: None,
         }
     }
@@ -130,6 +136,17 @@ impl ApiState {
     #[must_use]
     fn planning(&self) -> Option<&Database> {
         self.planning.as_ref()
+    }
+
+    #[must_use]
+    pub fn with_calendar_oauth(mut self, calendar_oauth: CalendarOAuthRuntime) -> Self {
+        self.calendar_oauth = Some(Arc::new(calendar_oauth));
+        self
+    }
+
+    #[must_use]
+    fn calendar_oauth(&self) -> Option<&Arc<CalendarOAuthRuntime>> {
+        self.calendar_oauth.as_ref()
     }
 
     #[must_use]
@@ -302,6 +319,30 @@ pub struct GoogleCalendarConnectionResponse {
     last_successful_sync_at: Option<String>,
     reauth_required: bool,
     version: Option<i64>,
+}
+
+/// A platform-bound request to begin Calendar consent. The server owns the
+/// Google client profile and callback URL; the client supplies no OAuth URL or
+/// provider credential.
+#[derive(Debug, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StartGoogleCalendarAuthorizationRequest {
+    client_kind: String,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StartGoogleCalendarAuthorizationResponse {
+    authorization_id: uuid::Uuid,
+    authorization_url: String,
+    expires_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleCalendarCallbackQuery {
+    state: String,
+    code: Option<String>,
+    error: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
@@ -554,6 +595,8 @@ pub(crate) fn error_response(
         refresh_session,
         list_schedule_entries,
         get_google_calendar_connection,
+        start_google_calendar_authorization,
+        complete_google_calendar_authorization,
         get_home_snapshot,
         create_schedule_entry,
         list_open_tasks,
@@ -590,6 +633,8 @@ pub(crate) fn error_response(
         ScheduleEntryResponse,
         ScheduleListResponse,
         GoogleCalendarConnectionResponse,
+        StartGoogleCalendarAuthorizationRequest,
+        StartGoogleCalendarAuthorizationResponse,
         TaskResponse,
         TaskListResponse,
         VoiceCommandKind,
@@ -623,6 +668,10 @@ pub fn router(state: ApiState) -> Router {
     let router = Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
+        .route(
+            "/oauth/google/calendar/callback",
+            get(complete_google_calendar_authorization),
+        )
         .route("/v1/auth/refresh", axum::routing::post(refresh_session))
         .route(
             "/v1/access/session",
@@ -635,6 +684,10 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/calendar/connections/google",
             get(get_google_calendar_connection),
+        )
+        .route(
+            "/v1/calendar/connections/google/authorizations",
+            post(start_google_calendar_authorization),
         )
         .route("/v1/home", get(get_home_snapshot))
         .route("/v1/tasks", get(list_open_tasks).post(create_task))
@@ -1937,6 +1990,273 @@ async fn get_google_calendar_connection(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/calendar/connections/google/authorizations",
+    tag = "calendar",
+    request_body = StartGoogleCalendarAuthorizationRequest,
+    responses(
+        (status = 201, body = StartGoogleCalendarAuthorizationResponse),
+        (status = 400),
+        (status = 401),
+        (status = 503)
+    )
+)]
+async fn start_google_calendar_authorization(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Json(request): Json<StartGoogleCalendarAuthorizationRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(client_kind) = parse_client_platform(&request.client_kind) else {
+        return invalid_request_response(request_id);
+    };
+    let Some(calendar_oauth) = state.calendar_oauth() else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "calendar.configuration_missing",
+            "Google Calendar 연결을 아직 준비하고 있어요.",
+            request_id,
+            false,
+        );
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let force_consent = match planning
+        .calendar_account_for_user(principal.identity().user_id())
+        .await
+    {
+        Ok(None) => true,
+        Ok(Some(account)) => matches!(
+            account.status,
+            CalendarAccountStatus::ReauthRequired
+                | CalendarAccountStatus::Revoked
+                | CalendarAccountStatus::Error
+        ),
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    let authorization_id = uuid::Uuid::now_v7();
+    let authorization =
+        match calendar_oauth.begin_authorization(authorization_id, client_kind, force_consent) {
+            Ok(authorization) => authorization,
+            Err(error) => return calendar_oauth_error_response(error, request_id),
+        };
+    let command = CreateCalendarOAuthAuthorization {
+        id: authorization_id,
+        user_id: principal.identity().user_id(),
+        session_id: principal.identity().session_id(),
+        device_id: principal.identity().device_id(),
+        state_verifier: authorization.state_verifier,
+        pkce_verifier: authorization.pkce_verifier,
+        client_kind,
+        expires_at: authorization.expires_at,
+    };
+    let persisted = match planning.create_calendar_oauth_authorization(&command).await {
+        Ok(persisted) => persisted,
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    let Ok(expires_at) = persisted.expires_at.format(&Rfc3339) else {
+        return unavailable_response(request_id);
+    };
+    (
+        StatusCode::CREATED,
+        Json(StartGoogleCalendarAuthorizationResponse {
+            authorization_id: persisted.id,
+            authorization_url: authorization.authorization_url,
+            expires_at,
+        }),
+    )
+        .into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/oauth/google/calendar/callback",
+    tag = "calendar",
+    params(
+        ("state" = String, Query),
+        ("code" = Option<String>, Query),
+        ("error" = Option<String>, Query)
+    ),
+    responses((status = 200), (status = 400), (status = 503))
+)]
+async fn complete_google_calendar_authorization(
+    State(state): State<ApiState>,
+    Query(query): Query<GoogleCalendarCallbackQuery>,
+) -> Response {
+    let Some(calendar_oauth) = state.calendar_oauth() else {
+        return calendar_callback_page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "연결을 완료하지 못했어요",
+            "서버의 Google Calendar 연결 설정을 확인한 뒤 다시 시도해 주세요.",
+        );
+    };
+    let Some(planning) = state.planning() else {
+        return calendar_callback_page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "연결을 완료하지 못했어요",
+            "잠시 후 앱에서 다시 시도해 주세요.",
+        );
+    };
+    let claimed = match planning
+        .claim_calendar_oauth_authorization(&calendar_oauth.state_verifier(&query.state))
+        .await
+    {
+        Ok(Some(authorization)) => authorization,
+        Ok(None) => {
+            return calendar_callback_page(
+                StatusCode::BAD_REQUEST,
+                "연결을 완료하지 못했어요",
+                "연결 시간이 지났거나 이미 처리된 요청이에요. 앱에서 다시 연결해 주세요.",
+            );
+        }
+        Err(_) => {
+            return calendar_callback_page(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "연결을 완료하지 못했어요",
+                "잠시 후 앱에서 다시 시도해 주세요.",
+            );
+        }
+    };
+    if query.error.is_some() || query.code.is_none() {
+        let _ = planning
+            .fail_calendar_oauth_authorization(claimed.id, "calendar.authorization_failed")
+            .await;
+        return calendar_callback_page(
+            StatusCode::BAD_REQUEST,
+            "연결을 완료하지 못했어요",
+            "Google Calendar 권한이 허용되지 않았어요. 앱에서 다시 연결해 주세요.",
+        );
+    }
+    let code = SecretString::from(query.code.unwrap_or_default());
+    let authorization_id = claimed.id;
+    let completion = calendar_oauth.complete_authorization(claimed, code).await;
+    let result = match completion {
+        Ok(command) => {
+            planning
+                .complete_calendar_oauth_authorization(&command)
+                .await
+        }
+        Err(error) => {
+            let _ = planning
+                .fail_calendar_oauth_authorization(authorization_id, error.failure_code())
+                .await;
+            return calendar_callback_error_page(error);
+        }
+    };
+    match result {
+        Ok(_) => calendar_callback_page(
+            StatusCode::OK,
+            "Google Calendar를 연결했어요",
+            "초기 일정을 불러오는 중이에요. 이제 앱으로 돌아가도 됩니다.",
+        ),
+        Err(error) => {
+            let failure_code = storage_failure_code(&error);
+            let _ = planning
+                .fail_calendar_oauth_authorization(authorization_id, failure_code)
+                .await;
+            calendar_callback_page(
+                if matches!(
+                    error,
+                    StorageError::PersistenceUnavailable | StorageError::MigrationUnavailable
+                ) {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::BAD_REQUEST
+                },
+                "연결을 완료하지 못했어요",
+                "앱에서 Google Calendar 연결을 다시 시도해 주세요.",
+            )
+        }
+    }
+}
+
+fn calendar_oauth_error_response(error: CalendarOAuthError, request_id: RequestId) -> Response {
+    let (status, code, message) = match error {
+        CalendarOAuthError::Configuration => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "calendar.configuration_missing",
+            "Google Calendar 연결을 아직 준비하고 있어요.",
+        ),
+        CalendarOAuthError::ProviderUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "calendar.provider_unavailable",
+            "Google Calendar에 연결할 수 없어요. 잠시 후 다시 시도해 주세요.",
+        ),
+        CalendarOAuthError::IdentityMismatch => (
+            StatusCode::FORBIDDEN,
+            "calendar.account_mismatch",
+            "로그인한 Google 계정을 확인한 뒤 다시 연결해 주세요.",
+        ),
+        CalendarOAuthError::InvalidCallback
+        | CalendarOAuthError::ProviderRejected
+        | CalendarOAuthError::RequiredScopeMissing
+        | CalendarOAuthError::Encryption => (
+            StatusCode::BAD_REQUEST,
+            "calendar.authorization_failed",
+            "Google Calendar 연결을 다시 진행해 주세요.",
+        ),
+    };
+    error_response(status, code, message, request_id, error.retryable())
+}
+
+fn calendar_callback_error_page(error: CalendarOAuthError) -> Response {
+    let message = match error {
+        CalendarOAuthError::ProviderUnavailable => {
+            "Google Calendar에 연결할 수 없어요. 잠시 후 앱에서 다시 시도해 주세요."
+        }
+        CalendarOAuthError::IdentityMismatch => {
+            "Jimin OS에 로그인한 계정과 같은 Google 계정으로 다시 연결해 주세요."
+        }
+        CalendarOAuthError::RequiredScopeMissing => {
+            "필요한 Calendar 권한이 허용되지 않았어요. 앱에서 다시 연결해 주세요."
+        }
+        CalendarOAuthError::Configuration
+        | CalendarOAuthError::InvalidCallback
+        | CalendarOAuthError::ProviderRejected
+        | CalendarOAuthError::Encryption => "앱에서 Google Calendar 연결을 다시 시도해 주세요.",
+    };
+    calendar_callback_page(
+        if error.retryable() {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::BAD_REQUEST
+        },
+        "연결을 완료하지 못했어요",
+        message,
+    )
+}
+
+fn calendar_callback_page(status: StatusCode, title: &str, message: &str) -> Response {
+    let page = format!(
+        "<!doctype html><html lang=\"ko\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{title}</title><body><main><h1>{title}</h1><p>{message}</p></main></body></html>"
+    );
+    let mut response = (status, page).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    response
+}
+
+fn parse_client_platform(value: &str) -> Option<ClientPlatform> {
+    match value {
+        "macos" => Some(ClientPlatform::Macos),
+        "ios" => Some(ClientPlatform::Ios),
+        "android" => Some(ClientPlatform::Android),
+        _ => None,
+    }
+}
+
 fn calendar_connection_response(
     account: Option<CalendarAccount>,
 ) -> GoogleCalendarConnectionResponse {
@@ -2593,6 +2913,7 @@ mod tests {
             [
                 "/health/live",
                 "/health/ready",
+                "/oauth/google/calendar/callback",
                 "/v1/access/session",
                 "/v1/agent/authentication",
                 "/v1/agent/jobs/{job_id}",
@@ -2600,6 +2921,7 @@ mod tests {
                 "/v1/assistant/voice-commands",
                 "/v1/auth/refresh",
                 "/v1/calendar/connections/google",
+                "/v1/calendar/connections/google/authorizations",
                 "/v1/conversations",
                 "/v1/conversations/{conversation_id}/jobs/latest",
                 "/v1/conversations/{conversation_id}/messages",

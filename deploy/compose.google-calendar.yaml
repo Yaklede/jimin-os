@@ -1,0 +1,20 @@
+# Optional Google Calendar OAuth runtime. `init_deployment` includes this
+# overlay only when JIMIN_GOOGLE_CALENDAR_OAUTH_ENABLED=1, so the base personal
+# server stays runnable before its Google Cloud credentials are provisioned.
+services:
+  api:
+    environment:
+      JIMIN_GOOGLE_CALENDAR_CLIENT_ID: ${JIMIN_GOOGLE_CALENDAR_CLIENT_ID:?set JIMIN_GOOGLE_CALENDAR_CLIENT_ID}
+      JIMIN_GOOGLE_CALENDAR_REDIRECT_URI: ${JIMIN_GOOGLE_CALENDAR_REDIRECT_URI:?set JIMIN_GOOGLE_CALENDAR_REDIRECT_URI}
+      JIMIN_CALENDAR_ENCRYPTION_KEY_VERSION: ${JIMIN_CALENDAR_ENCRYPTION_KEY_VERSION:-1}
+      JIMIN_GOOGLE_CALENDAR_CREDENTIAL_FILE: /run/secrets/google_calendar_credential
+      JIMIN_CALENDAR_ENCRYPTION_KEY_FILE: /run/secrets/calendar_encryption_key
+    secrets:
+      - google_calendar_credential
+      - calendar_encryption_key
+
+secrets:
+  google_calendar_credential:
+    file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/google_calendar_client_secret
+  calendar_encryption_key:
+    file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/calendar_encryption_key
