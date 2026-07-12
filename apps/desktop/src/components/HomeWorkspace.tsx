@@ -1,24 +1,23 @@
 import {
-  ArrowUpRight,
   CalendarDays,
-  CheckCircle2,
+  ChevronRight,
   Circle,
-  ClipboardList,
+  Clock3,
   MessageCircleMore,
+  Mic,
   Sparkles,
 } from "lucide-react";
-import { type ReactNode, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 
-import { type HomeSnapshot } from "../api/home";
 import { type Conversation } from "../api/agent";
-import { type Task } from "../api/planning";
+import { type HomeSnapshot } from "../api/home";
+import { type ScheduleEntry, type Task } from "../api/planning";
 import { copy } from "../copy";
 
 type HomeWorkspaceProps = {
   snapshot: HomeSnapshot | undefined;
   loading: boolean;
   error: string | undefined;
-  assistantReady: boolean;
   conversations: Conversation[];
   onOpenAssistant(): void;
   onCompleteTask(task: Task): Promise<void>;
@@ -28,14 +27,11 @@ export function HomeWorkspace({
   snapshot,
   loading,
   error,
-  assistantReady,
   conversations,
   onOpenAssistant,
   onCompleteTask,
 }: HomeWorkspaceProps) {
-  const [completingTaskId, setCompletingTaskId] = useState<
-    string | undefined
-  >();
+  const [completingTaskId, setCompletingTaskId] = useState<string>();
   const greeting = useMemo(() => greetingForHour(new Date().getHours()), []);
   const nextSchedule = snapshot?.schedule[0];
   const scheduleCount = snapshot?.schedule.length ?? 0;
@@ -54,96 +50,91 @@ export function HomeWorkspace({
   return (
     <section className="home-page" aria-busy={loading}>
       <header className="home-greeting">
-        <p>{greeting}</p>
-        <h1>{copy.home.title}</h1>
-        <span>{copy.home.description}</span>
+        <div>
+          <h1>{greeting}</h1>
+          <p>{copy.home.title}</p>
+        </div>
+        <button
+          className="home-greeting__assistant focus-visible-control"
+          type="button"
+          onClick={onOpenAssistant}
+          aria-label={copy.actions.startAssistantConversation}
+        >
+          <Sparkles aria-hidden="true" />
+        </button>
       </header>
 
       {error && (
-        <p className="home-inline-alert" role="alert">
+        <p className="inline-alert" role="alert">
           {error}
         </p>
       )}
 
-      <section className="home-briefing" aria-labelledby="daily-briefing-title">
-        <div>
-          <span className="home-briefing__icon" aria-hidden="true">
-            <Sparkles />
-          </span>
-          <div>
-            <p>{copy.home.briefingLabel}</p>
-            <h2 id="daily-briefing-title">
-              {briefingTitle(loading, nextSchedule, scheduleCount)}
-            </h2>
-            <span>{briefingDescription(loading, nextSchedule, taskCount)}</span>
-          </div>
+      <button
+        className="home-briefing focus-visible-control"
+        type="button"
+        onClick={onOpenAssistant}
+        aria-label={copy.home.askAssistant}
+      >
+        <span className="home-briefing__symbol" aria-hidden="true">
+          <Sparkles />
+        </span>
+        <span className="home-briefing__copy">
+          <strong>
+            {briefingHeading(loading, nextSchedule, scheduleCount)}
+          </strong>
+          <span>{briefingSummary(loading, scheduleCount, taskCount)}</span>
+        </span>
+        <ChevronRight aria-hidden="true" />
+      </button>
+
+      <button
+        className="home-voice-callout focus-visible-control"
+        type="button"
+        onClick={onOpenAssistant}
+      >
+        <span className="home-voice-callout__icon" aria-hidden="true">
+          <Mic />
+        </span>
+        <span>
+          <strong>{copy.home.askAssistant}</strong>
+          <span>{copy.home.description}</span>
+        </span>
+        <ChevronRight aria-hidden="true" />
+      </button>
+
+      <section
+        className="home-next-schedule"
+        aria-labelledby="next-schedule-title"
+      >
+        <div className="home-section-heading">
+          <h2 id="next-schedule-title">
+            {nextSchedule ? "다음 일정" : copy.home.scheduleTitle}
+          </h2>
+          {nextSchedule && (
+            <span>{relativeScheduleTime(nextSchedule.startsAt)}</span>
+          )}
         </div>
-        <button
-          className="home-briefing__action focus-visible-control"
-          type="button"
-          onClick={onOpenAssistant}
-        >
-          <MessageCircleMore aria-hidden="true" />
-          {assistantReady ? copy.home.askAssistant : copy.home.connectAssistant}
-        </button>
+        {loading ? (
+          <LoadingRows rows={1} />
+        ) : nextSchedule ? (
+          <ScheduleHighlight entry={nextSchedule} />
+        ) : (
+          <EmptySurface
+            title={copy.home.scheduleEmptyTitle}
+            description={copy.home.scheduleEmptyDescription}
+          />
+        )}
       </section>
 
-      <div className="home-layout">
-        <section
-          className="home-panel home-panel--schedule"
-          aria-labelledby="today-schedule-title"
-        >
-          <PanelHeading
-            icon={<CalendarDays aria-hidden="true" />}
-            title={copy.home.scheduleTitle}
-            meta={
-              loading
-                ? copy.home.loadingShort
-                : copy.home.scheduleCount(scheduleCount)
-            }
-          />
-          {loading ? (
-            <LoadingRows rows={3} />
-          ) : snapshot?.schedule.length ? (
-            <ol className="home-timeline">
-              {snapshot.schedule.map((entry) => (
-                <li key={entry.id}>
-                  <time dateTime={entry.startsAt}>
-                    {formatTime(entry.startsAt)}
-                  </time>
-                  <span aria-hidden="true" />
-                  <div>
-                    <strong>{entry.title}</strong>
-                    <p>
-                      {scheduleDetail(
-                        entry.startsAt,
-                        entry.endsAt,
-                        entry.notes,
-                      )}
-                    </p>
-                  </div>
-                </li>
-              ))}
-            </ol>
-          ) : (
-            <EmptyPanel
-              title={copy.home.scheduleEmptyTitle}
-              description={copy.home.scheduleEmptyDescription}
-            />
-          )}
-        </section>
-
-        <section
-          className="home-panel home-panel--tasks"
-          aria-labelledby="today-task-title"
-        >
-          <PanelHeading
-            icon={<ClipboardList aria-hidden="true" />}
-            title={copy.home.taskTitle}
-            meta={
-              loading ? copy.home.loadingShort : copy.home.taskCount(taskCount)
-            }
-          />
+      <section className="home-tasks" aria-labelledby="today-task-title">
+        <div className="home-section-heading">
+          <h2 id="today-task-title">{copy.home.taskTitle}</h2>
+          <span>
+            {loading ? copy.home.loadingShort : copy.home.taskCount(taskCount)}
+          </span>
+        </div>
+        <div className="home-task-surface">
           {loading ? (
             <LoadingRows rows={4} />
           ) : snapshot?.tasks.length ? (
@@ -158,77 +149,77 @@ export function HomeWorkspace({
                     aria-label={copy.home.completeTask(task.title)}
                   >
                     {completingTaskId === task.id ? (
-                      <span
-                        className="home-task-list__spinner"
-                        aria-hidden="true"
-                      />
+                      <span className="button-spinner" aria-hidden="true" />
                     ) : (
                       <Circle aria-hidden="true" />
                     )}
                   </button>
-                  <div>
-                    <strong>{task.title}</strong>
-                    {task.dueAt && <span>{dueLabel(task.dueAt)}</span>}
-                  </div>
+                  <span>{task.title}</span>
+                  {task.dueAt && (
+                    <time dateTime={task.dueAt}>{dueLabel(task.dueAt)}</time>
+                  )}
                 </li>
               ))}
             </ul>
           ) : (
-            <EmptyPanel
+            <EmptySurface
               title={copy.home.taskEmptyTitle}
               description={copy.home.taskEmptyDescription}
             />
           )}
-        </section>
-      </div>
-
-      <section className="home-next-action" aria-labelledby="next-action-title">
-        <div>
-          <span className="home-next-action__icon" aria-hidden="true">
-            <CheckCircle2 />
-          </span>
-          <div>
-            <p>{copy.home.nextActionLabel}</p>
-            <h2 id="next-action-title">
-              {nextSchedule
-                ? copy.home.nextActionSchedule(nextSchedule.title)
-                : copy.home.nextActionEmpty}
-            </h2>
-          </div>
         </div>
-        <button
-          className="quiet-button focus-visible-control"
-          type="button"
-          onClick={onOpenAssistant}
-        >
-          {copy.home.openAssistant}
-          <ArrowUpRight aria-hidden="true" />
-        </button>
       </section>
 
-      <aside
-        className="home-mobile-assistant"
-        aria-label={copy.home.assistantRailTitle}
+      <section
+        className="home-conversation-summary"
+        aria-labelledby="recent-conversation-title"
       >
-        <AssistantRail
-          assistantReady={assistantReady}
-          conversations={conversations}
-          onOpenAssistant={onOpenAssistant}
-        />
-      </aside>
+        <div className="home-section-heading">
+          <h2 id="recent-conversation-title">
+            {copy.home.recentConversations}
+          </h2>
+          <button
+            className="text-button focus-visible-control"
+            type="button"
+            onClick={onOpenAssistant}
+          >
+            {copy.actions.openConversation}
+          </button>
+        </div>
+        <div className="home-conversation-summary__surface">
+          {conversations.length ? (
+            <>
+              <MessageCircleMore aria-hidden="true" />
+              <span>
+                {conversations[0].title ?? copy.conversations.untitled}
+              </span>
+              <ChevronRight aria-hidden="true" />
+            </>
+          ) : (
+            <>
+              <MessageCircleMore aria-hidden="true" />
+              <span>{copy.home.recentEmpty}</span>
+              <ChevronRight aria-hidden="true" />
+            </>
+          )}
+        </div>
+      </section>
     </section>
   );
 }
+
+type AssistantRailProps = {
+  assistantReady: boolean;
+  conversations: Conversation[];
+  onOpenAssistant(): void;
+};
 
 export function AssistantRail({
   assistantReady,
   conversations,
   onOpenAssistant,
-}: Pick<
-  HomeWorkspaceProps,
-  "assistantReady" | "conversations" | "onOpenAssistant"
->) {
-  const recent = conversations.slice(0, 3);
+}: AssistantRailProps) {
+  const recent = conversations.slice(0, 2);
   return (
     <div className="assistant-rail">
       <div className="assistant-rail__identity">
@@ -244,15 +235,36 @@ export function AssistantRail({
           </p>
         </div>
       </div>
+      <p className="assistant-rail__message">
+        {assistantReady
+          ? "오늘의 일정과 할 일을 바탕으로 필요한 일을 같이 정리할게요."
+          : "ChatGPT를 연결하면 대화를 바로 시작할 수 있어요."}
+      </p>
+      <div className="assistant-rail__quick-actions">
+        <button
+          className="focus-visible-control"
+          type="button"
+          onClick={onOpenAssistant}
+        >
+          오늘 일정 정리하기
+        </button>
+        <button
+          className="focus-visible-control"
+          type="button"
+          onClick={onOpenAssistant}
+        >
+          해야 할 일 정하기
+        </button>
+      </div>
       <button
-        className="assistant-rail__prompt focus-visible-control"
+        className="assistant-rail__composer focus-visible-control"
         type="button"
         onClick={onOpenAssistant}
       >
         <span>{copy.home.assistantPrompt}</span>
-        <ArrowUpRight aria-hidden="true" />
+        <MessageCircleMore aria-hidden="true" />
       </button>
-      {recent.length ? (
+      {recent.length > 0 && (
         <div className="assistant-rail__recent">
           <p>{copy.home.recentConversations}</p>
           <ul>
@@ -263,34 +275,12 @@ export function AssistantRail({
             ))}
           </ul>
         </div>
-      ) : (
-        <p className="assistant-rail__empty">{copy.home.recentEmpty}</p>
       )}
     </div>
   );
 }
 
-function PanelHeading({
-  icon,
-  title,
-  meta,
-}: {
-  icon: ReactNode;
-  title: string;
-  meta: string;
-}) {
-  return (
-    <header className="home-panel__heading">
-      <div>
-        {icon}
-        <h2>{title}</h2>
-      </div>
-      <span>{meta}</span>
-    </header>
-  );
-}
-
-function EmptyPanel({
+export function EmptySurface({
   title,
   description,
 }: {
@@ -298,19 +288,37 @@ function EmptyPanel({
   description: string;
 }) {
   return (
-    <div className="home-empty-panel">
-      <strong>{title}</strong>
-      <p>{description}</p>
+    <div className="empty-surface">
+      <Clock3 aria-hidden="true" />
+      <div>
+        <strong>{title}</strong>
+        <p>{description}</p>
+      </div>
     </div>
   );
 }
 
-function LoadingRows({ rows }: { rows: number }) {
+export function LoadingRows({ rows }: { rows: number }) {
   return (
-    <div className="home-loading-rows" aria-label={copy.home.loadingShort}>
+    <div className="loading-rows" aria-label={copy.home.loadingShort}>
       {Array.from({ length: rows }, (_, index) => (
         <span key={index} className="skeleton" />
       ))}
+    </div>
+  );
+}
+
+function ScheduleHighlight({ entry }: { entry: ScheduleEntry }) {
+  return (
+    <div className="schedule-highlight">
+      <span className="schedule-highlight__icon" aria-hidden="true">
+        <CalendarDays />
+      </span>
+      <div>
+        <strong>{entry.title}</strong>
+        <p>{scheduleDetail(entry)}</p>
+      </div>
+      <ChevronRight aria-hidden="true" />
     </div>
   );
 }
@@ -321,9 +329,9 @@ function greetingForHour(hour: number): string {
   return copy.home.eveningGreeting;
 }
 
-function briefingTitle(
+function briefingHeading(
   loading: boolean,
-  nextSchedule: HomeSnapshot["schedule"][number] | undefined,
+  nextSchedule: ScheduleEntry | undefined,
   scheduleCount: number,
 ): string {
   if (loading) return copy.home.loadingBriefing;
@@ -332,16 +340,26 @@ function briefingTitle(
   return copy.home.briefingEmpty;
 }
 
-function briefingDescription(
+function briefingSummary(
   loading: boolean,
-  nextSchedule: HomeSnapshot["schedule"][number] | undefined,
+  scheduleCount: number,
   taskCount: number,
 ): string {
   if (loading) return copy.home.loadingDescription;
-  if (nextSchedule) return copy.home.briefingTaskCount(taskCount);
-  return taskCount
-    ? copy.home.briefingOnlyTasks(taskCount)
-    : copy.home.briefingNoItems;
+  const parts = [`일정 ${scheduleCount}개`, `할 일 ${taskCount}개`];
+  return parts.join(" · ");
+}
+
+function scheduleDetail(entry: ScheduleEntry): string {
+  const time = `${formatTime(entry.startsAt)} · ${formatTime(entry.endsAt)}`;
+  return entry.notes ? `${time} · ${entry.notes}` : time;
+}
+
+function relativeScheduleTime(value: string): string {
+  const difference = new Date(value).getTime() - Date.now();
+  const minutes = Math.round(difference / 60_000);
+  if (minutes > 0 && minutes < 60) return `${minutes}분 뒤`;
+  return formatTime(value);
 }
 
 function formatTime(value: string): string {
@@ -352,19 +370,9 @@ function formatTime(value: string): string {
   }).format(new Date(value));
 }
 
-function scheduleDetail(
-  startsAt: string,
-  endsAt: string,
-  notes: string | null,
-): string {
-  const time = `${formatTime(startsAt)}–${formatTime(endsAt)}`;
-  return notes ? `${time} · ${notes}` : time;
-}
-
 function dueLabel(value: string): string {
-  const due = new Date(value);
   return new Intl.DateTimeFormat("ko-KR", {
     month: "numeric",
     day: "numeric",
-  }).format(due);
+  }).format(new Date(value));
 }

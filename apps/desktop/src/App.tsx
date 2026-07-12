@@ -26,7 +26,10 @@ import {
 } from "./api/agent";
 import { ConversationWorkspace } from "./components/ConversationWorkspace";
 import { AssistantRail, HomeWorkspace } from "./components/HomeWorkspace";
+import { MemoryWorkspace } from "./components/MemoryWorkspace";
 import { OsShell, type OsDestination } from "./components/OsShell";
+import { PlanningWorkspace } from "./components/PlanningWorkspace";
+import { SettingsWorkspace } from "./components/SettingsWorkspace";
 import { copy } from "./copy";
 import {
   clearDeviceSession,
@@ -346,7 +349,7 @@ export default function App() {
   ]);
 
   function selectConversation(conversationId: string) {
-    setDestination("assistant");
+    setDestination("chat");
     setSelectedConversationId(conversationId);
     setConversationMessages([]);
     void loadConversationMessages(conversationId);
@@ -400,7 +403,7 @@ export default function App() {
 
   function openNewAssistantRequest() {
     startConversation();
-    setDestination("assistant");
+    setDestination("chat");
   }
 
   async function beginAgentAuthentication(): Promise<void> {
@@ -495,7 +498,7 @@ export default function App() {
           onRefresh={() => void refresh()}
           refreshing={mode === "loading"}
           rail={
-            destination === "home" ? (
+            destination !== "chat" ? (
               <AssistantRail
                 assistantReady={agentAuthentication?.state === "ready"}
                 conversations={conversations}
@@ -504,17 +507,35 @@ export default function App() {
             ) : undefined
           }
         >
-          {destination === "home" ? (
+          {destination === "home" && (
             <HomeWorkspace
               snapshot={homeSnapshot}
               loading={homeLoading || mode === "loading"}
               error={homeError ?? (mode === "error" ? message : undefined)}
-              assistantReady={agentAuthentication?.state === "ready"}
               conversations={conversations}
               onOpenAssistant={openNewAssistantRequest}
               onCompleteTask={completeHomeTask}
             />
-          ) : (
+          )}
+          {destination === "calendar" && (
+            <PlanningWorkspace
+              snapshot={homeSnapshot}
+              loading={homeLoading || mode === "loading"}
+              error={homeError ?? (mode === "error" ? message : undefined)}
+              onCompleteTask={completeHomeTask}
+            />
+          )}
+          {destination === "memory" && (
+            <MemoryWorkspace onOpenConversation={openNewAssistantRequest} />
+          )}
+          {destination === "settings" && (
+            <SettingsWorkspace
+              authentication={agentAuthentication}
+              requesting={authenticationRequesting}
+              onStartAuthentication={beginAgentAuthentication}
+            />
+          )}
+          {destination === "chat" && (
             <ConversationWorkspace
               conversations={conversations}
               messages={conversationMessages}

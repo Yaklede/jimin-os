@@ -1,9 +1,19 @@
-import { House, MessageCircleMore, RefreshCw, Sparkles } from "lucide-react";
+import {
+  BrainCircuit,
+  CalendarDays,
+  House,
+  MessageCircleMore,
+  Mic,
+  RefreshCw,
+  Settings2,
+  Sparkles,
+} from "lucide-react";
 import { type ReactNode } from "react";
 
 import { copy } from "../copy";
 
-export type OsDestination = "home" | "assistant";
+export type OsDestination =
+  "home" | "calendar" | "chat" | "memory" | "settings";
 
 type OsShellProps = {
   destination: OsDestination;
@@ -22,8 +32,10 @@ export function OsShell({
   onRefresh,
   refreshing,
 }: OsShellProps) {
+  const openChat = () => onNavigate("chat");
+
   return (
-    <div className="os-shell" data-has-rail={Boolean(rail)}>
+    <div className="os-shell" data-destination={destination}>
       <aside className="os-sidebar" aria-label={copy.navigation.label}>
         <button
           className="os-brand focus-visible-control"
@@ -34,8 +46,9 @@ export function OsShell({
           <span className="os-brand__mark" aria-hidden="true">
             <Sparkles />
           </span>
-          <span>Jimin OS</span>
+          <span>{copy.productName.toLocaleLowerCase("en-US")}</span>
         </button>
+
         <nav className="os-nav" aria-label={copy.navigation.label}>
           <NavigationButton
             active={destination === "home"}
@@ -44,12 +57,33 @@ export function OsShell({
             onClick={() => onNavigate("home")}
           />
           <NavigationButton
-            active={destination === "assistant"}
-            icon={<MessageCircleMore aria-hidden="true" />}
-            label={copy.navigation.assistant}
-            onClick={() => onNavigate("assistant")}
+            active={destination === "calendar"}
+            icon={<CalendarDays aria-hidden="true" />}
+            label={copy.navigation.schedule}
+            onClick={() => onNavigate("calendar")}
+          />
+          <NavigationButton
+            active={destination === "memory"}
+            icon={<BrainCircuit aria-hidden="true" />}
+            label={copy.navigation.memory}
+            onClick={() => onNavigate("memory")}
+          />
+          <NavigationButton
+            active={destination === "settings"}
+            icon={<Settings2 aria-hidden="true" />}
+            label={copy.navigation.settings}
+            onClick={() => onNavigate("settings")}
           />
         </nav>
+
+        <button
+          className="os-sidebar__assistant focus-visible-control"
+          type="button"
+          onClick={openChat}
+        >
+          <Mic aria-hidden="true" />
+          {copy.actions.startAssistantConversation}
+        </button>
       </aside>
 
       <section className="os-workspace">
@@ -57,11 +91,11 @@ export function OsShell({
           <button
             className="os-command-launcher focus-visible-control"
             type="button"
-            onClick={() => onNavigate("assistant")}
+            onClick={openChat}
           >
-            <Sparkles aria-hidden="true" />
+            <Mic aria-hidden="true" />
             <span>{copy.home.commandPlaceholder}</span>
-            <kbd>⌘ K</kbd>
+            <kbd>⌘K</kbd>
           </button>
           <div className="os-topbar__controls">
             <time dateTime={new Date().toISOString()}>{todayLabel()}</time>
@@ -88,14 +122,34 @@ export function OsShell({
         <NavigationButton
           active={destination === "home"}
           icon={<House aria-hidden="true" />}
-          label={copy.navigation.home}
+          label={copy.navigation.mobileHome}
           onClick={() => onNavigate("home")}
         />
         <NavigationButton
-          active={destination === "assistant"}
+          active={destination === "calendar"}
+          icon={<CalendarDays aria-hidden="true" />}
+          label={copy.navigation.schedule}
+          onClick={() => onNavigate("calendar")}
+        />
+        <button
+          className="os-mobile-nav__assistant focus-visible-control"
+          type="button"
+          aria-label={copy.actions.startAssistantConversation}
+          onClick={openChat}
+        >
+          <Mic aria-hidden="true" />
+        </button>
+        <NavigationButton
+          active={destination === "chat"}
           icon={<MessageCircleMore aria-hidden="true" />}
-          label={copy.navigation.assistant}
-          onClick={() => onNavigate("assistant")}
+          label={copy.navigation.chat}
+          onClick={openChat}
+        />
+        <NavigationButton
+          active={destination === "settings"}
+          icon={<Settings2 aria-hidden="true" />}
+          label={copy.navigation.settings}
+          onClick={() => onNavigate("settings")}
         />
       </nav>
     </div>
