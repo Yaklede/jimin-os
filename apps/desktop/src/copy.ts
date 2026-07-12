@@ -140,6 +140,7 @@ export const copy = {
     fallbackRecovery:
       "이 기기에서 음성 인식을 사용할 수 없어요. 입력으로 이어가 주세요.",
     retry: "다시 말하기",
+    finishListening: "말하기 마치기",
     useTranscript: "대화에서 확인하기",
     useTextInput: "입력으로 이어가기",
     close: "닫기",
@@ -155,7 +156,8 @@ export const copy = {
     chatgptFailed: "연결을 다시 확인해 주세요",
   },
   conversations: {
-    identity: "개인 비서",
+    identity: "지민",
+    mobileDescription: "음성으로 한 일도 여기서 이어서 볼 수 있어요.",
     title: "무엇을 함께 정리할까요?",
     description: "오늘 정리할 내용이나 고민을 말하듯이 적어 주세요.",
     startersLabel: "바로 시작할 수 있는 질문",

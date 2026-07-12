@@ -34,6 +34,7 @@ type SpeechRecognitionLike = {
   onerror: ((event: SpeechRecognitionErrorLike) => void) | null;
   onend: (() => void) | null;
   start(): void;
+  stop(): void;
   abort(): void;
 };
 
@@ -53,6 +54,7 @@ export function VoiceCommandSheet({
   onOpenTextInput,
 }: VoiceCommandSheetProps) {
   const recognizerRef = useRef<SpeechRecognitionLike | undefined>(undefined);
+  const completedRef = useRef(false);
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<RecognitionState>("listening");
   const [transcript, setTranscript] = useState("");
@@ -66,7 +68,7 @@ export function VoiceCommandSheet({
       return;
     }
 
-    let completed = false;
+    completedRef.current = false;
     const recognizer = new Constructor();
     recognizerRef.current = recognizer;
     setTranscript("");
@@ -80,25 +82,34 @@ export function VoiceCommandSheet({
       if (!text) return;
       setTranscript(text);
       if (result.isFinal) {
-        completed = true;
+        completedRef.current = true;
         setState("heard");
       }
     };
     recognizer.onerror = (event) => {
-      completed = true;
+      completedRef.current = true;
       setState(errorStateFor(event.error));
     };
     recognizer.onend = () => {
-      if (!completed) setState("no-speech");
+      if (!completedRef.current) setState("no-speech");
     };
 
     try {
       recognizer.start();
     } catch {
+      completedRef.current = true;
       setState("error");
     }
 
+    const timeout = window.setTimeout(() => {
+      if (completedRef.current) return;
+      completedRef.current = true;
+      recognizer.stop();
+      setState("no-speech");
+    }, 8_000);
+
     return () => {
+      window.clearTimeout(timeout);
       recognizer.abort();
       if (recognizerRef.current === recognizer) {
         recognizerRef.current = undefined;
@@ -109,8 +120,15 @@ export function VoiceCommandSheet({
   if (!open) return null;
 
   function retry() {
+    completedRef.current = true;
     recognizerRef.current?.abort();
     setAttempt((current) => current + 1);
+  }
+
+  function finishListening() {
+    completedRef.current = true;
+    recognizerRef.current?.stop();
+    setState(transcript.trim() ? "heard" : "no-speech");
   }
 
   function useTranscript() {
@@ -183,13 +201,23 @@ export function VoiceCommandSheet({
               {copy.voice.useTranscript}
             </button>
           ) : state === "listening" ? (
-            <button
-              className="voice-sheet__secondary focus-visible-control"
-              type="button"
-              onClick={onOpenTextInput}
-            >
-              {copy.voice.useTextInput}
-            </button>
+            <>
+              <button
+                className="primary-button focus-visible-control"
+                type="button"
+                onClick={finishListening}
+              >
+                <Mic aria-hidden="true" />
+                {copy.voice.finishListening}
+              </button>
+              <button
+                className="voice-sheet__secondary focus-visible-control"
+                type="button"
+                onClick={onOpenTextInput}
+              >
+                {copy.voice.useTextInput}
+              </button>
+            </>
           ) : (
             <>
               <button

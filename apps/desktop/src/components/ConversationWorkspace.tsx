@@ -135,6 +135,15 @@ export function ConversationWorkspace({
           className="assistant-conversation"
           aria-labelledby="assistant-title"
         >
+          <header className="assistant-mobile-identity">
+            <span aria-hidden="true">
+              <Sparkles />
+            </span>
+            <div>
+              <strong>{copy.conversations.identity}</strong>
+              <p>{copy.conversations.mobileDescription}</p>
+            </div>
+          </header>
           {isNewConversation ? (
             <AssistantWelcome
               authentication={authentication}

@@ -1191,6 +1191,10 @@ svg {
   padding: 24px;
 }
 
+.assistant-mobile-identity {
+  display: none;
+}
+
 .assistant-welcome-panel,
 .assistant-thread-panel {
   min-width: 0;
@@ -1788,12 +1792,12 @@ svg {
 
   .os-mobile-nav__assistant {
     position: absolute;
-    top: -28px;
+    top: -32px;
     left: 50%;
     display: grid;
     place-items: center;
-    width: 56px;
-    height: 56px;
+    width: 64px;
+    height: 64px;
     margin: 0;
     border: 0;
     border-radius: 50%;
@@ -1866,19 +1870,75 @@ svg {
     padding: 0;
   }
 
-  .assistant-welcome-panel {
-    width: 100%;
-    margin: 0;
-    padding: 16px 0;
+  .assistant-mobile-identity {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 58px;
+    border-bottom: 1px solid var(--border);
+    padding: 8px 0;
   }
 
-  .assistant-welcome-panel h1,
-  .assistant-thread-header h1 {
-    font-size: 22px;
+  .assistant-mobile-identity > span {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: white;
+  }
+
+  .assistant-mobile-identity svg {
+    width: 17px;
+    height: 17px;
+  }
+
+  .assistant-mobile-identity strong {
+    color: var(--text-strong);
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  .assistant-mobile-identity p {
+    margin: 1px 0 0;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .assistant-welcome-panel {
+    flex: 1;
+    width: 100%;
+    margin: 0;
+    padding: 20px 0 12px;
+  }
+
+  .assistant-welcome-panel header {
+    display: none;
+  }
+
+  .assistant-starter-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: auto;
+  }
+
+  .assistant-starter-list__item {
+    min-height: 38px;
+    width: auto;
+    border-radius: 99px;
+    padding: 8px 12px;
+    color: var(--accent);
+    font-size: 13px;
+  }
+
+  .assistant-starter-list__item svg {
+    display: none;
   }
 
   .assistant-thread-header {
-    align-items: flex-start;
+    display: none;
   }
 
   .assistant-thread-header__new {
@@ -1933,8 +1993,8 @@ svg {
     display: flex;
     flex-direction: column;
     justify-content: flex-end;
-    background: color-mix(in srgb, var(--text-strong) 42%, transparent);
-    animation: voice-sheet-dim 240ms ease-out both;
+    background: transparent;
+    animation: none;
   }
 
   .voice-sheet {
