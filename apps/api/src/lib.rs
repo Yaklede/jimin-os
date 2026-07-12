@@ -29,6 +29,7 @@ use jimin_storage::{
         PendingAgentActionDecision, QueuedAgentTurn,
     },
     auth::{Device, DeviceStatus, Profile},
+    calendar::{CalendarAccount, CalendarAccountStatus},
     planning::{NewScheduleEntry, NewTask, ScheduleEntry, ScheduleStatus, Task, TaskStatus},
 };
 use secrecy::{ExposeSecret, SecretString};
@@ -290,6 +291,19 @@ pub struct HomeSnapshotResponse {
     tasks: Vec<TaskResponse>,
 }
 
+/// Safe Google Calendar connection state. Provider credentials and identifiers
+/// never leave the server.
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleCalendarConnectionResponse {
+    status: String,
+    email: Option<String>,
+    granted_scopes: Vec<String>,
+    last_successful_sync_at: Option<String>,
+    reauth_required: bool,
+    version: Option<i64>,
+}
+
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationResponse {
@@ -539,6 +553,7 @@ pub(crate) fn error_response(
         trusted_network_session,
         refresh_session,
         list_schedule_entries,
+        get_google_calendar_connection,
         get_home_snapshot,
         create_schedule_entry,
         list_open_tasks,
@@ -574,6 +589,7 @@ pub(crate) fn error_response(
         DeviceRegistrationRequest,
         ScheduleEntryResponse,
         ScheduleListResponse,
+        GoogleCalendarConnectionResponse,
         TaskResponse,
         TaskListResponse,
         VoiceCommandKind,
@@ -615,6 +631,10 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/schedule-entries",
             get(list_schedule_entries).post(create_schedule_entry),
+        )
+        .route(
+            "/v1/calendar/connections/google",
+            get(get_google_calendar_connection),
         )
         .route("/v1/home", get(get_home_snapshot))
         .route("/v1/tasks", get(list_open_tasks).post(create_task))
@@ -1886,6 +1906,71 @@ async fn trusted_network_session(
 }
 
 #[utoipa::path(
+    get,
+    path = "/v1/calendar/connections/google",
+    tag = "calendar",
+    responses(
+        (status = 200, body = GoogleCalendarConnectionResponse),
+        (status = 401),
+        (status = 503)
+    )
+)]
+async fn get_google_calendar_connection(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+
+    match planning
+        .calendar_account_for_user(principal.identity().user_id())
+        .await
+    {
+        Ok(account) => Json(calendar_connection_response(account)).into_response(),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+fn calendar_connection_response(
+    account: Option<CalendarAccount>,
+) -> GoogleCalendarConnectionResponse {
+    let Some(account) = account else {
+        return GoogleCalendarConnectionResponse {
+            status: "not_connected".to_owned(),
+            email: None,
+            granted_scopes: Vec::new(),
+            last_successful_sync_at: None,
+            reauth_required: false,
+            version: None,
+        };
+    };
+    let status = match account.status {
+        CalendarAccountStatus::Connecting => "connecting",
+        CalendarAccountStatus::Active => "active",
+        CalendarAccountStatus::ReauthRequired => "reauth_required",
+        CalendarAccountStatus::Revoking => "revoking",
+        CalendarAccountStatus::Revoked => "revoked",
+        CalendarAccountStatus::Error => "error",
+    };
+    GoogleCalendarConnectionResponse {
+        status: status.to_owned(),
+        email: Some(account.email),
+        granted_scopes: account.granted_scopes,
+        last_successful_sync_at: account
+            .last_successful_sync_at
+            .map(|value| value.format(&Rfc3339).unwrap_or_default()),
+        reauth_required: account.status == CalendarAccountStatus::ReauthRequired,
+        version: Some(account.version),
+    }
+}
+
+#[utoipa::path(
     post,
     path = "/v1/auth/refresh",
     tag = "identity",
@@ -2514,6 +2599,7 @@ mod tests {
                 "/v1/agent/jobs/{job_id}/approval",
                 "/v1/assistant/voice-commands",
                 "/v1/auth/refresh",
+                "/v1/calendar/connections/google",
                 "/v1/conversations",
                 "/v1/conversations/{conversation_id}/jobs/latest",
                 "/v1/conversations/{conversation_id}/messages",
@@ -2556,6 +2642,22 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/v1/home?from=2026-07-12T00%3A00%3A00Z&to=2026-07-13T00%3A00%3A00Z")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn calendar_connection_endpoint_requires_a_live_signed_session() {
+        let (state, _, _) = signed_auth_state(true);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/calendar/connections/google")
                     .body(Body::empty())
                     .expect("request should be valid"),
             )
