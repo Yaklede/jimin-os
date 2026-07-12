@@ -51,9 +51,9 @@ pub struct NewAgentTurn {
     pub content: String,
 }
 
-/// A local planning action extracted from a conversational request. The action
-/// is persisted with its job in `waiting_approval` state and is never sent to
-/// the agent runner before the owner makes a decision.
+/// A local planning action extracted from a conversational request. The API
+/// decides whether a narrow deterministic action can execute immediately or
+/// should remain in `waiting_approval` for an explicit owner decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingAgentAction {
     CreateTask {

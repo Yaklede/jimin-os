@@ -1729,10 +1729,7 @@ async fn create_agent_turn(
         conversation_id,
         content: input.text,
     };
-    let queued = match pending_action_from_conversation_text(&turn.content) {
-        Some(action) => agent.enqueue_agent_action_turn(&turn, action).await,
-        None => agent.enqueue_agent_turn(&turn).await,
-    };
+    let queued = enqueue_conversation_turn(agent, &turn).await;
     match queued {
         Ok(queued) => (
             StatusCode::ACCEPTED,
@@ -1748,6 +1745,41 @@ async fn create_agent_turn(
         ),
         Err(error) => storage_error_response(&error, request_id),
     }
+}
+
+/// Executes narrow, deterministic personal planning instructions immediately.
+/// General conversation still queues a managed Codex turn; only a fully parsed
+/// local task or dated schedule bypasses the approval state.
+async fn enqueue_conversation_turn(
+    agent: &Database,
+    turn: &NewAgentTurn,
+) -> Result<QueuedAgentTurn, StorageError> {
+    let Some(action) = pending_action_from_conversation_text(&turn.content) else {
+        return agent.enqueue_agent_turn(turn).await;
+    };
+    let queued = agent.enqueue_agent_action_turn(turn, action).await?;
+    if queued.state != AgentJobState::WaitingApproval
+        || !agent
+            .resolve_agent_action(
+                turn.user_id,
+                queued.job_id,
+                PendingAgentActionDecision::Approve,
+            )
+            .await?
+    {
+        return Err(StorageError::PersistenceUnavailable);
+    }
+    let job = agent
+        .agent_job_for_user(turn.user_id, queued.job_id)
+        .await?
+        .ok_or(StorageError::PersistenceUnavailable)?;
+    Ok(QueuedAgentTurn {
+        job_id: queued.job_id,
+        message_id: queued.message_id,
+        conversation_id: queued.conversation_id,
+        state: job.state,
+        version: job.version,
+    })
 }
 
 fn pending_action_from_conversation_text(text: &str) -> Option<PendingAgentAction> {
