@@ -12,6 +12,24 @@ docks:
     version: 1.0.3
     platform: macos
     workdir: .opendock/workdirs/opendock__design-ultrawork__54093992ce81
+  - id: opendock/korea-equity-research
+    name: Korea Equity Research
+    requested: 0.1.2
+    version: 0.1.2
+    platform: macos
+    workdir: .opendock/workdirs/opendock__korea-equity-research__b74d0f42b968
+  - id: opendock/korea-macro-research
+    name: Korea Macro Research
+    requested: 0.1.2
+    version: 0.1.2
+    platform: macos
+    workdir: .opendock/workdirs/opendock__korea-macro-research__a002ee46edd4
+  - id: opendock/korea-real-estate-research
+    name: Korea Real Estate Research
+    requested: 0.1.2
+    version: 0.1.2
+    platform: macos
+    workdir: .opendock/workdirs/opendock__korea-real-estate-research__293748121bdf
   - id: opendock/ux-writing-ultrawork
     name: opendock/ux-writing-ultrawork
     requested: 1.0.3

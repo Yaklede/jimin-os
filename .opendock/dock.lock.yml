@@ -168,6 +168,192 @@ docks:
         mode: managed_file
         checksum: 87d23fa6db3d6f9a4df0c7984a8610813b3f0a9ec7bf8476be60d0fc0d294acb
         source: files
+  - id: opendock/korea-equity-research
+    name: Korea Equity Research
+    requested: 0.1.2
+    version: 0.1.2
+    checksum: 1514aafeaf72e30aa9a509832717934a68938b9aa9df4a0626117f706aff859d
+    signature: pPZLhj/LlAQKQgRXouIluKidgU/J7CAxpRJO4jYmajCsdHeGi737rx/iEQkzLBpdU4jBboU7FpuTLOSsSE0NAw==
+    platform: macos
+    workdir: .opendock/workdirs/opendock__korea-equity-research__b74d0f42b968
+    runtimes:
+      - name: node
+        requested: ">=22.0.0 <25.0.0"
+        source: host
+        version: 23.5.0
+        path: /Users/jimin/.opendock/runtimes/node/23.5.0/bin
+        commands:
+          - node
+    tools: []
+    dependencies: []
+    files:
+      - path: AGENTS.md
+        mode: managed_block
+        checksum: e47bcf6e75bb97619313bbb22cc4ceccf51dfda0f9d0a2809de94ff75081529e
+        markerId: files:AGENTS.md
+        source: files
+      - path: CLAUDE.md
+        mode: managed_block
+        checksum: e47bcf6e75bb97619313bbb22cc4ceccf51dfda0f9d0a2809de94ff75081529e
+        markerId: files:CLAUDE.md
+        source: files
+      - path: GEMINI.md
+        mode: managed_block
+        checksum: e47bcf6e75bb97619313bbb22cc4ceccf51dfda0f9d0a2809de94ff75081529e
+        markerId: files:GEMINI.md
+        source: files
+      - path: README.md
+        mode: managed_block
+        checksum: ce4a2e4c6ce948fc99f19c6a9a1bebfe1878156252eb686b2cf5f946f33f5444
+        markerId: files:README.md
+        source: files
+      - path: HARNESS.md
+        mode: managed_block
+        checksum: ac01d58262d4baa309bb2f6488254d9f310232c14867e325fb31b2e7b4ddb548
+        markerId: files:HARNESS.md
+        source: files
+      - path: KOREA_EQUITY_RESEARCH.md
+        mode: managed_block
+        checksum: 219b32dc70d892a27902ee3f9182e6afb9162f5f7def4e2ab5a449111784f3e4
+        markerId: files:KOREA_EQUITY_RESEARCH.md
+        source: files
+      - path: .opendock/templates/korea-equity-research/EQUITY_RESEARCH_RUN.md
+        mode: managed_block
+        checksum: 241581b033694b353812b2727dc526400699eecb4db2e9d33e472648d2ccb719
+        markerId: files:.opendock/templates/korea-equity-research/EQUITY_RESEARCH_RUN.md
+        source: files
+      - path: .opendock/harness/opendock__korea-equity-research/check.mjs
+        mode: managed_file
+        checksum: d63cc10176f0c6ebb1cbfa031b2dad2f44d64953e07d2fda4cb2aae2b1fa053d
+        source: files
+      - path: .agents/skills/opendock-korea-equity-research/SKILL.md
+        mode: managed_file
+        checksum: 715ed176ef6b5c22a2dcf5de461e8a86e4c799aa0bbd6c22024785af67ba95a6
+        source: files
+  - id: opendock/korea-macro-research
+    name: Korea Macro Research
+    requested: 0.1.2
+    version: 0.1.2
+    checksum: bf1693bd2acc09f1a128f44146a65a72eec3320dbed83888b3ddd87968ce0c2a
+    signature: tTQr0dDDbY7fFfSU16LMFpIi3wGUoybcw/pxwoMGUWf2vax7vOB39Hhum6Q7O3LgapNFNz0yroZ7+S7qnvBWBA==
+    platform: macos
+    workdir: .opendock/workdirs/opendock__korea-macro-research__a002ee46edd4
+    runtimes:
+      - name: node
+        requested: ">=22.0.0 <25.0.0"
+        source: host
+        version: 23.5.0
+        path: /Users/jimin/.opendock/runtimes/node/23.5.0/bin
+        commands:
+          - node
+    tools: []
+    dependencies: []
+    files:
+      - path: AGENTS.md
+        mode: managed_block
+        checksum: f26ddd7bc4e9cb519dea14a45016a2da69b30003779db6f9cf45c2e797b2406f
+        markerId: files:AGENTS.md
+        source: files
+      - path: CLAUDE.md
+        mode: managed_block
+        checksum: f26ddd7bc4e9cb519dea14a45016a2da69b30003779db6f9cf45c2e797b2406f
+        markerId: files:CLAUDE.md
+        source: files
+      - path: GEMINI.md
+        mode: managed_block
+        checksum: f26ddd7bc4e9cb519dea14a45016a2da69b30003779db6f9cf45c2e797b2406f
+        markerId: files:GEMINI.md
+        source: files
+      - path: README.md
+        mode: managed_block
+        checksum: a0805805c0821c14ac6b87ba527b1017f34cd70ec233c20e38ab66e5de1353c9
+        markerId: files:README.md
+        source: files
+      - path: HARNESS.md
+        mode: managed_block
+        checksum: 8a693af62bba9d7d31497a9a877fdf140297ee089536ec80dec2b6dc7ed4bf2c
+        markerId: files:HARNESS.md
+        source: files
+      - path: KOREA_MACRO_RESEARCH.md
+        mode: managed_block
+        checksum: 4150ac1bfc29049a48886bee965a5b28c605a330ba33e0e65a511b3425ad1efd
+        markerId: files:KOREA_MACRO_RESEARCH.md
+        source: files
+      - path: .opendock/templates/korea-macro-research/MACRO_RESEARCH_RUN.md
+        mode: managed_block
+        checksum: 8dee5570da076a3e0fa401a93f1f657752eec30c0ff7aef44b04e29a39ad5cdf
+        markerId: files:.opendock/templates/korea-macro-research/MACRO_RESEARCH_RUN.md
+        source: files
+      - path: .opendock/harness/opendock__korea-macro-research/check.mjs
+        mode: managed_file
+        checksum: fd96acae94eba275db6b06255c1bd94d23d94ed29d51d2c77e4df17a89e568ab
+        source: files
+      - path: .agents/skills/opendock-korea-macro-research/SKILL.md
+        mode: managed_file
+        checksum: d499f5e0a98226b32a1e2be38f81adc4d86604684afb690e7312e4075a616c65
+        source: files
+  - id: opendock/korea-real-estate-research
+    name: Korea Real Estate Research
+    requested: 0.1.2
+    version: 0.1.2
+    checksum: 7df8d3e08da91a9621983b8a538027b72a561eaac96275a0673334f3900bcf27
+    signature: TJSLdJw8Lb0xOo1+Ne96ZGIKTJSWwk/RR/wDj5USdTEAohEukhdFpuYTX6aQXEH7utELQ8dDQ1BP3wZPXHsHDA==
+    platform: macos
+    workdir: .opendock/workdirs/opendock__korea-real-estate-research__293748121bdf
+    runtimes:
+      - name: node
+        requested: ">=22.0.0 <25.0.0"
+        source: host
+        version: 23.5.0
+        path: /Users/jimin/.opendock/runtimes/node/23.5.0/bin
+        commands:
+          - node
+    tools: []
+    dependencies: []
+    files:
+      - path: AGENTS.md
+        mode: managed_block
+        checksum: cd3f91caf62fed2884a1d6f59388d34ded50a515445b01a9ba7ee459f0a55f10
+        markerId: files:AGENTS.md
+        source: files
+      - path: CLAUDE.md
+        mode: managed_block
+        checksum: cd3f91caf62fed2884a1d6f59388d34ded50a515445b01a9ba7ee459f0a55f10
+        markerId: files:CLAUDE.md
+        source: files
+      - path: GEMINI.md
+        mode: managed_block
+        checksum: cd3f91caf62fed2884a1d6f59388d34ded50a515445b01a9ba7ee459f0a55f10
+        markerId: files:GEMINI.md
+        source: files
+      - path: README.md
+        mode: managed_block
+        checksum: 486fd604182fa354a465930881c7a2e328bb93fd5db54172c4a556414c705ced
+        markerId: files:README.md
+        source: files
+      - path: HARNESS.md
+        mode: managed_block
+        checksum: 20aff6f2bd6fa0540336ae6343bb0c97d7a3ea0f354b7127db8c608cbf411add
+        markerId: files:HARNESS.md
+        source: files
+      - path: KOREA_REAL_ESTATE_RESEARCH.md
+        mode: managed_block
+        checksum: fd743171e52b1425737b9004b0db8ba90439fa2081455dff9340e0eb465ace03
+        markerId: files:KOREA_REAL_ESTATE_RESEARCH.md
+        source: files
+      - path: .opendock/templates/korea-real-estate-research/REAL_ESTATE_RESEARCH_RUN.md
+        mode: managed_block
+        checksum: 8cbef4812d2b2650670f8064419ca725012b471192a1a54f6bfa5db563ba2ee9
+        markerId: files:.opendock/templates/korea-real-estate-research/REAL_ESTATE_RESEARCH_RUN.md
+        source: files
+      - path: .opendock/harness/opendock__korea-real-estate-research/check.mjs
+        mode: managed_file
+        checksum: 819f2a0b5e0b950b467b109f1df004d849f9805646e739ab69a3f8a2438dbd64
+        source: files
+      - path: .agents/skills/opendock-korea-real-estate-research/SKILL.md
+        mode: managed_file
+        checksum: 29ef7916c2f32ba3253d9e155e0be75c78ced97c00240e05d37e00d20e85d067
+        source: files
   - id: opendock/ux-writing-ultrawork
     name: opendock/ux-writing-ultrawork
     requested: 1.0.3
