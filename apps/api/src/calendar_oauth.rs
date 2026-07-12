@@ -12,14 +12,16 @@ use chacha20poly1305::{
 use hmac::{Hmac, Mac, digest::KeyInit as HmacKeyInit};
 use jimin_domain::{ClientPlatform, PkceVerifier};
 use jimin_google::{
-    GoogleAuthError, GoogleAuthorizationCode, GoogleCalendarAdapter, GoogleCalendarGrant,
+    GoogleAuthError, GoogleAuthorizationCode, GoogleCalendarAdapter, GoogleCalendarEventEntry,
+    GoogleCalendarEventStatus, GoogleCalendarEventTime, GoogleCalendarGrant,
     GoogleCalendarListEntry, GoogleCalendarVisibility, GoogleIdentityAdapter, GoogleOAuthProfile,
 };
 use jimin_storage::{
     StorageError,
     calendar::{
-        CalendarSyncConnection, ClaimedCalendarOAuthAuthorization,
+        CalendarSyncConnection, CalendarSyncTarget, ClaimedCalendarOAuthAuthorization,
         CompleteCalendarOAuthAuthorization, EncryptedCalendarSecret, ProviderCalendar,
+        ProviderCalendarEvent, ProviderCalendarEventStatus, ProviderCalendarEventTime,
         ProviderCalendarVisibility,
     },
 };
@@ -220,6 +222,47 @@ impl CalendarOAuthRuntime {
             .map_err(CalendarOAuthError::from_google)?;
         Ok(entries.into_iter().map(provider_calendar).collect())
     }
+
+    /// Fetches every selected calendar's events only after its Calendar list
+    /// has been persisted. The short-lived access token stays within this
+    /// method and raw provider payloads never cross the API boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider or credential failure without leaking a
+    /// calendar ID, token, or event content.
+    pub async fn initial_calendar_event_sync(
+        &self,
+        connection: &CalendarSyncConnection,
+        targets: &[CalendarSyncTarget],
+    ) -> Result<Vec<(Uuid, Vec<ProviderCalendarEvent>)>, CalendarOAuthError> {
+        let refresh_token = self.crypto.decrypt(
+            &connection.refresh_token,
+            &refresh_token_aad(connection.user_id),
+        )?;
+        let access_token = self
+            .calendar
+            .refresh_access_token(&refresh_token)
+            .await
+            .map_err(CalendarOAuthError::from_google)?;
+        let mut synced = Vec::with_capacity(targets.len());
+        for target in targets {
+            let entries = self
+                .calendar
+                .list_events(
+                    &access_token,
+                    &target.provider_calendar_id,
+                    &target.time_zone,
+                )
+                .await
+                .map_err(CalendarOAuthError::from_google)?;
+            synced.push((
+                target.calendar_id,
+                entries.into_iter().map(provider_calendar_event).collect(),
+            ));
+        }
+        Ok(synced)
+    }
 }
 
 /// Newly generated material that is safe to persist only through the matching
@@ -413,6 +456,44 @@ fn provider_calendar(entry: GoogleCalendarListEntry) -> ProviderCalendar {
             GoogleCalendarVisibility::Deleted => ProviderCalendarVisibility::Deleted,
         },
         provider_etag: entry.provider_etag,
+    }
+}
+
+fn provider_calendar_event(entry: GoogleCalendarEventEntry) -> ProviderCalendarEvent {
+    ProviderCalendarEvent {
+        provider_event_id: entry.provider_event_id,
+        provider_etag: entry.provider_etag,
+        provider_updated_at: entry.provider_updated_at,
+        ical_uid: entry.ical_uid,
+        status: match entry.status {
+            GoogleCalendarEventStatus::Confirmed => ProviderCalendarEventStatus::Confirmed,
+            GoogleCalendarEventStatus::Tentative => ProviderCalendarEventStatus::Tentative,
+            GoogleCalendarEventStatus::Cancelled => ProviderCalendarEventStatus::Cancelled,
+        },
+        event_type: entry.event_type,
+        title: entry.title,
+        description: entry.description,
+        location: entry.location,
+        time: entry.time.map(|time| match time {
+            GoogleCalendarEventTime::Date { start, end } => {
+                ProviderCalendarEventTime::Date { start, end }
+            }
+            GoogleCalendarEventTime::DateTime {
+                start,
+                end,
+                time_zone,
+            } => ProviderCalendarEventTime::DateTime {
+                start,
+                end,
+                time_zone,
+            },
+        }),
+        recurrence: entry.recurrence,
+        recurring_provider_event_id: entry.recurring_provider_event_id,
+        visibility: entry.visibility,
+        transparency: entry.transparency,
+        html_link: entry.html_link,
+        is_editable: entry.is_editable,
     }
 }
 

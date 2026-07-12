@@ -84,6 +84,7 @@ pub struct ScheduleEntry {
     pub ends_at: OffsetDateTime,
     pub time_zone: String,
     pub status: ScheduleStatus,
+    pub source: ScheduleSource,
     pub version: i64,
 }
 
@@ -91,6 +92,14 @@ pub struct ScheduleEntry {
 pub enum ScheduleStatus {
     Confirmed,
     Cancelled,
+}
+
+/// Origin used to explain whether an item belongs to Jimin OS directly or a
+/// connected read-only Google Calendar source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleSource {
+    Manual,
+    GoogleCalendar,
 }
 
 /// A personal task that is safe to return to its owning device.
@@ -122,6 +131,7 @@ struct ScheduleRow {
     ends_at: OffsetDateTime,
     time_zone: String,
     status: String,
+    source: String,
     version: i64,
 }
 
@@ -146,6 +156,11 @@ impl TryFrom<ScheduleRow> for ScheduleEntry {
             "cancelled" => ScheduleStatus::Cancelled,
             _ => return Err(StorageError::PersistenceUnavailable),
         };
+        let source = match row.source.as_str() {
+            "manual" => ScheduleSource::Manual,
+            "google_calendar" => ScheduleSource::GoogleCalendar,
+            _ => return Err(StorageError::PersistenceUnavailable),
+        };
         Ok(Self {
             id: row.id,
             title: row.title,
@@ -154,6 +169,7 @@ impl TryFrom<ScheduleRow> for ScheduleEntry {
             ends_at: row.ends_at,
             time_zone: row.time_zone,
             status,
+            source,
             version: row.version,
         })
     }
@@ -201,7 +217,7 @@ impl Database {
             INSERT INTO schedule_entries (
                 id, user_id, title, notes, starts_at, ends_at, time_zone, source, status
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'manual', 'confirmed')
-            RETURNING id, title, notes, starts_at, ends_at, time_zone, status, version",
+            RETURNING id, title, notes, starts_at, ends_at, time_zone, status, source, version",
         )
         .bind(entry.id)
         .bind(entry.user_id)
@@ -250,17 +266,43 @@ impl Database {
         }
         let rows = sqlx::query_as::<_, ScheduleRow>(
             "\
-            SELECT id, title, notes, starts_at, ends_at, time_zone, status, version
+            SELECT id, title, notes, starts_at, ends_at, time_zone, status, source, version
             FROM schedule_entries
             WHERE user_id = $1
               AND status = 'confirmed'
               AND starts_at < $2
               AND ends_at > $3
+            UNION ALL
+            SELECT id, title, description_text AS notes, starts_at, ends_at,
+                source_time_zone AS time_zone, 'confirmed'::TEXT AS status,
+                'google_calendar'::TEXT AS source, version
+            FROM calendar_events
+            WHERE user_id = $1
+              AND provider_deleted_at IS NULL
+              AND provider_status IN ('confirmed', 'tentative')
+              AND time_kind = 'date_time'
+              AND start_at < $2
+              AND end_at > $3
+            UNION ALL
+            SELECT id, title, description_text AS notes,
+                (start_date::timestamp AT TIME ZONE 'UTC') AS starts_at,
+                (end_date::timestamp AT TIME ZONE 'UTC') AS ends_at,
+                'UTC'::TEXT AS time_zone, 'confirmed'::TEXT AS status,
+                'google_calendar'::TEXT AS source, version
+            FROM calendar_events
+            WHERE user_id = $1
+              AND provider_deleted_at IS NULL
+              AND provider_status IN ('confirmed', 'tentative')
+              AND time_kind = 'date'
+              AND start_date < $4
+              AND end_date > $5
             ORDER BY starts_at ASC, id ASC",
         )
         .bind(user_id)
         .bind(range_end)
         .bind(range_start)
+        .bind(range_end.date())
+        .bind(range_start.date())
         .fetch_all(self.pool())
         .await
         .map_err(classify)?;

@@ -18,7 +18,7 @@ use reqwest::{
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use thiserror::Error;
-use time::{Duration as TimeDuration, OffsetDateTime};
+use time::{Date, Duration as TimeDuration, Month, OffsetDateTime};
 use tokio::sync::Mutex;
 
 const GOOGLE_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
@@ -26,6 +26,7 @@ const GOOGLE_JWKS_ENDPOINT: &str = "https://www.googleapis.com/oauth2/v3/certs";
 const GOOGLE_AUTHORIZATION_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_CALENDAR_LIST_ENDPOINT: &str =
     "https://www.googleapis.com/calendar/v3/users/me/calendarList";
+const GOOGLE_CALENDAR_EVENTS_ENDPOINT: &str = "https://www.googleapis.com/calendar/v3/calendars";
 const GOOGLE_ISSUERS: [&str; 2] = ["https://accounts.google.com", "accounts.google.com"];
 const MAX_AUTHORIZATION_CODE_BYTES: usize = 4 * 1024;
 const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
@@ -33,6 +34,10 @@ const MAX_JWKS_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_CALENDAR_LIST_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CALENDAR_LIST_PAGES: usize = 100;
 const MAX_CALENDAR_LIST_ITEMS: usize = 10_000;
+const MAX_CALENDAR_EVENT_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CALENDAR_EVENT_PAGES: usize = 100;
+const MAX_CALENDAR_EVENT_ITEMS: usize = 100_000;
+const MAX_RECURRENCE_RULES: usize = 128;
 const DEFAULT_JWKS_TTL: Duration = Duration::from_mins(5);
 const MAX_JWKS_TTL: Duration = Duration::from_hours(24);
 
@@ -235,6 +240,49 @@ pub enum GoogleCalendarVisibility {
     Deleted,
 }
 
+/// Fully normalized provider event used only by the server-side sync path.
+/// It intentionally contains no attendee, conference, or attachment data.
+pub struct GoogleCalendarEventEntry {
+    pub provider_event_id: String,
+    pub provider_etag: Option<String>,
+    pub provider_updated_at: Option<OffsetDateTime>,
+    pub ical_uid: Option<String>,
+    pub status: GoogleCalendarEventStatus,
+    pub event_type: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub location: Option<String>,
+    pub time: Option<GoogleCalendarEventTime>,
+    pub recurrence: Option<Vec<String>>,
+    pub recurring_provider_event_id: Option<String>,
+    pub visibility: Option<String>,
+    pub transparency: Option<String>,
+    pub html_link: Option<String>,
+    pub is_editable: bool,
+}
+
+/// The two mutually exclusive time representations accepted by Google
+/// Calendar. All-day events retain their date semantics until persistence.
+pub enum GoogleCalendarEventTime {
+    Date {
+        start: Date,
+        end: Date,
+    },
+    DateTime {
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+        time_zone: String,
+    },
+}
+
+/// Google provider event status after strict normalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoogleCalendarEventStatus {
+    Confirmed,
+    Tentative,
+    Cancelled,
+}
+
 impl GoogleCalendarAdapter {
     /// Creates a Google Calendar adapter with fixed provider endpoints.
     ///
@@ -370,6 +418,79 @@ impl GoogleCalendarAdapter {
             next_page_token = page.next_page_token;
             if next_page_token.is_none() {
                 return Ok(calendars);
+            }
+        }
+        Err(GoogleAuthError::ProviderRejected)
+    }
+
+    /// Loads every page for one Calendar using the stable full-sync query
+    /// contract. Recurring masters and exceptions are preserved, while
+    /// cancelled entries are retained so storage can tombstone old events.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider error and never retains the response body
+    /// after validation. The caller supplies a validated calendar time zone
+    /// used only when Google omits event-level time-zone metadata.
+    pub async fn list_events(
+        &self,
+        access_token: &SecretString,
+        provider_calendar_id: &str,
+        calendar_time_zone: &str,
+    ) -> Result<Vec<GoogleCalendarEventEntry>, GoogleAuthError> {
+        let token = access_token.expose_secret();
+        let provider_calendar_id = validate_text(provider_calendar_id.to_owned(), 1_024)?;
+        let calendar_time_zone = validate_text(calendar_time_zone.to_owned(), 80)?;
+        if token.is_empty()
+            || token.len() > MAX_TOKEN_RESPONSE_BYTES
+            || token.chars().any(char::is_control)
+        {
+            return Err(GoogleAuthError::InvalidRequest);
+        }
+
+        let mut next_page_token: Option<String> = None;
+        let mut events = Vec::new();
+        for _ in 0..MAX_CALENDAR_EVENT_PAGES {
+            let mut url = reqwest::Url::parse(GOOGLE_CALENDAR_EVENTS_ENDPOINT)
+                .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+            url.path_segments_mut()
+                .map_err(|()| GoogleAuthError::ProviderUnavailable)?
+                .push(&provider_calendar_id)
+                .push("events");
+            {
+                let mut query = url.query_pairs_mut();
+                query.append_pair("singleEvents", "false");
+                query.append_pair("showDeleted", "true");
+                query.append_pair("maxResults", "2500");
+                if let Some(page_token) = &next_page_token {
+                    query.append_pair("pageToken", page_token);
+                }
+            }
+            let response = self
+                .client
+                .get(url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+            if !response.status().is_success() {
+                return Err(classify_provider_status(response.status().as_u16()));
+            }
+            if !is_json_response(&response) {
+                return Err(GoogleAuthError::ProviderUnavailable);
+            }
+            let payload = bounded_body(response, MAX_CALENDAR_EVENT_RESPONSE_BYTES).await?;
+            let page: GoogleCalendarEventPage =
+                serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
+            for item in page.items {
+                events.push(normalize_calendar_event_item(item, &calendar_time_zone)?);
+                if events.len() > MAX_CALENDAR_EVENT_ITEMS {
+                    return Err(GoogleAuthError::ProviderRejected);
+                }
+            }
+            next_page_token = page.next_page_token;
+            if next_page_token.is_none() {
+                return Ok(events);
             }
         }
         Err(GoogleAuthError::ProviderRejected)
@@ -663,6 +784,45 @@ struct GoogleCalendarListItem {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleCalendarEventPage {
+    #[serde(default)]
+    items: Vec<GoogleCalendarEventItem>,
+    next_page_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleCalendarEventItem {
+    id: String,
+    etag: Option<String>,
+    updated: Option<String>,
+    i_cal_uid: Option<String>,
+    status: String,
+    event_type: Option<String>,
+    summary: Option<String>,
+    description: Option<String>,
+    location: Option<String>,
+    start: Option<GoogleCalendarEventDateTime>,
+    end: Option<GoogleCalendarEventDateTime>,
+    recurrence: Option<Vec<String>>,
+    recurring_event_id: Option<String>,
+    visibility: Option<String>,
+    transparency: Option<String>,
+    html_link: Option<String>,
+    #[serde(default)]
+    guests_can_modify: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleCalendarEventDateTime {
+    date: Option<String>,
+    date_time: Option<String>,
+    time_zone: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct GoogleIdClaims {
     iss: String,
     aud: String,
@@ -772,6 +932,188 @@ fn normalize_calendar_list_item(
         },
         provider_etag,
     })
+}
+
+fn normalize_calendar_event_item(
+    item: GoogleCalendarEventItem,
+    calendar_time_zone: &str,
+) -> Result<GoogleCalendarEventEntry, GoogleAuthError> {
+    let provider_event_id = validate_text(item.id, 1_024)?;
+    let status = match item.status.as_str() {
+        "confirmed" => GoogleCalendarEventStatus::Confirmed,
+        "tentative" => GoogleCalendarEventStatus::Tentative,
+        "cancelled" => GoogleCalendarEventStatus::Cancelled,
+        _ => return Err(GoogleAuthError::ProviderRejected),
+    };
+    let event_type = match item.event_type.as_deref().unwrap_or("default") {
+        "default" => "default",
+        "birthday" => "birthday",
+        "focusTime" => "focus_time",
+        "fromGmail" => "from_gmail",
+        "outOfOffice" => "out_of_office",
+        "workingLocation" => "working_location",
+        _ => return Err(GoogleAuthError::ProviderRejected),
+    }
+    .to_owned();
+    let provider_etag = item
+        .etag
+        .map(|value| validate_text(value, 2_048))
+        .transpose()?;
+    let provider_updated_at = item
+        .updated
+        .map(|value| OffsetDateTime::parse(&value, &time::format_description::well_known::Rfc3339))
+        .transpose()
+        .map_err(|_| GoogleAuthError::ProviderRejected)?;
+    let ical_uid = item
+        .i_cal_uid
+        .map(|value| validate_text(value, 2_048))
+        .transpose()?;
+    let title = item
+        .summary
+        .map(|value| validate_text(value, 300))
+        .transpose()?;
+    if status != GoogleCalendarEventStatus::Cancelled && title.is_none() {
+        return Err(GoogleAuthError::ProviderRejected);
+    }
+    let description = item
+        .description
+        .map(|value| validate_text(value, 8_192))
+        .transpose()?;
+    let location = item
+        .location
+        .map(|value| validate_text(value, 1_024))
+        .transpose()?;
+    let recurrence = item
+        .recurrence
+        .map(|rules| {
+            if rules.len() > MAX_RECURRENCE_RULES {
+                return Err(GoogleAuthError::ProviderRejected);
+            }
+            rules
+                .into_iter()
+                .map(|rule| validate_text(rule, 1_024))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+    let recurring_provider_event_id = item
+        .recurring_event_id
+        .map(|value| validate_text(value, 1_024))
+        .transpose()?;
+    let visibility = item
+        .visibility
+        .map(|value| match value.as_str() {
+            "default" | "public" | "private" | "confidential" => Ok(value),
+            _ => Err(GoogleAuthError::ProviderRejected),
+        })
+        .transpose()?;
+    let transparency = item
+        .transparency
+        .map(|value| match value.as_str() {
+            "opaque" | "transparent" => Ok(value),
+            _ => Err(GoogleAuthError::ProviderRejected),
+        })
+        .transpose()?;
+    let html_link = item
+        .html_link
+        .map(|value| validate_https_url(value, 4_096))
+        .transpose()?;
+    let time = normalize_event_time(item.start, item.end, calendar_time_zone, status)?;
+    Ok(GoogleCalendarEventEntry {
+        provider_event_id,
+        provider_etag,
+        provider_updated_at,
+        ical_uid,
+        status,
+        event_type,
+        title,
+        description,
+        location,
+        time,
+        recurrence,
+        recurring_provider_event_id,
+        visibility,
+        transparency,
+        html_link,
+        is_editable: item.guests_can_modify,
+    })
+}
+
+fn normalize_event_time(
+    start: Option<GoogleCalendarEventDateTime>,
+    end: Option<GoogleCalendarEventDateTime>,
+    calendar_time_zone: &str,
+    status: GoogleCalendarEventStatus,
+) -> Result<Option<GoogleCalendarEventTime>, GoogleAuthError> {
+    let (Some(start), Some(end)) = (start, end) else {
+        return if status == GoogleCalendarEventStatus::Cancelled {
+            Ok(None)
+        } else {
+            Err(GoogleAuthError::ProviderRejected)
+        };
+    };
+    let source_time_zone = start.time_zone.clone().or(end.time_zone.clone());
+    match (start.date, end.date, start.date_time, end.date_time) {
+        (Some(start), Some(end), None, None) => {
+            let start = parse_google_date(&start)?;
+            let end = parse_google_date(&end)?;
+            if end <= start {
+                return Err(GoogleAuthError::ProviderRejected);
+            }
+            Ok(Some(GoogleCalendarEventTime::Date { start, end }))
+        }
+        (None, None, Some(start), Some(end)) => {
+            let start =
+                OffsetDateTime::parse(&start, &time::format_description::well_known::Rfc3339)
+                    .map_err(|_| GoogleAuthError::ProviderRejected)?;
+            let end = OffsetDateTime::parse(&end, &time::format_description::well_known::Rfc3339)
+                .map_err(|_| GoogleAuthError::ProviderRejected)?;
+            if end <= start {
+                return Err(GoogleAuthError::ProviderRejected);
+            }
+            let time_zone = source_time_zone.unwrap_or_else(|| calendar_time_zone.to_owned());
+            Ok(Some(GoogleCalendarEventTime::DateTime {
+                start,
+                end,
+                time_zone: validate_text(time_zone, 80)?,
+            }))
+        }
+        _ => Err(GoogleAuthError::ProviderRejected),
+    }
+}
+
+fn parse_google_date(value: &str) -> Result<Date, GoogleAuthError> {
+    let mut parts = value.split('-');
+    let (Some(year), Some(month), Some(day), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(GoogleAuthError::ProviderRejected);
+    };
+    let year = year
+        .parse::<i32>()
+        .map_err(|_| GoogleAuthError::ProviderRejected)?;
+    let month = month
+        .parse::<u8>()
+        .map_err(|_| GoogleAuthError::ProviderRejected)
+        .and_then(|number| {
+            Month::try_from(number).map_err(|_| GoogleAuthError::ProviderRejected)
+        })?;
+    let day = day
+        .parse::<u8>()
+        .map_err(|_| GoogleAuthError::ProviderRejected)?;
+    Date::from_calendar_date(year, month, day).map_err(|_| GoogleAuthError::ProviderRejected)
+}
+
+fn validate_https_url(value: String, maximum_bytes: usize) -> Result<String, GoogleAuthError> {
+    let value = validate_text(value, maximum_bytes)?;
+    let url = reqwest::Url::parse(&value).map_err(|_| GoogleAuthError::ProviderRejected)?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || url.username() != ""
+        || url.password().is_some()
+    {
+        return Err(GoogleAuthError::ProviderRejected);
+    }
+    Ok(value)
 }
 
 fn valid_url_safe_value(value: &str, maximum_bytes: usize) -> bool {
@@ -900,5 +1242,44 @@ mod tests {
 
         assert_eq!(entry.access_role, "owner");
         assert_eq!(entry.visibility, GoogleCalendarVisibility::Hidden);
+    }
+
+    #[test]
+    fn calendar_event_normalizes_timed_event_and_google_type() {
+        let item: GoogleCalendarEventItem = serde_json::from_str(
+            r#"{
+                "id": "event-1",
+                "status": "confirmed",
+                "eventType": "focusTime",
+                "summary": "집중 시간",
+                "start": {"dateTime": "2026-07-12T09:00:00+09:00"},
+                "end": {"dateTime": "2026-07-12T10:00:00+09:00"}
+            }"#,
+        )
+        .expect("fixture should deserialize");
+
+        let entry =
+            normalize_calendar_event_item(item, "Asia/Seoul").expect("event should normalize");
+
+        assert_eq!(entry.event_type, "focus_time");
+        assert_eq!(entry.status, GoogleCalendarEventStatus::Confirmed);
+        assert!(matches!(
+            entry.time,
+            Some(GoogleCalendarEventTime::DateTime { time_zone, .. }) if time_zone == "Asia/Seoul"
+        ));
+    }
+
+    #[test]
+    fn cancelled_calendar_event_can_omit_stale_fields() {
+        let item: GoogleCalendarEventItem =
+            serde_json::from_str(r#"{"id": "event-1", "status": "cancelled"}"#)
+                .expect("fixture should deserialize");
+
+        let entry =
+            normalize_calendar_event_item(item, "Asia/Seoul").expect("tombstone should normalize");
+
+        assert_eq!(entry.status, GoogleCalendarEventStatus::Cancelled);
+        assert!(entry.time.is_none());
+        assert!(entry.title.is_none());
     }
 }

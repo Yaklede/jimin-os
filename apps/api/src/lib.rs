@@ -31,7 +31,9 @@ use jimin_storage::{
     },
     auth::{Device, DeviceStatus, Profile},
     calendar::{CalendarAccount, CalendarAccountStatus, CreateCalendarOAuthAuthorization},
-    planning::{NewScheduleEntry, NewTask, ScheduleEntry, ScheduleStatus, Task, TaskStatus},
+    planning::{
+        NewScheduleEntry, NewTask, ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus,
+    },
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -266,6 +268,7 @@ pub struct ScheduleEntryResponse {
     ends_at: String,
     time_zone: String,
     status: String,
+    source: String,
     version: i64,
 }
 
@@ -2233,23 +2236,60 @@ async fn finish_initial_calendar_sync(
     if planning
         .apply_calendar_list_sync(account_id, user_id, &entries)
         .await
-        .is_ok()
+        .is_err()
     {
-        calendar_callback_page(
-            StatusCode::OK,
-            "Google Calendar를 연결했어요",
-            "일정을 불러왔어요. 이제 앱으로 돌아가도 됩니다.",
-        )
-    } else {
         let _ = planning
             .mark_calendar_sync_failure(account_id, user_id, "calendar.provider_unavailable")
             .await;
-        calendar_callback_page(
+        return calendar_callback_page(
             StatusCode::SERVICE_UNAVAILABLE,
             "연결했지만 일정을 불러오지 못했어요",
             "잠시 후 앱에서 다시 연결해 주세요.",
-        )
+        );
     }
+    let Ok(targets) = planning.calendar_sync_targets(account_id, user_id).await else {
+        let _ = planning
+            .mark_calendar_sync_failure(account_id, user_id, "calendar.provider_unavailable")
+            .await;
+        return calendar_callback_page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "연결했지만 일정을 불러오지 못했어요",
+            "잠시 후 앱에서 다시 연결해 주세요.",
+        );
+    };
+    let events = match calendar_oauth
+        .initial_calendar_event_sync(&connection, &targets)
+        .await
+    {
+        Ok(events) => events,
+        Err(error) => {
+            let _ = planning
+                .mark_calendar_sync_failure(account_id, user_id, error.failure_code())
+                .await;
+            return calendar_callback_error_page(error);
+        }
+    };
+    for (calendar_id, events) in events {
+        if planning
+            .apply_calendar_event_full_sync(account_id, user_id, calendar_id, &events)
+            .await
+            .is_err()
+        {
+            let _ = planning
+                .mark_calendar_sync_failure(account_id, user_id, "calendar.provider_unavailable")
+                .await;
+            return calendar_callback_page(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "연결했지만 일정을 불러오지 못했어요",
+                "잠시 후 앱에서 다시 연결해 주세요.",
+            );
+        }
+    }
+    calendar_callback_page(
+        StatusCode::OK,
+        "Google Calendar를 연결했어요",
+        "일정을 불러왔어요. 이제 앱으로 돌아가도 됩니다.",
+    )
 }
 
 fn calendar_oauth_error_response(error: CalendarOAuthError, request_id: RequestId) -> Response {
@@ -2525,6 +2565,10 @@ fn schedule_entry_response(entry: ScheduleEntry) -> Result<ScheduleEntryResponse
         status: match entry.status {
             ScheduleStatus::Confirmed => "confirmed".to_owned(),
             ScheduleStatus::Cancelled => "cancelled".to_owned(),
+        },
+        source: match entry.source {
+            ScheduleSource::Manual => "manual".to_owned(),
+            ScheduleSource::GoogleCalendar => "google_calendar".to_owned(),
         },
         version: entry.version,
     })
