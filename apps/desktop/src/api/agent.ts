@@ -32,6 +32,19 @@ export interface AgentJob {
   createdAt: string;
   finishedAt: string | null;
   version: number;
+  pendingAction: PendingAgentAction | null;
+}
+
+export interface PendingAgentAction {
+  kind: "create_task" | "create_schedule";
+  title: string;
+  startsAt: string | null;
+  endsAt: string | null;
+}
+
+export interface ConversationStreamSnapshot {
+  messages: ConversationMessage[];
+  job: AgentJob | null;
 }
 
 export interface QueuedAgentTurn {
@@ -193,6 +206,59 @@ export async function fetchLatestConversationJob(
   return body;
 }
 
+export async function resolveAgentAction(
+  baseUrl: string,
+  access: string,
+  jobId: string,
+  decision: "approve" | "decline",
+): Promise<AgentJob> {
+  return request<AgentJob>(
+    baseUrl,
+    access,
+    `/v1/agent/jobs/${jobId}/approval`,
+    { decision },
+  );
+}
+
+export async function streamConversationUpdates(
+  baseUrl: string,
+  access: string,
+  conversationId: string,
+  signal: AbortSignal,
+  onSnapshot: (snapshot: ConversationStreamSnapshot) => void,
+): Promise<void> {
+  const response = await fetch(
+    `${normalizeBaseUrl(baseUrl)}/v1/conversations/${conversationId}/stream`,
+    {
+      headers: {
+        ...authHeaders(access),
+        Accept: "text/event-stream",
+      },
+      signal,
+    },
+  );
+  if (!response.ok || !response.body) throw errorFromStatus(response.status);
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let pending = "";
+  try {
+    while (!signal.aborted) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      pending += decoder.decode(value, { stream: true });
+      const frames = pending.split("\n\n");
+      pending = frames.pop() ?? "";
+      for (const frame of frames) {
+        const snapshot = parseSnapshotFrame(frame);
+        if (snapshot) onSnapshot(snapshot);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 async function request<T>(
   baseUrl: string,
   access: string,
@@ -244,8 +310,64 @@ function isAgentJob(value: unknown): value is AgentJob {
     isRecord(value) &&
     typeof value.id === "string" &&
     typeof value.conversationId === "string" &&
-    typeof value.state === "string"
+    typeof value.state === "string" &&
+    (value.pendingAction === null || isPendingAgentAction(value.pendingAction))
   );
+}
+
+function isConversationMessage(value: unknown): value is ConversationMessage {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.role === "string" &&
+    typeof value.content === "string" &&
+    typeof value.status === "string" &&
+    typeof value.createdAt === "string"
+  );
+}
+
+function isPendingAgentAction(value: unknown): value is PendingAgentAction {
+  return (
+    isRecord(value) &&
+    (value.kind === "create_task" || value.kind === "create_schedule") &&
+    typeof value.title === "string" &&
+    (value.startsAt === null || typeof value.startsAt === "string") &&
+    (value.endsAt === null || typeof value.endsAt === "string")
+  );
+}
+
+function parseSnapshotFrame(
+  frame: string,
+): ConversationStreamSnapshot | undefined {
+  const event = frame
+    .split("\n")
+    .find((line) => line.startsWith("event:"))
+    ?.slice("event:".length)
+    .trim();
+  if (event !== "snapshot") return undefined;
+  const data = frame
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice("data:".length).trimStart())
+    .join("\n");
+  if (!data) return undefined;
+  try {
+    const value: unknown = JSON.parse(data);
+    if (
+      !isRecord(value) ||
+      !Array.isArray(value.messages) ||
+      !value.messages.every(isConversationMessage) ||
+      !(value.job === null || isAgentJob(value.job))
+    ) {
+      return undefined;
+    }
+    return {
+      messages: value.messages,
+      job: value.job,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function isAgentAuthentication(value: unknown): value is AgentAuthentication {

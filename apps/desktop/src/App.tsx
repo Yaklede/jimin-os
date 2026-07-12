@@ -14,12 +14,13 @@ import {
   AgentRequestError,
   createConversation,
   fetchAgentAuthentication,
-  fetchAgentJob,
   fetchConversationMessages,
   fetchConversations,
   fetchLatestConversationJob,
   queueAgentTurn,
   requestAgentAuthentication,
+  resolveAgentAction,
+  streamConversationUpdates,
   type AgentAuthentication,
   type AgentJob,
   type Conversation,
@@ -45,7 +46,6 @@ import { createUuidV7 } from "./uuid";
 type AppMode =
   "configuration" | "server-unreachable" | "loading" | "ready" | "error";
 type ConversationJobs = Record<string, AgentJob>;
-const ACTIVE_RESPONSE_POLL_INTERVAL_MS = 250;
 
 export default function App() {
   const apiBaseUrl = personalServerBaseUrl ?? "";
@@ -282,73 +282,65 @@ export default function App() {
     };
   }, [agentAuthentication, apiBaseUrl, tokens]);
 
-  const activeJobIds = useMemo(
+  const activeJobs = useMemo(
     () =>
       Object.values(conversationJobs)
         .filter((job) => !isTerminalAgentJob(job.state))
-        .map((job) => job.id)
-        .sort(),
+        .sort((left, right) => left.id.localeCompare(right.id)),
     [conversationJobs],
   );
-  const activeJobKey = activeJobIds.join(":");
+  const activeJobKey = activeJobs
+    .map((job) => `${job.conversationId}:${job.id}`)
+    .join(":");
 
   useEffect(() => {
-    if (!tokens || activeJobIds.length === 0) return;
+    if (!tokens || activeJobs.length === 0) return;
     let current = true;
-    let polling = false;
-
-    const poll = async () => {
-      if (polling) return;
-      polling = true;
+    const controller = new AbortController();
+    const subscribe = async (job: AgentJob) => {
       try {
-        const results = await Promise.all(
-          activeJobIds.map(async (jobId) => {
-            try {
-              return await fetchAgentJob(apiBaseUrl, tokens.accessToken, jobId);
-            } catch {
-              return undefined;
+        await streamConversationUpdates(
+          apiBaseUrl,
+          tokens.accessToken,
+          job.conversationId,
+          controller.signal,
+          (snapshot) => {
+            if (!current) return;
+            const streamedJob = snapshot.job;
+            if (streamedJob) {
+              setConversationJobs((known) => ({
+                ...known,
+                [streamedJob.conversationId]: streamedJob,
+              }));
             }
-          }),
+            if (job.conversationId === selectedConversationId) {
+              setConversationMessages(snapshot.messages);
+            }
+            if (streamedJob && isTerminalAgentJob(streamedJob.state)) {
+              void refreshConversations();
+              void loadHomeSnapshot();
+            }
+          },
         );
-        if (!current) return;
-        const jobs = results.filter((job): job is AgentJob => Boolean(job));
-        if (jobs.length !== activeJobIds.length) {
+      } catch (error) {
+        if (
+          current &&
+          !(error instanceof DOMException && error.name === "AbortError")
+        ) {
           setConversationError(copy.messages.conversationLoadNotice);
         }
-        if (jobs.length === 0) return;
-        setConversationJobs((known) => {
-          const next = { ...known };
-          for (const job of jobs) next[job.conversationId] = job;
-          return next;
-        });
-        const selectedJob = jobs.find(
-          (job) => job.conversationId === selectedConversationId,
-        );
-        if (selectedJob && selectedConversationId) {
-          await loadConversationMessages(selectedConversationId, true);
-        }
-        const finishedConversationIds = jobs
-          .filter((job) => isTerminalAgentJob(job.state))
-          .map((job) => job.conversationId);
-        if (finishedConversationIds.length) void refreshConversations();
-      } finally {
-        polling = false;
       }
     };
-
-    void poll();
-    const interval = window.setInterval(
-      () => void poll(),
-      ACTIVE_RESPONSE_POLL_INTERVAL_MS,
-    );
+    for (const job of activeJobs) void subscribe(job);
     return () => {
       current = false;
-      window.clearInterval(interval);
+      controller.abort();
     };
   }, [
     activeJobKey,
     apiBaseUrl,
     loadConversationMessages,
+    loadHomeSnapshot,
     refreshConversations,
     selectedConversationId,
     tokens,
@@ -517,6 +509,7 @@ export default function App() {
           createdAt: new Date().toISOString(),
           finishedAt: null,
           version: 1,
+          pendingAction: null,
         },
       }));
       await loadConversationMessages(queued.conversationId);
@@ -529,6 +522,37 @@ export default function App() {
           : copy.messages.conversationSendNotice,
       );
       return false;
+    }
+  }
+
+  async function resolveConversationAction(
+    decision: "approve" | "decline",
+  ): Promise<void> {
+    if (!tokens || !selectedConversationId) return;
+    const job = conversationJobs[selectedConversationId];
+    if (!job || job.state !== "waiting_approval") return;
+    setConversationLoading(true);
+    setConversationError(undefined);
+    try {
+      const resolved = await resolveAgentAction(
+        apiBaseUrl,
+        tokens.accessToken,
+        job.id,
+        decision,
+      );
+      setConversationJobs((known) => ({
+        ...known,
+        [resolved.conversationId]: resolved,
+      }));
+      await Promise.all([
+        loadConversationMessages(resolved.conversationId, true),
+        loadHomeSnapshot(),
+        refreshConversations(),
+      ]);
+    } catch {
+      setConversationError(copy.messages.actionResolutionNotice);
+    } finally {
+      setConversationLoading(false);
     }
   }
 
@@ -594,9 +618,9 @@ export default function App() {
               conversations={conversations}
               messages={conversationMessages}
               selectedConversationId={selectedConversationId}
-              jobState={
+              job={
                 selectedConversationId
-                  ? conversationJobs[selectedConversationId]?.state
+                  ? conversationJobs[selectedConversationId]
                   : undefined
               }
               hasActiveJob={Boolean(
@@ -618,6 +642,7 @@ export default function App() {
               onStartConversation={startConversation}
               onStartAuthentication={beginAgentAuthentication}
               onSend={sendConversationRequest}
+              onResolveAction={resolveConversationAction}
             />
           )}
         </OsShell>

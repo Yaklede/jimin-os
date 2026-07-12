@@ -31,7 +31,7 @@ type ConversationWorkspaceProps = {
   conversations: Conversation[];
   messages: ConversationMessage[];
   selectedConversationId: string | undefined;
-  jobState: AgentJob["state"] | undefined;
+  job: AgentJob | undefined;
   hasActiveJob: boolean;
   authentication: AgentAuthentication | undefined;
   authenticationRequesting: boolean;
@@ -43,13 +43,14 @@ type ConversationWorkspaceProps = {
   onStartConversation(): void;
   onStartAuthentication(): Promise<void>;
   onSend(text: string, clientMessageId: string): Promise<boolean>;
+  onResolveAction(decision: "approve" | "decline"): Promise<void>;
 };
 
 export function ConversationWorkspace({
   conversations,
   messages,
   selectedConversationId,
-  jobState,
+  job,
   hasActiveJob,
   authentication,
   authenticationRequesting,
@@ -61,6 +62,7 @@ export function ConversationWorkspace({
   onStartConversation,
   onStartAuthentication,
   onSend,
+  onResolveAction,
 }: ConversationWorkspaceProps) {
   const [draft, setDraft] = useState("");
   const composer = useRef<HTMLTextAreaElement>(null);
@@ -152,10 +154,18 @@ export function ConversationWorkspace({
             />
           )}
 
-          {isWaiting && jobState && !isTerminalJob(jobState) && (
-            <AgentProgress state={jobState} />
+          {job?.state === "waiting_approval" && job.pendingAction ? (
+            <ActionApprovalPanel
+              action={job.pendingAction}
+              submitting={loading}
+              onResolve={onResolveAction}
+            />
+          ) : (
+            isWaiting &&
+            job &&
+            !isTerminalJob(job.state) && <AgentProgress state={job.state} />
           )}
-          {jobState && isFailedJob(jobState) && (
+          {job && isFailedJob(job.state) && (
             <p
               className="assistant-job-state assistant-job-state--error"
               role="alert"
@@ -636,12 +646,81 @@ function AgentProgress({ state }: { state: AgentJob["state"] }) {
   );
 }
 
+function ActionApprovalPanel({
+  action,
+  submitting,
+  onResolve,
+}: {
+  action: NonNullable<AgentJob["pendingAction"]>;
+  submitting: boolean;
+  onResolve(decision: "approve" | "decline"): Promise<void>;
+}) {
+  const isSchedule = action.kind === "create_schedule";
+  return (
+    <section
+      className="assistant-action-approval"
+      aria-labelledby="assistant-action-approval-title"
+    >
+      <p className="assistant-action-approval__eyebrow">
+        {copy.conversations.approvalEyebrow}
+      </p>
+      <h2 id="assistant-action-approval-title">
+        {copy.conversations.approvalTitle}
+      </h2>
+      <p className="assistant-action-approval__description">
+        {isSchedule
+          ? formatScheduleAction(action.title, action.startsAt)
+          : copy.conversations.approvalTaskDescription.replace(
+              "{title}",
+              action.title,
+            )}
+      </p>
+      <div className="assistant-action-approval__actions" role="group">
+        <button
+          className="assistant-action-approval__approve focus-visible-control"
+          type="button"
+          disabled={submitting}
+          onClick={() => void onResolve("approve")}
+        >
+          {copy.actions.approveAction}
+        </button>
+        <button
+          className="assistant-action-approval__decline focus-visible-control"
+          type="button"
+          disabled={submitting}
+          onClick={() => void onResolve("decline")}
+        >
+          {copy.actions.declineAction}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function formatScheduleAction(title: string, startsAt: string | null) {
+  if (!startsAt) {
+    return copy.conversations.approvalScheduleDescription.replace(
+      "{title}",
+      title,
+    );
+  }
+  const time = new Intl.DateTimeFormat("ko-KR", {
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(startsAt));
+  return copy.conversations.approvalScheduleWithTime
+    .replace("{time}", time)
+    .replace("{title}", title);
+}
+
 function isTerminalJob(state: AgentJob["state"]) {
   return ["completed", "failed", "cancelled", "declined"].includes(state);
 }
 
 function isFailedJob(state: AgentJob["state"]) {
-  return ["failed", "cancelled", "declined"].includes(state);
+  return ["failed", "cancelled"].includes(state);
 }
 
 function selectedTitle(conversations: Conversation[], conversationId: string) {

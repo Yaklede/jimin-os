@@ -24,6 +24,8 @@ export const copy = {
     openConversation: "대화 열기",
     viewSchedule: "일정 보기",
     viewMemory: "기억 보기",
+    approveAction: "실행하기",
+    declineAction: "취소",
   },
   navigation: {
     label: "Jimin OS 탐색",
@@ -194,6 +196,11 @@ export const copy = {
     processing: "답변을 작성하고 있어요.",
     streaming: "답변 작성 중",
     waitingApproval: "승인이 필요한 작업을 확인하고 있어요.",
+    approvalEyebrow: "실행 확인",
+    approvalTitle: "이 작업을 실행할까요?",
+    approvalTaskDescription: "{title} 할 일을 추가해요.",
+    approvalScheduleDescription: "{title} 일정을 등록해요.",
+    approvalScheduleWithTime: "{time}에 {title} 일정을 등록해요.",
     failed: "답변이 중단됐어요. 같은 요청을 다시 보내 주세요.",
   },
   authentication: {
@@ -241,6 +248,8 @@ export const copy = {
       "이 요청을 처리하고 있어요. 끝난 뒤 새 요청을 보낼 수 있어요.",
     conversationChanged:
       "다른 기기에서 대화가 변경됐어요. 대화 목록을 다시 확인해 주세요.",
+    actionResolutionNotice:
+      "요청을 처리하지 못했어요. 대화를 다시 확인한 뒤 한 번 더 시도해 주세요.",
     authenticationLoadNotice:
       "ChatGPT 연결 상태를 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
     authenticationStartNotice:

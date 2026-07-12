@@ -3,7 +3,7 @@ pub mod config;
 pub mod probe;
 mod voice_command;
 
-use std::{collections::BTreeMap, future::Future, sync::Arc};
+use std::{collections::BTreeMap, convert::Infallible, future::Future, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use axum::{
@@ -11,7 +11,10 @@ use axum::{
     extract::{Path, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     middleware,
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::get,
 };
 use jimin_application::{ApplicationError, DeviceSession, SessionService};
@@ -22,7 +25,8 @@ use jimin_storage::{
     agent::{
         AgentAuthentication, AgentAuthenticationState, AgentJob, AgentJobState, Conversation,
         ConversationMessage, ConversationMessageRole, ConversationMessageStatus,
-        ConversationStatus, NewAgentTurn, NewConversation, QueuedAgentTurn,
+        ConversationStatus, NewAgentTurn, NewConversation, PendingAgentAction,
+        PendingAgentActionDecision, QueuedAgentTurn,
     },
     auth::{Device, DeviceStatus, Profile},
     planning::{NewScheduleEntry, NewTask, ScheduleEntry, ScheduleStatus, Task, TaskStatus},
@@ -340,6 +344,23 @@ pub struct AgentJobResponse {
     created_at: String,
     finished_at: Option<String>,
     version: i64,
+    pending_action: Option<PendingAgentActionResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingAgentActionResponse {
+    kind: String,
+    title: String,
+    starts_at: Option<String>,
+    ends_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConversationStreamSnapshot {
+    messages: Vec<ConversationMessageResponse>,
+    job: Option<AgentJobResponse>,
 }
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
@@ -455,6 +476,12 @@ struct CreateAgentTurnRequest {
 
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ResolveAgentActionRequest {
+    decision: String,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct AgentTurnInput {
     #[serde(rename = "type")]
     kind: String,
@@ -520,9 +547,11 @@ pub(crate) fn error_response(
         list_conversations,
         create_conversation,
         list_conversation_messages,
+        stream_conversation_updates,
         get_latest_conversation_job,
         create_agent_turn,
         get_agent_job,
+        resolve_agent_action,
         get_agent_authentication,
         request_agent_authentication,
         live,
@@ -556,9 +585,11 @@ pub(crate) fn error_response(
         ConversationMessageResponse,
         ConversationMessageListResponse,
         AgentJobResponse,
+        PendingAgentActionResponse,
         AgentAuthenticationResponse,
         CreateConversationRequest,
         CreateAgentTurnRequest,
+        ResolveAgentActionRequest,
         AgentTurnInput,
         VoiceCommandRequest
     )),
@@ -607,6 +638,10 @@ pub fn router(state: ApiState) -> Router {
             get(list_conversation_messages),
         )
         .route(
+            "/v1/conversations/{conversation_id}/stream",
+            get(stream_conversation_updates),
+        )
+        .route(
             "/v1/conversations/{conversation_id}/jobs/latest",
             get(get_latest_conversation_job),
         )
@@ -615,6 +650,10 @@ pub fn router(state: ApiState) -> Router {
             get(get_agent_authentication).post(request_agent_authentication),
         )
         .route("/v1/agent/jobs/{job_id}", get(get_agent_job))
+        .route(
+            "/v1/agent/jobs/{job_id}/approval",
+            axum::routing::post(resolve_agent_action),
+        )
         .route("/v1/me", get(me))
         .route("/v1/devices", get(devices));
 
@@ -1412,6 +1451,138 @@ async fn list_conversation_messages(
 
 #[utoipa::path(
     get,
+    path = "/v1/conversations/{conversation_id}/stream",
+    tag = "agent",
+    params(("conversation_id" = String, Path)),
+    responses((status = 200, description = "Authenticated server-sent conversation snapshots"), (status = 401), (status = 404), (status = 503))
+)]
+async fn stream_conversation_updates(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(conversation_id): Path<uuid::Uuid>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(agent) = state.agent().cloned() else {
+        return unavailable_response(request_id);
+    };
+    let user_id = principal.identity().user_id();
+    match conversation_stream_snapshot(&agent, user_id, conversation_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return agent_not_found_response(request_id),
+        Err(error) => return storage_error_response(&error, request_id),
+    }
+
+    let stream = futures_util::stream::unfold(
+        ConversationStreamState {
+            agent,
+            user_id,
+            conversation_id,
+            last_fingerprint: None,
+            close_after_event: false,
+        },
+        |mut stream_state| async move {
+            if stream_state.close_after_event {
+                return None;
+            }
+            loop {
+                let Ok(Some(snapshot)) = conversation_stream_snapshot(
+                    &stream_state.agent,
+                    stream_state.user_id,
+                    stream_state.conversation_id,
+                )
+                .await
+                else {
+                    return None;
+                };
+                let fingerprint = conversation_stream_fingerprint(&snapshot);
+                let terminal = snapshot
+                    .job
+                    .as_ref()
+                    .is_none_or(|job| agent_job_response_is_terminal(&job.state));
+                if stream_state.last_fingerprint.as_deref() != Some(fingerprint.as_str()) {
+                    let Ok(data) = serde_json::to_string(&snapshot) else {
+                        return None;
+                    };
+                    stream_state.last_fingerprint = Some(fingerprint);
+                    stream_state.close_after_event = terminal;
+                    return Some((
+                        Ok::<Event, Infallible>(Event::default().event("snapshot").data(data)),
+                        stream_state,
+                    ));
+                }
+                if terminal {
+                    return None;
+                }
+                tokio::time::sleep(Duration::from_millis(120)).await;
+            }
+        },
+    );
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(10))
+                .text("keep-alive"),
+        )
+        .into_response()
+}
+
+struct ConversationStreamState {
+    agent: Database,
+    user_id: uuid::Uuid,
+    conversation_id: uuid::Uuid,
+    last_fingerprint: Option<String>,
+    close_after_event: bool,
+}
+
+async fn conversation_stream_snapshot(
+    agent: &Database,
+    user_id: uuid::Uuid,
+    conversation_id: uuid::Uuid,
+) -> Result<Option<ConversationStreamSnapshot>, StorageError> {
+    let Some(messages) = agent
+        .conversation_messages_for_user(user_id, conversation_id)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let messages = messages
+        .into_iter()
+        .map(conversation_message_response)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|()| StorageError::PersistenceUnavailable)?;
+    let job = agent
+        .latest_agent_job_for_conversation_for_user(user_id, conversation_id)
+        .await?
+        .map(|job| agent_job_response(&job))
+        .transpose()
+        .map_err(|()| StorageError::PersistenceUnavailable)?;
+    Ok(Some(ConversationStreamSnapshot { messages, job }))
+}
+
+fn conversation_stream_fingerprint(snapshot: &ConversationStreamSnapshot) -> String {
+    let message_versions = snapshot
+        .messages
+        .iter()
+        .map(|message| format!("{}:{}:{}", message.id, message.version, message.status))
+        .collect::<Vec<_>>()
+        .join(",");
+    let job = snapshot.job.as_ref().map_or_else(
+        || "none".to_owned(),
+        |job| format!("{}:{}:{}", job.id, job.version, job.state),
+    );
+    format!("{job}|{message_versions}")
+}
+
+fn agent_job_response_is_terminal(state: &str) -> bool {
+    matches!(state, "completed" | "failed" | "cancelled" | "declined")
+}
+
+#[utoipa::path(
+    get,
     path = "/v1/conversations/{conversation_id}/jobs/latest",
     tag = "agent",
     params(("conversation_id" = String, Path)),
@@ -1476,17 +1647,19 @@ async fn create_agent_turn(
         return invalid_request_response(request_id);
     }
 
-    match agent
-        .enqueue_agent_turn(&NewAgentTurn {
-            job_id: uuid::Uuid::now_v7(),
-            message_id: uuid::Uuid::now_v7(),
-            client_message_id: body.client_message_id,
-            user_id: principal.identity().user_id(),
-            conversation_id,
-            content: input.text,
-        })
-        .await
-    {
+    let turn = NewAgentTurn {
+        job_id: uuid::Uuid::now_v7(),
+        message_id: uuid::Uuid::now_v7(),
+        client_message_id: body.client_message_id,
+        user_id: principal.identity().user_id(),
+        conversation_id,
+        content: input.text,
+    };
+    let queued = match pending_action_from_conversation_text(&turn.content) {
+        Some(action) => agent.enqueue_agent_action_turn(&turn, action).await,
+        None => agent.enqueue_agent_turn(&turn).await,
+    };
+    match queued {
         Ok(queued) => (
             StatusCode::ACCEPTED,
             Json(queued_agent_turn_response(&queued)),
@@ -1500,6 +1673,30 @@ async fn create_agent_turn(
             false,
         ),
         Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+fn pending_action_from_conversation_text(text: &str) -> Option<PendingAgentAction> {
+    let korea_offset = time::UtcOffset::from_hms(9, 0, 0).ok()?;
+    let reference_at = OffsetDateTime::now_utc().to_offset(korea_offset);
+    match voice_command::interpret(text, reference_at, "Asia/Seoul").ok()? {
+        VoiceCommand::CreateTask { title } => Some(PendingAgentAction::CreateTask { title }),
+        VoiceCommand::CreateSchedule {
+            title,
+            starts_at,
+            ends_at,
+            ..
+        } => Some(PendingAgentAction::CreateSchedule {
+            title,
+            starts_at,
+            ends_at,
+            time_zone: "Asia/Seoul".to_owned(),
+        }),
+        VoiceCommand::ListSchedule { .. }
+        | VoiceCommand::ListTasks
+        | VoiceCommand::NeedsScheduleDetails
+        | VoiceCommand::NeedsTaskDetails
+        | VoiceCommand::ContinueConversation => None,
     }
 }
 
@@ -1590,6 +1787,54 @@ async fn get_agent_job(
             Err(()) => unavailable_response(request_id),
         },
         Ok(None) => agent_not_found_response(request_id),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/agent/jobs/{job_id}/approval",
+    tag = "agent",
+    params(("job_id" = String, Path)),
+    request_body = ResolveAgentActionRequest,
+    responses((status = 200, body = AgentJobResponse), (status = 400), (status = 401), (status = 409), (status = 404), (status = 503))
+)]
+async fn resolve_agent_action(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(job_id): Path<uuid::Uuid>,
+    Json(body): Json<ResolveAgentActionRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let decision = match body.decision.as_str() {
+        "approve" => PendingAgentActionDecision::Approve,
+        "decline" => PendingAgentActionDecision::Decline,
+        _ => return invalid_request_response(request_id),
+    };
+    let Some(agent) = state.agent() else {
+        return unavailable_response(request_id);
+    };
+    let user_id = principal.identity().user_id();
+    match agent.resolve_agent_action(user_id, job_id, decision).await {
+        Ok(true) => match agent.agent_job_for_user(user_id, job_id).await {
+            Ok(Some(job)) => match agent_job_response(&job) {
+                Ok(response) => Json(response).into_response(),
+                Err(()) => unavailable_response(request_id),
+            },
+            Ok(None) => agent_not_found_response(request_id),
+            Err(error) => storage_error_response(&error, request_id),
+        },
+        Ok(false) => error_response(
+            StatusCode::CONFLICT,
+            "agent.action_unavailable",
+            "이 요청은 이미 처리되었거나 실행할 수 없어요. 대화를 다시 확인해 주세요.",
+            request_id,
+            false,
+        ),
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -1889,7 +2134,36 @@ fn agent_job_response(job: &AgentJob) -> Result<AgentJobResponse, ()> {
             .map(|value| value.format(&Rfc3339).map_err(|_| ()))
             .transpose()?,
         version: job.version,
+        pending_action: job
+            .pending_action
+            .as_ref()
+            .map(pending_agent_action_response)
+            .transpose()?,
     })
+}
+
+fn pending_agent_action_response(
+    action: &PendingAgentAction,
+) -> Result<PendingAgentActionResponse, ()> {
+    match action {
+        PendingAgentAction::CreateTask { title } => Ok(PendingAgentActionResponse {
+            kind: "create_task".to_owned(),
+            title: title.clone(),
+            starts_at: None,
+            ends_at: None,
+        }),
+        PendingAgentAction::CreateSchedule {
+            title,
+            starts_at,
+            ends_at,
+            ..
+        } => Ok(PendingAgentActionResponse {
+            kind: "create_schedule".to_owned(),
+            title: title.clone(),
+            starts_at: Some(starts_at.format(&Rfc3339).map_err(|_| ())?),
+            ends_at: Some(ends_at.format(&Rfc3339).map_err(|_| ())?),
+        }),
+    }
 }
 
 fn agent_authentication_response(
@@ -2236,11 +2510,13 @@ mod tests {
                 "/v1/access/session",
                 "/v1/agent/authentication",
                 "/v1/agent/jobs/{job_id}",
+                "/v1/agent/jobs/{job_id}/approval",
                 "/v1/assistant/voice-commands",
                 "/v1/auth/refresh",
                 "/v1/conversations",
                 "/v1/conversations/{conversation_id}/jobs/latest",
                 "/v1/conversations/{conversation_id}/messages",
+                "/v1/conversations/{conversation_id}/stream",
                 "/v1/conversations/{conversation_id}/turns",
                 "/v1/devices",
                 "/v1/home",

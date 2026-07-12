@@ -51,6 +51,102 @@ pub struct NewAgentTurn {
     pub content: String,
 }
 
+/// A local planning action extracted from a conversational request. The action
+/// is persisted with its job in `waiting_approval` state and is never sent to
+/// the agent runner before the owner makes a decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingAgentAction {
+    CreateTask {
+        title: String,
+    },
+    CreateSchedule {
+        title: String,
+        starts_at: OffsetDateTime,
+        ends_at: OffsetDateTime,
+        time_zone: String,
+    },
+}
+
+impl PendingAgentAction {
+    fn validate(&self) -> Result<(), StorageError> {
+        match self {
+            Self::CreateTask { title } => {
+                if valid_text(title, MAX_TITLE_CHARS, false) {
+                    Ok(())
+                } else {
+                    Err(StorageError::InvalidConfiguration)
+                }
+            }
+            Self::CreateSchedule {
+                title,
+                starts_at,
+                ends_at,
+                time_zone,
+            } => {
+                if valid_text(title, MAX_TITLE_CHARS, false)
+                    && valid_time_zone(time_zone)
+                    && ends_at > starts_at
+                {
+                    Ok(())
+                } else {
+                    Err(StorageError::InvalidConfiguration)
+                }
+            }
+        }
+    }
+
+    fn action_type(&self) -> &'static str {
+        match self {
+            Self::CreateTask { .. } => "create_task",
+            Self::CreateSchedule { .. } => "create_schedule",
+        }
+    }
+
+    fn title(&self) -> &str {
+        match self {
+            Self::CreateTask { title } | Self::CreateSchedule { title, .. } => title,
+        }
+    }
+
+    fn schedule_values(&self) -> (Option<OffsetDateTime>, Option<OffsetDateTime>, Option<&str>) {
+        match self {
+            Self::CreateTask { .. } => (None, None, None),
+            Self::CreateSchedule {
+                starts_at,
+                ends_at,
+                time_zone,
+                ..
+            } => (Some(*starts_at), Some(*ends_at), Some(time_zone)),
+        }
+    }
+
+    fn completion_message(&self) -> String {
+        match self {
+            Self::CreateTask { title } => format!("{title} 할 일을 추가했어요."),
+            Self::CreateSchedule {
+                title, starts_at, ..
+            } => format!(
+                "{:02}:{:02}에 {title} 일정을 등록했어요.",
+                starts_at.hour(),
+                starts_at.minute()
+            ),
+        }
+    }
+
+    fn decline_message(&self) -> String {
+        match self {
+            Self::CreateTask { title } => format!("{title} 할 일 추가를 취소했어요."),
+            Self::CreateSchedule { title, .. } => format!("{title} 일정 등록을 취소했어요."),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingAgentActionDecision {
+    Approve,
+    Decline,
+}
+
 impl NewAgentTurn {
     /// Validates a single bounded user turn before it is atomically queued.
     ///
@@ -153,6 +249,7 @@ pub struct AgentJob {
     pub created_at: OffsetDateTime,
     pub finished_at: Option<OffsetDateTime>,
     pub version: i64,
+    pub pending_action: Option<PendingAgentAction>,
 }
 
 /// The safe, client-visible state of the managed `ChatGPT` sign-in ceremony.
@@ -259,6 +356,22 @@ struct AgentJobReadRow {
     created_at: OffsetDateTime,
     finished_at: Option<OffsetDateTime>,
     version: i64,
+    pending_action_type: Option<String>,
+    pending_action_title: Option<String>,
+    pending_action_starts_at: Option<OffsetDateTime>,
+    pending_action_ends_at: Option<OffsetDateTime>,
+    pending_action_time_zone: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct PendingActionJobRow {
+    conversation_id: Uuid,
+    state: String,
+    pending_action_type: Option<String>,
+    pending_action_title: Option<String>,
+    pending_action_starts_at: Option<OffsetDateTime>,
+    pending_action_ends_at: Option<OffsetDateTime>,
+    pending_action_time_zone: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -351,6 +464,13 @@ impl TryFrom<AgentJobReadRow> for AgentJob {
     type Error = StorageError;
 
     fn try_from(row: AgentJobReadRow) -> Result<Self, Self::Error> {
+        let pending_action = pending_action_from_fields(
+            row.pending_action_type.as_deref(),
+            row.pending_action_title,
+            row.pending_action_starts_at,
+            row.pending_action_ends_at,
+            row.pending_action_time_zone,
+        )?;
         Ok(Self {
             id: row.id,
             conversation_id: row.conversation_id,
@@ -358,6 +478,7 @@ impl TryFrom<AgentJobReadRow> for AgentJob {
             created_at: row.created_at,
             finished_at: row.finished_at,
             version: row.version,
+            pending_action,
         })
     }
 }
@@ -812,7 +933,10 @@ impl Database {
     ) -> Result<Option<AgentJob>, StorageError> {
         let row = sqlx::query_as::<_, AgentJobReadRow>(
             "\
-            SELECT id, conversation_id, state, created_at, finished_at, version
+            SELECT id, conversation_id, state, created_at, finished_at, version,
+                   pending_action_type, pending_action_title,
+                   pending_action_starts_at, pending_action_ends_at,
+                   pending_action_time_zone
             FROM agent_jobs
             WHERE id = $1 AND user_id = $2",
         )
@@ -837,7 +961,10 @@ impl Database {
     ) -> Result<Option<AgentJob>, StorageError> {
         let row = sqlx::query_as::<_, AgentJobReadRow>(
             "\
-            SELECT id, conversation_id, state, created_at, finished_at, version
+            SELECT id, conversation_id, state, created_at, finished_at, version,
+                   pending_action_type, pending_action_title,
+                   pending_action_starts_at, pending_action_ends_at,
+                   pending_action_time_zone
             FROM agent_jobs
             WHERE user_id = $1 AND conversation_id = $2
             ORDER BY created_at DESC, id DESC
@@ -862,6 +989,32 @@ impl Database {
     pub async fn enqueue_agent_turn(
         &self,
         turn: &NewAgentTurn,
+    ) -> Result<QueuedAgentTurn, StorageError> {
+        self.enqueue_agent_turn_inner(turn, None).await
+    }
+
+    /// Records a planning action as a conversation turn without executing it.
+    /// The caller must later resolve the same job through the explicit
+    /// approval operation below.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed action
+    /// details and a classified storage error when persistence is unavailable.
+    pub async fn enqueue_agent_action_turn(
+        &self,
+        turn: &NewAgentTurn,
+        action: PendingAgentAction,
+    ) -> Result<QueuedAgentTurn, StorageError> {
+        action.validate()?;
+        self.enqueue_agent_turn_inner(turn, Some(&action)).await
+    }
+
+    #[allow(clippy::too_many_lines)] // One transaction intentionally owns turn, job, and sync writes.
+    async fn enqueue_agent_turn_inner(
+        &self,
+        turn: &NewAgentTurn,
+        pending_action: Option<&PendingAgentAction>,
     ) -> Result<QueuedAgentTurn, StorageError> {
         turn.validate()?;
         let mut transaction = self
@@ -908,16 +1061,40 @@ impl Database {
             return Err(StorageError::PersistenceUnavailable);
         }
 
+        let (action_type, action_title, action_starts_at, action_ends_at, action_time_zone) =
+            pending_action.map_or((None, None, None, None, None), |action| {
+                let (starts_at, ends_at, time_zone) = action.schedule_values();
+                (
+                    Some(action.action_type()),
+                    Some(action.title()),
+                    starts_at,
+                    ends_at,
+                    time_zone,
+                )
+            });
         let row = sqlx::query_as::<_, JobRow>(
             "\
-            INSERT INTO agent_jobs (id, user_id, conversation_id, input_message_id)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO agent_jobs (
+                id, user_id, conversation_id, input_message_id, state,
+                pending_action_type, pending_action_title,
+                pending_action_starts_at, pending_action_ends_at,
+                pending_action_time_zone
+            ) VALUES (
+                $1, $2, $3, $4,
+                CASE WHEN $5::text IS NULL THEN 'queued' ELSE 'waiting_approval' END,
+                $5, $6, $7, $8, $9
+            )
             RETURNING id, input_message_id, conversation_id, state, version",
         )
         .bind(turn.job_id)
         .bind(turn.user_id)
         .bind(turn.conversation_id)
         .bind(turn.message_id)
+        .bind(action_type)
+        .bind(action_title)
+        .bind(action_starts_at)
+        .bind(action_ends_at)
+        .bind(action_time_zone)
         .fetch_one(&mut *transaction)
         .await
         .map_err(|error| classify(&error))?;
@@ -955,6 +1132,158 @@ impl Database {
             .await
             .map_err(|error| classify(&error))?;
         Ok(queued)
+    }
+
+    /// Resolves one owner-visible planning proposal exactly once. Approval
+    /// creates the local planning record and finalizes the conversation in the
+    /// same transaction; decline records a clear conversation outcome without
+    /// changing the personal plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed IDs and a
+    /// classified storage error when the action or its audit changes cannot be
+    /// persisted.
+    #[allow(clippy::too_many_lines)] // Approval must atomically cover plan, job, message, and sync writes.
+    pub async fn resolve_agent_action(
+        &self,
+        user_id: Uuid,
+        job_id: Uuid,
+        decision: PendingAgentActionDecision,
+    ) -> Result<bool, StorageError> {
+        if !is_v7(user_id) || !is_v7(job_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| classify(&error))?;
+        let row = sqlx::query_as::<_, PendingActionJobRow>(
+            "\
+            SELECT conversation_id, state,
+                   pending_action_type, pending_action_title,
+                   pending_action_starts_at, pending_action_ends_at,
+                   pending_action_time_zone
+            FROM agent_jobs
+            WHERE id = $1 AND user_id = $2
+            FOR UPDATE",
+        )
+        .bind(job_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        let Some(row) = row else {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| classify(&error))?;
+            return Ok(false);
+        };
+        if parse_job_state(&row.state)? != AgentJobState::WaitingApproval {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| classify(&error))?;
+            return Ok(false);
+        }
+        let action = pending_action_from_fields(
+            row.pending_action_type.as_deref(),
+            row.pending_action_title,
+            row.pending_action_starts_at,
+            row.pending_action_ends_at,
+            row.pending_action_time_zone,
+        )?
+        .ok_or(StorageError::PersistenceUnavailable)?;
+
+        let outcome = match decision {
+            PendingAgentActionDecision::Approve => {
+                persist_approved_agent_action(&mut transaction, user_id, &action).await?;
+                action.completion_message()
+            }
+            PendingAgentActionDecision::Decline => action.decline_message(),
+        };
+        let state = match decision {
+            PendingAgentActionDecision::Approve => "completed",
+            PendingAgentActionDecision::Decline => "declined",
+        };
+        let job_version = sqlx::query_scalar::<_, i64>(
+            "\
+            UPDATE agent_jobs
+            SET state = $3,
+                phase = NULL,
+                pending_action_type = NULL,
+                pending_action_title = NULL,
+                pending_action_starts_at = NULL,
+                pending_action_ends_at = NULL,
+                pending_action_time_zone = NULL,
+                finished_at = NOW()
+            WHERE id = $1 AND user_id = $2 AND state = 'waiting_approval'
+            RETURNING version",
+        )
+        .bind(job_id)
+        .bind(user_id)
+        .bind(state)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        let Some(job_version) = job_version else {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| classify(&error))?;
+            return Ok(false);
+        };
+        let assistant_message_id = Uuid::now_v7();
+        let message_version = sqlx::query_scalar::<_, i64>(
+            "\
+            INSERT INTO messages (
+                id, conversation_id, agent_job_id, role, content, status, completed_at
+            ) VALUES ($1, $2, $3, 'assistant', $4, 'completed', NOW())
+            RETURNING version",
+        )
+        .bind(assistant_message_id)
+        .bind(row.conversation_id)
+        .bind(job_id)
+        .bind(outcome)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        let conversation_version = sqlx::query_scalar::<_, i64>(
+            "\
+            UPDATE conversations
+            SET last_message_at = NOW()
+            WHERE id = $1 AND user_id = $2
+            RETURNING version",
+        )
+        .bind(row.conversation_id)
+        .bind(user_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        append_change(&mut transaction, user_id, "agent_job", job_id, job_version).await?;
+        append_change(
+            &mut transaction,
+            user_id,
+            "message",
+            assistant_message_id,
+            message_version,
+        )
+        .await?;
+        append_change(
+            &mut transaction,
+            user_id,
+            "conversation",
+            row.conversation_id,
+            conversation_version,
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| classify(&error))?;
+        Ok(true)
     }
 
     /// Claims one queued turn for a named runner with a bounded lease.
@@ -1391,6 +1720,56 @@ impl Database {
     }
 }
 
+async fn persist_approved_agent_action(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    action: &PendingAgentAction,
+) -> Result<(), StorageError> {
+    match action {
+        PendingAgentAction::CreateTask { title } => {
+            let id = Uuid::now_v7();
+            let version = sqlx::query_scalar::<_, i64>(
+                "\
+                INSERT INTO tasks (id, user_id, title, notes, status, priority, due_at)
+                VALUES ($1, $2, $3, NULL, 'open', 1, NULL)
+                RETURNING version",
+            )
+            .bind(id)
+            .bind(user_id)
+            .bind(title.trim())
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(|error| classify(&error))?;
+            append_change(transaction, user_id, "task", id, version).await
+        }
+        PendingAgentAction::CreateSchedule {
+            title,
+            starts_at,
+            ends_at,
+            time_zone,
+        } => {
+            let id = Uuid::now_v7();
+            let version = sqlx::query_scalar::<_, i64>(
+                "\
+                INSERT INTO schedule_entries (
+                    id, user_id, title, notes, starts_at, ends_at, time_zone, source, status
+                ) VALUES ($1, $2, $3, NULL, $4, $5, $6, 'manual', 'confirmed')
+                RETURNING version",
+            )
+            .bind(id)
+            .bind(user_id)
+            .bind(title.trim())
+            .bind(starts_at)
+            .bind(ends_at)
+            .bind(time_zone.trim())
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(|error| classify(&error))?;
+            append_change(transaction, user_id, "schedule_entry", id, version).await
+        }
+    }
+}
+
 async fn existing_agent_turn(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     conversation_id: Uuid,
@@ -1460,6 +1839,34 @@ fn parse_agent_authentication_state(value: &str) -> Result<AgentAuthenticationSt
     }
 }
 
+fn pending_action_from_fields(
+    action_type: Option<&str>,
+    title: Option<String>,
+    starts_at: Option<OffsetDateTime>,
+    ends_at: Option<OffsetDateTime>,
+    time_zone: Option<String>,
+) -> Result<Option<PendingAgentAction>, StorageError> {
+    match (action_type, title, starts_at, ends_at, time_zone) {
+        (None, None, None, None, None) => Ok(None),
+        (Some("create_task"), Some(title), None, None, None) => {
+            let action = PendingAgentAction::CreateTask { title };
+            action.validate()?;
+            Ok(Some(action))
+        }
+        (Some("create_schedule"), Some(title), Some(starts_at), Some(ends_at), Some(time_zone)) => {
+            let action = PendingAgentAction::CreateSchedule {
+                title,
+                starts_at,
+                ends_at,
+                time_zone,
+            };
+            action.validate()?;
+            Ok(Some(action))
+        }
+        _ => Err(StorageError::PersistenceUnavailable),
+    }
+}
+
 fn is_v7(value: Uuid) -> bool {
     value.get_version_num() == 7
 }
@@ -1468,6 +1875,10 @@ fn valid_text(value: &str, maximum: usize, allow_empty: bool) -> bool {
     (allow_empty || !value.trim().is_empty())
         && value.chars().count() <= maximum
         && !value.chars().any(char::is_control)
+}
+
+fn valid_time_zone(value: &str) -> bool {
+    valid_text(value, 80, false)
 }
 
 fn valid_assistant_output(value: &str) -> bool {

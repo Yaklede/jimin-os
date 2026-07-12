@@ -4,7 +4,10 @@ use jimin_auth::SessionIdentity;
 use jimin_domain::{ClientPlatform, DeviceRegistration, EmailAddress, GoogleSubject};
 use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness,
-    agent::{AgentJobState, ConversationMessageRole, NewAgentTurn, NewConversation},
+    agent::{
+        AgentJobState, ConversationMessageRole, NewAgentTurn, NewConversation, PendingAgentAction,
+        PendingAgentActionDecision,
+    },
     auth::{
         ConsumeDevicePairing, CreateDevicePairing, PairingConsumption, ProvisionLogin,
         RefreshRotation, RotateRefreshToken,
@@ -504,6 +507,114 @@ async fn queued_agent_turn_is_leased_and_completed_once() {
             .await
             .expect("claim query should succeed")
             .is_none()
+    );
+
+    database.close().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The integration test verifies one approval lifecycle and its idempotency."
+)]
+async fn approved_conversation_action_creates_one_task_and_finalizes_the_job() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database
+        .migrate()
+        .await
+        .expect("action approval migration should succeed");
+    let provisioned = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let conversation_id = Uuid::now_v7();
+    database
+        .create_conversation(&NewConversation {
+            id: conversation_id,
+            user_id: provisioned.profile.id,
+            title: Some("할 일 추가".to_owned()),
+        })
+        .await
+        .expect("conversation should persist");
+    let queued = database
+        .enqueue_agent_action_turn(
+            &NewAgentTurn {
+                job_id: Uuid::now_v7(),
+                message_id: Uuid::now_v7(),
+                client_message_id: Uuid::now_v7(),
+                user_id: provisioned.profile.id,
+                conversation_id,
+                content: "할 일에 장보기 추가해 줘".to_owned(),
+            },
+            PendingAgentAction::CreateTask {
+                title: "장보기".to_owned(),
+            },
+        )
+        .await
+        .expect("action should wait for approval");
+    assert_eq!(queued.state, AgentJobState::WaitingApproval);
+    assert!(
+        database
+            .claim_next_agent_job("integration-agent", Duration::from_secs(30))
+            .await
+            .expect("waiting approval must not be claimed")
+            .is_none()
+    );
+    let pending = database
+        .agent_job_for_user(provisioned.profile.id, queued.job_id)
+        .await
+        .expect("job should load")
+        .expect("owner should read job");
+    assert!(matches!(
+        pending.pending_action,
+        Some(PendingAgentAction::CreateTask { ref title }) if title == "장보기"
+    ));
+    assert!(
+        database
+            .resolve_agent_action(
+                provisioned.profile.id,
+                queued.job_id,
+                PendingAgentActionDecision::Approve,
+            )
+            .await
+            .expect("approval should resolve")
+    );
+    assert!(
+        !database
+            .resolve_agent_action(
+                provisioned.profile.id,
+                queued.job_id,
+                PendingAgentActionDecision::Approve,
+            )
+            .await
+            .expect("repeat approval should be safe")
+    );
+    let tasks = database
+        .open_tasks_for_user(provisioned.profile.id)
+        .await
+        .expect("task should be visible");
+    assert!(tasks.iter().any(|task| task.title == "장보기"));
+    let completed = database
+        .agent_job_for_user(provisioned.profile.id, queued.job_id)
+        .await
+        .expect("job should load")
+        .expect("owner should read completed job");
+    assert_eq!(completed.state, AgentJobState::Completed);
+    assert!(completed.pending_action.is_none());
+    let messages = database
+        .conversation_messages_for_user(provisioned.profile.id, conversation_id)
+        .await
+        .expect("messages should load")
+        .expect("owner should read messages");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.content == "장보기 할 일을 추가했어요.")
     );
 
     database.close().await;

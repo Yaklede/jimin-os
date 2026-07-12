@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 async-trait.workspace = true
 axum.workspace = true
+futures-util.workspace = true
 jimin-observability = { path = "../../crates/observability" }
 jimin-auth = { path = "../../crates/auth" }
 jimin-application = { path = "../../crates/application" }

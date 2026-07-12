@@ -7,6 +7,8 @@ import {
   fetchLatestConversationJob,
   queueAgentTurn,
   requestAgentAuthentication,
+  resolveAgentAction,
+  streamConversationUpdates,
 } from "./agent";
 import { createUuidV7 } from "../uuid";
 
@@ -133,7 +135,7 @@ describe("agent API", () => {
         .fn<typeof fetch>()
         .mockResolvedValue(
           new Response(
-            '{"id":"job-1","conversationId":"conversation-1","state":"running","createdAt":"2026-07-11T00:00:00Z","finishedAt":null,"version":2}',
+            '{"id":"job-1","conversationId":"conversation-1","state":"running","createdAt":"2026-07-11T00:00:00Z","finishedAt":null,"version":2,"pendingAction":null}',
             { status: 200, headers: { "Content-Type": "application/json" } },
           ),
         ),
@@ -153,7 +155,7 @@ describe("agent API", () => {
       .fn<typeof fetch>()
       .mockResolvedValue(
         new Response(
-          '{"id":"job-2","conversationId":"conversation-1","state":"failed","createdAt":"2026-07-11T00:00:00Z","finishedAt":"2026-07-11T00:01:00Z","version":3}',
+          '{"id":"job-2","conversationId":"conversation-1","state":"failed","createdAt":"2026-07-11T00:00:00Z","finishedAt":"2026-07-11T00:01:00Z","version":3,"pendingAction":null}',
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
       );
@@ -191,5 +193,71 @@ describe("agent API", () => {
         "conversation-1",
       ),
     ).resolves.toBeUndefined();
+  });
+
+  it("reads incremental authenticated conversation snapshots from the stream", async () => {
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'event: snapshot\ndata: {"messages":[{"id":"message-1","role":"assistant","content":"답변을","status":"streaming","createdAt":"2026-07-11T00:00:00Z","completedAt":null,"version":1}],"job":{"id":"job-1","conversationId":"conversation-1","state":"running","createdAt":"2026-07-11T00:00:00Z","finishedAt":null,"version":2,"pendingAction":null}}\n\n',
+          ),
+        );
+        controller.close();
+      },
+    });
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(body, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const snapshots: string[] = [];
+
+    await streamConversationUpdates(
+      "https://jimin-os.example",
+      "session-access",
+      "conversation-1",
+      new AbortController().signal,
+      (snapshot) => snapshots.push(snapshot.messages[0]?.content ?? ""),
+    );
+
+    expect(snapshots).toEqual(["답변을"]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://jimin-os.example/v1/conversations/conversation-1/stream",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer session-access",
+          Accept: "text/event-stream",
+        }),
+      }),
+    );
+  });
+
+  it("resolves an explicit local action only after the user decides", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          '{"id":"job-1","conversationId":"conversation-1","state":"completed","createdAt":"2026-07-11T00:00:00Z","finishedAt":"2026-07-11T00:00:02Z","version":3,"pendingAction":null}',
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const job = await resolveAgentAction(
+      "https://jimin-os.example",
+      "session-access",
+      "job-1",
+      "approve",
+    );
+
+    expect(job.state).toBe("completed");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://jimin-os.example/v1/agent/jobs/job-1/approval",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 });

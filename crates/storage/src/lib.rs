@@ -8,7 +8,7 @@ pub mod agent;
 pub mod auth;
 pub mod planning;
 
-pub const EXPECTED_SCHEMA_VERSION: i64 = 6;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 7;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
