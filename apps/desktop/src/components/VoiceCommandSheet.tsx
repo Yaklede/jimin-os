@@ -60,7 +60,7 @@ export type VoiceCommandOutcome =
   | {
       kind: "handled";
       message: string;
-      destination: "calendar";
+      destination: "home" | "calendar";
     }
   | {
       kind: "needs-details" | "conversation" | "failed";
@@ -72,7 +72,7 @@ type VoiceCommandSheetProps = {
   onClose(): void;
   onProcessTranscript(value: string): Promise<VoiceCommandOutcome>;
   onOpenTextInput(value?: string): void;
-  onOpenDestination(destination: "calendar"): void;
+  onOpenDestination(destination: "home" | "calendar"): void;
 };
 
 export function VoiceCommandSheet({
@@ -85,6 +85,7 @@ export function VoiceCommandSheet({
   const recognizerRef = useRef<SpeechRecognitionLike | undefined>(undefined);
   const usingNativeRecognitionRef = useRef(false);
   const completedRef = useRef(false);
+  const processedTranscriptRef = useRef<string | undefined>(undefined);
   const dragStartYRef = useRef<number | undefined>(undefined);
   const dragOffsetRef = useRef(0);
   const [attempt, setAttempt] = useState(0);
@@ -101,6 +102,7 @@ export function VoiceCommandSheet({
     if (!open) return;
 
     completedRef.current = false;
+    processedTranscriptRef.current = undefined;
     setTranscript("");
     setState("listening");
     setCommandOutcome(undefined);
@@ -186,6 +188,43 @@ export function VoiceCommandSheet({
   }, [attempt, open]);
 
   useEffect(() => {
+    const value = transcript.trim();
+    if (
+      !open ||
+      state !== "heard" ||
+      !value ||
+      commandOutcome ||
+      processedTranscriptRef.current === value
+    ) {
+      return;
+    }
+
+    processedTranscriptRef.current = value;
+    let cancelled = false;
+    setProcessingCommand(true);
+
+    void onProcessTranscript(value)
+      .then((outcome) => {
+        if (!cancelled) setCommandOutcome(outcome);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCommandOutcome({
+            kind: "failed",
+            message: copy.voice.commandFailed,
+          });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setProcessingCommand(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [commandOutcome, onProcessTranscript, open, state, transcript]);
+
+  useEffect(() => {
     if (!open) return;
 
     function closeOnEscape(event: KeyboardEvent) {
@@ -200,9 +239,15 @@ export function VoiceCommandSheet({
 
   if (!open) return null;
 
+  const commandIsProcessing =
+    processingCommand || (state === "heard" && !commandOutcome);
+
   function retry() {
+    processedTranscriptRef.current = undefined;
     setCommandOutcome(undefined);
     setProcessingCommand(false);
+    setTranscript("");
+    setState("listening");
     if (usingNativeRecognitionRef.current) {
       setAttempt((current) => current + 1);
       return;
@@ -224,21 +269,6 @@ export function VoiceCommandSheet({
     completedRef.current = true;
     recognizerRef.current?.stop();
     setState(transcript.trim() ? "heard" : "no-speech");
-  }
-
-  async function processTranscript() {
-    if (!transcript.trim()) return;
-    setProcessingCommand(true);
-    try {
-      setCommandOutcome(await onProcessTranscript(transcript.trim()));
-    } catch {
-      setCommandOutcome({
-        kind: "failed",
-        message: copy.voice.commandFailed,
-      });
-    } finally {
-      setProcessingCommand(false);
-    }
   }
 
   function continueConversation() {
@@ -325,10 +355,10 @@ export function VoiceCommandSheet({
 
         <span
           className="voice-sheet__orb"
-          data-state={processingCommand ? "processing" : state}
+          data-state={commandIsProcessing ? "processing" : state}
           aria-hidden="true"
         >
-          {isRecordingState(state) || processingCommand ? (
+          {isRecordingState(state) || commandIsProcessing ? (
             <LoaderCircle className="spin" />
           ) : (
             <Mic />
@@ -337,14 +367,14 @@ export function VoiceCommandSheet({
         <h2 id="voice-sheet-title">
           {commandOutcome
             ? titleForOutcome(commandOutcome)
-            : processingCommand
+            : commandIsProcessing
               ? copy.voice.processingCommandTitle
               : titleFor(state)}
         </h2>
         <p className="voice-sheet__description" aria-live="polite">
           {commandOutcome
             ? commandOutcome.message
-            : processingCommand
+            : commandIsProcessing
               ? copy.voice.processingCommandDescription
               : descriptionFor(state)}
         </p>
@@ -366,9 +396,6 @@ export function VoiceCommandSheet({
           </>
         )}
 
-        {(state === "heard" || processingCommand || commandOutcome) &&
-          transcript && <p className="voice-sheet__transcript">{transcript}</p>}
-
         {isRecoveryState(state) && (
           <p className="voice-sheet__notice" role="alert">
             <CircleAlert aria-hidden="true" />
@@ -377,7 +404,7 @@ export function VoiceCommandSheet({
         )}
 
         <div className="voice-sheet__actions">
-          {processingCommand ? (
+          {commandIsProcessing ? (
             <button className="primary-button" type="button" disabled>
               <LoaderCircle className="spin" aria-hidden="true" />
               {copy.voice.processingCommandAction}
@@ -390,7 +417,7 @@ export function VoiceCommandSheet({
                 onClick={openCommandDestination}
               >
                 <SendHorizontal aria-hidden="true" />
-                {copy.voice.openSchedule}
+                {destinationActionLabel(commandOutcome.destination)}
               </button>
               <button
                 className="voice-sheet__secondary focus-visible-control"
@@ -418,15 +445,6 @@ export function VoiceCommandSheet({
                 {copy.voice.continueConversation}
               </button>
             </>
-          ) : state === "heard" ? (
-            <button
-              className="primary-button focus-visible-control"
-              type="button"
-              onClick={() => void processTranscript()}
-            >
-              <SendHorizontal aria-hidden="true" />
-              {copy.voice.processTranscript}
-            </button>
           ) : state === "listening" ? (
             <>
               <button
@@ -480,6 +498,10 @@ export function VoiceCommandSheet({
       </section>
     </div>
   );
+}
+
+function destinationActionLabel(destination: "home" | "calendar"): string {
+  return destination === "home" ? copy.voice.openHome : copy.voice.openSchedule;
 }
 
 function titleForOutcome(outcome: VoiceCommandOutcome): string {

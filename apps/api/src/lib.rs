@@ -385,6 +385,7 @@ enum VoiceCommandKind {
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum VoiceCommandDestination {
+    Home,
     Calendar,
     Conversation,
 }
@@ -1241,7 +1242,7 @@ async fn list_voice_tasks(
             } else {
                 format!("열린 할 일이 {}개 있어요.", tasks.len())
             },
-            destination: VoiceCommandDestination::Calendar,
+            destination: VoiceCommandDestination::Home,
         })
         .into_response(),
         Err(error) => storage_error_response(&error, request_id),
@@ -1270,7 +1271,7 @@ async fn create_voice_task(
             Json(VoiceCommandResponse {
                 kind: VoiceCommandKind::TaskCreated,
                 message: format!("{title} 할 일을 추가했어요."),
-                destination: VoiceCommandDestination::Calendar,
+                destination: VoiceCommandDestination::Home,
             }),
         )
             .into_response(),

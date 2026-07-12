@@ -45,4 +45,29 @@ describe("voice command API", () => {
       timeZone: expect.any(String),
     });
   });
+
+  it("accepts a task result that sends the user to today", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(
+            '{"kind":"task_created","message":"장보기 할 일을 추가했어요.","destination":"home"}',
+            { status: 201, headers: { "Content-Type": "application/json" } },
+          ),
+        ),
+    );
+
+    await expect(
+      processVoiceCommand(
+        "https://jimin-os.example/",
+        "session-access",
+        "할 일이 장보기 추가해 줘",
+      ),
+    ).resolves.toMatchObject({
+      kind: "task_created",
+      destination: "home",
+    });
+  });
 });

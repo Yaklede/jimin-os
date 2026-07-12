@@ -7,7 +7,7 @@ export type VoiceCommandResult = {
     | "needs_details"
     | "continue_conversation";
   message: string;
-  destination: "calendar" | "conversation";
+  destination: "home" | "calendar" | "conversation";
 };
 
 export class VoiceCommandRequestError extends Error {
@@ -75,7 +75,9 @@ function isVoiceCommandResult(value: unknown): value is VoiceCommandResult {
   return (
     isVoiceCommandKind(value.kind) &&
     typeof value.message === "string" &&
-    (value.destination === "calendar" || value.destination === "conversation")
+    (value.destination === "home" ||
+      value.destination === "calendar" ||
+      value.destination === "conversation")
   );
 }
 

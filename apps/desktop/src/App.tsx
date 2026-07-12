@@ -437,7 +437,7 @@ export default function App() {
         return {
           kind: "handled",
           message: result.message,
-          destination: "calendar",
+          destination: result.destination === "calendar" ? "calendar" : "home",
         };
       }
       if (result.kind === "needs_details") {

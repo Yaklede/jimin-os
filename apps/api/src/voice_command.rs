@@ -269,13 +269,17 @@ fn extract_task_title(text: &str) -> Option<String> {
         "할일"
     };
     let (before, after) = text.split_once(marker)?;
-    let after = clean_action_tail(after)
-        .trim()
-        .strip_prefix("에 ")
-        .unwrap_or_else(|| clean_action_tail(after).trim())
-        .trim_start_matches('에')
-        .trim();
+    let after = clean_action_tail(trim_task_reference_particle(after)).trim();
     clean_title(after).or_else(|| clean_title(trim_object_particle(before)))
+}
+
+fn trim_task_reference_particle(value: &str) -> &str {
+    let value = value.trim_start();
+    ["에 ", "이 ", "가 ", "을 ", "를 ", "은 ", "는 "]
+        .iter()
+        .find_map(|particle| value.strip_prefix(particle))
+        .unwrap_or(value)
+        .trim_start()
 }
 
 fn is_time_word(value: &str) -> bool {
@@ -421,6 +425,19 @@ mod tests {
     #[test]
     fn accepts_the_spaced_korean_polite_action_form() {
         let command = interpret("할 일에 장보기 추가해 줘", reference_at(), "Asia/Seoul")
+            .expect("voice command should parse");
+
+        assert_eq!(
+            command,
+            VoiceCommand::CreateTask {
+                title: "장보기".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn accepts_the_subject_particle_after_the_task_phrase() {
+        let command = interpret("할 일이 장보기 추가해 줘", reference_at(), "Asia/Seoul")
             .expect("voice command should parse");
 
         assert_eq!(

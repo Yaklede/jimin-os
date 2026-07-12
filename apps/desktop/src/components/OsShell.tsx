@@ -53,7 +53,7 @@ export function OsShell({
     openChat();
   }
 
-  function openVoiceDestination(destination: "calendar") {
+  function openVoiceDestination(destination: "home" | "calendar") {
     setVoiceSheetOpen(false);
     onNavigate(destination);
   }
