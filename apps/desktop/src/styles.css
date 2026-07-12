@@ -989,6 +989,52 @@ textarea:focus-visible {
   }
 }
 
+.message-row[data-streaming="true"] .message-row__meta strong {
+  color: var(--accent);
+}
+
+.message-row__streaming {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  gap: 4px;
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.message-row__streaming svg {
+  width: 14px;
+  height: 14px;
+  color: var(--accent);
+  stroke-width: 2;
+}
+
+.message-row__caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -0.12em;
+  background: var(--accent);
+  animation: assistant-caret 1s steps(2, jump-none) infinite;
+}
+
+@keyframes assistant-caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message-row__caret {
+    animation-duration: 0.01ms;
+    animation-iteration-count: 1;
+  }
+}
+
 @media (max-width: 460px) {
   .brand {
     gap: 8px;

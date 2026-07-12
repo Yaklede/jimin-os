@@ -5,6 +5,7 @@ use jimin_storage::{Database, StorageError, agent::ClaimedAgentJob};
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufRead, AsyncWrite},
+    sync::mpsc,
     time::Instant,
 };
 use uuid::Uuid;
@@ -127,13 +128,46 @@ where
         return Err(WorkerError::LostLease);
     }
 
-    match client
-        .run_turn_with_response(&thread_id, &job.input_content)
-        .await
-    {
+    let assistant_message_id = Uuid::now_v7();
+    let (delta_sender, mut delta_receiver) = mpsc::unbounded_channel();
+    let turn =
+        client.run_turn_with_response_streaming(&thread_id, &job.input_content, move |delta| {
+            let _ = delta_sender.send(delta.to_owned());
+        });
+    tokio::pin!(turn);
+
+    let completed = loop {
+        tokio::select! {
+            result = &mut turn => {
+                while let Ok(delta) = delta_receiver.try_recv() {
+                    persist_delta(
+                        database,
+                        &job,
+                        runner_id,
+                        assistant_message_id,
+                        &delta,
+                    )
+                    .await?;
+                }
+                break result;
+            }
+            Some(delta) = delta_receiver.recv() => {
+                persist_delta(
+                    database,
+                    &job,
+                    runner_id,
+                    assistant_message_id,
+                    &delta,
+                )
+                .await?;
+            }
+        }
+    };
+
+    match completed {
         Ok(completed) => {
             if !database
-                .complete_agent_job(job.id, runner_id, Uuid::now_v7(), &completed.response)
+                .complete_agent_job(job.id, runner_id, assistant_message_id, &completed.response)
                 .await?
             {
                 return Err(WorkerError::LostLease);
@@ -142,6 +176,22 @@ where
         Err(error) => {
             handle_codex_failure(database, &job, runner_id, error).await?;
         }
+    }
+    Ok(())
+}
+
+async fn persist_delta(
+    database: &Database,
+    job: &ClaimedAgentJob,
+    runner_id: &str,
+    assistant_message_id: Uuid,
+    delta: &str,
+) -> Result<(), WorkerError> {
+    if !database
+        .append_agent_response_delta(job.id, runner_id, assistant_message_id, delta)
+        .await?
+    {
+        return Err(WorkerError::LostLease);
     }
     Ok(())
 }

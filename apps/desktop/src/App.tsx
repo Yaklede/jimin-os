@@ -1,11 +1,5 @@
 import { RefreshCw, Server } from "lucide-react";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   bootstrapTrustedNetworkSession,
@@ -39,12 +33,9 @@ import { personalServerBaseUrl } from "./server-config";
 import { createUuidV7 } from "./uuid";
 
 type AppMode =
-  | "configuration"
-  | "server-unreachable"
-  | "loading"
-  | "ready"
-  | "error";
+  "configuration" | "server-unreachable" | "loading" | "ready" | "error";
 type ConversationJobs = Record<string, AgentJob>;
+const ACTIVE_RESPONSE_POLL_INTERVAL_MS = 250;
 
 export default function App() {
   const apiBaseUrl = personalServerBaseUrl ?? "";
@@ -87,7 +78,7 @@ export default function App() {
       setTokens(session);
     } catch {
       setMode("server-unreachable");
-      setMessage(copy.messages.personalServerUnavailable);
+      setMessage(copy.messages.serverOffline);
     }
   }, [apiBaseUrl]);
 
@@ -107,10 +98,12 @@ export default function App() {
   }, [apiBaseUrl, tokens]);
 
   const loadConversationMessages = useCallback(
-    async (conversationId: string) => {
+    async (conversationId: string, background = false) => {
       if (!tokens) return;
-      setConversationLoading(true);
-      setConversationError(undefined);
+      if (!background) {
+        setConversationLoading(true);
+        setConversationError(undefined);
+      }
       try {
         setConversationMessages(
           await fetchConversationMessages(
@@ -120,14 +113,16 @@ export default function App() {
           ),
         );
       } catch (error) {
-        setConversationMessages([]);
-        setConversationError(
-          error instanceof AgentRequestError && error.code === "notFound"
-            ? copy.messages.conversationChanged
-            : copy.messages.conversationLoadNotice,
-        );
+        if (!background) {
+          setConversationMessages([]);
+          setConversationError(
+            error instanceof AgentRequestError && error.code === "notFound"
+              ? copy.messages.conversationChanged
+              : copy.messages.conversationLoadNotice,
+          );
+        }
       } finally {
-        setConversationLoading(false);
+        if (!background) setConversationLoading(false);
       }
     },
     [apiBaseUrl, tokens],
@@ -263,39 +258,52 @@ export default function App() {
   useEffect(() => {
     if (!tokens || activeJobIds.length === 0) return;
     let current = true;
+    let polling = false;
 
     const poll = async () => {
-      const results = await Promise.all(
-        activeJobIds.map(async (jobId) => {
-          try {
-            return await fetchAgentJob(apiBaseUrl, tokens.accessToken, jobId);
-          } catch {
-            return undefined;
-          }
-        }),
-      );
-      if (!current) return;
-      const jobs = results.filter((job): job is AgentJob => Boolean(job));
-      if (jobs.length !== activeJobIds.length) {
-        setConversationError(copy.messages.conversationLoadNotice);
+      if (polling) return;
+      polling = true;
+      try {
+        const results = await Promise.all(
+          activeJobIds.map(async (jobId) => {
+            try {
+              return await fetchAgentJob(apiBaseUrl, tokens.accessToken, jobId);
+            } catch {
+              return undefined;
+            }
+          }),
+        );
+        if (!current) return;
+        const jobs = results.filter((job): job is AgentJob => Boolean(job));
+        if (jobs.length !== activeJobIds.length) {
+          setConversationError(copy.messages.conversationLoadNotice);
+        }
+        if (jobs.length === 0) return;
+        setConversationJobs((known) => {
+          const next = { ...known };
+          for (const job of jobs) next[job.conversationId] = job;
+          return next;
+        });
+        const selectedJob = jobs.find(
+          (job) => job.conversationId === selectedConversationId,
+        );
+        if (selectedJob && selectedConversationId) {
+          await loadConversationMessages(selectedConversationId, true);
+        }
+        const finishedConversationIds = jobs
+          .filter((job) => isTerminalAgentJob(job.state))
+          .map((job) => job.conversationId);
+        if (finishedConversationIds.length) void refreshConversations();
+      } finally {
+        polling = false;
       }
-      if (jobs.length === 0) return;
-      setConversationJobs((known) => {
-        const next = { ...known };
-        for (const job of jobs) next[job.conversationId] = job;
-        return next;
-      });
-      const finishedConversationIds = jobs
-        .filter((job) => isTerminalAgentJob(job.state))
-        .map((job) => job.conversationId);
-      if (finishedConversationIds.includes(selectedConversationId ?? "")) {
-        void loadConversationMessages(selectedConversationId!);
-      }
-      if (finishedConversationIds.length) void refreshConversations();
     };
 
     void poll();
-    const interval = window.setInterval(() => void poll(), 1_500);
+    const interval = window.setInterval(
+      () => void poll(),
+      ACTIVE_RESPONSE_POLL_INTERVAL_MS,
+    );
     return () => {
       current = false;
       window.clearInterval(interval);
@@ -451,7 +459,7 @@ export default function App() {
           <ServerConfigurationPanel />
         ) : mode === "server-unreachable" ? (
           <PersonalServerRecoveryPanel
-            message={message ?? copy.messages.personalServerUnavailable}
+            message={message ?? copy.messages.serverOffline}
             onRetry={() => void bootstrapTrustedNetworkDevice()}
           />
         ) : (

@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufRead, AsyncWrite};
 
 use crate::codec::JsonLineTransport;
@@ -26,6 +26,17 @@ struct Request<'a, P> {
 #[derive(Serialize)]
 struct ClientNotification<'a> {
     method: &'a str,
+}
+
+#[derive(Serialize)]
+struct ServerResponse<'a> {
+    id: &'a Value,
+    result: &'a Value,
+}
+
+struct ServerRequest {
+    id: Value,
+    method: String,
 }
 
 pub(crate) struct RpcConnection<R, W> {
@@ -75,7 +86,9 @@ where
                     }
                     self.queued_notifications.push_back(notification);
                 }
-                Incoming::ServerRequest => return Err(Error::UnexpectedServerRequest),
+                Incoming::ServerRequest(request) => {
+                    self.decline_server_request(request).await?;
+                }
                 Incoming::Response {
                     id,
                     result,
@@ -100,22 +113,36 @@ where
     }
 
     pub(crate) async fn next_notification(&mut self) -> Result<Notification> {
-        if let Some(notification) = self.queued_notifications.pop_front() {
-            return Ok(notification);
-        }
+        loop {
+            if let Some(notification) = self.queued_notifications.pop_front() {
+                return Ok(notification);
+            }
 
-        let value = self.transport.read_value().await?;
-        match classify(&value)? {
-            Incoming::Notification(notification) => Ok(notification),
-            Incoming::ServerRequest => Err(Error::UnexpectedServerRequest),
-            Incoming::Response { .. } => Err(Error::UnknownResponseId),
+            let value = self.transport.read_value().await?;
+            match classify(&value)? {
+                Incoming::Notification(notification) => return Ok(notification),
+                Incoming::ServerRequest(request) => {
+                    self.decline_server_request(request).await?;
+                }
+                Incoming::Response { .. } => return Err(Error::UnknownResponseId),
+            }
         }
+    }
+
+    async fn decline_server_request(&mut self, request: ServerRequest) -> Result<()> {
+        let result = safe_decline_result(&request.method).ok_or(Error::UnexpectedServerRequest)?;
+        self.transport
+            .write(&ServerResponse {
+                id: &request.id,
+                result: &result,
+            })
+            .await
     }
 }
 
 enum Incoming {
     Notification(Notification),
-    ServerRequest,
+    ServerRequest(ServerRequest),
     Response {
         id: u64,
         result: Option<Value>,
@@ -133,10 +160,37 @@ fn classify(value: &Value) -> Result<Incoming> {
             method: method.to_owned(),
             params: object.get("params").cloned(),
         })),
-        (Some(_), Some(_)) => Ok(Incoming::ServerRequest),
+        (Some(method), Some(id)) if valid_server_request_id(id) => {
+            Ok(Incoming::ServerRequest(ServerRequest {
+                id: id.clone(),
+                method: method.to_owned(),
+            }))
+        }
+        (Some(_), Some(_)) | (None, None) => Err(Error::InvalidProtocolMessage),
         (None, Some(id)) => classify_response(object, id),
-        (None, None) => Err(Error::InvalidProtocolMessage),
     }
+}
+
+fn safe_decline_result(method: &str) -> Option<Value> {
+    match method {
+        "item/commandExecution/requestApproval"
+        | "item/fileChange/requestApproval"
+        | "applyPatchApproval"
+        | "execCommandApproval" => Some(json!({ "decision": "decline" })),
+        "item/permissions/requestApproval" => Some(json!({ "permissions": {} })),
+        "item/tool/requestUserInput" => Some(json!({ "answers": {} })),
+        "mcpServer/elicitation/request" => Some(json!({ "action": "decline", "content": null })),
+        "item/tool/call" => Some(json!({ "success": false, "contentItems": [] })),
+        _ => None,
+    }
+}
+
+fn valid_server_request_id(value: &Value) -> bool {
+    value.as_i64().is_some()
+        || value.as_u64().is_some()
+        || value.as_str().is_some_and(|id| {
+            !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control)
+        })
 }
 
 fn classify_response(object: &Map<String, Value>, id: &Value) -> Result<Incoming> {
@@ -203,6 +257,50 @@ mod tests {
             .await
             .expect("queued notification");
         assert_eq!(notification.method, "future/event");
+        server_task.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn declines_a_command_approval_before_returning_the_original_response() {
+        let (client, server) = tokio::io::duplex(4096);
+        let (client_reader, client_writer) = split(client);
+        let transport = JsonLineTransport::new(BufReader::new(client_reader), client_writer, 4096);
+        let mut connection = RpcConnection::new(transport);
+
+        let server_task = tokio::spawn(async move {
+            let (server_reader, mut server_writer) = split(server);
+            let mut server_reader = BufReader::new(server_reader);
+            let mut request = String::new();
+            server_reader
+                .read_line(&mut request)
+                .await
+                .expect("client request");
+            server_writer
+                .write_all(
+                    b"{\"id\":\"approval-1\",\"method\":\"item/commandExecution/requestApproval\",\"params\":{}}\n",
+                )
+                .await
+                .expect("server request");
+            let mut decision = String::new();
+            server_reader
+                .read_line(&mut decision)
+                .await
+                .expect("client decision");
+            assert_eq!(
+                serde_json::from_str::<Value>(&decision).expect("decision json"),
+                json!({"id": "approval-1", "result": {"decision": "decline"}})
+            );
+            server_writer
+                .write_all(b"{\"id\":1,\"result\":{\"ok\":true}}\n")
+                .await
+                .expect("response");
+        });
+
+        let result: Value = connection
+            .request("test/read", json!({}))
+            .await
+            .expect("response after declined approval");
+        assert_eq!(result, json!({"ok": true}));
         server_task.await.expect("server task");
     }
 

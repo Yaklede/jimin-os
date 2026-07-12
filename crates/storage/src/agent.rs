@@ -1156,7 +1156,7 @@ impl Database {
         if !is_v7(job_id)
             || !is_v7(assistant_message_id)
             || !valid_runner_id(runner_id)
-            || !valid_text(content, MAX_CONTENT_CHARS, false)
+            || !valid_assistant_output(content)
         {
             return Err(StorageError::InvalidConfiguration);
         }
@@ -1193,6 +1193,12 @@ impl Database {
             INSERT INTO messages (
                 id, conversation_id, agent_job_id, role, content, status, completed_at
             ) VALUES ($1, $2, $3, 'assistant', $4, 'completed', NOW())
+            ON CONFLICT (id) DO UPDATE
+            SET content = EXCLUDED.content,
+                status = 'completed',
+                completed_at = NOW()
+            WHERE messages.conversation_id = EXCLUDED.conversation_id
+              AND messages.agent_job_id = EXCLUDED.agent_job_id
             RETURNING version",
         )
         .bind(assistant_message_id)
@@ -1229,6 +1235,97 @@ impl Database {
             "conversation",
             conversation_id,
             conversation_version,
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| classify(&error))?;
+        Ok(true)
+    }
+
+    /// Appends one safe assistant delta to the message visible to the
+    /// conversation owner while the lease-owning turn is still running.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed IDs,
+    /// runner metadata, or assistant text, and a classified storage error when
+    /// persistence fails.
+    pub async fn append_agent_response_delta(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+        assistant_message_id: Uuid,
+        delta: &str,
+    ) -> Result<bool, StorageError> {
+        if !is_v7(job_id)
+            || !is_v7(assistant_message_id)
+            || !valid_runner_id(runner_id)
+            || !valid_assistant_delta(delta)
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| classify(&error))?;
+        let job = sqlx::query_as::<_, (Uuid, Uuid, i64)>(
+            "\
+            UPDATE agent_jobs
+            SET phase = 'streaming'
+            WHERE id = $1 AND claim_owner = $2 AND state = 'running'
+            RETURNING user_id, conversation_id, version",
+        )
+        .bind(job_id)
+        .bind(runner_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        let Some((user_id, conversation_id, job_version)) = job else {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| classify(&error))?;
+            return Ok(false);
+        };
+        let message_version = sqlx::query_scalar::<_, i64>(
+            "\
+            INSERT INTO messages (
+                id, conversation_id, agent_job_id, role, content, status
+            ) VALUES ($1, $2, $3, 'assistant', $4, 'streaming')
+            ON CONFLICT (id) DO UPDATE
+            SET content = messages.content || EXCLUDED.content,
+                status = 'streaming',
+                completed_at = NULL
+            WHERE messages.conversation_id = EXCLUDED.conversation_id
+              AND messages.agent_job_id = EXCLUDED.agent_job_id
+              AND char_length(messages.content) + char_length(EXCLUDED.content) <= $5
+            RETURNING version",
+        )
+        .bind(assistant_message_id)
+        .bind(conversation_id)
+        .bind(job_id)
+        .bind(delta)
+        .bind(i32::try_from(MAX_CONTENT_CHARS).map_err(|_| StorageError::InvalidConfiguration)?)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        let Some(message_version) = message_version else {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| classify(&error))?;
+            return Err(StorageError::PersistenceUnavailable);
+        };
+        append_change(&mut transaction, user_id, "agent_job", job_id, job_version).await?;
+        append_change(
+            &mut transaction,
+            user_id,
+            "message",
+            assistant_message_id,
+            message_version,
         )
         .await?;
         transaction
@@ -1371,6 +1468,18 @@ fn valid_text(value: &str, maximum: usize, allow_empty: bool) -> bool {
     (allow_empty || !value.trim().is_empty())
         && value.chars().count() <= maximum
         && !value.chars().any(char::is_control)
+}
+
+fn valid_assistant_output(value: &str) -> bool {
+    !value.trim().is_empty() && valid_assistant_delta(value)
+}
+
+fn valid_assistant_delta(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().count() <= MAX_CONTENT_CHARS
+        && !value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
 }
 
 fn valid_runner_id(value: &str) -> bool {

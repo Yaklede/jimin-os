@@ -39,8 +39,7 @@ export const copy = {
     title: "개인 서버 정보를 찾을 수 없어요",
     description: "이 설치본에 개인 서버 정보가 포함되지 않았어요.",
     nextTitle: "서버 주소를 직접 입력할 필요는 없어요",
-    nextDescription:
-      "개인 서버가 포함된 설치본으로 다시 설치해 주세요.",
+    nextDescription: "개인 서버가 포함된 설치본으로 다시 설치해 주세요.",
   },
   personalServer: {
     title: "개인 서버에 연결하지 못했어요",
@@ -79,9 +78,10 @@ export const copy = {
     composerPlaceholder: "예: 내일 오후 2시에 운동 일정 잡아 줘",
     composerHelp: "한 번에 하나의 요청을 처리해요.",
     preparing: "요청을 준비하고 있어요.",
-    processing: "요청을 처리하고 있어요.",
+    processing: "답변을 작성하고 있어요.",
+    streaming: "답변 작성 중",
     waitingApproval: "승인이 필요한 작업을 확인하고 있어요.",
-    failed: "요청을 완료하지 못했어요. 내용을 확인한 뒤 다시 보내 주세요.",
+    failed: "답변이 중단됐어요. 같은 요청을 다시 보내 주세요.",
   },
   authentication: {
     title: "ChatGPT를 연결하면 바로 대화를 시작할 수 있어요.",
@@ -108,7 +108,7 @@ export const copy = {
     endsAt: "종료 시간",
   },
   messages: {
-    personalServerUnavailable: "VPN 연결과 개인 서버 상태를 확인한 뒤 다시 시도해 주세요.",
+    serverOffline: "VPN 연결과 개인 서버 상태를 확인한 뒤 다시 시도해 주세요.",
     loadFailed: "계획을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
     saveFailed: "변경 내용을 저장하지 못했어요. 다시 시도해 주세요.",
     taskAdded: "할 일을 추가했어요.",

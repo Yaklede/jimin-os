@@ -15,6 +15,7 @@ const CLIENT_TITLE: &str = "Jimin OS Agent";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_LOGIN_FIELD_BYTES: usize = 4 * 1024;
 const MAX_AGENT_RESPONSE_BYTES: usize = 512 * 1024;
+const PERSONAL_ASSISTANT_INSTRUCTIONS: &str = "You are Jimin, a private personal AI assistant. Respond directly and helpfully to the user's request using only the conversation context. Do not execute commands, inspect or change files, access the network, or call tools. If the request requires personal data that was not supplied, explain which information is needed instead of attempting a tool call.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -211,6 +212,7 @@ where
                     "approvalPolicy": "never",
                     "sandbox": "read-only",
                     "cwd": cwd,
+                    "developerInstructions": PERSONAL_ASSISTANT_INSTRUCTIONS,
                     "model": model,
                     "serviceTier": null
                 }),
@@ -250,6 +252,7 @@ where
                     "approvalPolicy": "never",
                     "sandbox": "read-only",
                     "cwd": cwd,
+                    "developerInstructions": PERSONAL_ASSISTANT_INSTRUCTIONS,
                     "model": model,
                     "serviceTier": null
                 }),
@@ -278,6 +281,7 @@ where
                     "approvalPolicy": "never",
                     "sandbox": "read-only",
                     "cwd": cwd,
+                    "developerInstructions": PERSONAL_ASSISTANT_INSTRUCTIONS,
                     "model": model,
                     "serviceTier": null
                 }),
@@ -318,6 +322,26 @@ where
         thread_id: &str,
         prompt: &str,
     ) -> Result<CompletedTurn> {
+        self.run_turn_with_response_streaming(thread_id, prompt, |_| {})
+            .await
+    }
+
+    /// Runs a conversation turn and invokes `on_delta` for each matching
+    /// agent-message fragment before the authoritative final response arrives.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for protocol failures, failed turns, or a final
+    /// answer exceeding the bounded private-response payload.
+    pub async fn run_turn_with_response_streaming<F>(
+        &mut self,
+        thread_id: &str,
+        prompt: &str,
+        mut on_delta: F,
+    ) -> Result<CompletedTurn>
+    where
+        F: FnMut(&str),
+    {
         self.require_initialized()?;
         if thread_id.is_empty() || prompt.is_empty() {
             return Err(Error::InvalidProtocolMessage);
@@ -344,7 +368,8 @@ where
             });
         }
 
-        self.collect_turn(thread_id, &response.turn.id).await
+        self.collect_turn_with_deltas(thread_id, &response.turn.id, &mut on_delta)
+            .await
     }
 
     fn require_initialized(&self) -> Result<()> {
@@ -355,7 +380,15 @@ where
         }
     }
 
-    async fn collect_turn(&mut self, thread_id: &str, turn_id: &str) -> Result<CompletedTurn> {
+    async fn collect_turn_with_deltas<F>(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        on_delta: &mut F,
+    ) -> Result<CompletedTurn>
+    where
+        F: FnMut(&str),
+    {
         let mut delta_notifications = 0_u64;
         let mut delta_bytes = 0_u64;
         let mut retry_notifications = 0_u64;
@@ -372,6 +405,7 @@ where
                     if params.thread_id == thread_id && params.turn_id == turn_id {
                         delta_notifications = delta_notifications.saturating_add(1);
                         delta_bytes = delta_bytes.saturating_add(params.delta.len() as u64);
+                        on_delta(&params.delta);
                     }
                 }
                 "item/completed" => {
@@ -946,16 +980,22 @@ mod tests {
             .start_ephemeral_thread_in(Path::new("/tmp/fixture-workspace"), Some("gpt-fixture"))
             .await
             .expect("thread");
-        let summary = client
-            .run_turn(&thread_id, "Summarize a generic fixture.")
+        let mut received_deltas = Vec::new();
+        let completed = client
+            .run_turn_with_response_streaming(&thread_id, "Summarize a generic fixture.", |delta| {
+                received_deltas.push(delta.to_owned());
+            })
             .await
             .expect("turn");
+        let summary = completed.summary;
         let encoded = serde_json::to_string(&summary).expect("summary json");
         assert_eq!(summary.status, "completed");
         assert_eq!(summary.delta_notifications, 1);
         assert_eq!(summary.retry_notifications, 1);
         assert_eq!(summary.unknown_notifications, 1);
         assert_eq!(summary.response_bytes, "authoritative final".len() as u64);
+        assert_eq!(received_deltas, vec!["stream draft"]);
+        assert_eq!(completed.response, "authoritative final");
         assert!(!encoded.contains("authoritative final"));
         assert!(!encoded.contains("stream draft"));
         assert!(!encoded.contains("private upstream message"));

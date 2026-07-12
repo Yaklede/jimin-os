@@ -440,12 +440,34 @@ async fn queued_agent_turn_is_leased_and_completed_once() {
             .await
             .expect("job should start")
     );
+    let assistant_message_id = Uuid::now_v7();
+    assert!(
+        database
+            .append_agent_response_delta(claim.id, runner_id, assistant_message_id, "오늘 일정은 ",)
+            .await
+            .expect("first response delta should persist")
+    );
+    let streaming_messages = database
+        .conversation_messages_for_user(provisioned.profile.id, conversation_id)
+        .await
+        .expect("streaming messages should load")
+        .expect("owner should read messages");
+    assert_eq!(streaming_messages.len(), 2);
+    assert_eq!(
+        streaming_messages[1].role,
+        ConversationMessageRole::Assistant
+    );
+    assert_eq!(
+        streaming_messages[1].status,
+        jimin_storage::agent::ConversationMessageStatus::Streaming
+    );
+    assert_eq!(streaming_messages[1].content, "오늘 일정은 ");
     assert!(
         database
             .complete_agent_job(
                 claim.id,
                 runner_id,
-                Uuid::now_v7(),
+                assistant_message_id,
                 "오늘 일정은 오후 3시에 하나 있어요.",
             )
             .await

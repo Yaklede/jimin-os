@@ -167,28 +167,54 @@ export function ConversationWorkspace({
                 </h1>
                 <span>{copy.conversations.threadDescription}</span>
               </header>
-              <div className="message-stream" aria-live="polite">
+              <div className="message-stream" aria-live="off">
                 {messages.length ? (
                   <ol className="message-list">
-                    {messages.map((message) => (
-                      <li
-                        key={message.id}
-                        className="message-row"
-                        data-role={message.role}
-                      >
-                        <div className="message-row__meta">
-                          <strong>
-                            {message.role === "user"
-                              ? copy.conversations.userLabel
-                              : copy.productName}
-                          </strong>
-                          <time dateTime={message.createdAt}>
-                            {formatMessageTime(message.createdAt)}
-                          </time>
-                        </div>
-                        <p>{message.content}</p>
-                      </li>
-                    ))}
+                    {messages.map((message) => {
+                      const streaming =
+                        message.role === "assistant" &&
+                        message.status === "streaming";
+                      return (
+                        <li
+                          key={message.id}
+                          className="message-row"
+                          data-role={message.role}
+                          data-streaming={streaming}
+                        >
+                          <div className="message-row__meta">
+                            <strong>
+                              {message.role === "user"
+                                ? copy.conversations.userLabel
+                                : copy.productName}
+                            </strong>
+                            <time dateTime={message.createdAt}>
+                              {formatMessageTime(message.createdAt)}
+                            </time>
+                          </div>
+                          {streaming && (
+                            <span
+                              className="message-row__streaming"
+                              role="status"
+                            >
+                              <LoaderCircle
+                                aria-hidden="true"
+                                className="spin"
+                              />
+                              {copy.conversations.streaming}
+                            </span>
+                          )}
+                          <p>
+                            {message.content}
+                            {streaming && (
+                              <span
+                                className="message-row__caret"
+                                aria-hidden="true"
+                              />
+                            )}
+                          </p>
+                        </li>
+                      );
+                    })}
                   </ol>
                 ) : loading ? (
                   <LoadingMessages />
