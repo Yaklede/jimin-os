@@ -1,11 +1,14 @@
-import { RefreshCw, Server } from "lucide-react";
+import { Server } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   bootstrapTrustedNetworkSession,
+  completeTask,
   refreshDeviceSession,
   type SessionTokens,
+  type Task,
 } from "./api/planning";
+import { type HomeSnapshot, fetchHomeSnapshot } from "./api/home";
 import {
   AgentRequestError,
   createConversation,
@@ -22,6 +25,8 @@ import {
   type ConversationMessage,
 } from "./api/agent";
 import { ConversationWorkspace } from "./components/ConversationWorkspace";
+import { AssistantRail, HomeWorkspace } from "./components/HomeWorkspace";
+import { OsShell, type OsDestination } from "./components/OsShell";
 import { copy } from "./copy";
 import {
   clearDeviceSession,
@@ -43,6 +48,10 @@ export default function App() {
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [mode, setMode] = useState<AppMode>("loading");
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [destination, setDestination] = useState<OsDestination>("home");
+  const [homeSnapshot, setHomeSnapshot] = useState<HomeSnapshot | undefined>();
+  const [homeLoading, setHomeLoading] = useState(false);
+  const [homeError, setHomeError] = useState<string | undefined>();
   const [selectedConversationId, setSelectedConversationId] = useState<
     string | undefined
   >(undefined);
@@ -97,6 +106,22 @@ export default function App() {
     }
   }, [apiBaseUrl, tokens]);
 
+  const loadHomeSnapshot = useCallback(async () => {
+    if (!tokens) return;
+    setHomeLoading(true);
+    setHomeError(undefined);
+    try {
+      const [from, to] = currentLocalDayRange();
+      setHomeSnapshot(
+        await fetchHomeSnapshot(apiBaseUrl, tokens.accessToken, from, to),
+      );
+    } catch {
+      setHomeError(copy.messages.homeLoadNotice);
+    } finally {
+      setHomeLoading(false);
+    }
+  }, [apiBaseUrl, tokens]);
+
   const loadConversationMessages = useCallback(
     async (conversationId: string, background = false) => {
       if (!tokens) return;
@@ -137,6 +162,7 @@ export default function App() {
       const [nextConversations, authentication] = await Promise.all([
         fetchConversations(apiBaseUrl, tokens.accessToken),
         fetchAgentAuthentication(apiBaseUrl, tokens.accessToken),
+        loadHomeSnapshot(),
       ]);
       setConversations(nextConversations);
       setAgentAuthentication(authentication);
@@ -159,7 +185,7 @@ export default function App() {
       setMode("error");
       setMessage(copy.messages.conversationLoadNotice);
     }
-  }, [apiBaseUrl, sessionLoaded, tokens]);
+  }, [apiBaseUrl, loadHomeSnapshot, sessionLoaded, tokens]);
 
   async function discardSession() {
     try {
@@ -167,6 +193,8 @@ export default function App() {
     } finally {
       setTokens(undefined);
       setConversations([]);
+      setHomeSnapshot(undefined);
+      setHomeError(undefined);
       setConversationMessages([]);
       setSelectedConversationId(undefined);
       setConversationJobs({});
@@ -318,6 +346,7 @@ export default function App() {
   ]);
 
   function selectConversation(conversationId: string) {
+    setDestination("assistant");
     setSelectedConversationId(conversationId);
     setConversationMessages([]);
     void loadConversationMessages(conversationId);
@@ -348,6 +377,30 @@ export default function App() {
     setConversationMessages([]);
     setConversationError(undefined);
     pendingConversationId.current = undefined;
+  }
+
+  async function completeHomeTask(task: Task): Promise<void> {
+    if (!tokens) return;
+    setHomeError(undefined);
+    try {
+      await completeTask(apiBaseUrl, tokens.accessToken, task);
+      setHomeSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              tasks: current.tasks.filter((item) => item.id !== task.id),
+            }
+          : current,
+      );
+    } catch {
+      setHomeError(copy.messages.taskCompletionNotice);
+      void loadHomeSnapshot();
+    }
+  }
+
+  function openNewAssistantRequest() {
+    startConversation();
+    setDestination("assistant");
   }
 
   async function beginAgentAuthentication(): Promise<void> {
@@ -424,74 +477,74 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <header className="app-header">
-        <div className="app-header__inner">
-          <div className="brand">
-            <span className="brand__mark" aria-hidden="true">
-              J
-            </span>
-            <span className="brand__name">Jimin OS</span>
-          </div>
-          <div className="app-header__controls">
-            {tokens && (
-              <button
-                className="quiet-button focus-visible-control"
-                type="button"
-                aria-label={copy.actions.refresh}
-                onClick={() => void refresh()}
-                disabled={mode === "loading"}
-              >
-                <RefreshCw aria-hidden="true" />
-                <span className="refresh-label">{copy.actions.refresh}</span>
-              </button>
-            )}
-          </div>
-        </div>
-      </header>
-      <main
-        className={
-          mode === "configuration" || mode === "server-unreachable"
-            ? "setup-main"
-            : "conversation-main"
-        }
-      >
-        {mode === "configuration" ? (
+      {mode === "configuration" ? (
+        <main className="setup-main">
           <ServerConfigurationPanel />
-        ) : mode === "server-unreachable" ? (
+        </main>
+      ) : mode === "server-unreachable" ? (
+        <main className="setup-main">
           <PersonalServerRecoveryPanel
             message={message ?? copy.messages.serverOffline}
             onRetry={() => void bootstrapTrustedNetworkDevice()}
           />
-        ) : (
-          <ConversationWorkspace
-            conversations={conversations}
-            messages={conversationMessages}
-            selectedConversationId={selectedConversationId}
-            jobState={
-              selectedConversationId
-                ? conversationJobs[selectedConversationId]?.state
-                : undefined
-            }
-            hasActiveJob={Boolean(
-              selectedConversationId &&
-              conversationJobs[selectedConversationId] &&
-              !isTerminalAgentJob(
-                conversationJobs[selectedConversationId].state,
-              ),
-            )}
-            authentication={agentAuthentication}
-            authenticationRequesting={authenticationRequesting}
-            loading={conversationLoading}
-            error={
-              conversationError ?? (mode === "error" ? message : undefined)
-            }
-            onSelect={selectConversation}
-            onStartConversation={startConversation}
-            onStartAuthentication={beginAgentAuthentication}
-            onSend={sendConversationRequest}
-          />
-        )}
-      </main>
+        </main>
+      ) : (
+        <OsShell
+          destination={destination}
+          onNavigate={setDestination}
+          onRefresh={() => void refresh()}
+          refreshing={mode === "loading"}
+          rail={
+            destination === "home" ? (
+              <AssistantRail
+                assistantReady={agentAuthentication?.state === "ready"}
+                conversations={conversations}
+                onOpenAssistant={openNewAssistantRequest}
+              />
+            ) : undefined
+          }
+        >
+          {destination === "home" ? (
+            <HomeWorkspace
+              snapshot={homeSnapshot}
+              loading={homeLoading || mode === "loading"}
+              error={homeError ?? (mode === "error" ? message : undefined)}
+              assistantReady={agentAuthentication?.state === "ready"}
+              conversations={conversations}
+              onOpenAssistant={openNewAssistantRequest}
+              onCompleteTask={completeHomeTask}
+            />
+          ) : (
+            <ConversationWorkspace
+              conversations={conversations}
+              messages={conversationMessages}
+              selectedConversationId={selectedConversationId}
+              jobState={
+                selectedConversationId
+                  ? conversationJobs[selectedConversationId]?.state
+                  : undefined
+              }
+              hasActiveJob={Boolean(
+                selectedConversationId &&
+                conversationJobs[selectedConversationId] &&
+                !isTerminalAgentJob(
+                  conversationJobs[selectedConversationId].state,
+                ),
+              )}
+              authentication={agentAuthentication}
+              authenticationRequesting={authenticationRequesting}
+              loading={conversationLoading}
+              error={
+                conversationError ?? (mode === "error" ? message : undefined)
+              }
+              onSelect={selectConversation}
+              onStartConversation={startConversation}
+              onStartAuthentication={beginAgentAuthentication}
+              onSend={sendConversationRequest}
+            />
+          )}
+        </OsShell>
+      )}
     </div>
   );
 }
@@ -547,6 +600,12 @@ function ServerConfigurationPanel() {
 function conversationTitle(value: string) {
   const title = value.trim().replace(/\s+/g, " ").slice(0, 36);
   return title || null;
+}
+
+function currentLocalDayRange(now = new Date()): [Date, Date] {
+  const from = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const to = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  return [from, to];
 }
 
 function isTerminalAgentJob(state: AgentJob["state"]) {

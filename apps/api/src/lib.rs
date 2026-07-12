@@ -271,6 +271,18 @@ pub struct TaskListResponse {
     next_cursor: Option<String>,
 }
 
+/// Server-owned read model for the real planning data shown on the daily home.
+///
+/// The snapshot deliberately excludes provider-shaped placeholders: a future
+/// connected source is added only when its own persistence and sync contract
+/// exists.
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HomeSnapshotResponse {
+    schedule: Vec<ScheduleEntryResponse>,
+    tasks: Vec<TaskResponse>,
+}
+
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationResponse {
@@ -462,6 +474,7 @@ pub(crate) fn error_response(
         trusted_network_session,
         refresh_session,
         list_schedule_entries,
+        get_home_snapshot,
         create_schedule_entry,
         list_open_tasks,
         create_task,
@@ -495,6 +508,7 @@ pub(crate) fn error_response(
         ScheduleListResponse,
         TaskResponse,
         TaskListResponse,
+        HomeSnapshotResponse,
         ConversationResponse,
         ConversationListResponse,
         QueuedAgentTurnResponse,
@@ -528,6 +542,7 @@ pub fn router(state: ApiState) -> Router {
             "/v1/schedule-entries",
             get(list_schedule_entries).post(create_schedule_entry),
         )
+        .route("/v1/home", get(get_home_snapshot))
         .route("/v1/tasks", get(list_open_tasks).post(create_task))
         .route(
             "/v1/tasks/{task_id}/complete",
@@ -783,6 +798,58 @@ async fn list_schedule_entries(
         },
         Err(error) => storage_error_response(&error, request_id),
     }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/home",
+    tag = "home",
+    params(("from" = String, Query), ("to" = String, Query)),
+    responses((status = 200, body = HomeSnapshotResponse), (status = 400), (status = 401), (status = 503))
+)]
+async fn get_home_snapshot(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    axum::extract::Query(query): axum::extract::Query<ScheduleRangeQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let (Ok(from), Ok(to)) = (
+        OffsetDateTime::parse(&query.from, &Rfc3339),
+        OffsetDateTime::parse(&query.to, &Rfc3339),
+    ) else {
+        return invalid_request_response(request_id);
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let user_id = principal.identity().user_id();
+    let (schedule, tasks) = match tokio::try_join!(
+        planning.schedule_entries_in_range(user_id, from, to),
+        planning.open_tasks_for_user(user_id),
+    ) {
+        Ok(values) => values,
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    let Ok(schedule) = schedule
+        .into_iter()
+        .map(schedule_entry_response)
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return unavailable_response(request_id);
+    };
+    let Ok(tasks) = tasks
+        .into_iter()
+        .map(task_response)
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return unavailable_response(request_id);
+    };
+
+    Json(HomeSnapshotResponse { schedule, tasks }).into_response()
 }
 
 #[utoipa::path(
@@ -1904,6 +1971,7 @@ mod tests {
                 "/v1/conversations/{conversation_id}/messages",
                 "/v1/conversations/{conversation_id}/turns",
                 "/v1/devices",
+                "/v1/home",
                 "/v1/me",
                 "/v1/schedule-entries",
                 "/v1/tasks",
@@ -1924,6 +1992,22 @@ mod tests {
                     .body(Body::from(
                         r#"{"clientConversationId":"019f68cb-9400-7000-8000-000000000000","title":null}"#,
                     ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn home_endpoint_requires_a_live_signed_session() {
+        let (state, _, _) = signed_auth_state(true);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/home?from=2026-07-12T00%3A00%3A00Z&to=2026-07-13T00%3A00%3A00Z")
+                    .body(Body::empty())
                     .expect("request should be valid"),
             )
             .await
