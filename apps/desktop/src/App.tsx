@@ -581,6 +581,9 @@ export default function App() {
       }));
       await loadConversationMessages(queued.conversationId);
       void refreshConversations();
+      if (isTerminalAgentJob(queued.state)) {
+        await loadHomeSnapshot();
+      }
       return true;
     } catch (error) {
       setConversationError(
