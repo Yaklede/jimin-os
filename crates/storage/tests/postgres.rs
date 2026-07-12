@@ -487,6 +487,120 @@ async fn queued_agent_turn_is_leased_and_completed_once() {
     database.close().await;
 }
 
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The integration test verifies that an interrupted provider turn is finalized without replay."
+)]
+async fn expired_running_turn_is_failed_without_replaying_the_provider_call() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        1,
+        Duration::from_secs(2),
+    )
+    .expect("test database URL should be valid");
+    database
+        .migrate()
+        .await
+        .expect("agent migration should succeed");
+    let provisioned = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let conversation_id = Uuid::now_v7();
+    database
+        .create_conversation(&NewConversation {
+            id: conversation_id,
+            user_id: provisioned.profile.id,
+            title: Some("중단 복구".to_owned()),
+        })
+        .await
+        .expect("conversation should persist");
+    let queued = database
+        .enqueue_agent_turn(&NewAgentTurn {
+            job_id: Uuid::now_v7(),
+            message_id: Uuid::now_v7(),
+            client_message_id: Uuid::now_v7(),
+            user_id: provisioned.profile.id,
+            conversation_id,
+            content: "중단된 요청을 다시 보내지 마".to_owned(),
+        })
+        .await
+        .expect("turn should queue");
+    let runner_id = "recovery-agent";
+    let claim = database
+        .claim_next_agent_job(runner_id, Duration::from_secs(30))
+        .await
+        .expect("claim query should succeed")
+        .expect("queued job should be claimed");
+    assert!(
+        database
+            .start_agent_job(
+                claim.id,
+                runner_id,
+                "thread-recovery-1",
+                Duration::from_secs(30),
+            )
+            .await
+            .expect("job should start")
+    );
+
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("test database should be reachable");
+    sqlx::query(
+        "UPDATE agent_jobs SET claim_expires_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+    )
+    .bind(queued.job_id)
+    .execute(&pool)
+    .await
+    .expect("lease should expire for recovery test");
+
+    assert_eq!(
+        database
+            .fail_expired_running_agent_jobs("agent.recovery_required")
+            .await
+            .expect("interrupted job should be finalized"),
+        1
+    );
+    assert_eq!(
+        database
+            .agent_job_for_user(provisioned.profile.id, queued.job_id)
+            .await
+            .expect("job query should succeed")
+            .expect("owner should read job")
+            .state,
+        AgentJobState::Failed
+    );
+    let (error_code,): (Option<String>,) =
+        sqlx::query_as("SELECT error_code FROM agent_jobs WHERE id = $1")
+            .bind(queued.job_id)
+            .fetch_one(&pool)
+            .await
+            .expect("recovery error code should persist");
+    assert_eq!(error_code.as_deref(), Some("agent.recovery_required"));
+    assert!(
+        database
+            .claim_next_agent_job(runner_id, Duration::from_secs(30))
+            .await
+            .expect("failed job must never be requeued")
+            .is_none()
+    );
+    assert_eq!(
+        database
+            .fail_expired_running_agent_jobs("agent.recovery_required")
+            .await
+            .expect("recovery should be idempotent"),
+        0
+    );
+
+    pool.close().await;
+    database.close().await;
+}
+
 fn provision_login_command(user_id: Uuid, installation_id: Uuid) -> ProvisionLogin {
     let device = DeviceRegistration::new(
         installation_id,

@@ -3,7 +3,10 @@ use std::{path::Path, time::Duration};
 use jimin_codex_client::{AppServerClient, Error as CodexError};
 use jimin_storage::{Database, StorageError, agent::ClaimedAgentJob};
 use thiserror::Error;
-use tokio::io::{AsyncBufRead, AsyncWrite};
+use tokio::{
+    io::{AsyncBufRead, AsyncWrite},
+    time::Instant,
+};
 use uuid::Uuid;
 
 pub(crate) enum WorkerExit {
@@ -54,8 +57,21 @@ where
 {
     let shutdown = wait_for_shutdown_signal();
     tokio::pin!(shutdown);
+    let recovery_interval = lease / 2;
+    let mut next_recovery_at = Instant::now();
 
     loop {
+        if Instant::now() >= next_recovery_at {
+            // A restarted App Server cannot safely replay a turn that might
+            // have reached Codex. Once its lease expires, surface that
+            // interruption to the client rather than leaving the
+            // conversation permanently busy.
+            database
+                .fail_expired_running_agent_jobs("agent.recovery_required")
+                .await?;
+            next_recovery_at = Instant::now() + recovery_interval;
+        }
+
         let claimed = tokio::select! {
             signal = &mut shutdown => {
                 signal.map_err(WorkerError::Signal)?;

@@ -1015,6 +1015,55 @@ impl Database {
         Ok(row.map(ClaimedAgentJob::from))
     }
 
+    /// Safely finalizes expired work that was interrupted after the provider
+    /// turn boundary. The turn is never requeued because the provider may have
+    /// received it before the worker stopped. The deployed topology has one
+    /// durable personal worker, so an expired lease proves no healthy worker
+    /// remains responsible for this turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed error
+    /// metadata, and a classified storage error when persistence fails.
+    pub async fn fail_expired_running_agent_jobs(
+        &self,
+        error_code: &str,
+    ) -> Result<usize, StorageError> {
+        if !valid_error_code(error_code) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| classify(&error))?;
+        let rows = sqlx::query_as::<_, (Uuid, Uuid, i64)>(
+            "\
+            UPDATE agent_jobs
+            SET state = 'failed',
+                phase = NULL,
+                claim_owner = NULL,
+                claim_expires_at = NULL,
+                error_code = $1,
+                finished_at = NOW()
+            WHERE state = 'running'
+              AND claim_expires_at < NOW()
+            RETURNING id, user_id, version",
+        )
+        .bind(error_code)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        for (job_id, user_id, version) in &rows {
+            append_change(&mut transaction, *user_id, "agent_job", *job_id, *version).await?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| classify(&error))?;
+        Ok(rows.len())
+    }
+
     /// Marks a lease-owned job as running after its Codex thread is available,
     /// but before `turn/start` is sent.
     ///

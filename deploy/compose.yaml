@@ -135,6 +135,8 @@ services:
       JIMIN_AGENT_DATABASE_MAX_CONNECTIONS: ${JIMIN_AGENT_DATABASE_MAX_CONNECTIONS:-2}
       JIMIN_AGENT_CLAIM_LEASE_SECONDS: ${JIMIN_AGENT_CLAIM_LEASE_SECONDS:-30}
       JIMIN_AGENT_POLL_INTERVAL_MS: ${JIMIN_AGENT_POLL_INTERVAL_MS:-500}
+      # One durable identity for this single personal worker instance.
+      JIMIN_AGENT_RUNNER_ID: ${JIMIN_AGENT_RUNNER_ID:-agent-primary}
       RUST_LOG: ${RUST_LOG:-info}
     command:
       - serve
