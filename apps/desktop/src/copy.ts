@@ -6,10 +6,6 @@ export const copy = {
     checkAgainLabel: "서버 상태 다시 확인하기",
     checking: "확인하고 있어요",
     refresh: "새로고침",
-    connect: "이 기기 연결하기",
-    scanQr: "QR 코드 스캔하기",
-    openingScanner: "스캐너 여는 중",
-    enterCode: "코드 직접 입력하기",
     addTask: "할 일 추가하기",
     addSchedule: "일정 추가하기",
     complete: "완료하기",
@@ -20,7 +16,7 @@ export const copy = {
     retryChatgptConnection: "다시 연결하기",
     openChatgpt: "브라우저에서 ChatGPT 열기",
     copyAuthenticationCode: "코드 복사하기",
-    retryLocalPhoneTest: "다시 연결하기",
+    retryPersonalServer: "다시 연결하기",
   },
   summary: {
     checkingTitle: "서버 상태를 확인하고 있어요",
@@ -38,33 +34,17 @@ export const copy = {
     attention: "확인 필요",
     disconnected: "연결 안 됨",
   },
-  setup: {
-    eyebrow: "Jimin OS 시작하기",
-    title: "이 기기를 등록해요",
-    description:
-      "개인 서버에 연결하면 일정, 할 일, 대화를 이 기기에서도 사용할 수 있어요.",
-    scopeTitle: "개인 서버가 설정되어 있어요",
-    scopeDescription:
-      "이 앱은 하나의 개인 서버에만 연결돼요. 여기서는 이 기기만 등록해요.",
-    deviceLabel: "이 기기 이름",
-    deviceHint: "다른 기기와 구분할 수 있는 이름을 적어 주세요.",
-    defaultDeviceName: "내 기기",
-    tokenLabel: "일회용 연결 코드",
-    tokenHint:
-      "QR 코드를 스캔할 수 없을 때만 서버에서 받은 코드를 입력해 주세요.",
-    scanHint: "스캐너가 열리면 일회용 QR 코드를 비춰 주세요.",
-  },
   configuration: {
     eyebrow: "Jimin OS 설정 확인",
-    title: "개인 서버 설정이 필요해요",
-    description: "이 설치본에는 연결할 개인 서버가 아직 설정되지 않았어요.",
-    nextTitle: "서버 주소를 입력할 필요는 없어요",
+    title: "개인 서버 정보를 찾을 수 없어요",
+    description: "이 설치본에 개인 서버 정보가 포함되지 않았어요.",
+    nextTitle: "서버 주소를 직접 입력할 필요는 없어요",
     nextDescription:
-      "개인 서버가 설정된 설치본으로 다시 설치한 뒤 이 기기를 등록해 주세요.",
+      "개인 서버가 포함된 설치본으로 다시 설치해 주세요.",
   },
-  localPhoneTest: {
-    title: "테스트 서버에 연결하지 못했어요",
-    deviceName: "개발용 Android",
+  personalServer: {
+    title: "개인 서버에 연결하지 못했어요",
+    deviceName: "Jimin OS",
   },
   schedule: {
     title: "다가오는 일정",
@@ -128,19 +108,7 @@ export const copy = {
     endsAt: "종료 시간",
   },
   messages: {
-    setupRequired: "기기 이름과 일회용 연결 코드를 모두 입력해 주세요.",
-    deviceNameRequired: "이 기기의 이름을 먼저 입력해 주세요.",
-    manualCodeRequired: "일회용 연결 코드를 입력해 주세요.",
-    connectionNotice:
-      "이 기기를 연결할 수 없어요. 새 일회용 연결 코드를 만든 뒤 다시 시도해 주세요.",
-    qrCodeNeedsAnotherScan:
-      "Jimin OS QR 코드가 아니에요. 개인 서버 QR 코드를 다시 스캔해 주세요.",
-    cameraUnavailable: "스캐너를 열 수 없어요. 코드를 직접 입력해 주세요.",
-    storageNotice:
-      "기기 연결 정보를 안전하게 저장할 수 없어요. 앱을 다시 연 뒤 다시 시도해 주세요.",
-    sessionExpired:
-      "기기 연결이 만료됐어요. 새 연결 코드로 다시 연결해 주세요.",
-    localPhoneTestUnavailable: "맥에서 실행 중인 테스트 서버를 확인한 뒤 다시 연결해 주세요.",
+    personalServerUnavailable: "VPN 연결과 개인 서버 상태를 확인한 뒤 다시 시도해 주세요.",
     loadFailed: "계획을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
     saveFailed: "변경 내용을 저장하지 못했어요. 다시 시도해 주세요.",
     taskAdded: "할 일을 추가했어요.",

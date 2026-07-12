@@ -6,12 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[features]
-default = []
-# Compiles an unauthenticated route only for the loopback local-phone test
-# image. Deployed server images must not enable this feature.
-local-phone-test = []
-
 [dependencies]
 async-trait.workspace = true
 axum.workspace = true
@@ -20,7 +14,6 @@ jimin-auth = { path = "../../crates/auth" }
 jimin-application = { path = "../../crates/application" }
 jimin-domain = { path = "../../crates/domain" }
 jimin-storage = { path = "../../crates/storage" }
-qrcode.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true

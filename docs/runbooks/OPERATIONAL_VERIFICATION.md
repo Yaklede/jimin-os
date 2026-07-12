@@ -3,7 +3,7 @@
 ## 목적
 
 개인 서버에 배포한 Jimin OS를 Mac과 Android에서 실제로 사용하기 전,
-기기 연결·일정·할 일·대화·재시작 복구가 모두 한 번씩 확인되도록 한다.
+개인 서버 자동 연결·일정·할 일·대화·재시작 복구가 모두 한 번씩 확인되도록 한다.
 이 runbook은 배포를 자동 실행하지 않는다. 서버 secret, ChatGPT device-code
 인증, 개인 Android 기기 연결은 운영자가 직접 승인하고 수행한다.
 
@@ -13,7 +13,7 @@
 
 1. private HTTPS hostname에서 gateway, API, PostgreSQL, Agent가 기동한다.
 2. Agent가 ChatGPT 구독 계정으로 로그인되어 비민감 대화 turn 하나를 완료한다.
-3. Mac과 Android가 같은 개인 서버에 각각 기기 등록된다.
+3. Mac과 Android가 같은 VPN 전용 개인 서버에 자동으로 연결된다.
 4. 두 기기에서 일정과 할 일의 생성·완료 결과가 서버 기준으로 확인된다.
 5. 대화 요청이 완료되고, 앱을 다시 열어도 같은 대화와 마지막 요청 상태를 읽는다.
 
@@ -36,32 +36,20 @@ Agent가 `auth_required` 상태이면 일정과 할 일은 계속 사용할 수 
 요청은 처리되지 않는다. 대화 검증 전에 device auth와 turn probe가 성공해야
 한다.
 
-## 2. 기기 연결 QR 코드 만들기
+## 2. 개인 서버 자동 연결 확인
 
-신뢰된 서버에서 API container를 통해 일회용 기기 연결 QR 코드를 만든다. Compose
-인자는 각 배포 runbook의 실제 환경 파일과 동일해야 한다.
+실제 환경 파일에서 `JIMIN_TRUSTED_NETWORK=1`을 설정한다. 이 값은 gateway
+ingress가 소유자 VPN으로 제한된 배포에서만 설정한다. 외부 인터넷에 공개된
+서버에서는 기본값 `0`을 유지한다.
 
-```bash
-docker compose <compose-args> exec -T api jimin-api pairing create
-```
-
-명령은 터미널에 한 번만 쓸 수 있는 QR 코드를 출력한다. 이 QR 코드는
-credential로 취급한다.
-
-- terminal history, chat, issue, screenshot, 검증 기록에 남기지 않는다.
-- Android의 Jimin OS setup 화면에서 **QR 코드 스캔하기**를 눌러 화면의 QR
-  코드를 읽는다.
-- macOS 또는 Android의 예외 복구에는 `jimin-api pairing create --code`로 만든
-  일회용 코드를 **코드 직접 입력하기**에 입력한다. 이 명령의 출력도 credential로
-  취급한다.
-- 만료·소비된 값은 재사용하지 않고 새로 만든다.
+앱은 고정된 private HTTPS hostname으로 개인 서버에 연결하고, 최초 실행과
+내부 session 만료 시 session을 자동으로 갱신한다. 사용자에게 QR, 기기 이름,
+연결 코드, 서버 주소 입력을 요구하지 않는다.
 
 ## 3. Mac 검증
 
 1. 현재 commit에서 만든 `Jimin OS_0.1.0_aarch64.dmg`를 열어 앱을 실행한다.
-2. 개인 서버 주소가 포함된 설치본의 setup 화면에서 기기 이름을 확인하고,
-   `jimin-api pairing create --code`로 만든 일회용 코드를 **코드 직접 입력하기**에
-   입력한다.
+2. 대화 화면이 바로 열리고 QR·기기 등록 화면이 보이지 않는지 확인한다.
 3. 연결 후 오늘 화면에서 할 일 하나와 일정 하나를 만든다.
 4. 할 일을 완료하고 일정·할 일이 화면에 맞게 갱신되는지 확인한다.
 5. 앱을 완전히 종료한 뒤 다시 열어 session과 오늘 데이터가 유지되는지 확인한다.
@@ -99,13 +87,11 @@ adb install -r \
 다음을 확인한다.
 
 1. launcher에 Jimin OS 아이콘과 앱 이름이 보인다.
-2. cold start에서 setup 화면이 표시된다.
-3. 새 일회용 연결 QR 코드로 Android를 등록한다. 연결 QR 코드는 Mac에서 사용한 값과
-   별도로 만든다.
-4. 오늘 화면에서 Mac이 만든 일정·할 일을 읽고, Android에서 한 변경이 Mac에
+2. cold start에서 대화 화면이 표시되고 QR·기기 등록 화면이 보이지 않는다.
+3. 오늘 화면에서 Mac이 만든 일정·할 일을 읽고, Android에서 한 변경이 Mac에
    반영되는지 확인한다.
-5. 앱을 강제 종료하고 다시 열어 session이 유지되는지 확인한다.
-6. 대화 하나를 열고 완료된 응답과 실패 안내가 이해 가능한지 확인한다.
+4. 앱을 강제 종료하고 다시 열어 session이 유지되는지 확인한다.
+5. 대화 하나를 열고 완료된 응답과 실패 안내가 이해 가능한지 확인한다.
 
 개인 서버 배포본에서 Android 기기가 TLS certificate를 신뢰하지 못하면 연결이
 실패해야 한다. certificate 검증을 끄거나 `http` 주소로 바꾸어 우회하지 않는다.
@@ -122,7 +108,6 @@ adb install -r \
 
 다음 정보는 남기지 않는다.
 
-- pairing URI 또는 token
 - access/refresh token, ChatGPT credential, secret file 내용
 - 개인 일정 제목, 대화 원문, AI 응답 원문
 

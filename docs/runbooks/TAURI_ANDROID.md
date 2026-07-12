@@ -1,6 +1,6 @@
 # Tauri Android 개발·실기기 검증
 
-이 runbook은 Jimin OS Android 클라이언트를 생성, 빌드, 개인 Android 기기에서 검증할 때 사용한다. 앱 identity는 QR 기기 연결 코드이며 Google Cloud Console은 Calendar 연결 기능을 구현하기 전까지 필요하지 않다.
+이 runbook은 Jimin OS Android 클라이언트를 생성, 빌드, 개인 Android 기기에서 검증할 때 사용한다. 앱은 VPN으로 제한된 개인 서버에 자동 연결하며 Google Cloud Console은 Calendar 연결 기능을 구현하기 전까지 필요하지 않다.
 
 ## 사전 조건
 
@@ -45,12 +45,12 @@ pnpm --filter @jimin-os/desktop tauri android build --debug --apk --target aarch
 
 ## 최소 실기기 검증
 
-1. 앱 cold start에서 기기 연결 화면이 보이는지 확인한다.
-2. 서버가 만든 QR 기기 연결 코드를 교환하고, 앱을 강제 종료한 뒤 다시 열어 session이 유지되는지 확인한다.
+1. 앱 cold start에서 대화 화면이 보이고 기기 등록 화면이 나타나지 않는지 확인한다.
+2. 앱을 강제 종료한 뒤 다시 열어 개인 서버 session과 대화가 유지되는지 확인한다.
 3. 오늘 일정과 열린 할 일을 읽고, 할 일 하나와 일정 하나를 추가·완료한다.
-4. 서버를 잠시 차단했다가 복구해 오류 문구와 재연결을 확인한다.
+4. 서버 또는 VPN을 잠시 차단했다가 복구해 오류 문구와 재연결을 확인한다.
 5. Android 기기에서 서버 TLS 인증서를 신뢰하지 않을 때 안전하게 연결을 거부하는지 확인한다.
-6. 화면 캡처, 기기 모델, Android version, APK SHA-256, PASS/FAIL을 `docs/verification/`의 private 검증 기록에 남긴다. 연결 코드·access token·refresh token·일정 상세 내용은 기록하지 않는다.
+6. 화면 캡처, 기기 모델, Android version, APK SHA-256, PASS/FAIL을 `docs/verification/`의 private 검증 기록에 남긴다. access token·refresh token·일정 상세 내용은 기록하지 않는다.
 
 ## 현재 알려진 검증 제한
 
@@ -59,5 +59,5 @@ pnpm --filter @jimin-os/desktop tauri android build --debug --apk --target aarch
 SHA-256이 일치한다. 개인 Android 기기(`SM-S948N`)에는 debug APK 설치와 앱
 기동까지 확인했다.
 
-기기 연결, TLS 신뢰, 일정·할 일 동기화, 서버 Agent 대화는 개인 서버 배포와
-일회용 연결 값 생성 후 운영 검증 절차에서 확인한다.
+개인 서버 자동 연결, TLS 신뢰, 일정·할 일 동기화, 서버 Agent 대화는 개인 서버
+배포 후 운영 검증 절차에서 확인한다.

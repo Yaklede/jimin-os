@@ -1,6 +1,6 @@
 # ADR-0004. Jimin OS 앱 신원은 QR 기기 등록으로 관리한다
 
-- 상태: Accepted
+- 상태: Superseded by [ADR-0005](ADR-0005-vpn-trusted-personal-access.md)
 - 결정일: 2026-07-11
 - 적용 단계: M1 이후 전체 client/API
 

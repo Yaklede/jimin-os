@@ -11,7 +11,7 @@
 
 ## 현재 구현 상태
 
-서버 수직 슬라이스와 첫 개인 계획 클라이언트가 구현되어 있습니다. Rust API, PostgreSQL migration, Codex App Server adapter, QR 기기 등록·세션, 일정·할 일 API, non-root Docker image, TLS gateway, 배포·rollback runbook, React 계획 화면, macOS Tauri 셸과 Android 프로젝트 생성물이 저장소에 들어 있습니다. macOS Tauri 개발 실행과 Keychain adapter의 컴파일은 통과했습니다. 실제 Linux server 배포, ChatGPT device auth, Android APK build 및 개인 휴대폰 실기기 검증은 아직 완료하지 않았으므로 운영 검증 전 단계입니다.
+서버 수직 슬라이스와 첫 개인 AI 비서 클라이언트가 구현되어 있습니다. Rust API, PostgreSQL migration, Codex App Server adapter, VPN 전용 개인 서버 세션, 일정·할 일 API, non-root Docker image, TLS gateway, 배포·rollback runbook, React 대화 화면, macOS Tauri 셸과 Android 프로젝트 생성물이 저장소에 들어 있습니다. 앱은 개인 서버 주소가 포함된 설치본에서 자동으로 연결하며, QR·기기 등록 화면을 노출하지 않습니다. macOS Tauri 개발 실행과 Keychain adapter의 컴파일은 통과했습니다. 실제 Linux server 배포, ChatGPT device auth, Android APK build 및 개인 휴대폰 실기기 검증은 아직 완료하지 않았으므로 운영 검증 전 단계입니다.
 
 검증 근거와 아직 실행하지 않은 항목은 [M0 로컬 검증 기록](docs/verification/M0_LOCAL_VALIDATION_2026-07-10.md)에 구분해 기록합니다.
 

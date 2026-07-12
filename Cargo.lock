@@ -2525,7 +2525,6 @@ dependencies = [
  "jimin-observability",
  "jimin-storage",
  "pkcs8 0.11.0",
- "qrcode",
  "secrecy",
  "serde",
  "serde_json",
@@ -2587,7 +2586,6 @@ dependencies = [
  "android-native-keyring-store",
  "keyring",
  "keyring-core",
- "serde",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
@@ -3811,12 +3809,6 @@ checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
 ]
-
-[[package]]
-name = "qrcode"
-version = "0.14.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quick-xml"

@@ -43,9 +43,9 @@ VITE_API_BASE_URL="$VITE_API_BASE_URL" \
 pnpm --filter @jimin-os/desktop tauri build
 ```
 
-서버 주소가 없는 production 패키지는 기기 등록을 시작하지 않고, 설정된
-설치본으로 다시 설치하라는 안내만 표시한다. 일반 사용 화면에는 서버 주소
-입력란을 제공하지 않는다.
+서버 주소가 없는 production 패키지는 개인 서버 정보를 찾을 수 없다는 안내를
+표시한다. 일반 사용 화면에는 서버 주소 입력란·QR 등록·연결 코드 입력란을
+제공하지 않는다.
 
 ## 개발 브라우저
 

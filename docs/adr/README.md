@@ -6,6 +6,7 @@
 |---|---|---|
 | [ADR-0001](ADR-0001-codex-app-server-compatibility.md) | Accepted | Codex App Server 호환성 경계 |
 | [ADR-0002](ADR-0002-mobile-runtime.md) | Proposed | 모바일 runtime 실기기 판정 |
-| [ADR-0004](ADR-0004-device-pairing-app-identity.md) | Accepted | QR 기기 등록 기반 앱 신원 |
+| [ADR-0004](ADR-0004-device-pairing-app-identity.md) | Superseded | QR 기기 등록 기반 앱 신원 |
+| [ADR-0005](ADR-0005-vpn-trusted-personal-access.md) | Accepted | VPN 전용 단일 사용자 앱 접근 |
 
 M0에서 배포/TLS와 모바일 runtime을 실제 환경으로 검증한 뒤 Proposed ADR을 확정한다.

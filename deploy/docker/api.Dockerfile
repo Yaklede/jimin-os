@@ -4,7 +4,6 @@ ARG RUST_BUILDER_IMAGE=docker.io/library/rust:1.95.0-slim-bookworm@sha256:d74820
 ARG DEBIAN_RUNTIME_IMAGE=docker.io/library/debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
 
 FROM ${RUST_BUILDER_IMAGE} AS builder
-ARG JIMIN_API_FEATURES=
 WORKDIR /workspace
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
@@ -14,11 +13,7 @@ COPY crates ./crates
 COPY migrations ./migrations
 COPY schemas ./schemas
 
-RUN if [ -n "$JIMIN_API_FEATURES" ]; then \
-      cargo build --locked --release --package jimin-api --bin jimin-api --features "$JIMIN_API_FEATURES"; \
-    else \
-      cargo build --locked --release --package jimin-api --bin jimin-api; \
-    fi
+RUN cargo build --locked --release --package jimin-api --bin jimin-api
 
 FROM ${DEBIAN_RUNTIME_IMAGE} AS runtime
 ARG JIMIN_BUILD_SHA=dev

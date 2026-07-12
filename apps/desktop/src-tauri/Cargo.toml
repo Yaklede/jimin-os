@@ -16,7 +16,6 @@ tauri-build.workspace = true
 [dependencies]
 keyring.workspace = true
 keyring-core.workspace = true
-serde.workspace = true
 tauri.workspace = true
 tauri-plugin-opener.workspace = true
 uuid.workspace = true

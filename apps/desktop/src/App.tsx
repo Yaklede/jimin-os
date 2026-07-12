@@ -1,19 +1,14 @@
-import { RefreshCw, ScanLine, Server } from "lucide-react";
+import { RefreshCw, Server } from "lucide-react";
 import {
-  FormEvent,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import { invoke } from "@tauri-apps/api/core";
 
 import {
-  bootstrapLocalPhoneTestSession,
-  exchangePairingCode,
-  isLocalPhoneTest,
-  pairingTokenFromScannedQr,
+  bootstrapTrustedNetworkSession,
   refreshDeviceSession,
   type SessionTokens,
 } from "./api/planning";
@@ -45,8 +40,7 @@ import { createUuidV7 } from "./uuid";
 
 type AppMode =
   | "configuration"
-  | "setup"
-  | "local-test-error"
+  | "server-unreachable"
   | "loading"
   | "ready"
   | "error";
@@ -79,21 +73,21 @@ export default function App() {
   const pendingConversationId = useRef<string | undefined>(undefined);
   const [message, setMessage] = useState<string | undefined>(undefined);
 
-  const bootstrapLocalPhoneTestDevice = useCallback(async () => {
+  const bootstrapTrustedNetworkDevice = useCallback(async () => {
     setMode("loading");
     setMessage(undefined);
     try {
       const installationId = await readOrCreateInstallationId();
-      const testTokens = await bootstrapLocalPhoneTestSession(
+      const session = await bootstrapTrustedNetworkSession(
         apiBaseUrl,
-        copy.localPhoneTest.deviceName,
+        copy.personalServer.deviceName,
         installationId,
       );
-      await saveDeviceSession({ tokens: testTokens });
-      setTokens(testTokens);
+      await saveDeviceSession({ tokens: session });
+      setTokens(session);
     } catch {
-      setMode("local-test-error");
-      setMessage(copy.messages.localPhoneTestUnavailable);
+      setMode("server-unreachable");
+      setMessage(copy.messages.personalServerUnavailable);
     }
   }, [apiBaseUrl]);
 
@@ -183,8 +177,7 @@ export default function App() {
       setConversationJobs({});
       setAgentAuthentication(undefined);
       pendingConversationId.current = undefined;
-      setMode("setup");
-      setMessage(copy.messages.sessionExpired);
+      await bootstrapTrustedNetworkDevice();
     }
   }
 
@@ -205,16 +198,13 @@ export default function App() {
         if (stored) {
           setTokens(stored.tokens);
           setMode("loading");
-        } else if (isLocalPhoneTest()) {
-          await bootstrapLocalPhoneTestDevice();
         } else {
-          setMode("setup");
+          await bootstrapTrustedNetworkDevice();
         }
       })
       .catch(() => {
         if (current) {
-          setMode("setup");
-          setMessage(copy.messages.storageNotice);
+          void bootstrapTrustedNetworkDevice();
         }
       })
       .finally(() => {
@@ -224,7 +214,7 @@ export default function App() {
     return () => {
       current = false;
     };
-  }, [apiBaseUrl, bootstrapLocalPhoneTestDevice]);
+  }, [apiBaseUrl, bootstrapTrustedNetworkDevice]);
 
   useEffect(() => {
     void refresh();
@@ -318,35 +308,6 @@ export default function App() {
     selectedConversationId,
     tokens,
   ]);
-
-  async function pairDevice(pairingCode: string, deviceName: string) {
-    if (!apiBaseUrl) {
-      setMode("configuration");
-      return;
-    }
-    const normalizedCode = pairingCode.trim();
-    const normalizedDeviceName = deviceName.trim();
-    if (!normalizedCode || !normalizedDeviceName) {
-      setMessage(copy.messages.setupRequired);
-      return;
-    }
-    setMode("loading");
-    try {
-      const nextTokens = await exchangePairingCode(
-        apiBaseUrl,
-        normalizedCode,
-        normalizedDeviceName,
-        await readOrCreateInstallationId(),
-      );
-      await saveDeviceSession({ tokens: nextTokens });
-      setTokens(nextTokens);
-      setMessage(undefined);
-      scrollToTop();
-    } catch {
-      setMode("setup");
-      setMessage(copy.messages.connectionNotice);
-    }
-  }
 
   function selectConversation(conversationId: string) {
     setSelectedConversationId(conversationId);
@@ -481,29 +442,18 @@ export default function App() {
       </header>
       <main
         className={
-          mode === "setup" ||
-          mode === "configuration" ||
-          mode === "local-test-error"
+          mode === "configuration" || mode === "server-unreachable"
             ? "setup-main"
             : "conversation-main"
         }
       >
         {mode === "configuration" ? (
           <ServerConfigurationPanel />
-        ) : mode === "local-test-error" ? (
-          <LocalPhoneTestRecoveryPanel
-            message={message ?? copy.messages.localPhoneTestUnavailable}
-            onRetry={() => void bootstrapLocalPhoneTestDevice()}
+        ) : mode === "server-unreachable" ? (
+          <PersonalServerRecoveryPanel
+            message={message ?? copy.messages.personalServerUnavailable}
+            onRetry={() => void bootstrapTrustedNetworkDevice()}
           />
-        ) : mode === "setup" ? (
-          <>
-            {message && (
-              <p className="inline-alert" role="alert">
-                {message}
-              </p>
-            )}
-            <SetupPanel onPairingCode={pairDevice} />
-          </>
         ) : (
           <ConversationWorkspace
             conversations={conversations}
@@ -538,7 +488,7 @@ export default function App() {
   );
 }
 
-function LocalPhoneTestRecoveryPanel({
+function PersonalServerRecoveryPanel({
   message,
   onRetry,
 }: {
@@ -546,158 +496,21 @@ function LocalPhoneTestRecoveryPanel({
   onRetry(): void;
 }) {
   return (
-    <section className="setup-panel" aria-labelledby="local-test-title">
+    <section className="setup-panel" aria-labelledby="personal-server-title">
       <div className="setup-panel__intro">
         <Server aria-hidden="true" />
-        <h1 id="local-test-title">{copy.localPhoneTest.title}</h1>
-        <p className="setup-panel__description">{message}</p>
+        <h1 id="personal-server-title">{copy.personalServer.title}</h1>
+        <p className="setup-panel__description" role="alert">
+          {message}
+        </p>
       </div>
       <button
         className="primary-button focus-visible-control"
         type="button"
         onClick={onRetry}
       >
-        {copy.actions.retryLocalPhoneTest}
+        {copy.actions.retryPersonalServer}
       </button>
-    </section>
-  );
-}
-
-function SetupPanel({
-  onPairingCode,
-}: {
-  onPairingCode(pairingCode: string, deviceName: string): void;
-}) {
-  const [deviceName, setDeviceName] = useState<string>(
-    copy.setup.defaultDeviceName,
-  );
-  const [manualCode, setManualCode] = useState("");
-  const [manualEntryVisible, setManualEntryVisible] = useState(false);
-  const [scannerPending, setScannerPending] = useState(false);
-  const [setupNotice, setSetupNotice] = useState<string | undefined>(undefined);
-
-  function validateDeviceName(): boolean {
-    if (deviceName.trim()) return true;
-    setSetupNotice(copy.messages.deviceNameRequired);
-    return false;
-  }
-
-  async function startQrScan() {
-    if (!validateDeviceName()) return;
-    if (!("__TAURI_INTERNALS__" in window)) {
-      setManualEntryVisible(true);
-      setSetupNotice(copy.messages.cameraUnavailable);
-      return;
-    }
-
-    setScannerPending(true);
-    setSetupNotice(undefined);
-
-    try {
-      const scanned = await invoke<QrScanResponse>("scan_qr_code");
-      if (!scanned.content) return;
-      if (!pairingTokenFromScannedQr(scanned.content)) {
-        setManualEntryVisible(true);
-        setSetupNotice(copy.messages.qrCodeNeedsAnotherScan);
-        return;
-      }
-
-      onPairingCode(scanned.content, deviceName);
-    } catch {
-      setManualEntryVisible(true);
-      setSetupNotice(copy.messages.cameraUnavailable);
-    } finally {
-      setScannerPending(false);
-    }
-  }
-
-  function submitManualCode(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!validateDeviceName()) return;
-    if (!manualCode.trim()) {
-      setSetupNotice(copy.messages.manualCodeRequired);
-      return;
-    }
-    setSetupNotice(undefined);
-    onPairingCode(manualCode, deviceName);
-  }
-
-  return (
-    <section className="setup-panel" aria-labelledby="setup-title">
-      <div className="setup-panel__intro">
-        <Server aria-hidden="true" />
-        <p className="setup-panel__eyebrow">{copy.setup.eyebrow}</p>
-        <h1 id="setup-title">{copy.setup.title}</h1>
-        <p className="setup-panel__description">{copy.setup.description}</p>
-      </div>
-      <aside className="setup-panel__scope" aria-label={copy.setup.scopeTitle}>
-        <strong>{copy.setup.scopeTitle}</strong>
-        <p>{copy.setup.scopeDescription}</p>
-      </aside>
-      <form className="setup-form" onSubmit={submitManualCode}>
-        <div className="field">
-          <label htmlFor="device-name">{copy.setup.deviceLabel}</label>
-          <p id="device-name-hint" className="field__hint">
-            {copy.setup.deviceHint}
-          </p>
-          <input
-            id="device-name"
-            name="deviceName"
-            value={deviceName}
-            maxLength={80}
-            required
-            aria-describedby="device-name-hint"
-            onChange={(event) => setDeviceName(event.target.value)}
-          />
-        </div>
-        <div className="setup-scan-action">
-          <button
-            className="primary-button focus-visible-control"
-            type="button"
-            onClick={() => void startQrScan()}
-            disabled={scannerPending}
-          >
-            <ScanLine aria-hidden="true" />
-            {scannerPending ? copy.actions.openingScanner : copy.actions.scanQr}
-          </button>
-          <p>{copy.setup.scanHint}</p>
-        </div>
-        {setupNotice && (
-          <div className="setup-inline-alert" role="alert">
-            <p>{setupNotice}</p>
-          </div>
-        )}
-        {!manualEntryVisible ? (
-          <button
-            className="setup-manual-toggle focus-visible-control"
-            type="button"
-            onClick={() => setManualEntryVisible(true)}
-          >
-            {copy.actions.enterCode}
-          </button>
-        ) : (
-          <div className="field setup-manual-entry">
-            <label htmlFor="pairing-code">{copy.setup.tokenLabel}</label>
-            <p id="pairing-code-hint" className="field__hint">
-              {copy.setup.tokenHint}
-            </p>
-            <textarea
-              id="pairing-code"
-              name="pairingCode"
-              value={manualCode}
-              rows={3}
-              aria-describedby="pairing-code-hint"
-              onChange={(event) => setManualCode(event.target.value)}
-            />
-            <button
-              className="secondary-button focus-visible-control"
-              type="submit"
-            >
-              {copy.actions.connect}
-            </button>
-          </div>
-        )}
-      </form>
     </section>
   );
 }
@@ -730,12 +543,4 @@ function conversationTitle(value: string) {
 
 function isTerminalAgentJob(state: AgentJob["state"]) {
   return ["completed", "failed", "cancelled", "declined"].includes(state);
-}
-
-function scrollToTop() {
-  window.scrollTo(0, 0);
-}
-
-interface QrScanResponse {
-  content: string | null;
 }

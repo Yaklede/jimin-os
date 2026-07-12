@@ -10,9 +10,6 @@
         android:label="@string/app_name"
         android:theme="@style/Theme.jimin_desktop"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
-        <meta-data
-            android:name="com.google.mlkit.vision.DEPENDENCIES"
-            android:value="barcode_ui" />
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
             android:launchMode="singleTask"

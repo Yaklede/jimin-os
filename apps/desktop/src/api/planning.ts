@@ -26,14 +26,10 @@ export interface Task {
   version: number;
 }
 
-interface PairingResponse extends SessionTokens {
+interface DeviceSessionResponse extends SessionTokens {
   user: unknown;
   device: unknown;
   syncCursor: string;
-}
-
-interface ClientEnvironment {
-  readonly VITE_LOCAL_PHONE_TEST?: string;
 }
 
 interface ListResponse<T> {
@@ -51,57 +47,7 @@ export class PlanningRequestError extends Error {
   }
 }
 
-export async function exchangePairingCode(
-  baseUrl: string,
-  pairingCode: string,
-  deviceName: string,
-  installationId: string,
-): Promise<SessionTokens> {
-  const code = pairingTokenFromValue(pairingCode);
-  if (!code || !isUuidV7(installationId)) {
-    throw new PlanningRequestError("invalid");
-  }
-  const response = await fetch(
-    `${normalizeBaseUrl(baseUrl)}/v1/auth/pairings/exchange`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        pairingToken: code,
-        device: {
-          installationId,
-          platform: clientPlatformForUserAgent(navigator.userAgent),
-          name: deviceName,
-          appVersion: "0.1.0-dev",
-          osVersion: navigator.platform,
-        },
-      }),
-    },
-  );
-  const body = await readJson(response);
-  if (!response.ok) {
-    throw errorFromStatus(response.status);
-  }
-  if (!isPairingResponse(body)) {
-    throw new PlanningRequestError("unavailable");
-  }
-  return {
-    ["accessToken"]: body.accessToken,
-    ["refreshToken"]: body.refreshToken,
-  };
-}
-
-export function isLocalPhoneTest(
-  environment?: ClientEnvironment,
-): boolean {
-  const configured = environment ?? (import.meta.env as ClientEnvironment);
-  return configured.VITE_LOCAL_PHONE_TEST === "1";
-}
-
-export async function bootstrapLocalPhoneTestSession(
+export async function bootstrapTrustedNetworkSession(
   baseUrl: string,
   deviceName: string,
   installationId: string,
@@ -110,7 +56,7 @@ export async function bootstrapLocalPhoneTestSession(
     throw new PlanningRequestError("invalid");
   }
   const response = await fetch(
-    `${normalizeBaseUrl(baseUrl)}/v1/testing/local-phone-bootstrap`,
+    `${normalizeBaseUrl(baseUrl)}/v1/access/session`,
     {
       method: "POST",
       headers: {
@@ -130,33 +76,13 @@ export async function bootstrapLocalPhoneTestSession(
   if (!response.ok) {
     throw errorFromStatus(response.status);
   }
-  if (!isPairingResponse(body)) {
+  if (!isDeviceSessionResponse(body)) {
     throw new PlanningRequestError("unavailable");
   }
   return {
     ["accessToken"]: body.accessToken,
     ["refreshToken"]: body.refreshToken,
   };
-}
-
-export function pairingTokenFromValue(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed.startsWith("jimin-os://")) return trimmed;
-  try {
-    const pairingUrl = new URL(trimmed);
-    if (pairingUrl.protocol !== "jimin-os:" || pairingUrl.hostname !== "pair") {
-      return "";
-    }
-    return pairingUrl.searchParams.get("token")?.trim() ?? "";
-  } catch {
-    return "";
-  }
-}
-
-export function pairingTokenFromScannedQr(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed.startsWith("jimin-os://")) return "";
-  return pairingTokenFromValue(trimmed);
 }
 
 export function clientPlatformForUserAgent(userAgent: string): ClientPlatform {
@@ -182,7 +108,7 @@ export async function refreshDeviceSession(
   if (!response.ok) {
     throw errorFromStatus(response.status);
   }
-  if (!isPairingResponse(body)) {
+  if (!isDeviceSessionResponse(body)) {
     throw new PlanningRequestError("unavailable");
   }
   return {
@@ -318,7 +244,7 @@ function errorFromStatus(status: number): PlanningRequestError {
   return new PlanningRequestError("unavailable");
 }
 
-function isPairingResponse(value: unknown): value is PairingResponse {
+function isDeviceSessionResponse(value: unknown): value is DeviceSessionResponse {
   return (
     isRecord(value) &&
     typeof value.accessToken === "string" &&

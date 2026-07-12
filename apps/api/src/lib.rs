@@ -51,6 +51,7 @@ pub struct ApiState {
     configuration_ready: bool,
     database: Option<Arc<dyn ReadinessProbe>>,
     expected_schema_version: i64,
+    trusted_network: bool,
     authentication: Option<Arc<auth::Authentication>>,
     pairing: Option<Arc<PairingRuntime>>,
     planning: Option<Database>,
@@ -69,6 +70,7 @@ impl ApiState {
             configuration_ready,
             database,
             expected_schema_version: EXPECTED_SCHEMA_VERSION,
+            trusted_network: false,
             authentication: None,
             pairing: None,
             planning: None,
@@ -80,6 +82,19 @@ impl ApiState {
     pub fn with_authentication(mut self, authentication: auth::Authentication) -> Self {
         self.authentication = Some(Arc::new(authentication));
         self
+    }
+
+    /// Enables the private-network bootstrap route. Deployment ingress must
+    /// restrict the API to the owner's VPN before this flag is set.
+    #[must_use]
+    pub fn with_trusted_network(mut self, trusted_network: bool) -> Self {
+        self.trusted_network = trusted_network;
+        self
+    }
+
+    #[must_use]
+    const fn trusted_network(&self) -> bool {
+        self.trusted_network
     }
 
     #[must_use]
@@ -131,20 +146,7 @@ impl PairingRuntime {
         Self { sessions }
     }
 
-    /// Issues one QR pairing token for a trusted server administrator or an
-    /// already authenticated Jimin OS client.
-    ///
-    /// # Errors
-    ///
-    /// Returns a sanitized application error without logging token material.
-    pub async fn issue_device_pairing(
-        &self,
-    ) -> Result<jimin_application::IssuedDevicePairing, ApplicationError> {
-        self.sessions.issue_device_pairing().await
-    }
-
-    #[cfg(feature = "local-phone-test")]
-    async fn provision_local_phone_test_device(
+    async fn provision_trusted_network_device(
         &self,
         device: DeviceRegistration,
         request_id: uuid::Uuid,
@@ -346,24 +348,9 @@ pub struct DeviceSessionResponse {
 
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct PairingExchangeRequest {
-    #[schema(value_type = String)]
-    pairing_token: SecretString,
-    device: DeviceRegistrationRequest,
-}
-
-#[derive(serde::Deserialize, ToSchema)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct RefreshSessionRequest {
     #[schema(value_type = String)]
     refresh_token: SecretString,
-}
-
-#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DevicePairingResponse {
-    pairing_token: String,
-    expires_at: String,
 }
 
 #[derive(serde::Deserialize, ToSchema)]
@@ -472,9 +459,8 @@ pub(crate) fn error_response(
 #[derive(OpenApi)]
 #[openapi(
     paths(
-        pairing_exchange,
+        trusted_network_session,
         refresh_session,
-        create_device_pairing,
         list_schedule_entries,
         create_schedule_entry,
         list_open_tasks,
@@ -504,7 +490,7 @@ pub(crate) fn error_response(
         DeviceResponse,
         DeviceListResponse,
         DeviceSessionResponse,
-        DevicePairingResponse,
+        DeviceRegistrationRequest,
         ScheduleEntryResponse,
         ScheduleListResponse,
         TaskResponse,
@@ -533,14 +519,10 @@ pub fn router(state: ApiState) -> Router {
     let router = Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
-        .route(
-            "/v1/auth/pairings/exchange",
-            axum::routing::post(pairing_exchange),
-        )
         .route("/v1/auth/refresh", axum::routing::post(refresh_session))
         .route(
-            "/v1/device-pairings",
-            axum::routing::post(create_device_pairing),
+            "/v1/access/session",
+            axum::routing::post(trusted_network_session),
         )
         .route(
             "/v1/schedule-entries",
@@ -574,12 +556,6 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/agent/jobs/{job_id}", get(get_agent_job))
         .route("/v1/me", get(me))
         .route("/v1/devices", get(devices));
-
-    #[cfg(feature = "local-phone-test")]
-    let router = router.route(
-        "/v1/testing/local-phone-bootstrap",
-        axum::routing::post(local_phone_test_bootstrap),
-    );
 
     router
         .fallback(not_found)
@@ -1282,64 +1258,24 @@ async fn get_agent_job(
 
 #[utoipa::path(
     post,
-    path = "/v1/auth/pairings/exchange",
+    path = "/v1/access/session",
     tag = "identity",
+    request_body = DeviceRegistrationRequest,
     responses(
-        (status = 200, description = "One-time device pairing exchanged for a Jimin OS device session", body = DeviceSessionResponse),
-        (status = 400, description = "Pairing request or device metadata is invalid"),
-        (status = 401, description = "Pairing token is invalid, expired, or already consumed"),
+        (status = 200, description = "Private-network device session created without an interactive pairing step", body = DeviceSessionResponse),
+        (status = 400, description = "Device metadata is invalid"),
+        (status = 404, description = "Private-network access is not enabled for this deployment"),
         (status = 503, description = "Authentication service is temporarily unavailable")
     )
 )]
-async fn pairing_exchange(
-    State(state): State<ApiState>,
-    Extension(request_id): Extension<RequestId>,
-    Json(request): Json<PairingExchangeRequest>,
-) -> Response {
-    let Some(pairing) = state.pairing() else {
-        return error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "service.temporarily_unavailable",
-            "잠시 후 다시 시도해 주세요.",
-            request_id,
-            true,
-        );
-    };
-    let Ok(device) = DeviceRegistration::new(
-        request.device.installation_id,
-        request.device.platform,
-        request.device.name,
-        request.device.app_version,
-        request.device.os_version,
-    ) else {
-        return invalid_request_response(request_id);
-    };
-    let session = match pairing
-        .sessions
-        .consume_device_pairing(request.pairing_token, device, uuid::Uuid::now_v7())
-        .await
-    {
-        Ok(session) => session,
-        Err(error) => return application_error_response(&error, request_id),
-    };
-    match device_session_response(&session) {
-        Ok(response) => no_store_json(response),
-        Err(()) => error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "service.temporarily_unavailable",
-            "잠시 후 다시 시도해 주세요.",
-            request_id,
-            true,
-        ),
-    }
-}
-
-#[cfg(feature = "local-phone-test")]
-async fn local_phone_test_bootstrap(
+async fn trusted_network_session(
     State(state): State<ApiState>,
     Extension(request_id): Extension<RequestId>,
     Json(request): Json<DeviceRegistrationRequest>,
 ) -> Response {
+    if !state.trusted_network() {
+        return not_found_response(request_id);
+    }
     let Some(pairing) = state.pairing() else {
         return unavailable_response(request_id);
     };
@@ -1353,7 +1289,7 @@ async fn local_phone_test_bootstrap(
         return invalid_request_response(request_id);
     };
     let session = match pairing
-        .provision_local_phone_test_device(device, uuid::Uuid::now_v7())
+        .provision_trusted_network_device(device, uuid::Uuid::now_v7())
         .await
     {
         Ok(session) => session,
@@ -1409,52 +1345,6 @@ async fn refresh_session(
     }
 }
 
-#[utoipa::path(
-    post,
-    path = "/v1/device-pairings",
-    tag = "identity",
-    responses(
-        (status = 200, description = "A new one-time QR pairing token", body = DevicePairingResponse),
-        (status = 401, description = "Session is absent, invalid, or expired"),
-        (status = 503, description = "Authentication service is temporarily unavailable")
-    )
-)]
-async fn create_device_pairing(
-    State(state): State<ApiState>,
-    Extension(request_id): Extension<RequestId>,
-    request: Request,
-) -> Response {
-    if let Err(failure) = auth::authenticate(&state, request.headers()).await {
-        return failure.into_response(request_id);
-    }
-    let Some(pairing) = state.pairing() else {
-        return error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "service.temporarily_unavailable",
-            "잠시 후 다시 시도해 주세요.",
-            request_id,
-            true,
-        );
-    };
-    let issued = match pairing.issue_device_pairing().await {
-        Ok(issued) => issued,
-        Err(error) => return application_error_response(&error, request_id),
-    };
-    let Ok(expires_at) = issued.expires_at().format(&Rfc3339) else {
-        return error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "service.temporarily_unavailable",
-            "잠시 후 다시 시도해 주세요.",
-            request_id,
-            true,
-        );
-    };
-    no_store_json(DevicePairingResponse {
-        pairing_token: issued.token().serialized().expose_secret().to_owned(),
-        expires_at,
-    })
-}
-
 fn device_session_response(session: &DeviceSession) -> Result<DeviceSessionResponse, ()> {
     let expires_at = OffsetDateTime::from(session.access_token().expires_at())
         .format(&Rfc3339)
@@ -1492,7 +1382,7 @@ fn application_error_response(error: &ApplicationError, request_id: RequestId) -
         ApplicationError::PairingRejected => error_response(
             StatusCode::UNAUTHORIZED,
             "auth.pairing_rejected",
-            "기기 연결 코드를 다시 확인해 주세요.",
+            "개인 서버 연결을 다시 확인해 주세요.",
             request_id,
             false,
         ),
@@ -1726,9 +1616,11 @@ fn device_response(device: Device) -> DeviceResponse {
     }
 }
 
-async fn not_found(
-    Extension(request_id): Extension<RequestId>,
-) -> (StatusCode, Json<ErrorEnvelope>) {
+async fn not_found(Extension(request_id): Extension<RequestId>) -> Response {
+    not_found_response(request_id)
+}
+
+fn not_found_response(request_id: RequestId) -> Response {
     (
         StatusCode::NOT_FOUND,
         Json(ErrorEnvelope {
@@ -1741,6 +1633,7 @@ async fn not_found(
             },
         }),
     )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -2002,15 +1895,14 @@ mod tests {
             [
                 "/health/live",
                 "/health/ready",
+                "/v1/access/session",
                 "/v1/agent/authentication",
                 "/v1/agent/jobs/{job_id}",
-                "/v1/auth/pairings/exchange",
                 "/v1/auth/refresh",
                 "/v1/conversations",
                 "/v1/conversations/{conversation_id}/jobs/latest",
                 "/v1/conversations/{conversation_id}/messages",
                 "/v1/conversations/{conversation_id}/turns",
-                "/v1/device-pairings",
                 "/v1/devices",
                 "/v1/me",
                 "/v1/schedule-entries",
@@ -2077,7 +1969,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::OPTIONS)
-                    .uri("/v1/auth/pairings/exchange")
+                    .uri("/v1/access/session")
                     .header("origin", "http://tauri.localhost")
                     .header("access-control-request-method", "POST")
                     .header(
@@ -2097,17 +1989,18 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "local-phone-test"))]
     #[tokio::test]
-    async fn local_phone_bootstrap_is_not_routable_in_a_standard_build() {
+    async fn trusted_network_session_is_not_available_without_private_network_mode() {
         let state = ApiState::new("test-sha", false, None);
         let response = router(state)
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v1/testing/local-phone-bootstrap")
+                    .uri("/v1/access/session")
                     .header("content-type", "application/json")
-                    .body(Body::from("{}"))
+                    .body(Body::from(
+                        r#"{"installationId":"019f68cb-9400-7000-8000-000000000000","platform":"android","name":"Jimin OS","appVersion":"0.1.0-dev","osVersion":"Android"}"#,
+                    ))
                     .expect("request should be valid"),
             )
             .await
@@ -2116,15 +2009,32 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
-    #[cfg(feature = "local-phone-test")]
     #[tokio::test]
-    async fn local_phone_bootstrap_is_available_only_in_the_test_image() {
-        let state = ApiState::new("test-sha", false, None);
+    async fn retired_pairing_routes_are_not_exposed() {
+        let state = ApiState::new("test-sha", false, None).with_trusted_network(true);
+        for path in ["/v1/auth/pairings/exchange", "/v1/device-pairings"] {
+            let response = router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request should be valid"),
+                )
+                .await
+                .expect("handler should respond");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[tokio::test]
+    async fn trusted_network_session_requires_an_available_session_runtime() {
+        let state = ApiState::new("test-sha", false, None).with_trusted_network(true);
         let response = router(state)
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/v1/testing/local-phone-bootstrap")
+                    .uri("/v1/access/session")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"installationId":"019f68cb-9400-7000-8000-000000000000","platform":"android","name":"개발용 Android","appVersion":"0.1.0-dev","osVersion":"Android"}"#,

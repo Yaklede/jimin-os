@@ -1,8 +1,8 @@
 services:
   api:
-    build:
-      args:
-        JIMIN_API_FEATURES: local-phone-test
+    environment:
+      # USB debugging exposes the API only through the Mac loopback device.
+      JIMIN_TRUSTED_NETWORK: "1"
     # This port is intentionally bound only to the Mac loopback device. Android
     # reaches it through `adb reverse`; it is never exposed on the LAN.
     ports:

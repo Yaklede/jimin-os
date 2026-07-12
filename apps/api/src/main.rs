@@ -14,7 +14,6 @@ use jimin_auth::{
 };
 use jimin_observability::init_tracing;
 use jimin_storage::Database;
-use qrcode::{QrCode, render::unicode};
 use secrecy::ExposeSecret;
 use tokio::{net::TcpListener, signal};
 use tracing::{error, info, warn};
@@ -22,12 +21,6 @@ use tracing::{error, info, warn};
 const DEFAULT_PROBE_ADDR: &str = "127.0.0.1:8080";
 const MIGRATION_RETRY_INITIAL: Duration = Duration::from_secs(1);
 const MIGRATION_RETRY_MAXIMUM: Duration = Duration::from_secs(30);
-
-#[derive(Clone, Copy)]
-enum PairingOutput {
-    Qr,
-    Code,
-}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -37,10 +30,6 @@ async fn main() -> ExitCode {
         .is_some_and(|argument| argument == "probe")
     {
         return run_probe_command(&arguments).await;
-    }
-
-    if let Some(output) = pairing_output_for(&arguments) {
-        return run_pairing_create_command(output).await;
     }
 
     if init_tracing().is_err() {
@@ -118,7 +107,8 @@ async fn run_server() -> Result<(), &'static str> {
         config.build_sha().to_owned(),
         configuration_ready,
         readiness_database,
-    );
+    )
+    .with_trusted_network(config.trusted_network());
     if let Some((authentication, pairing)) = runtime {
         state = state.with_authentication(authentication);
         state = state.with_pairing(pairing);
@@ -195,93 +185,6 @@ fn build_authentication(
     ))
 }
 
-async fn run_pairing_create_command(output: PairingOutput) -> ExitCode {
-    if init_tracing().is_err() {
-        return ExitCode::FAILURE;
-    }
-    let Ok(config) = AppConfig::load() else {
-        return ExitCode::FAILURE;
-    };
-    let (SecretSetting::Available(database_url), AuthenticationSetting::Available(settings)) =
-        (config.database_url(), config.authentication())
-    else {
-        return ExitCode::FAILURE;
-    };
-    let Ok(database) = Database::connect_lazy(
-        database_url,
-        config.database_max_connections(),
-        config.database_acquire_timeout(),
-    ) else {
-        return ExitCode::FAILURE;
-    };
-    let Some((_, pairing)) = build_authentication(settings, &database) else {
-        return ExitCode::FAILURE;
-    };
-    if !matches!(
-        database
-            .readiness(jimin_storage::EXPECTED_SCHEMA_VERSION)
-            .await,
-        jimin_storage::Readiness::Ready { .. }
-    ) {
-        database.close().await;
-        return ExitCode::FAILURE;
-    }
-    let result = pairing.issue_device_pairing().await;
-    database.close().await;
-    let Ok(issued) = result else {
-        return ExitCode::FAILURE;
-    };
-    let Ok(expires_at) = issued
-        .expires_at()
-        .format(&time::format_description::well_known::Rfc3339)
-    else {
-        return ExitCode::FAILURE;
-    };
-    match output {
-        PairingOutput::Qr => {
-            let pairing_uri = format!(
-                "jimin-os://pair?token={}",
-                issued.token().serialized().expose_secret()
-            );
-            let Ok(pairing_qr) = render_pairing_qr(&pairing_uri) else {
-                return ExitCode::FAILURE;
-            };
-            // This command is a trusted-server bootstrap surface. The pairing
-            // URI is intentionally rendered as a QR code instead of being
-            // written as text so Android can scan it directly.
-            println!(
-                "Jimin OS 연결 QR 코드\n\n{pairing_qr}\n이 QR 코드는 한 번만 사용할 수 있으며 {expires_at}에 만료돼요."
-            );
-        }
-        PairingOutput::Code => {
-            // macOS has no camera-scanning flow in this phase. Printing a raw
-            // one-time code is an explicit recovery path and must never be
-            // logged, copied to chat, or used for Android's normal flow.
-            println!(
-                "Jimin OS 일회용 연결 코드\n{}\n이 코드는 한 번만 사용할 수 있으며 {expires_at}에 만료돼요.",
-                issued.token().serialized().expose_secret()
-            );
-        }
-    }
-    ExitCode::SUCCESS
-}
-
-fn pairing_output_for(arguments: &[String]) -> Option<PairingOutput> {
-    match arguments {
-        [command, action] if command == "pairing" && action == "create" => Some(PairingOutput::Qr),
-        [command, action, option]
-            if command == "pairing" && action == "create" && option == "--code" =>
-        {
-            Some(PairingOutput::Code)
-        }
-        _ => None,
-    }
-}
-
-fn render_pairing_qr(pairing_uri: &str) -> Result<String, qrcode::types::QrError> {
-    QrCode::new(pairing_uri.as_bytes()).map(|code| code.render::<unicode::Dense1x2>().build())
-}
-
 async fn reconcile_migrations(database: Database) {
     let mut retry_delay = MIGRATION_RETRY_INITIAL;
     loop {
@@ -350,10 +253,7 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MIGRATION_RETRY_MAXIMUM, PairingOutput, next_migration_retry, pairing_output_for,
-        render_pairing_qr,
-    };
+    use super::{MIGRATION_RETRY_MAXIMUM, next_migration_retry};
     use std::time::Duration;
 
     #[test]
@@ -370,32 +270,5 @@ mod tests {
             next_migration_retry(MIGRATION_RETRY_MAXIMUM),
             MIGRATION_RETRY_MAXIMUM
         );
-    }
-
-    #[test]
-    fn renders_a_pairing_uri_without_printing_its_raw_value() {
-        let pairing_uri = "jimin-os://pair?token=pairing-secret";
-
-        let rendered = render_pairing_qr(pairing_uri).expect("pairing QR should render");
-
-        assert!(!rendered.is_empty());
-        assert!(!rendered.contains(pairing_uri));
-        assert!(!rendered.contains("pairing-secret"));
-    }
-
-    #[test]
-    fn pairing_output_uses_qr_by_default_and_requires_an_explicit_code_flag() {
-        assert!(matches!(
-            pairing_output_for(&["pairing".to_owned(), "create".to_owned()]),
-            Some(PairingOutput::Qr)
-        ));
-        assert!(matches!(
-            pairing_output_for(&[
-                "pairing".to_owned(),
-                "create".to_owned(),
-                "--code".to_owned()
-            ]),
-            Some(PairingOutput::Code)
-        ));
     }
 }

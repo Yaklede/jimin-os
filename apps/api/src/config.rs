@@ -23,6 +23,7 @@ pub struct AppConfig {
     database_url: SecretSetting,
     database_max_connections: u32,
     database_acquire_timeout: Duration,
+    trusted_network: bool,
     authentication: AuthenticationSetting,
 }
 
@@ -57,6 +58,8 @@ pub enum ConfigError {
     InvalidBuildSha,
     #[error("database pool configuration is invalid")]
     InvalidDatabasePool,
+    #[error("trusted-network configuration is invalid")]
+    InvalidTrustedNetwork,
     #[error("authentication configuration is invalid")]
     InvalidAuthentication,
     #[error("environment configuration contains non-Unicode data")]
@@ -70,6 +73,7 @@ impl ConfigError {
             Self::InvalidBindAddress => "config.bind_address_invalid",
             Self::InvalidBuildSha => "config.build_sha_invalid",
             Self::InvalidDatabasePool => "config.database_pool_invalid",
+            Self::InvalidTrustedNetwork => "config.trusted_network_invalid",
             Self::InvalidAuthentication => "config.authentication_invalid",
             Self::NonUnicodeEnvironment => "config.environment_non_unicode",
         }
@@ -108,6 +112,8 @@ impl AppConfig {
             100,
             60_000,
         )?;
+        let trusted_network =
+            parse_boolean(env_string("JIMIN_TRUSTED_NETWORK")?.as_deref(), false)?;
 
         let database_url = match (env_string("DATABASE_URL"), env_string("DATABASE_URL_FILE")) {
             (Ok(direct), Ok(file)) => resolve_secret(direct, file, read_secret_file),
@@ -121,6 +127,7 @@ impl AppConfig {
             database_url,
             database_max_connections,
             database_acquire_timeout: Duration::from_millis(acquire_timeout_ms),
+            trusted_network,
             authentication,
         })
     }
@@ -148,6 +155,11 @@ impl AppConfig {
     #[must_use]
     pub const fn database_acquire_timeout(&self) -> Duration {
         self.database_acquire_timeout
+    }
+
+    #[must_use]
+    pub const fn trusted_network(&self) -> bool {
+        self.trusted_network
     }
 
     #[must_use]
@@ -320,6 +332,15 @@ fn valid_auth_text(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= 255 && !value.chars().any(char::is_control)
 }
 
+fn parse_boolean(value: Option<&str>, default: bool) -> Result<bool, ConfigError> {
+    match value {
+        None => Ok(default),
+        Some("1" | "true") => Ok(true),
+        Some("0" | "false") => Ok(false),
+        Some(_) => Err(ConfigError::InvalidTrustedNetwork),
+    }
+}
+
 fn parse_bounded_u32(
     value: Option<String>,
     default: u32,
@@ -405,5 +426,18 @@ mod tests {
         assert!(valid_build_sha("abc-123_test.sha"));
         assert!(!valid_build_sha("abc 123"));
         assert!(!valid_build_sha(""));
+    }
+
+    #[test]
+    fn trusted_network_flag_accepts_only_explicit_boolean_values() {
+        assert!(matches!(parse_boolean(None, false), Ok(false)));
+        assert!(matches!(parse_boolean(Some("1"), false), Ok(true)));
+        assert!(matches!(parse_boolean(Some("true"), false), Ok(true)));
+        assert!(matches!(parse_boolean(Some("0"), true), Ok(false)));
+        assert!(matches!(parse_boolean(Some("false"), true), Ok(false)));
+        assert!(matches!(
+            parse_boolean(Some("yes"), false),
+            Err(ConfigError::InvalidTrustedNetwork)
+        ));
     }
 }
