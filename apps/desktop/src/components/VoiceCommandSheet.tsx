@@ -5,7 +5,12 @@ import {
   SendHorizontal,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import {
+  type PointerEvent as ReactPointerEvent,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
 import { copy } from "../copy";
@@ -80,6 +85,8 @@ export function VoiceCommandSheet({
   const recognizerRef = useRef<SpeechRecognitionLike | undefined>(undefined);
   const usingNativeRecognitionRef = useRef(false);
   const completedRef = useRef(false);
+  const dragStartYRef = useRef<number | undefined>(undefined);
+  const dragOffsetRef = useRef(0);
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<RecognitionState>("listening");
   const [transcript, setTranscript] = useState("");
@@ -87,6 +94,8 @@ export function VoiceCommandSheet({
     VoiceCommandOutcome | undefined
   >(undefined);
   const [processingCommand, setProcessingCommand] = useState(false);
+  const [dragOffset, setDragOffset] = useState(0);
+  const [dragging, setDragging] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -96,6 +105,7 @@ export function VoiceCommandSheet({
     setState("listening");
     setCommandOutcome(undefined);
     setProcessingCommand(false);
+    resetSheetPosition();
 
     if (usesAndroidNativeRecognition()) {
       usingNativeRecognitionRef.current = true;
@@ -175,6 +185,19 @@ export function VoiceCommandSheet({
     };
   }, [attempt, open]);
 
+  useEffect(() => {
+    if (!open) return;
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      resetSheetPosition();
+      onClose();
+    }
+
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose, open]);
+
   if (!open) return null;
 
   function retry() {
@@ -227,20 +250,75 @@ export function VoiceCommandSheet({
     onOpenDestination(commandOutcome.destination);
   }
 
+  function resetSheetPosition() {
+    dragStartYRef.current = undefined;
+    dragOffsetRef.current = 0;
+    setDragOffset(0);
+    setDragging(false);
+  }
+
+  function closeSheet() {
+    resetSheetPosition();
+    onClose();
+  }
+
+  function startSheetDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    dragStartYRef.current = event.clientY;
+    dragOffsetRef.current = 0;
+    setDragging(true);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveSheetDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    const startY = dragStartYRef.current;
+    if (startY === undefined) return;
+    const nextOffset = Math.max(0, event.clientY - startY);
+    dragOffsetRef.current = nextOffset;
+    setDragOffset(nextOffset);
+  }
+
+  function endSheetDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (dragStartYRef.current === undefined) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    const shouldClose = dragOffsetRef.current >= 108;
+    resetSheetPosition();
+    if (shouldClose) onClose();
+  }
+
   return (
-    <div className="voice-sheet-backdrop" role="presentation">
+    <div
+      className="voice-sheet-backdrop"
+      role="presentation"
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget) closeSheet();
+      }}
+    >
       <section
         className="voice-sheet"
         aria-labelledby="voice-sheet-title"
         aria-modal="true"
         role="dialog"
+        data-dragging={dragging}
+        style={{ transform: `translateY(${dragOffset}px)` }}
       >
-        <div className="voice-sheet__handle" aria-hidden="true" />
+        <div
+          className="voice-sheet__grab-area"
+          aria-hidden="true"
+          onPointerDown={startSheetDrag}
+          onPointerMove={moveSheetDrag}
+          onPointerUp={endSheetDrag}
+          onPointerCancel={endSheetDrag}
+        >
+          <div className="voice-sheet__handle" />
+        </div>
         <button
           className="voice-sheet__close focus-visible-control"
           type="button"
           aria-label={copy.voice.closeLabel}
-          onClick={onClose}
+          onClick={closeSheet}
         >
           <X aria-hidden="true" />
         </button>
@@ -317,7 +395,7 @@ export function VoiceCommandSheet({
               <button
                 className="voice-sheet__secondary focus-visible-control"
                 type="button"
-                onClick={onClose}
+                onClick={closeSheet}
               >
                 {copy.voice.close}
               </button>
@@ -395,7 +473,7 @@ export function VoiceCommandSheet({
         <button
           className="voice-sheet__dismiss focus-visible-control"
           type="button"
-          onClick={onClose}
+          onClick={closeSheet}
         >
           {copy.voice.close}
         </button>

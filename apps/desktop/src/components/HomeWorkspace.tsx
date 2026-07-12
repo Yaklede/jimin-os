@@ -9,7 +9,6 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 
-import { type Conversation } from "../api/agent";
 import { type HomeSnapshot } from "../api/home";
 import { type ScheduleEntry, type Task } from "../api/planning";
 import { copy } from "../copy";
@@ -18,7 +17,6 @@ type HomeWorkspaceProps = {
   snapshot: HomeSnapshot | undefined;
   loading: boolean;
   error: string | undefined;
-  conversations: Conversation[];
   onOpenAssistant(): void;
   onCompleteTask(task: Task): Promise<void>;
 };
@@ -27,7 +25,6 @@ export function HomeWorkspace({
   snapshot,
   loading,
   error,
-  conversations,
   onOpenAssistant,
   onCompleteTask,
 }: HomeWorkspaceProps) {
@@ -169,57 +166,19 @@ export function HomeWorkspace({
           )}
         </div>
       </section>
-
-      <section
-        className="home-conversation-summary"
-        aria-labelledby="recent-conversation-title"
-      >
-        <div className="home-section-heading">
-          <h2 id="recent-conversation-title">
-            {copy.home.recentConversations}
-          </h2>
-          <button
-            className="text-button focus-visible-control"
-            type="button"
-            onClick={onOpenAssistant}
-          >
-            {copy.actions.openConversation}
-          </button>
-        </div>
-        <div className="home-conversation-summary__surface">
-          {conversations.length ? (
-            <>
-              <MessageCircleMore aria-hidden="true" />
-              <span>
-                {conversations[0].title ?? copy.conversations.untitled}
-              </span>
-              <ChevronRight aria-hidden="true" />
-            </>
-          ) : (
-            <>
-              <MessageCircleMore aria-hidden="true" />
-              <span>{copy.home.recentEmpty}</span>
-              <ChevronRight aria-hidden="true" />
-            </>
-          )}
-        </div>
-      </section>
     </section>
   );
 }
 
 type AssistantRailProps = {
   assistantReady: boolean;
-  conversations: Conversation[];
   onOpenAssistant(): void;
 };
 
 export function AssistantRail({
   assistantReady,
-  conversations,
   onOpenAssistant,
 }: AssistantRailProps) {
-  const recent = conversations.slice(0, 2);
   return (
     <div className="assistant-rail">
       <div className="assistant-rail__identity">
@@ -264,18 +223,6 @@ export function AssistantRail({
         <span>{copy.home.assistantPrompt}</span>
         <MessageCircleMore aria-hidden="true" />
       </button>
-      {recent.length > 0 && (
-        <div className="assistant-rail__recent">
-          <p>{copy.home.recentConversations}</p>
-          <ul>
-            {recent.map((conversation) => (
-              <li key={conversation.id}>
-                {conversation.title ?? copy.conversations.untitled}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
     </div>
   );
 }

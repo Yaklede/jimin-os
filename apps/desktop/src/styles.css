@@ -325,8 +325,7 @@ svg {
 
 .home-greeting,
 .home-briefing,
-.home-voice-callout,
-.home-conversation-summary {
+.home-voice-callout {
   grid-column: auto;
 }
 
@@ -384,7 +383,6 @@ svg {
 .home-voice-callout,
 .home-next-schedule,
 .home-task-surface,
-.home-conversation-summary__surface,
 .planning-surface,
 .memory-empty,
 .settings-list,
@@ -409,8 +407,7 @@ svg {
 }
 
 .home-briefing:hover,
-.home-voice-callout:hover,
-.home-conversation-summary__surface:hover {
+.home-voice-callout:hover {
   border-color: var(--border-strong);
 }
 
@@ -445,8 +442,7 @@ svg {
 }
 
 .home-briefing > svg,
-.home-voice-callout > svg,
-.home-conversation-summary__surface > svg:last-child {
+.home-voice-callout > svg {
   width: 18px;
   height: 18px;
   margin-left: auto;
@@ -483,8 +479,7 @@ svg {
 }
 
 .home-next-schedule,
-.home-tasks,
-.home-conversation-summary {
+.home-tasks {
   min-width: 0;
 }
 
@@ -560,8 +555,7 @@ svg {
 .planning-task-list,
 .planning-timeline,
 .assistant-history__list,
-.assistant-message-list,
-.assistant-rail__recent ul {
+.assistant-message-list {
   margin: 0;
   padding: 0;
   list-style: none;
@@ -619,14 +613,6 @@ svg {
   white-space: nowrap;
 }
 
-.home-conversation-summary {
-  grid-column: 1 / -1;
-}
-
-.home-conversation-summary .home-section-heading {
-  margin-bottom: 8px;
-}
-
 .text-button {
   display: inline-flex;
   align-items: center;
@@ -647,29 +633,6 @@ svg {
 .text-button svg {
   width: 16px;
   height: 16px;
-}
-
-.home-conversation-summary__surface {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 54px;
-  padding: 10px 14px;
-  color: var(--text);
-}
-
-.home-conversation-summary__surface > svg:first-child {
-  width: 18px;
-  height: 18px;
-  color: var(--accent);
-}
-
-.home-conversation-summary__surface span {
-  overflow: hidden;
-  color: var(--text);
-  font-size: 14px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .assistant-rail {
@@ -708,8 +671,7 @@ svg {
 }
 
 .assistant-rail__identity p,
-.assistant-rail__message,
-.assistant-rail__recent p {
+.assistant-rail__message {
   margin: 2px 0 0;
   color: var(--muted);
   font-size: 12px;
@@ -771,24 +733,6 @@ svg {
   width: 18px;
   height: 18px;
   color: var(--accent);
-}
-
-.assistant-rail__recent {
-  border-top: 1px solid var(--border);
-  padding-top: 12px;
-}
-
-.assistant-rail__recent p {
-  margin-bottom: 6px;
-}
-
-.assistant-rail__recent li {
-  overflow: hidden;
-  padding: 5px 0;
-  color: var(--text);
-  font-size: 13px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .loading-rows,
@@ -1626,11 +1570,9 @@ svg {
 @keyframes voice-sheet-up {
   from {
     opacity: 0;
-    transform: translateY(24px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 
@@ -1702,7 +1644,6 @@ svg {
   .home-voice-callout,
   .home-next-schedule,
   .home-tasks,
-  .home-conversation-summary,
   .planning-page .page-heading,
   .planning-page .inline-alert {
     grid-column: auto;
@@ -1742,10 +1683,6 @@ svg {
 
   .home-next-schedule {
     padding: 16px;
-  }
-
-  .home-conversation-summary {
-    grid-column: auto;
   }
 
   .os-mobile-nav {
@@ -2084,8 +2021,8 @@ svg {
     display: flex;
     flex-direction: column;
     justify-content: flex-end;
-    background: transparent;
-    animation: none;
+    background: color-mix(in srgb, var(--canvas) 68%, transparent);
+    animation: voice-sheet-dim 180ms ease-out both;
   }
 
   .voice-sheet {
@@ -2099,6 +2036,22 @@ svg {
     background: var(--surface);
     color: var(--text);
     animation: voice-sheet-up 240ms cubic-bezier(0.2, 0.8, 0.25, 1) both;
+    transition: transform 180ms cubic-bezier(0.2, 0.8, 0.25, 1);
+    will-change: transform;
+  }
+
+  .voice-sheet[data-dragging="true"] {
+    transition: none;
+  }
+
+  .voice-sheet__grab-area {
+    display: grid;
+    place-items: center;
+    align-self: stretch;
+    min-height: 44px;
+    margin: -14px 0 -8px;
+    touch-action: none;
+    cursor: grab;
   }
 
   .voice-sheet__handle {
@@ -2110,12 +2063,12 @@ svg {
 
   .voice-sheet__close {
     position: absolute;
-    top: 14px;
-    right: 16px;
+    top: 10px;
+    right: 12px;
     display: grid;
     place-items: center;
-    width: 36px;
-    height: 36px;
+    width: 44px;
+    height: 44px;
     border: 0;
     border-radius: 50%;
     background: var(--surface-subtle);

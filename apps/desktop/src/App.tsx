@@ -557,7 +557,6 @@ export default function App() {
             destination !== "chat" ? (
               <AssistantRail
                 assistantReady={agentAuthentication?.state === "ready"}
-                conversations={conversations}
                 onOpenAssistant={openNewAssistantRequest}
               />
             ) : undefined
@@ -568,7 +567,6 @@ export default function App() {
               snapshot={homeSnapshot}
               loading={homeLoading || mode === "loading"}
               error={homeError ?? (mode === "error" ? message : undefined)}
-              conversations={conversations}
               onOpenAssistant={openNewAssistantRequest}
               onCompleteTask={completeHomeTask}
             />

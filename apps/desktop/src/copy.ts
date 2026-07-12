@@ -74,8 +74,6 @@ export const copy = {
     assistantNeedsConnection:
       "ChatGPT를 연결하면 대화를 바로 시작할 수 있어요.",
     assistantPrompt: "지민에게 말하기",
-    recentConversations: "최근 대화",
-    recentEmpty: "아직 시작한 대화가 없어요. 지금 필요한 일을 말해 보세요.",
     loadingShort: "불러오는 중",
   },
   summary: {
