@@ -1597,6 +1597,35 @@ svg {
   }
 }
 
+@keyframes voice-sheet-dim {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes voice-sheet-up {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes voice-wave {
+  from {
+    transform: scaleY(0.5);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
 @media (max-width: 1120px) {
   .os-shell {
     grid-template-columns: 208px minmax(0, 1fr);
@@ -1710,7 +1739,7 @@ svg {
     left: 0;
     display: grid;
     grid-template-columns: repeat(5, minmax(0, 1fr));
-    align-items: end;
+    align-items: start;
     min-height: calc(72px + env(safe-area-inset-bottom));
     padding: 6px 8px max(8px, env(safe-area-inset-bottom));
     background: color-mix(in srgb, var(--surface) 96%, transparent);
@@ -1741,24 +1770,44 @@ svg {
     height: 21px;
   }
 
+  .os-mobile-nav > .os-nav__button:nth-child(1) {
+    grid-column: 1;
+  }
+
+  .os-mobile-nav > .os-nav__button:nth-child(2) {
+    grid-column: 2;
+  }
+
+  .os-mobile-nav > .os-nav__button:nth-child(4) {
+    grid-column: 4;
+  }
+
+  .os-mobile-nav > .os-nav__button:nth-child(5) {
+    grid-column: 5;
+  }
+
   .os-mobile-nav__assistant {
+    position: absolute;
+    top: -28px;
+    left: 50%;
     display: grid;
     place-items: center;
     width: 56px;
     height: 56px;
-    margin: -26px auto 0;
+    margin: 0;
     border: 0;
     border-radius: 50%;
     background: var(--accent);
     box-shadow: var(--shadow-float);
     color: white;
+    transform: translateX(-50%);
     transition:
       background 160ms ease,
       transform 160ms ease;
   }
 
   .os-mobile-nav__assistant:active {
-    transform: scale(0.96);
+    transform: translateX(-50%) scale(0.96);
   }
 
   .os-mobile-nav__assistant svg {
@@ -1875,6 +1924,211 @@ svg {
 
   .setup-main {
     padding: 16px;
+  }
+
+  .voice-sheet-backdrop {
+    position: fixed;
+    z-index: 100;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    background: color-mix(in srgb, var(--text-strong) 42%, transparent);
+    animation: voice-sheet-dim 240ms ease-out both;
+  }
+
+  .voice-sheet {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    border-radius: 24px 24px 0 0;
+    padding: 14px 20px calc(24px + env(safe-area-inset-bottom));
+    background: var(--surface);
+    color: var(--text);
+    animation: voice-sheet-up 240ms cubic-bezier(0.2, 0.8, 0.25, 1) both;
+  }
+
+  .voice-sheet__handle {
+    width: 40px;
+    height: 5px;
+    border-radius: 99px;
+    background: var(--border-strong);
+  }
+
+  .voice-sheet__close {
+    position: absolute;
+    top: 14px;
+    right: 16px;
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--surface-subtle);
+    color: var(--muted);
+  }
+
+  .voice-sheet__close svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .voice-sheet__orb {
+    display: grid;
+    place-items: center;
+    width: 64px;
+    height: 64px;
+    margin-top: 2px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: var(--shadow-float);
+    color: white;
+  }
+
+  .voice-sheet__orb svg {
+    width: 28px;
+    height: 28px;
+  }
+
+  .voice-sheet__orb[data-state="heard"] {
+    background: var(--accent-tint);
+    box-shadow: none;
+    color: var(--accent);
+  }
+
+  .voice-sheet__orb[data-state="unsupported"],
+  .voice-sheet__orb[data-state="permission"],
+  .voice-sheet__orb[data-state="no-speech"],
+  .voice-sheet__orb[data-state="error"] {
+    background: var(--surface-subtle);
+    box-shadow: none;
+    color: var(--muted);
+  }
+
+  .voice-sheet h2 {
+    margin: 0;
+    color: var(--text-strong);
+    font-size: 20px;
+    font-weight: 600;
+  }
+
+  .voice-sheet__description,
+  .voice-sheet__examples {
+    max-width: 320px;
+    margin: -6px 0 0;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.5;
+    text-align: center;
+  }
+
+  .voice-sheet__examples {
+    margin: 0;
+    color: var(--faint);
+    font-size: 13px;
+  }
+
+  .voice-sheet__wave {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    height: 24px;
+  }
+
+  .voice-sheet__wave span {
+    width: 4px;
+    height: 10px;
+    border-radius: 99px;
+    background: var(--accent);
+    animation: voice-wave 840ms ease-in-out infinite alternate;
+  }
+
+  .voice-sheet__wave span:nth-child(2) {
+    height: 18px;
+    animation-delay: 120ms;
+  }
+
+  .voice-sheet__wave span:nth-child(3) {
+    height: 24px;
+    animation-delay: 240ms;
+  }
+
+  .voice-sheet__wave span:nth-child(4) {
+    height: 18px;
+    animation-delay: 360ms;
+  }
+
+  .voice-sheet__wave span:nth-child(5) {
+    animation-delay: 480ms;
+  }
+
+  .voice-sheet__transcript,
+  .voice-sheet__notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    width: 100%;
+    max-width: 420px;
+    margin: 0;
+    border: 1px solid var(--border);
+    border-radius: 16px 6px 16px 16px;
+    padding: 12px 14px;
+    background: var(--accent-tint);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  .voice-sheet__notice {
+    border-radius: var(--radius-control);
+    background: var(--surface-subtle);
+    color: var(--muted);
+  }
+
+  .voice-sheet__notice svg {
+    width: 18px;
+    height: 18px;
+    color: var(--danger);
+  }
+
+  .voice-sheet__actions {
+    display: grid;
+    gap: 8px;
+    width: 100%;
+    max-width: 420px;
+  }
+
+  .voice-sheet__actions .primary-button,
+  .voice-sheet__secondary {
+    width: 100%;
+  }
+
+  .voice-sheet__secondary {
+    min-height: 44px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 500;
+  }
+
+  .voice-sheet__secondary:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .voice-sheet__dismiss {
+    min-height: 36px;
+    border: 0;
+    padding: 6px 12px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 14px;
   }
 }
 

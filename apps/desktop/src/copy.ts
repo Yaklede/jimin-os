@@ -123,6 +123,27 @@ export const copy = {
       "대화에서 남기고 싶은 내용을 정하면 여기에 모아둘 수 있어요.",
     openConversation: "대화로 내용 정리하기",
   },
+  voice: {
+    closeLabel: "음성 명령 시트 닫기",
+    listeningTitle: "듣고 있어요",
+    listeningDescription: "말을 마치면 내용을 확인할 수 있어요.",
+    listeningHint: "“회의 잡아줘” · “할 일 끝냈어” · “오늘 일정 알려줘”",
+    heardTitle: "이렇게 들었어요",
+    heardDescription: "대화에서 내용을 확인하고 보내기 전에 고칠 수 있어요.",
+    voiceTitle:
+      "음성 인식을 시작하지 못했어요. 다시 말하거나 입력으로 이어가 주세요.",
+    voiceDescription: "마이크 권한과 기기 설정을 확인해 주세요.",
+    permissionRecovery:
+      "마이크 권한을 허용한 뒤 다시 말하거나 입력으로 이어가 주세요.",
+    speechFallback:
+      "말한 내용을 듣지 못했어요. 다시 말하거나 입력으로 이어가 주세요.",
+    fallbackRecovery:
+      "이 기기에서 음성 인식을 사용할 수 없어요. 입력으로 이어가 주세요.",
+    retry: "다시 말하기",
+    useTranscript: "대화에서 확인하기",
+    useTextInput: "입력으로 이어가기",
+    close: "닫기",
+  },
   settings: {
     title: settingsTab,
     description: "지민이 사용할 연결 상태를 확인할 수 있어요.",

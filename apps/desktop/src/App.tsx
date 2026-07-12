@@ -58,6 +58,9 @@ export default function App() {
   const [selectedConversationId, setSelectedConversationId] = useState<
     string | undefined
   >(undefined);
+  const [assistantDraft, setAssistantDraft] = useState<string | undefined>(
+    undefined,
+  );
   const [conversationMessages, setConversationMessages] = useState<
     ConversationMessage[]
   >([]);
@@ -200,6 +203,7 @@ export default function App() {
       setHomeError(undefined);
       setConversationMessages([]);
       setSelectedConversationId(undefined);
+      setAssistantDraft(undefined);
       setConversationJobs({});
       setAgentAuthentication(undefined);
       pendingConversationId.current = undefined;
@@ -350,6 +354,7 @@ export default function App() {
 
   function selectConversation(conversationId: string) {
     setDestination("chat");
+    setAssistantDraft(undefined);
     setSelectedConversationId(conversationId);
     setConversationMessages([]);
     void loadConversationMessages(conversationId);
@@ -403,6 +408,13 @@ export default function App() {
 
   function openNewAssistantRequest() {
     startConversation();
+    setAssistantDraft(undefined);
+    setDestination("chat");
+  }
+
+  function handleVoiceTranscript(value: string) {
+    startConversation();
+    setAssistantDraft(value);
     setDestination("chat");
   }
 
@@ -495,6 +507,7 @@ export default function App() {
         <OsShell
           destination={destination}
           onNavigate={setDestination}
+          onVoiceTranscript={handleVoiceTranscript}
           onRefresh={() => void refresh()}
           refreshing={mode === "loading"}
           rail={
@@ -558,7 +571,9 @@ export default function App() {
               error={
                 conversationError ?? (mode === "error" ? message : undefined)
               }
+              initialDraft={assistantDraft}
               onSelect={selectConversation}
+              onInitialDraftApplied={() => setAssistantDraft(undefined)}
               onStartConversation={startConversation}
               onStartAuthentication={beginAgentAuthentication}
               onSend={sendConversationRequest}

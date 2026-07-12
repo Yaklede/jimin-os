@@ -8,9 +8,10 @@ import {
   Settings2,
   Sparkles,
 } from "lucide-react";
-import { type ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 
 import { copy } from "../copy";
+import { VoiceCommandSheet } from "./VoiceCommandSheet";
 
 export type OsDestination =
   "home" | "calendar" | "chat" | "memory" | "settings";
@@ -20,6 +21,7 @@ type OsShellProps = {
   children: ReactNode;
   rail?: ReactNode;
   onNavigate(destination: OsDestination): void;
+  onVoiceTranscript(value: string): void;
   onRefresh(): void;
   refreshing: boolean;
 };
@@ -29,10 +31,23 @@ export function OsShell({
   children,
   rail,
   onNavigate,
+  onVoiceTranscript,
   onRefresh,
   refreshing,
 }: OsShellProps) {
+  const [voiceSheetOpen, setVoiceSheetOpen] = useState(false);
   const openChat = () => onNavigate("chat");
+  const openVoiceSheet = () => setVoiceSheetOpen(true);
+
+  function openTextInput() {
+    setVoiceSheetOpen(false);
+    openChat();
+  }
+
+  function useVoiceTranscript(value: string) {
+    setVoiceSheetOpen(false);
+    onVoiceTranscript(value);
+  }
 
   return (
     <div className="os-shell" data-destination={destination}>
@@ -135,7 +150,7 @@ export function OsShell({
           className="os-mobile-nav__assistant focus-visible-control"
           type="button"
           aria-label={copy.actions.startAssistantConversation}
-          onClick={openChat}
+          onClick={openVoiceSheet}
         >
           <Mic aria-hidden="true" />
         </button>
@@ -152,6 +167,13 @@ export function OsShell({
           onClick={() => onNavigate("settings")}
         />
       </nav>
+
+      <VoiceCommandSheet
+        open={voiceSheetOpen}
+        onClose={() => setVoiceSheetOpen(false)}
+        onOpenTextInput={openTextInput}
+        onUseTranscript={useVoiceTranscript}
+      />
     </div>
   );
 }

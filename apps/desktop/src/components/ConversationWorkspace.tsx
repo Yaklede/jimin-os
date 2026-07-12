@@ -11,7 +11,13 @@ import {
   SendHorizontal,
   Sparkles,
 } from "lucide-react";
-import { type FormEvent, type RefObject, useRef, useState } from "react";
+import {
+  type FormEvent,
+  type RefObject,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import {
   type AgentAuthentication,
@@ -32,7 +38,9 @@ type ConversationWorkspaceProps = {
   authenticationRequesting: boolean;
   loading: boolean;
   error: string | undefined;
+  initialDraft: string | undefined;
   onSelect(conversationId: string): void;
+  onInitialDraftApplied(): void;
   onStartConversation(): void;
   onStartAuthentication(): Promise<void>;
   onSend(text: string, clientMessageId: string): Promise<boolean>;
@@ -48,7 +56,9 @@ export function ConversationWorkspace({
   authenticationRequesting,
   loading,
   error,
+  initialDraft,
   onSelect,
+  onInitialDraftApplied,
   onStartConversation,
   onStartAuthentication,
   onSend,
@@ -60,6 +70,13 @@ export function ConversationWorkspace({
   const isWaiting = hasActiveJob;
   const isNewConversation = !selectedConversationId;
   const canSend = authentication?.state === "ready";
+
+  useEffect(() => {
+    if (!initialDraft) return;
+    setDraft(initialDraft);
+    onInitialDraftApplied();
+    requestAnimationFrame(() => composer.current?.focus());
+  }, [initialDraft, onInitialDraftApplied]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
