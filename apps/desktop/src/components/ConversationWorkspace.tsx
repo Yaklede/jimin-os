@@ -1,15 +1,17 @@
+import { isTauri } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
+  ArrowUpRight,
   CircleAlert,
   Clipboard,
   ExternalLink,
   LoaderCircle,
+  MessageCircleMore,
   Plus,
   SendHorizontal,
   Sparkles,
 } from "lucide-react";
-import { FormEvent, useRef, useState } from "react";
-import { isTauri } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { type FormEvent, type RefObject, useRef, useState } from "react";
 
 import {
   type AgentAuthentication,
@@ -56,7 +58,7 @@ export function ConversationWorkspace({
   const pendingMessageId = useRef<string | undefined>(undefined);
   const pendingMessageText = useRef<string | undefined>(undefined);
   const isWaiting = hasActiveJob;
-  const isHome = !selectedConversationId;
+  const isNewConversation = !selectedConversationId;
   const canSend = authentication?.state === "ready";
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -80,158 +82,56 @@ export function ConversationWorkspace({
   function startConversation() {
     pendingMessageId.current = undefined;
     pendingMessageText.current = undefined;
+    setDraft("");
     onStartConversation();
-    composer.current?.focus();
+    requestAnimationFrame(() => composer.current?.focus());
   }
 
   function chooseStarter(text: string) {
     setDraft(text);
-    composer.current?.focus();
+    requestAnimationFrame(() => composer.current?.focus());
   }
 
   return (
-    <section className="assistant-page" aria-busy={loading}>
+    <section
+      className="assistant-page assistant-page--conversation"
+      data-view={isNewConversation ? "new" : "thread"}
+      aria-busy={loading}
+    >
       {error && (
-        <p className="inline-alert" role="alert">
+        <p className="assistant-inline-alert" role="alert">
           {error}
         </p>
       )}
 
-      <div className="assistant-layout">
-        <aside
-          className="assistant-directory"
-          aria-labelledby="conversation-list-title"
-        >
-          <div className="assistant-directory__header">
-            <h2 id="conversation-list-title">{copy.conversations.listTitle}</h2>
-            <button
-              className="quiet-icon-button focus-visible-control"
-              type="button"
-              aria-label={copy.actions.startConversation}
-              onClick={startConversation}
-              disabled={loading || isWaiting}
-            >
-              <Plus aria-hidden="true" />
-            </button>
-          </div>
-          {loading ? (
-            <LoadingConversationRows />
-          ) : conversations.length ? (
-            <ul className="conversation-list">
-              {conversations.map((conversation) => {
-                const selected = conversation.id === selectedConversationId;
-                return (
-                  <li key={conversation.id}>
-                    <button
-                      className="conversation-list__row focus-visible-control"
-                      data-selected={selected}
-                      type="button"
-                      onClick={() => onSelect(conversation.id)}
-                    >
-                      <strong>
-                        {conversation.title ?? copy.conversations.untitled}
-                      </strong>
-                      <span>
-                        {conversation.lastMessageAt
-                          ? formatConversationTime(conversation.lastMessageAt)
-                          : copy.conversations.noMessages}
-                      </span>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          ) : (
-            <p className="assistant-directory__empty">
-              {copy.conversations.empty}
-            </p>
-          )}
-        </aside>
+      <div className="assistant-workbench">
+        <ConversationHistory
+          conversations={conversations}
+          loading={loading}
+          selectedConversationId={selectedConversationId}
+          disabled={isWaiting}
+          onSelect={onSelect}
+          onStartConversation={startConversation}
+        />
 
         <section
-          className="assistant-workspace"
+          className="assistant-conversation"
           aria-labelledby="assistant-title"
         >
-          {isHome ? (
-            <AssistantHome
+          {isNewConversation ? (
+            <AssistantWelcome
               authentication={authentication}
               authenticationRequesting={authenticationRequesting}
               onChooseStarter={chooseStarter}
               onStartAuthentication={onStartAuthentication}
             />
           ) : (
-            <section className="assistant-thread">
-              <header className="assistant-thread__header">
-                <h1 id="assistant-title">
-                  {selectedTitle(conversations, selectedConversationId)}
-                </h1>
-                <span>{copy.conversations.threadDescription}</span>
-              </header>
-              <div className="message-stream" aria-live="off">
-                {messages.length ? (
-                  <ol className="message-list">
-                    {messages.map((message) => {
-                      const streaming =
-                        message.role === "assistant" &&
-                        message.status === "streaming";
-                      return (
-                        <li
-                          key={message.id}
-                          className="message-row"
-                          data-role={message.role}
-                          data-streaming={streaming}
-                        >
-                          <div className="message-row__meta">
-                            <strong>
-                              {message.role === "user"
-                                ? copy.conversations.userLabel
-                                : copy.productName}
-                            </strong>
-                            <time dateTime={message.createdAt}>
-                              {formatMessageTime(message.createdAt)}
-                            </time>
-                          </div>
-                          {streaming && (
-                            <span
-                              className="message-row__streaming"
-                              role="status"
-                            >
-                              <LoaderCircle
-                                aria-hidden="true"
-                                className="spin"
-                              />
-                              {copy.conversations.streaming}
-                            </span>
-                          )}
-                          <p>
-                            {message.content}
-                            {streaming && (
-                              <span
-                                className="message-row__caret"
-                                aria-hidden="true"
-                              />
-                            )}
-                          </p>
-                        </li>
-                      );
-                    })}
-                  </ol>
-                ) : loading ? (
-                  <LoadingMessages />
-                ) : (
-                  <p className="assistant-thread__empty">
-                    {copy.conversations.threadEmpty}
-                  </p>
-                )}
-              </div>
-            </section>
-          )}
-
-          {!canSend && !isHome && (
-            <AssistantAuthenticationGate
-              authentication={authentication}
-              requesting={authenticationRequesting}
-              onStartAuthentication={onStartAuthentication}
+            <ConversationThread
+              conversations={conversations}
+              conversationId={selectedConversationId}
+              messages={messages}
+              loading={loading}
+              onStartConversation={startConversation}
             />
           )}
 
@@ -240,7 +140,7 @@ export function ConversationWorkspace({
           )}
           {jobState && isFailedJob(jobState) && (
             <p
-              className="assistant-progress assistant-progress--error"
+              className="assistant-job-state assistant-job-state--error"
               role="alert"
             >
               <CircleAlert aria-hidden="true" />
@@ -248,44 +148,98 @@ export function ConversationWorkspace({
             </p>
           )}
 
-          {canSend && (
-            <form className="assistant-composer" onSubmit={submit}>
-              <label htmlFor="agent-message">
-                {copy.conversations.composerLabel}
-              </label>
-              <textarea
-                ref={composer}
-                id="agent-message"
-                value={draft}
-                onChange={(event) => setDraft(event.target.value)}
-                maxLength={24_000}
-                placeholder={copy.conversations.composerPlaceholder}
-                disabled={loading || isWaiting}
-                required
-                rows={isHome ? 3 : 4}
-              />
-              <div className="assistant-composer__actions">
-                <p>{copy.conversations.composerHelp}</p>
-                <button
-                  className="primary-button focus-visible-control"
-                  type="submit"
-                  disabled={loading || isWaiting || !draft.trim()}
-                >
-                  <SendHorizontal aria-hidden="true" />
-                  {isWaiting
-                    ? copy.actions.sendingRequest
-                    : copy.actions.sendRequest}
-                </button>
-              </div>
-            </form>
-          )}
+          {canSend ? (
+            <AssistantComposer
+              draft={draft}
+              composer={composer}
+              loading={loading}
+              waiting={isWaiting}
+              isNewConversation={isNewConversation}
+              onChange={setDraft}
+              onSubmit={submit}
+            />
+          ) : !isNewConversation ? (
+            <AssistantAuthenticationGate
+              authentication={authentication}
+              requesting={authenticationRequesting}
+              onStartAuthentication={onStartAuthentication}
+            />
+          ) : null}
         </section>
       </div>
     </section>
   );
 }
 
-function AssistantHome({
+function ConversationHistory({
+  conversations,
+  loading,
+  selectedConversationId,
+  disabled,
+  onSelect,
+  onStartConversation,
+}: Pick<
+  ConversationWorkspaceProps,
+  "conversations" | "loading" | "selectedConversationId" | "onSelect"
+> & {
+  disabled: boolean;
+  onStartConversation(): void;
+}) {
+  return (
+    <aside
+      className="assistant-history"
+      aria-labelledby="conversation-list-title"
+    >
+      <div className="assistant-history__header">
+        <div>
+          <h2 id="conversation-list-title">{copy.conversations.listTitle}</h2>
+        </div>
+        <button
+          className="assistant-history__new focus-visible-control"
+          type="button"
+          aria-label={copy.actions.startConversation}
+          onClick={onStartConversation}
+          disabled={loading || disabled}
+        >
+          <Plus aria-hidden="true" />
+        </button>
+      </div>
+      {loading ? (
+        <LoadingConversationRows />
+      ) : conversations.length ? (
+        <ul className="assistant-history__list">
+          {conversations.map((conversation) => {
+            const selected = conversation.id === selectedConversationId;
+            return (
+              <li key={conversation.id}>
+                <button
+                  className="assistant-history__row focus-visible-control"
+                  data-selected={selected}
+                  type="button"
+                  onClick={() => onSelect(conversation.id)}
+                  aria-current={selected ? "page" : undefined}
+                >
+                  <strong>
+                    {conversation.title ?? copy.conversations.untitled}
+                  </strong>
+                  <span>
+                    {conversation.lastMessageAt
+                      ? formatConversationTime(conversation.lastMessageAt)
+                      : copy.conversations.noMessages}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <p className="assistant-history__empty">{copy.conversations.empty}</p>
+      )}
+    </aside>
+  );
+}
+
+function AssistantWelcome({
   authentication,
   authenticationRequesting,
   onChooseStarter,
@@ -298,28 +252,29 @@ function AssistantHome({
 }) {
   const canSend = authentication?.state === "ready";
   return (
-    <section className="assistant-start">
-      <header className="assistant-welcome">
-        <span className="assistant-welcome__identity">
+    <section className="assistant-welcome-panel">
+      <header>
+        <p className="assistant-welcome-panel__identity">
           <Sparkles aria-hidden="true" />
           {copy.conversations.identity}
-        </span>
+        </p>
         <h1 id="assistant-title">{copy.conversations.title}</h1>
         <span>{copy.conversations.description}</span>
       </header>
       {canSend ? (
         <div
-          className="assistant-starters"
+          className="assistant-starter-list"
           aria-label={copy.conversations.startersLabel}
         >
           {copy.conversations.starters.map((starter) => (
             <button
-              className="assistant-starter focus-visible-control"
+              className="assistant-starter-list__item focus-visible-control"
               type="button"
               key={starter}
               onClick={() => onChooseStarter(starter)}
             >
-              {starter}
+              <span>{starter}</span>
+              <ArrowUpRight aria-hidden="true" />
             </button>
           ))}
         </div>
@@ -331,6 +286,145 @@ function AssistantHome({
         />
       )}
     </section>
+  );
+}
+
+function ConversationThread({
+  conversations,
+  conversationId,
+  messages,
+  loading,
+  onStartConversation,
+}: Pick<
+  ConversationWorkspaceProps,
+  "conversations" | "messages" | "loading"
+> & {
+  conversationId: string;
+  onStartConversation(): void;
+}) {
+  return (
+    <section className="assistant-thread-panel">
+      <header className="assistant-thread-header">
+        <div>
+          <p>{copy.conversations.threadEyebrow}</p>
+          <h1 id="assistant-title">
+            {selectedTitle(conversations, conversationId)}
+          </h1>
+          <span>{copy.conversations.threadDescription}</span>
+        </div>
+        <button
+          className="assistant-thread-header__new focus-visible-control"
+          type="button"
+          onClick={onStartConversation}
+        >
+          <Plus aria-hidden="true" />
+          {copy.conversations.newConversation}
+        </button>
+      </header>
+      <div className="assistant-transcript" aria-live="off">
+        {messages.length ? (
+          <ol className="assistant-message-list">
+            {messages.map((message) => {
+              const streaming =
+                message.role === "assistant" && message.status === "streaming";
+              return (
+                <li
+                  key={message.id}
+                  className="assistant-message"
+                  data-role={message.role}
+                  data-streaming={streaming}
+                >
+                  <div className="assistant-message__meta">
+                    <strong>
+                      {message.role === "user"
+                        ? copy.conversations.userLabel
+                        : copy.navigation.assistant}
+                    </strong>
+                    <time dateTime={message.createdAt}>
+                      {formatMessageTime(message.createdAt)}
+                    </time>
+                  </div>
+                  <p className="assistant-message__content">
+                    {message.content}
+                    {streaming && (
+                      <span
+                        className="assistant-message__caret"
+                        aria-hidden="true"
+                      />
+                    )}
+                  </p>
+                  {streaming && (
+                    <span
+                      className="assistant-message__streaming"
+                      role="status"
+                    >
+                      <LoaderCircle aria-hidden="true" className="spin" />
+                      {copy.conversations.streaming}
+                    </span>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+        ) : loading ? (
+          <LoadingMessages />
+        ) : (
+          <p className="assistant-thread-panel__empty">
+            {copy.conversations.threadEmpty}
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function AssistantComposer({
+  draft,
+  composer,
+  loading,
+  waiting,
+  isNewConversation,
+  onChange,
+  onSubmit,
+}: {
+  draft: string;
+  composer: RefObject<HTMLTextAreaElement | null>;
+  loading: boolean;
+  waiting: boolean;
+  isNewConversation: boolean;
+  onChange(value: string): void;
+  onSubmit(event: FormEvent<HTMLFormElement>): void;
+}) {
+  return (
+    <form
+      className="assistant-request-field"
+      data-welcome={isNewConversation}
+      onSubmit={onSubmit}
+    >
+      <label htmlFor="agent-message">{copy.conversations.composerLabel}</label>
+      <textarea
+        ref={composer}
+        id="agent-message"
+        value={draft}
+        onChange={(event) => onChange(event.target.value)}
+        maxLength={24_000}
+        placeholder={copy.conversations.composerPlaceholder}
+        disabled={loading || waiting}
+        required
+        rows={isNewConversation ? 3 : 4}
+      />
+      <div className="assistant-request-field__footer">
+        <span>{copy.conversations.composerHelp}</span>
+        <button
+          className="assistant-request-field__send focus-visible-control"
+          type="submit"
+          disabled={loading || waiting || !draft.trim()}
+        >
+          <SendHorizontal aria-hidden="true" />
+          {waiting ? copy.actions.sendingRequest : copy.actions.sendRequest}
+        </button>
+      </div>
+    </form>
   );
 }
 
@@ -383,7 +477,7 @@ function AssistantAuthenticationGate({
 
   return (
     <section
-      className="assistant-authentication"
+      className="assistant-auth-gate"
       aria-live="polite"
       aria-labelledby="assistant-authentication-title"
     >
@@ -394,15 +488,15 @@ function AssistantAuthenticationGate({
           </AuthenticationHeading>
           <p>{copy.authentication.awaitingDescription}</p>
           {browserOpenFailed && (
-            <p className="inline-alert" role="alert">
+            <p className="assistant-inline-alert" role="alert">
               {copy.authentication.browserOpenFailed}
             </p>
           )}
-          <div className="assistant-authentication__code">
+          <div className="assistant-auth-gate__code">
             <span>{copy.authentication.codeLabel}</span>
             <output>{authentication.userCode}</output>
             <button
-              className="quiet-button focus-visible-control"
+              className="assistant-auth-gate__copy focus-visible-control"
               type="button"
               onClick={() => void copyCode()}
             >
@@ -413,7 +507,7 @@ function AssistantAuthenticationGate({
             </button>
           </div>
           <button
-            className="primary-button focus-visible-control"
+            className="assistant-auth-gate__primary focus-visible-control"
             type="button"
             onClick={() => void openChatgpt()}
           >
@@ -427,7 +521,7 @@ function AssistantAuthenticationGate({
             {copy.authentication.prepareTitle}
           </AuthenticationHeading>
           <p>{copy.authentication.prepareDescription}</p>
-          <p className="assistant-authentication__status" role="status">
+          <p className="assistant-auth-gate__status" role="status">
             <LoaderCircle aria-hidden="true" className="spin" />
             {copy.authentication.preparing}
           </p>
@@ -445,7 +539,7 @@ function AssistantAuthenticationGate({
               : copy.authentication.description}
           </p>
           <button
-            className="primary-button focus-visible-control"
+            className="assistant-auth-gate__primary focus-visible-control"
             type="button"
             onClick={() => void onStartAuthentication()}
             disabled={requesting}
@@ -462,7 +556,7 @@ function AssistantAuthenticationGate({
 
 function AuthenticationHeading({ children }: { children: string }) {
   return (
-    <div className="assistant-authentication__heading">
+    <div className="assistant-auth-gate__heading">
       <Sparkles aria-hidden="true" />
       <h2 id="assistant-authentication-title">{children}</h2>
     </div>
@@ -478,7 +572,7 @@ function AgentProgress({ state }: { state: AgentJob["state"] }) {
         : copy.conversations.processing;
 
   return (
-    <p className="assistant-progress" role="status">
+    <p className="assistant-job-state" role="status">
       <LoaderCircle aria-hidden="true" className="spin" />
       {message}
     </p>
@@ -516,7 +610,7 @@ function formatMessageTime(value: string) {
 
 function LoadingConversationRows() {
   return (
-    <div className="loading-rows">
+    <div className="assistant-history__loading" aria-hidden="true">
       <span className="skeleton" />
       <span className="skeleton" />
       <span className="skeleton" />
@@ -526,7 +620,7 @@ function LoadingConversationRows() {
 
 function LoadingMessages() {
   return (
-    <div className="loading-rows">
+    <div className="assistant-transcript__loading" aria-hidden="true">
       <span className="skeleton" />
       <span className="skeleton" />
     </div>
