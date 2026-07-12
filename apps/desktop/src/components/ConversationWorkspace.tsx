@@ -6,7 +6,6 @@ import {
   Clipboard,
   ExternalLink,
   LoaderCircle,
-  MessageCircleMore,
   Plus,
   SendHorizontal,
   Sparkles,
@@ -133,17 +132,9 @@ export function ConversationWorkspace({
 
         <section
           className="assistant-conversation"
-          aria-labelledby="assistant-title"
+          aria-label={copy.conversations.identity}
         >
-          <header className="assistant-mobile-identity">
-            <span aria-hidden="true">
-              <Sparkles />
-            </span>
-            <div>
-              <strong>{copy.conversations.identity}</strong>
-              <p>{copy.conversations.mobileDescription}</p>
-            </div>
-          </header>
+          <MobileAssistantHeader onStartConversation={startConversation} />
           {isNewConversation ? (
             <AssistantWelcome
               authentication={authentication}
@@ -194,6 +185,32 @@ export function ConversationWorkspace({
         </section>
       </div>
     </section>
+  );
+}
+
+function MobileAssistantHeader({
+  onStartConversation,
+}: {
+  onStartConversation(): void;
+}) {
+  return (
+    <header className="assistant-mobile-identity">
+      <span aria-hidden="true">
+        <Sparkles />
+      </span>
+      <div>
+        <strong>{copy.conversations.identity}</strong>
+        <p>{copy.conversations.mobileDescription}</p>
+      </div>
+      <button
+        className="assistant-mobile-identity__new focus-visible-control"
+        type="button"
+        aria-label={copy.actions.startConversation}
+        onClick={onStartConversation}
+      >
+        <Plus aria-hidden="true" />
+      </button>
+    </header>
   );
 }
 
