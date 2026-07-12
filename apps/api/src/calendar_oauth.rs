@@ -14,7 +14,8 @@ use jimin_domain::{ClientPlatform, PkceVerifier};
 use jimin_google::{
     GoogleAuthError, GoogleAuthorizationCode, GoogleCalendarAdapter, GoogleCalendarEventEntry,
     GoogleCalendarEventStatus, GoogleCalendarEventTime, GoogleCalendarGrant,
-    GoogleCalendarListEntry, GoogleCalendarVisibility, GoogleIdentityAdapter, GoogleOAuthProfile,
+    GoogleCalendarListEntry, GoogleCalendarVisibility, GoogleGmailMessageEntry,
+    GoogleIdentityAdapter, GoogleOAuthProfile,
 };
 use jimin_storage::{
     StorageError,
@@ -24,6 +25,7 @@ use jimin_storage::{
         ProviderCalendarEvent, ProviderCalendarEventStatus, ProviderCalendarEventTime,
         ProviderCalendarVisibility,
     },
+    gmail::ProviderGmailMessage,
 };
 use rand::Rng;
 use secrecy::{ExposeSecret, SecretString};
@@ -40,6 +42,7 @@ const RANDOM_PKCE_BYTES: usize = 64;
 const XCHACHA_NONCE_BYTES: usize = 24;
 const CALENDAR_EVENTS_SCOPE: &str = "https://www.googleapis.com/auth/calendar.events";
 const CALENDAR_LIST_SCOPE: &str = "https://www.googleapis.com/auth/calendar.calendarlist.readonly";
+const GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -263,6 +266,44 @@ impl CalendarOAuthRuntime {
         }
         Ok(synced)
     }
+
+    /// Loads a bounded inbox metadata view only when the account has granted
+    /// Gmail read access. Existing Calendar-only accounts remain usable until
+    /// the owner reconnects with the expanded Google consent scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider or credential error and never requests
+    /// Gmail bodies or attachments.
+    pub async fn initial_gmail_inbox_sync(
+        &self,
+        connection: &CalendarSyncConnection,
+    ) -> Result<Option<Vec<ProviderGmailMessage>>, CalendarOAuthError> {
+        if !connection
+            .granted_scopes
+            .iter()
+            .any(|scope| scope == GMAIL_READONLY_SCOPE)
+        {
+            return Ok(None);
+        }
+        let refresh_token = self.crypto.decrypt(
+            &connection.refresh_token,
+            &refresh_token_aad(connection.user_id),
+        )?;
+        let access_token = self
+            .calendar
+            .refresh_access_token(&refresh_token)
+            .await
+            .map_err(CalendarOAuthError::from_google)?;
+        let messages = self
+            .calendar
+            .list_gmail_inbox_messages(&access_token)
+            .await
+            .map_err(CalendarOAuthError::from_google)?;
+        Ok(Some(
+            messages.into_iter().map(provider_gmail_message).collect(),
+        ))
+    }
 }
 
 /// Newly generated material that is safe to persist only through the matching
@@ -431,12 +472,14 @@ fn refresh_token_aad(user_id: Uuid) -> Vec<u8> {
 fn calendar_scopes(scopes: &[String]) -> Result<Vec<String>, CalendarOAuthError> {
     if !scopes.iter().any(|scope| scope == CALENDAR_EVENTS_SCOPE)
         || !scopes.iter().any(|scope| scope == CALENDAR_LIST_SCOPE)
+        || !scopes.iter().any(|scope| scope == GMAIL_READONLY_SCOPE)
     {
         return Err(CalendarOAuthError::RequiredScopeMissing);
     }
     Ok(vec![
         CALENDAR_EVENTS_SCOPE.to_owned(),
         CALENDAR_LIST_SCOPE.to_owned(),
+        GMAIL_READONLY_SCOPE.to_owned(),
     ])
 }
 
@@ -497,6 +540,18 @@ fn provider_calendar_event(entry: GoogleCalendarEventEntry) -> ProviderCalendarE
     }
 }
 
+fn provider_gmail_message(entry: GoogleGmailMessageEntry) -> ProviderGmailMessage {
+    ProviderGmailMessage {
+        provider_message_id: entry.provider_message_id,
+        provider_thread_id: entry.provider_thread_id,
+        received_at: entry.received_at,
+        sender: entry.sender,
+        subject: entry.subject,
+        snippet: entry.snippet,
+        is_unread: entry.is_unread,
+    }
+}
+
 /// Maps callback failures to the narrow storage error surface used by routes.
 pub fn storage_failure_code(error: &StorageError) -> &'static str {
     match error {
@@ -545,15 +600,22 @@ mod tests {
     }
 
     #[test]
-    fn calendar_scope_filter_requires_the_two_requested_scopes() {
+    fn calendar_scope_filter_requires_all_requested_google_scopes() {
         let scopes = vec![
             CALENDAR_EVENTS_SCOPE.to_owned(),
             CALENDAR_LIST_SCOPE.to_owned(),
+            GMAIL_READONLY_SCOPE.to_owned(),
         ];
         assert_eq!(
             calendar_scopes(&scopes).expect("scopes should be accepted"),
             scopes
         );
-        assert!(calendar_scopes(&[CALENDAR_EVENTS_SCOPE.to_owned()]).is_err());
+        assert!(
+            calendar_scopes(&[
+                CALENDAR_EVENTS_SCOPE.to_owned(),
+                CALENDAR_LIST_SCOPE.to_owned(),
+            ])
+            .is_err()
+        );
     }
 }

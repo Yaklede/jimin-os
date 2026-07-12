@@ -27,6 +27,8 @@ const GOOGLE_AUTHORIZATION_ENDPOINT: &str = "https://accounts.google.com/o/oauth
 const GOOGLE_CALENDAR_LIST_ENDPOINT: &str =
     "https://www.googleapis.com/calendar/v3/users/me/calendarList";
 const GOOGLE_CALENDAR_EVENTS_ENDPOINT: &str = "https://www.googleapis.com/calendar/v3/calendars";
+const GOOGLE_GMAIL_MESSAGES_ENDPOINT: &str =
+    "https://gmail.googleapis.com/gmail/v1/users/me/messages";
 const GOOGLE_ISSUERS: [&str; 2] = ["https://accounts.google.com", "accounts.google.com"];
 const MAX_AUTHORIZATION_CODE_BYTES: usize = 4 * 1024;
 const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
@@ -38,6 +40,9 @@ const MAX_CALENDAR_EVENT_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CALENDAR_EVENT_PAGES: usize = 100;
 const MAX_CALENDAR_EVENT_ITEMS: usize = 100_000;
 const MAX_RECURRENCE_RULES: usize = 128;
+const MAX_GMAIL_INBOX_MESSAGES: usize = 50;
+const MAX_GMAIL_LIST_RESPONSE_BYTES: usize = 512 * 1024;
+const MAX_GMAIL_MESSAGE_RESPONSE_BYTES: usize = 512 * 1024;
 const DEFAULT_JWKS_TTL: Duration = Duration::from_mins(5);
 const MAX_JWKS_TTL: Duration = Duration::from_hours(24);
 
@@ -283,6 +288,18 @@ pub enum GoogleCalendarEventStatus {
     Cancelled,
 }
 
+/// Bounded Gmail inbox metadata. Message bodies, attachments, and raw header
+/// collections are discarded by the adapter before this value is returned.
+pub struct GoogleGmailMessageEntry {
+    pub provider_message_id: String,
+    pub provider_thread_id: String,
+    pub received_at: Option<OffsetDateTime>,
+    pub sender: Option<String>,
+    pub subject: Option<String>,
+    pub snippet: Option<String>,
+    pub is_unread: bool,
+}
+
 impl GoogleCalendarAdapter {
     /// Creates a Google Calendar adapter with fixed provider endpoints.
     ///
@@ -495,6 +512,88 @@ impl GoogleCalendarAdapter {
         }
         Err(GoogleAuthError::ProviderRejected)
     }
+
+    /// Lists a bounded, read-only view of the Gmail inbox. The adapter first
+    /// receives message IDs, then requests only metadata headers for each
+    /// entry; it never requests body parts or attachments.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider error and retains no Gmail response body
+    /// after the metadata has been normalized.
+    pub async fn list_gmail_inbox_messages(
+        &self,
+        access_token: &SecretString,
+    ) -> Result<Vec<GoogleGmailMessageEntry>, GoogleAuthError> {
+        let token = access_token.expose_secret();
+        if token.is_empty()
+            || token.len() > MAX_TOKEN_RESPONSE_BYTES
+            || token.chars().any(char::is_control)
+        {
+            return Err(GoogleAuthError::InvalidRequest);
+        }
+        let mut list_url = reqwest::Url::parse(GOOGLE_GMAIL_MESSAGES_ENDPOINT)
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        {
+            let mut query = list_url.query_pairs_mut();
+            query.append_pair("labelIds", "INBOX");
+            query.append_pair("maxResults", "50");
+        }
+        let response = self
+            .client
+            .get(list_url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        if !response.status().is_success() {
+            return Err(classify_provider_status(response.status().as_u16()));
+        }
+        if !is_json_response(&response) {
+            return Err(GoogleAuthError::ProviderUnavailable);
+        }
+        let payload = bounded_body(response, MAX_GMAIL_LIST_RESPONSE_BYTES).await?;
+        let list: GoogleGmailMessageListResponse =
+            serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
+        if list.messages.len() > MAX_GMAIL_INBOX_MESSAGES {
+            return Err(GoogleAuthError::ProviderRejected);
+        }
+
+        let mut messages = Vec::with_capacity(list.messages.len());
+        for reference in list.messages {
+            let provider_message_id = validate_text(reference.id, 255)?;
+            let mut message_url = reqwest::Url::parse(GOOGLE_GMAIL_MESSAGES_ENDPOINT)
+                .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+            message_url
+                .path_segments_mut()
+                .map_err(|()| GoogleAuthError::ProviderUnavailable)?
+                .push(&provider_message_id);
+            {
+                let mut query = message_url.query_pairs_mut();
+                query.append_pair("format", "metadata");
+                query.append_pair("metadataHeaders", "From");
+                query.append_pair("metadataHeaders", "Subject");
+            }
+            let response = self
+                .client
+                .get(message_url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+            if !response.status().is_success() {
+                return Err(classify_provider_status(response.status().as_u16()));
+            }
+            if !is_json_response(&response) {
+                return Err(GoogleAuthError::ProviderUnavailable);
+            }
+            let payload = bounded_body(response, MAX_GMAIL_MESSAGE_RESPONSE_BYTES).await?;
+            let message: GoogleGmailMessageResponse =
+                serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
+            messages.push(normalize_gmail_message(message, &provider_message_id)?);
+        }
+        Ok(messages)
+    }
 }
 
 impl GoogleIdentityAdapter {
@@ -582,7 +681,7 @@ impl GoogleIdentityAdapter {
             query.append_pair("response_type", "code");
             query.append_pair(
                 "scope",
-                "openid email https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+                "openid email https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly https://www.googleapis.com/auth/gmail.readonly",
             );
             query.append_pair("state", state);
             query.append_pair("code_challenge", code_challenge);
@@ -823,6 +922,40 @@ struct GoogleCalendarEventDateTime {
 }
 
 #[derive(Deserialize)]
+struct GoogleGmailMessageListResponse {
+    #[serde(default)]
+    messages: Vec<GoogleGmailMessageReference>,
+}
+
+#[derive(Deserialize)]
+struct GoogleGmailMessageReference {
+    id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleGmailMessageResponse {
+    id: String,
+    thread_id: String,
+    internal_date: Option<String>,
+    label_ids: Option<Vec<String>>,
+    snippet: Option<String>,
+    payload: Option<GoogleGmailMessagePayload>,
+}
+
+#[derive(Deserialize)]
+struct GoogleGmailMessagePayload {
+    #[serde(default)]
+    headers: Vec<GoogleGmailHeader>,
+}
+
+#[derive(Deserialize)]
+struct GoogleGmailHeader {
+    name: String,
+    value: String,
+}
+
+#[derive(Deserialize)]
 struct GoogleIdClaims {
     iss: String,
     aud: String,
@@ -1036,6 +1169,59 @@ fn normalize_calendar_event_item(
         html_link,
         is_editable: item.guests_can_modify,
     })
+}
+
+fn normalize_gmail_message(
+    message: GoogleGmailMessageResponse,
+    expected_message_id: &str,
+) -> Result<GoogleGmailMessageEntry, GoogleAuthError> {
+    let provider_message_id = validate_text(message.id, 255)?;
+    if provider_message_id != expected_message_id {
+        return Err(GoogleAuthError::ProviderRejected);
+    }
+    let provider_thread_id = validate_text(message.thread_id, 255)?;
+    let headers = message
+        .payload
+        .map_or_else(Vec::new, |payload| payload.headers);
+    let sender = gmail_header_value(&headers, "from");
+    let subject = gmail_header_value(&headers, "subject");
+    let snippet = message
+        .snippet
+        .as_deref()
+        .and_then(|value| normalize_gmail_text(value, 512));
+    let received_at = message
+        .internal_date
+        .and_then(|value| parse_gmail_internal_date(&value));
+    let is_unread = message
+        .label_ids
+        .as_deref()
+        .is_some_and(|labels| labels.iter().any(|label| label == "UNREAD"));
+    Ok(GoogleGmailMessageEntry {
+        provider_message_id,
+        provider_thread_id,
+        received_at,
+        sender,
+        subject,
+        snippet,
+        is_unread,
+    })
+}
+
+fn gmail_header_value(headers: &[GoogleGmailHeader], expected_name: &str) -> Option<String> {
+    headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case(expected_name))
+        .and_then(|header| normalize_gmail_text(&header.value, 1_024))
+}
+
+fn normalize_gmail_text(value: &str, maximum_bytes: usize) -> Option<String> {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!normalized.is_empty() && normalized.len() <= maximum_bytes).then_some(normalized)
+}
+
+fn parse_gmail_internal_date(value: &str) -> Option<OffsetDateTime> {
+    let milliseconds = value.parse::<i64>().ok()?;
+    OffsetDateTime::from_unix_timestamp(milliseconds / 1_000).ok()
 }
 
 fn normalize_event_time(
@@ -1281,5 +1467,32 @@ mod tests {
         assert_eq!(entry.status, GoogleCalendarEventStatus::Cancelled);
         assert!(entry.time.is_none());
         assert!(entry.title.is_none());
+    }
+
+    #[test]
+    fn gmail_metadata_discards_header_controls_and_marks_unread() {
+        let message: GoogleGmailMessageResponse = serde_json::from_str(
+            r#"{
+                "id": "message-1",
+                "threadId": "thread-1",
+                "internalDate": "1780000000000",
+                "labelIds": ["INBOX", "UNREAD"],
+                "snippet": "일정을 확인해 주세요.",
+                "payload": {
+                    "headers": [
+                        {"name": "From", "value": "Jimin <jimin@example.com>"},
+                        {"name": "Subject", "value": "내일 회의"}
+                    ]
+                }
+            }"#,
+        )
+        .expect("fixture should deserialize");
+
+        let entry =
+            normalize_gmail_message(message, "message-1").expect("metadata should normalize");
+
+        assert_eq!(entry.subject.as_deref(), Some("내일 회의"));
+        assert!(entry.is_unread);
+        assert!(entry.received_at.is_some());
     }
 }

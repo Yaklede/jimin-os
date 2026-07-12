@@ -4,6 +4,7 @@ use jimin_codex_client::{AppServerClient, Error as CodexError};
 use jimin_storage::{
     Database, StorageError,
     agent::ClaimedAgentJob,
+    gmail::GmailMessage,
     planning::{ScheduleEntry, ScheduleSource, Task},
 };
 use thiserror::Error;
@@ -17,6 +18,7 @@ use uuid::Uuid;
 
 const CONTEXT_SCHEDULE_LIMIT: usize = 32;
 const CONTEXT_TASK_LIMIT: usize = 32;
+const CONTEXT_INBOX_LIMIT: usize = 16;
 const CONTEXT_MAX_BYTES: usize = 20 * 1024;
 
 pub(crate) enum WorkerExit {
@@ -195,18 +197,20 @@ async fn contextualized_turn_input(
     job: &ClaimedAgentJob,
 ) -> Result<String, StorageError> {
     let now = OffsetDateTime::now_utc();
-    let (schedule, tasks) = tokio::try_join!(
+    let (schedule, tasks, inbox) = tokio::try_join!(
         database.schedule_entries_in_range(
             job.user_id,
             now - TimeDuration::days(1),
             now + TimeDuration::days(14),
         ),
         database.open_tasks_for_user(job.user_id),
+        database.recent_gmail_messages_for_user(job.user_id),
     )?;
     Ok(render_contextualized_turn(
         &job.input_content,
         &schedule,
         &tasks,
+        &inbox,
         now,
     ))
 }
@@ -215,6 +219,7 @@ fn render_contextualized_turn(
     input: &str,
     schedule: &[ScheduleEntry],
     tasks: &[Task],
+    inbox: &[GmailMessage],
     now: OffsetDateTime,
 ) -> String {
     let mut prompt = String::from(
@@ -254,7 +259,21 @@ fn render_contextualized_turn(
             );
         }
     }
-    prompt.push_str("</open_tasks>\n</server_context>\n\n<user_request>\n");
+    prompt.push_str("</open_tasks>\n<inbox>\n");
+    if inbox.is_empty() {
+        prompt.push_str("(no synced inbox metadata)\n");
+    } else {
+        for message in inbox.iter().take(CONTEXT_INBOX_LIMIT) {
+            let state = if message.is_unread { "unread" } else { "read" };
+            let sender = message.sender.as_deref().unwrap_or("unknown sender");
+            let subject = message.subject.as_deref().unwrap_or("(no subject)");
+            let received_at = message
+                .received_at
+                .map_or_else(|| "unknown date".to_owned(), |date| date.to_string());
+            let _ = writeln!(prompt, "- [{state} | {received_at}] {sender} | {subject}");
+        }
+    }
+    prompt.push_str("</inbox>\n</server_context>\n\n<user_request>\n");
     append_bounded(&mut prompt, input.trim(), CONTEXT_MAX_BYTES);
     prompt.push_str("\n</user_request>");
     prompt
@@ -360,8 +379,9 @@ async fn wait_for_shutdown_signal() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use jimin_codex_client::Error as CodexError;
-    use jimin_storage::planning::{
-        ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus,
+    use jimin_storage::{
+        gmail::GmailMessage,
+        planning::{ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus},
     };
     use time::{Duration, OffsetDateTime};
     use uuid::Uuid;
@@ -402,11 +422,22 @@ mod tests {
             version: 1,
         };
 
-        let prompt = render_contextualized_turn("내일 일정 알려줘", &[schedule], &[task], now);
+        let inbox = GmailMessage {
+            id: Uuid::now_v7(),
+            received_at: Some(now),
+            sender: Some("Jimin <jimin@example.com>".to_owned()),
+            subject: Some("회의 확인".to_owned()),
+            snippet: None,
+            is_unread: true,
+        };
+        let prompt =
+            render_contextualized_turn("내일 일정 알려줘", &[schedule], &[task], &[inbox], now);
 
         assert!(prompt.contains("read-only personal data"));
         assert!(prompt.contains("[Google Calendar] 회의"));
         assert!(prompt.contains("장보기"));
+        assert!(prompt.contains("[unread"));
+        assert!(prompt.contains("회의 확인"));
         assert!(prompt.contains("<user_request>\n내일 일정 알려줘"));
     }
 }

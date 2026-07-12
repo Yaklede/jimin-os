@@ -377,7 +377,7 @@ impl Database {
         let row = sqlx::query_as::<_, CalendarSyncConnectionRow>(
             "\
             SELECT id, user_id, refresh_token_ciphertext, refresh_token_nonce,
-                encryption_key_version
+                encryption_key_version, granted_scopes
             FROM calendar_accounts
             WHERE id = $1
               AND user_id = $2
@@ -779,6 +779,7 @@ pub struct CalendarSyncConnection {
     pub account_id: Uuid,
     pub user_id: Uuid,
     pub refresh_token: EncryptedCalendarSecret,
+    pub granted_scopes: Vec<String>,
 }
 
 /// One provider calendar eligible for a server-owned event synchronization.
@@ -821,6 +822,7 @@ struct CalendarSyncConnectionRow {
     refresh_token_ciphertext: Option<Vec<u8>>,
     refresh_token_nonce: Option<Vec<u8>>,
     encryption_key_version: Option<i32>,
+    granted_scopes: Vec<String>,
 }
 
 impl TryFrom<CalendarSyncConnectionRow> for CalendarSyncConnection {
@@ -838,13 +840,14 @@ impl TryFrom<CalendarSyncConnectionRow> for CalendarSyncConnection {
                 .encryption_key_version
                 .ok_or(StorageError::PersistenceUnavailable)?,
         };
-        if !refresh_token.valid() {
+        if !refresh_token.valid() || !valid_scopes(&row.granted_scopes) {
             return Err(StorageError::PersistenceUnavailable);
         }
         Ok(Self {
             account_id: row.id,
             user_id: row.user_id,
             refresh_token,
+            granted_scopes: row.granted_scopes,
         })
     }
 }

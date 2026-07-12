@@ -2328,6 +2328,25 @@ async fn synchronize_google_calendar(
             .await
             .map_err(|_| CalendarOAuthError::ProviderUnavailable)?;
     }
+    match calendar_oauth.initial_gmail_inbox_sync(&connection).await {
+        Ok(Some(messages)) => {
+            if planning
+                .apply_gmail_inbox_sync(user_id, &messages)
+                .await
+                .is_err()
+            {
+                let _ = planning
+                    .mark_gmail_sync_failure(user_id, "gmail.provider_unavailable")
+                    .await;
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let _ = planning
+                .mark_gmail_sync_failure(user_id, error.failure_code())
+                .await;
+        }
+    }
     Ok(())
 }
 

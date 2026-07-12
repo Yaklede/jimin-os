@@ -7,9 +7,10 @@ use thiserror::Error;
 pub mod agent;
 pub mod auth;
 pub mod calendar;
+pub mod gmail;
 pub mod planning;
 
-pub const EXPECTED_SCHEMA_VERSION: i64 = 9;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 10;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
