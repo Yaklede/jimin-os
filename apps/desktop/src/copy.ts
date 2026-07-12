@@ -128,8 +128,13 @@ export const copy = {
     listeningTitle: "듣고 있어요",
     listeningDescription: "말을 마치면 내용을 확인할 수 있어요.",
     listeningHint: "“회의 잡아줘” · “할 일 끝냈어” · “오늘 일정 알려줘”",
+    finalizingTitle: "말한 내용을 정리하고 있어요",
+    finalizingDescription: "잠시만 기다려 주세요.",
+    finalizingAction: "내용 확인 중",
     heardTitle: "이렇게 들었어요",
     heardDescription: "대화에서 내용을 확인하고 보내기 전에 고칠 수 있어요.",
+    noSpeechTitle: "말한 내용을 듣지 못했어요",
+    noSpeechDescription: "조금 더 가까이에서 또렷하게 말해 주세요.",
     voiceTitle:
       "음성 인식을 시작하지 못했어요. 다시 말하거나 입력으로 이어가 주세요.",
     voiceDescription: "마이크 권한과 기기 설정을 확인해 주세요.",

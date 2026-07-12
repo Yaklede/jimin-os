@@ -11,6 +11,9 @@
         { "url": "https://auth.openai.com/*" },
         { "url": "https://chatgpt.com/*" }
       ]
-    }
+    },
+    "voice-recognition:allow-start",
+    "voice-recognition:allow-stop",
+    "voice-recognition:allow-cancel"
   ]
 }

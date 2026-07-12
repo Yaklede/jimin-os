@@ -6,11 +6,22 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 
 import { copy } from "../copy";
 
 type RecognitionState =
-  "listening" | "heard" | "unsupported" | "permission" | "no-speech" | "error";
+  | "listening"
+  | "finalizing"
+  | "heard"
+  | "unsupported"
+  | "permission"
+  | "no-speech"
+  | "error";
+
+type NativeVoiceResult = {
+  transcript: string;
+};
 
 type SpeechRecognitionResultLike = {
   isFinal: boolean;
@@ -54,6 +65,7 @@ export function VoiceCommandSheet({
   onOpenTextInput,
 }: VoiceCommandSheetProps) {
   const recognizerRef = useRef<SpeechRecognitionLike | undefined>(undefined);
+  const usingNativeRecognitionRef = useRef(false);
   const completedRef = useRef(false);
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<RecognitionState>("listening");
@@ -62,17 +74,44 @@ export function VoiceCommandSheet({
   useEffect(() => {
     if (!open) return;
 
+    completedRef.current = false;
+    setTranscript("");
+    setState("listening");
+
+    if (usesAndroidNativeRecognition()) {
+      usingNativeRecognitionRef.current = true;
+      let disposed = false;
+
+      void invoke<NativeVoiceResult>("plugin:voice-recognition|start")
+        .then((result) => {
+          if (disposed) return;
+          completedRef.current = true;
+          const text = result.transcript.trim();
+          setTranscript(text);
+          setState(text ? "heard" : "no-speech");
+        })
+        .catch((error: unknown) => {
+          if (disposed) return;
+          completedRef.current = true;
+          setState(nativeErrorStateFor(error));
+        });
+
+      return () => {
+        disposed = true;
+        usingNativeRecognitionRef.current = false;
+        void invoke("plugin:voice-recognition|cancel").catch(() => undefined);
+      };
+    }
+
+    usingNativeRecognitionRef.current = false;
     const Constructor = recognitionConstructor();
     if (!Constructor) {
       setState("unsupported");
       return;
     }
 
-    completedRef.current = false;
     const recognizer = new Constructor();
     recognizerRef.current = recognizer;
-    setTranscript("");
-    setState("listening");
     recognizer.lang = "ko-KR";
     recognizer.interimResults = true;
     recognizer.continuous = false;
@@ -120,12 +159,24 @@ export function VoiceCommandSheet({
   if (!open) return null;
 
   function retry() {
+    if (usingNativeRecognitionRef.current) {
+      setAttempt((current) => current + 1);
+      return;
+    }
     completedRef.current = true;
     recognizerRef.current?.abort();
     setAttempt((current) => current + 1);
   }
 
   function finishListening() {
+    if (usingNativeRecognitionRef.current) {
+      setState("finalizing");
+      void invoke("plugin:voice-recognition|stop").catch((error: unknown) => {
+        completedRef.current = true;
+        setState(nativeErrorStateFor(error));
+      });
+      return;
+    }
     completedRef.current = true;
     recognizerRef.current?.stop();
     setState(transcript.trim() ? "heard" : "no-speech");
@@ -159,14 +210,18 @@ export function VoiceCommandSheet({
           data-state={state}
           aria-hidden="true"
         >
-          {state === "listening" ? <LoaderCircle className="spin" /> : <Mic />}
+          {isRecordingState(state) ? (
+            <LoaderCircle className="spin" />
+          ) : (
+            <Mic />
+          )}
         </span>
         <h2 id="voice-sheet-title">{titleFor(state)}</h2>
         <p className="voice-sheet__description" aria-live="polite">
           {descriptionFor(state)}
         </p>
 
-        {state === "listening" && (
+        {isRecordingState(state) && (
           <>
             <div className="voice-sheet__wave" aria-hidden="true">
               <span />
@@ -175,7 +230,11 @@ export function VoiceCommandSheet({
               <span />
               <span />
             </div>
-            <p className="voice-sheet__examples">{copy.voice.listeningHint}</p>
+            {state === "listening" && (
+              <p className="voice-sheet__examples">
+                {copy.voice.listeningHint}
+              </p>
+            )}
           </>
         )}
 
@@ -218,6 +277,11 @@ export function VoiceCommandSheet({
                 {copy.voice.useTextInput}
               </button>
             </>
+          ) : state === "finalizing" ? (
+            <button className="primary-button" type="button" disabled>
+              <LoaderCircle className="spin" aria-hidden="true" />
+              {copy.voice.finalizingAction}
+            </button>
           ) : (
             <>
               <button
@@ -269,19 +333,48 @@ function errorStateFor(value: string): RecognitionState {
   return "error";
 }
 
+function usesAndroidNativeRecognition() {
+  return isTauri() && /Android/i.test(navigator.userAgent);
+}
+
+function nativeErrorStateFor(error: unknown): RecognitionState {
+  const detail = nativeErrorDetail(error);
+  if (detail.includes("VOICE_PERMISSION")) return "permission";
+  if (detail.includes("VOICE_NO_SPEECH")) return "no-speech";
+  if (detail.includes("VOICE_UNAVAILABLE")) return "unsupported";
+  return "error";
+}
+
+function nativeErrorDetail(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object" && error !== null) {
+    const value = error as { code?: unknown; message?: unknown };
+    return [value.code, value.message]
+      .filter((part): part is string => typeof part === "string")
+      .join(" ");
+  }
+  return String(error);
+}
+
 function titleFor(state: RecognitionState) {
   if (state === "listening") return copy.voice.listeningTitle;
+  if (state === "finalizing") return copy.voice.finalizingTitle;
   if (state === "heard") return copy.voice.heardTitle;
+  if (state === "no-speech") return copy.voice.noSpeechTitle;
   return copy.voice.voiceTitle;
 }
 
 function descriptionFor(state: RecognitionState) {
   if (state === "listening") return copy.voice.listeningDescription;
+  if (state === "finalizing") return copy.voice.finalizingDescription;
   if (state === "heard") return copy.voice.heardDescription;
+  if (state === "no-speech") return copy.voice.noSpeechDescription;
   return copy.voice.voiceDescription;
 }
 
-function recoveryFor(state: Exclude<RecognitionState, "listening" | "heard">) {
+function recoveryFor(
+  state: Exclude<RecognitionState, "listening" | "finalizing" | "heard">,
+) {
   if (state === "permission") return copy.voice.permissionRecovery;
   if (state === "no-speech") return copy.voice.speechFallback;
   return copy.voice.fallbackRecovery;
@@ -289,6 +382,12 @@ function recoveryFor(state: Exclude<RecognitionState, "listening" | "heard">) {
 
 function isRecoveryState(
   state: RecognitionState,
-): state is Exclude<RecognitionState, "listening" | "heard"> {
-  return state !== "listening" && state !== "heard";
+): state is Exclude<RecognitionState, "listening" | "finalizing" | "heard"> {
+  return state !== "listening" && state !== "finalizing" && state !== "heard";
+}
+
+function isRecordingState(
+  state: RecognitionState,
+): state is "listening" | "finalizing" {
+  return state === "listening" || state === "finalizing";
 }

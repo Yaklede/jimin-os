@@ -84,6 +84,7 @@ fn valid_installation_id(value: &str) -> bool {
 pub fn run() {
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(jimin_voice_recognition::init())
         .invoke_handler(tauri::generate_handler![
             read_device_session,
             save_device_session,
