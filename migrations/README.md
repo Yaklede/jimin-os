@@ -15,4 +15,9 @@ session, refresh token, device, sync, and audit tables are intentionally
 created before Google Calendar data. Calendar migrations must not alter the
 semantics of existing session rows or refresh token verifier values.
 
+Migration `0008_google_calendar_foundation.sql` adds the provider-owned
+Calendar account, OAuth transaction, normalized event, sync, staging, and
+mutation records. It does not add a Google credential to the repository or
+make any outbound provider call by itself.
+
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.
