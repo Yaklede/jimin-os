@@ -243,7 +243,7 @@ export const copy = {
     conversationLoadNotice:
       "대화를 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
     conversationSendNotice:
-      "요청을 보내지 못했어요. 내용을 확인한 뒤 다시 시도해 주세요.",
+      "요청을 보내지 못했어요. 연결을 다시 확인한 뒤 같은 요청을 보내 주세요.",
     conversationBusy:
       "이 요청을 처리하고 있어요. 끝난 뒤 새 요청을 보낼 수 있어요.",
     conversationChanged:

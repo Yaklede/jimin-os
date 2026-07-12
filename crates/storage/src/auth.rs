@@ -966,6 +966,22 @@ impl Database {
         .map_err(|error| classify_database_error(&error))?;
         devices.into_iter().map(Device::try_from).collect()
     }
+
+    /// Returns the newest persisted sync sequence for a user session response.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::PersistenceUnavailable`] when the database
+    /// cannot return the current cursor.
+    pub async fn current_sync_cursor_for_user(&self, user_id: Uuid) -> Result<i64, StorageError> {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(MAX(sequence), 0) FROM sync_changes WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(self.pool())
+        .await
+        .map_err(|error| classify_database_error(&error))
+    }
 }
 
 fn all_version_seven(ids: &[Uuid]) -> bool {

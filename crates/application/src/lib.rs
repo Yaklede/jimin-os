@@ -373,13 +373,18 @@ impl SessionService {
         };
         let access_token =
             self.issue_access_token(rotated.profile.id, rotated.session_id, rotated.device.id)?;
+        let sync_cursor = self
+            .database
+            .current_sync_cursor_for_user(rotated.profile.id)
+            .await
+            .map_err(ApplicationError::Storage)?;
 
         Ok(DeviceSession {
             access_token,
             refresh_token: replacement,
             profile: rotated.profile,
             device: rotated.device,
-            sync_cursor: None,
+            sync_cursor: Some(sync_cursor),
         })
     }
 

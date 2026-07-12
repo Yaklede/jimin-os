@@ -266,37 +266,40 @@ impl Database {
         }
         let rows = sqlx::query_as::<_, ScheduleRow>(
             "\
-            SELECT id, title, notes, starts_at, ends_at, time_zone, status, source, version
-            FROM schedule_entries
-            WHERE user_id = $1
-              AND status = 'confirmed'
-              AND starts_at < $2
-              AND ends_at > $3
-            UNION ALL
-            SELECT id, title, description_text AS notes, starts_at, ends_at,
-                source_time_zone AS time_zone, 'confirmed'::TEXT AS status,
-                'google_calendar'::TEXT AS source, version
-            FROM calendar_events
-            WHERE user_id = $1
-              AND provider_deleted_at IS NULL
-              AND provider_status IN ('confirmed', 'tentative')
-              AND time_kind = 'date_time'
-              AND start_at < $2
-              AND end_at > $3
-            UNION ALL
-            SELECT id, title, description_text AS notes,
-                (start_date::timestamp AT TIME ZONE 'UTC') AS starts_at,
-                (end_date::timestamp AT TIME ZONE 'UTC') AS ends_at,
-                'UTC'::TEXT AS time_zone, 'confirmed'::TEXT AS status,
-                'google_calendar'::TEXT AS source, version
-            FROM calendar_events
-            WHERE user_id = $1
-              AND provider_deleted_at IS NULL
-              AND provider_status IN ('confirmed', 'tentative')
-              AND time_kind = 'date'
-              AND start_date < $4
-              AND end_date > $5
-            ORDER BY starts_at ASC, id ASC",
+            SELECT *
+            FROM (
+                SELECT id, title, notes, starts_at, ends_at, time_zone, status, source, version
+                FROM schedule_entries
+                WHERE user_id = $1
+                  AND status = 'confirmed'
+                  AND starts_at < $2
+                  AND ends_at > $3
+                UNION ALL
+                SELECT id, title, description_text AS notes, start_at AS starts_at, end_at AS ends_at,
+                    source_time_zone AS time_zone, 'confirmed'::TEXT AS status,
+                    'google_calendar'::TEXT AS source, version
+                FROM calendar_events
+                WHERE user_id = $1
+                  AND provider_deleted_at IS NULL
+                  AND provider_status IN ('confirmed', 'tentative')
+                  AND time_kind = 'date_time'
+                  AND start_at < $2
+                  AND end_at > $3
+                UNION ALL
+                SELECT id, title, description_text AS notes,
+                    (start_date::timestamp AT TIME ZONE 'UTC') AS starts_at,
+                    (end_date::timestamp AT TIME ZONE 'UTC') AS ends_at,
+                    'UTC'::TEXT AS time_zone, 'confirmed'::TEXT AS status,
+                    'google_calendar'::TEXT AS source, version
+                FROM calendar_events
+                WHERE user_id = $1
+                  AND provider_deleted_at IS NULL
+                  AND provider_status IN ('confirmed', 'tentative')
+                  AND time_kind = 'date'
+                  AND start_date < $4
+                  AND end_date > $5
+            ) AS schedule
+            ORDER BY schedule.starts_at ASC, schedule.id ASC",
         )
         .bind(user_id)
         .bind(range_end)

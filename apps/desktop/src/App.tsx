@@ -41,6 +41,10 @@ import {
   saveDeviceSession,
 } from "./device-session";
 import { personalServerBaseUrl } from "./server-config";
+import {
+  isUnauthorizedFailure,
+  retryUnauthorizedRequest,
+} from "./session-retry";
 import { createUuidV7 } from "./uuid";
 
 type AppMode =
@@ -84,7 +88,58 @@ export default function App() {
   const [authenticationRequesting, setAuthenticationRequesting] =
     useState(false);
   const pendingConversationId = useRef<string | undefined>(undefined);
+  const activeSessionRef = useRef<SessionTokens | undefined>(undefined);
+  const refreshInFlightRef = useRef<Promise<SessionTokens> | undefined>(
+    undefined,
+  );
   const [message, setMessage] = useState<string | undefined>(undefined);
+
+  const applyActiveSession = useCallback((session: SessionTokens) => {
+    activeSessionRef.current = session;
+    setTokens(session);
+  }, []);
+
+  const persistActiveSession = useCallback(
+    async (session: SessionTokens) => {
+      applyActiveSession(session);
+      try {
+        await saveDeviceSession({ tokens: session });
+      } catch {
+        // The current session is still usable. A later launch will bootstrap again.
+      }
+    },
+    [applyActiveSession],
+  );
+
+  const refreshActiveSession = useCallback(
+    async (staleRefreshToken: string): Promise<SessionTokens> => {
+      const current = activeSessionRef.current;
+      if (current && current.refreshToken !== staleRefreshToken) return current;
+      if (refreshInFlightRef.current) return refreshInFlightRef.current;
+
+      const refresh = refreshDeviceSession(apiBaseUrl, staleRefreshToken);
+      refreshInFlightRef.current = refresh;
+      try {
+        const refreshed = await refresh;
+        await persistActiveSession(refreshed);
+        return refreshed;
+      } finally {
+        if (refreshInFlightRef.current === refresh) {
+          refreshInFlightRef.current = undefined;
+        }
+      }
+    },
+    [apiBaseUrl, persistActiveSession],
+  );
+
+  const withAuthenticatedSession = useCallback(
+    async <T,>(operation: (accessToken: string) => Promise<T>): Promise<T> => {
+      const session = activeSessionRef.current;
+      if (!session) throw new AgentRequestError("unauthorized");
+      return retryUnauthorizedRequest(session, operation, refreshActiveSession);
+    },
+    [refreshActiveSession],
+  );
 
   const bootstrapTrustedNetworkDevice = useCallback(async () => {
     setMode("loading");
@@ -96,13 +151,12 @@ export default function App() {
         copy.personalServer.deviceName,
         installationId,
       );
-      await saveDeviceSession({ tokens: session });
-      setTokens(session);
+      await persistActiveSession(session);
     } catch {
       setMode("server-unreachable");
       setMessage(copy.messages.serverOffline);
     }
-  }, [apiBaseUrl]);
+  }, [apiBaseUrl, persistActiveSession]);
 
   const refreshConversations = useCallback(async () => {
     if (!tokens) return;
@@ -110,14 +164,16 @@ export default function App() {
     setConversationError(undefined);
     try {
       setConversations(
-        await fetchConversations(apiBaseUrl, tokens.accessToken),
+        await withAuthenticatedSession((accessToken) =>
+          fetchConversations(apiBaseUrl, accessToken),
+        ),
       );
     } catch {
       setConversationError(copy.messages.conversationLoadNotice);
     } finally {
       setConversationLoading(false);
     }
-  }, [apiBaseUrl, tokens]);
+  }, [apiBaseUrl, tokens, withAuthenticatedSession]);
 
   const loadHomeSnapshot = useCallback(async () => {
     if (!tokens) return;
@@ -126,14 +182,16 @@ export default function App() {
     try {
       const [from, to] = currentLocalDayRange();
       setHomeSnapshot(
-        await fetchHomeSnapshot(apiBaseUrl, tokens.accessToken, from, to),
+        await withAuthenticatedSession((accessToken) =>
+          fetchHomeSnapshot(apiBaseUrl, accessToken, from, to),
+        ),
       );
     } catch {
       setHomeError(copy.messages.homeLoadNotice);
     } finally {
       setHomeLoading(false);
     }
-  }, [apiBaseUrl, tokens]);
+  }, [apiBaseUrl, tokens, withAuthenticatedSession]);
 
   const loadConversationMessages = useCallback(
     async (conversationId: string, background = false) => {
@@ -144,10 +202,8 @@ export default function App() {
       }
       try {
         setConversationMessages(
-          await fetchConversationMessages(
-            apiBaseUrl,
-            tokens.accessToken,
-            conversationId,
+          await withAuthenticatedSession((accessToken) =>
+            fetchConversationMessages(apiBaseUrl, accessToken, conversationId),
           ),
         );
       } catch (error) {
@@ -163,7 +219,7 @@ export default function App() {
         if (!background) setConversationLoading(false);
       }
     },
-    [apiBaseUrl, tokens],
+    [apiBaseUrl, tokens, withAuthenticatedSession],
   );
 
   const refresh = useCallback(async () => {
@@ -173,37 +229,32 @@ export default function App() {
     setMessage(undefined);
     try {
       const [nextConversations, authentication] = await Promise.all([
-        fetchConversations(apiBaseUrl, tokens.accessToken),
-        fetchAgentAuthentication(apiBaseUrl, tokens.accessToken),
+        withAuthenticatedSession((accessToken) =>
+          fetchConversations(apiBaseUrl, accessToken),
+        ),
+        withAuthenticatedSession((accessToken) =>
+          fetchAgentAuthentication(apiBaseUrl, accessToken),
+        ),
         loadHomeSnapshot(),
       ]);
       setConversations(nextConversations);
       setAgentAuthentication(authentication);
       setMode("ready");
     } catch (error) {
-      if (error instanceof AgentRequestError && error.code === "unauthorized") {
-        try {
-          const refreshed = await refreshDeviceSession(
-            apiBaseUrl,
-            tokens.refreshToken,
-          );
-          await saveDeviceSession({ tokens: refreshed });
-          setTokens(refreshed);
-          return;
-        } catch {
-          await discardSession();
-        }
+      if (isUnauthorizedFailure(error)) {
+        await discardSession();
         return;
       }
       setMode("error");
       setMessage(copy.messages.conversationLoadNotice);
     }
-  }, [apiBaseUrl, loadHomeSnapshot, sessionLoaded, tokens]);
+  }, [loadHomeSnapshot, sessionLoaded, tokens, withAuthenticatedSession]);
 
   async function discardSession() {
     try {
       await clearDeviceSession();
     } finally {
+      activeSessionRef.current = undefined;
       setTokens(undefined);
       setConversations([]);
       setHomeSnapshot(undefined);
@@ -233,7 +284,7 @@ export default function App() {
       .then(async (stored) => {
         if (!current) return;
         if (stored) {
-          setTokens(stored.tokens);
+          applyActiveSession(stored.tokens);
           setMode("loading");
         } else {
           await bootstrapTrustedNetworkDevice();
@@ -251,7 +302,7 @@ export default function App() {
     return () => {
       current = false;
     };
-  }, [apiBaseUrl, bootstrapTrustedNetworkDevice]);
+  }, [apiBaseUrl, applyActiveSession, bootstrapTrustedNetworkDevice]);
 
   useEffect(() => {
     void refresh();
@@ -270,9 +321,8 @@ export default function App() {
     let current = true;
     const poll = async () => {
       try {
-        const authentication = await fetchAgentAuthentication(
-          apiBaseUrl,
-          tokens.accessToken,
+        const authentication = await withAuthenticatedSession((accessToken) =>
+          fetchAgentAuthentication(apiBaseUrl, accessToken),
         );
         if (current) setAgentAuthentication(authentication);
       } catch {
@@ -285,7 +335,7 @@ export default function App() {
       current = false;
       window.clearInterval(interval);
     };
-  }, [agentAuthentication, apiBaseUrl, tokens]);
+  }, [agentAuthentication, apiBaseUrl, tokens, withAuthenticatedSession]);
 
   const activeJobs = useMemo(
     () =>
@@ -304,28 +354,30 @@ export default function App() {
     const controller = new AbortController();
     const subscribe = async (job: AgentJob) => {
       try {
-        await streamConversationUpdates(
-          apiBaseUrl,
-          tokens.accessToken,
-          job.conversationId,
-          controller.signal,
-          (snapshot) => {
-            if (!current) return;
-            const streamedJob = snapshot.job;
-            if (streamedJob) {
-              setConversationJobs((known) => ({
-                ...known,
-                [streamedJob.conversationId]: streamedJob,
-              }));
-            }
-            if (job.conversationId === selectedConversationId) {
-              setConversationMessages(snapshot.messages);
-            }
-            if (streamedJob && isTerminalAgentJob(streamedJob.state)) {
-              void refreshConversations();
-              void loadHomeSnapshot();
-            }
-          },
+        await withAuthenticatedSession((accessToken) =>
+          streamConversationUpdates(
+            apiBaseUrl,
+            accessToken,
+            job.conversationId,
+            controller.signal,
+            (snapshot) => {
+              if (!current) return;
+              const streamedJob = snapshot.job;
+              if (streamedJob) {
+                setConversationJobs((known) => ({
+                  ...known,
+                  [streamedJob.conversationId]: streamedJob,
+                }));
+              }
+              if (job.conversationId === selectedConversationId) {
+                setConversationMessages(snapshot.messages);
+              }
+              if (streamedJob && isTerminalAgentJob(streamedJob.state)) {
+                void refreshConversations();
+                void loadHomeSnapshot();
+              }
+            },
+          ),
         );
       } catch (error) {
         if (
@@ -349,6 +401,7 @@ export default function App() {
     refreshConversations,
     selectedConversationId,
     tokens,
+    withAuthenticatedSession,
   ]);
 
   function selectConversation(conversationId: string) {
@@ -363,10 +416,8 @@ export default function App() {
   async function restoreConversationJob(conversationId: string) {
     if (!tokens) return;
     try {
-      const job = await fetchLatestConversationJob(
-        apiBaseUrl,
-        tokens.accessToken,
-        conversationId,
+      const job = await withAuthenticatedSession((accessToken) =>
+        fetchLatestConversationJob(apiBaseUrl, accessToken, conversationId),
       );
       if (job) {
         setConversationJobs((known) => ({
@@ -390,7 +441,9 @@ export default function App() {
     if (!tokens) return;
     setHomeError(undefined);
     try {
-      await completeTask(apiBaseUrl, tokens.accessToken, task);
+      await withAuthenticatedSession((accessToken) =>
+        completeTask(apiBaseUrl, accessToken, task),
+      );
       setHomeSnapshot((current) =>
         current
           ? {
@@ -427,10 +480,8 @@ export default function App() {
       };
     }
     try {
-      const result = await processVoiceCommand(
-        apiBaseUrl,
-        tokens.accessToken,
-        value,
+      const result = await withAuthenticatedSession((accessToken) =>
+        processVoiceCommand(apiBaseUrl, accessToken, value),
       );
       if (
         result.kind === "schedule_listed" ||
@@ -463,7 +514,9 @@ export default function App() {
     setConversationError(undefined);
     try {
       setAgentAuthentication(
-        await requestAgentAuthentication(apiBaseUrl, tokens.accessToken),
+        await withAuthenticatedSession((accessToken) =>
+          requestAgentAuthentication(apiBaseUrl, accessToken),
+        ),
       );
     } catch {
       setConversationError(copy.messages.authenticationStartNotice);
@@ -487,23 +540,32 @@ export default function App() {
         const clientConversationId =
           pendingConversationId.current ?? createUuidV7();
         pendingConversationId.current = clientConversationId;
-        const conversation = await createConversation(
-          apiBaseUrl,
-          tokens.accessToken,
-          clientConversationId,
-          conversationTitle(text),
+        const conversation = await withAuthenticatedSession((accessToken) =>
+          createConversation(
+            apiBaseUrl,
+            accessToken,
+            clientConversationId,
+            conversationTitle(text),
+          ),
         );
         pendingConversationId.current = undefined;
         conversationId = conversation.id;
         setConversations((current) => [conversation, ...current]);
         setSelectedConversationId(conversation.id);
       }
-      const queued = await queueAgentTurn(
-        apiBaseUrl,
-        tokens.accessToken,
-        conversationId,
-        text.trim(),
-        clientMessageId,
+      if (!conversationId) {
+        setConversationError(copy.messages.conversationSendNotice);
+        return false;
+      }
+      const targetConversationId = conversationId;
+      const queued = await withAuthenticatedSession((accessToken) =>
+        queueAgentTurn(
+          apiBaseUrl,
+          accessToken,
+          targetConversationId,
+          text.trim(),
+          clientMessageId,
+        ),
       );
       setConversationJobs((known) => ({
         ...known,
@@ -539,11 +601,8 @@ export default function App() {
     setConversationLoading(true);
     setConversationError(undefined);
     try {
-      const resolved = await resolveAgentAction(
-        apiBaseUrl,
-        tokens.accessToken,
-        job.id,
-        decision,
+      const resolved = await withAuthenticatedSession((accessToken) =>
+        resolveAgentAction(apiBaseUrl, accessToken, job.id, decision),
       );
       setConversationJobs((known) => ({
         ...known,
