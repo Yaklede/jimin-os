@@ -12,14 +12,15 @@ use chacha20poly1305::{
 use hmac::{Hmac, Mac, digest::KeyInit as HmacKeyInit};
 use jimin_domain::{ClientPlatform, PkceVerifier};
 use jimin_google::{
-    GoogleAuthError, GoogleAuthorizationCode, GoogleCalendarGrant, GoogleIdentityAdapter,
-    GoogleOAuthProfile,
+    GoogleAuthError, GoogleAuthorizationCode, GoogleCalendarAdapter, GoogleCalendarGrant,
+    GoogleCalendarListEntry, GoogleCalendarVisibility, GoogleIdentityAdapter, GoogleOAuthProfile,
 };
 use jimin_storage::{
     StorageError,
     calendar::{
-        ClaimedCalendarOAuthAuthorization, CompleteCalendarOAuthAuthorization,
-        EncryptedCalendarSecret,
+        CalendarSyncConnection, ClaimedCalendarOAuthAuthorization,
+        CompleteCalendarOAuthAuthorization, EncryptedCalendarSecret, ProviderCalendar,
+        ProviderCalendarVisibility,
     },
 };
 use rand::Rng;
@@ -43,6 +44,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// Calendar OAuth runtime assembled entirely from deployment-owned settings.
 pub struct CalendarOAuthRuntime {
     google: GoogleIdentityAdapter,
+    calendar: GoogleCalendarAdapter,
     crypto: CalendarCrypto,
     redirect_uri: String,
     encryption_key_version: i32,
@@ -77,6 +79,11 @@ impl CalendarOAuthRuntime {
         Ok(Self {
             google: GoogleIdentityAdapter::new(profiles)
                 .map_err(|_| CalendarOAuthError::Configuration)?,
+            calendar: GoogleCalendarAdapter::new(
+                settings.client_id(),
+                settings.client_secret().clone(),
+            )
+            .map_err(|_| CalendarOAuthError::Configuration)?,
             crypto: CalendarCrypto::new(settings.encryption_key())?,
             redirect_uri: settings.redirect_uri().to_owned(),
             encryption_key_version: settings.encryption_key_version(),
@@ -184,6 +191,34 @@ impl CalendarOAuthRuntime {
             granted_scopes,
             refresh_token,
         })
+    }
+
+    /// Uses the newly persisted refresh credential to load the complete
+    /// Google Calendar list before the account becomes active.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized [`CalendarOAuthError`] when credential decryption,
+    /// token refresh, or provider list retrieval fails.
+    pub async fn initial_calendar_list_sync(
+        &self,
+        connection: &CalendarSyncConnection,
+    ) -> Result<Vec<ProviderCalendar>, CalendarOAuthError> {
+        let refresh_token = self.crypto.decrypt(
+            &connection.refresh_token,
+            &refresh_token_aad(connection.user_id),
+        )?;
+        let access_token = self
+            .calendar
+            .refresh_access_token(&refresh_token)
+            .await
+            .map_err(CalendarOAuthError::from_google)?;
+        let entries = self
+            .calendar
+            .list_calendars(&access_token)
+            .await
+            .map_err(CalendarOAuthError::from_google)?;
+        Ok(entries.into_iter().map(provider_calendar).collect())
     }
 }
 
@@ -360,6 +395,25 @@ fn calendar_scopes(scopes: &[String]) -> Result<Vec<String>, CalendarOAuthError>
         CALENDAR_EVENTS_SCOPE.to_owned(),
         CALENDAR_LIST_SCOPE.to_owned(),
     ])
+}
+
+fn provider_calendar(entry: GoogleCalendarListEntry) -> ProviderCalendar {
+    ProviderCalendar {
+        provider_calendar_id: entry.provider_calendar_id,
+        name: entry.name,
+        description: entry.description,
+        time_zone: entry.time_zone,
+        color_id: entry.color_id,
+        access_role: entry.access_role,
+        is_primary: entry.is_primary,
+        provider_selected: entry.provider_selected,
+        visibility: match entry.visibility {
+            GoogleCalendarVisibility::Visible => ProviderCalendarVisibility::Visible,
+            GoogleCalendarVisibility::Hidden => ProviderCalendarVisibility::Hidden,
+            GoogleCalendarVisibility::Deleted => ProviderCalendarVisibility::Deleted,
+        },
+        provider_etag: entry.provider_etag,
+    }
 }
 
 /// Maps callback failures to the narrow storage error surface used by routes.

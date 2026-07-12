@@ -354,6 +354,223 @@ impl Database {
             .map_err(|_| StorageError::PersistenceUnavailable)?;
         CalendarAccount::try_from(row)
     }
+
+    /// Returns the encrypted credential for an account that is eligible for a
+    /// Calendar list synchronization. The caller must decrypt it only inside
+    /// the server process and must never serialize this value to a client.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::PersistenceUnavailable`] when the row is
+    /// malformed or the database cannot be queried.
+    pub async fn calendar_sync_connection(
+        &self,
+        account_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<CalendarSyncConnection>, StorageError> {
+        let row = sqlx::query_as::<_, CalendarSyncConnectionRow>(
+            "\
+            SELECT id, user_id, refresh_token_ciphertext, refresh_token_nonce,
+                encryption_key_version
+            FROM calendar_accounts
+            WHERE id = $1
+              AND user_id = $2
+              AND status IN ('connecting', 'active')",
+        )
+        .bind(account_id)
+        .bind(user_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|_| StorageError::PersistenceUnavailable)?;
+        row.map(CalendarSyncConnection::try_from).transpose()
+    }
+
+    /// Replaces the Calendar list metadata only after every provider page has
+    /// been validated. The primary calendar becomes sync-enabled, while all
+    /// other calendars remain visible but await explicit selection support.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed provider
+    /// entries and [`StorageError::PersistenceUnavailable`] for a failed
+    /// transaction.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The full list transaction keeps tombstoning, calendar upserts, sync-state initialization, and account activation atomic."
+    )]
+    pub async fn apply_calendar_list_sync(
+        &self,
+        account_id: Uuid,
+        user_id: Uuid,
+        entries: &[ProviderCalendar],
+    ) -> Result<CalendarListSyncResult, StorageError> {
+        if account_id.get_version_num() != 7
+            || user_id.get_version_num() != 7
+            || !valid_provider_calendars(entries)
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|_| StorageError::PersistenceUnavailable)?;
+        let account_exists = sqlx::query_scalar::<_, Uuid>(
+            "\
+            SELECT id FROM calendar_accounts
+            WHERE id = $1
+              AND user_id = $2
+              AND status IN ('connecting', 'active')
+            FOR UPDATE",
+        )
+        .bind(account_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| StorageError::PersistenceUnavailable)?;
+        if account_exists.is_none() {
+            return Err(StorageError::InvalidConfiguration);
+        }
+
+        let now = OffsetDateTime::now_utc();
+        let provider_calendar_ids = entries
+            .iter()
+            .map(|entry| entry.provider_calendar_id.clone())
+            .collect::<Vec<_>>();
+        sqlx::query(
+            "\
+            UPDATE calendars
+            SET is_primary = FALSE,
+                sync_enabled = FALSE,
+                provider_deleted_at = COALESCE(provider_deleted_at, $3)
+            WHERE account_id = $1
+              AND NOT (provider_calendar_id = ANY($2::TEXT[]))",
+        )
+        .bind(account_id)
+        .bind(&provider_calendar_ids)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| StorageError::PersistenceUnavailable)?;
+
+        for entry in entries {
+            let provider_deleted = entry.visibility == ProviderCalendarVisibility::Deleted;
+            let is_primary =
+                entry.is_primary && entry.visibility == ProviderCalendarVisibility::Visible;
+            let sync_enabled = is_primary;
+            let provider_deleted_at = provider_deleted.then_some(now);
+            let calendar_id = sqlx::query_scalar::<_, Uuid>(
+                "\
+                INSERT INTO calendars (
+                    id, account_id, provider_calendar_id, name, description,
+                    time_zone, color_id, access_role, is_primary,
+                    provider_selected, sync_enabled, provider_etag,
+                    provider_deleted_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+                )
+                ON CONFLICT (account_id, provider_calendar_id) DO UPDATE
+                SET name = EXCLUDED.name,
+                    description = EXCLUDED.description,
+                    time_zone = EXCLUDED.time_zone,
+                    color_id = EXCLUDED.color_id,
+                    access_role = EXCLUDED.access_role,
+                    is_primary = EXCLUDED.is_primary,
+                    provider_selected = EXCLUDED.provider_selected,
+                    sync_enabled = EXCLUDED.sync_enabled,
+                    provider_etag = EXCLUDED.provider_etag,
+                    provider_deleted_at = EXCLUDED.provider_deleted_at
+                RETURNING id",
+            )
+            .bind(Uuid::now_v7())
+            .bind(account_id)
+            .bind(&entry.provider_calendar_id)
+            .bind(&entry.name)
+            .bind(&entry.description)
+            .bind(&entry.time_zone)
+            .bind(&entry.color_id)
+            .bind(&entry.access_role)
+            .bind(is_primary)
+            .bind(entry.provider_selected)
+            .bind(sync_enabled)
+            .bind(&entry.provider_etag)
+            .bind(provider_deleted_at)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|_| StorageError::PersistenceUnavailable)?;
+            sqlx::query(
+                "\
+                INSERT INTO calendar_sync_states (
+                    id, calendar_id, status, query_fingerprint
+                ) VALUES ($1, $2, 'idle', 'google-events-v1')
+                ON CONFLICT (calendar_id) DO NOTHING",
+            )
+            .bind(Uuid::now_v7())
+            .bind(calendar_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| StorageError::PersistenceUnavailable)?;
+        }
+
+        sqlx::query(
+            "\
+            UPDATE calendar_accounts
+            SET status = 'active',
+                last_successful_sync_at = $3,
+                last_error_code = NULL
+            WHERE id = $1 AND user_id = $2",
+        )
+        .bind(account_id)
+        .bind(user_id)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| StorageError::PersistenceUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StorageError::PersistenceUnavailable)?;
+        Ok(CalendarListSyncResult {
+            calendar_count: entries.len(),
+        })
+    }
+
+    /// Preserves the last successfully synchronized Calendar read model while
+    /// recording a classified provider error for reconnect or retry UI.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for unsafe IDs or error
+    /// codes and [`StorageError::PersistenceUnavailable`] when the update
+    /// cannot be stored.
+    pub async fn mark_calendar_sync_failure(
+        &self,
+        account_id: Uuid,
+        user_id: Uuid,
+        failure_code: &str,
+    ) -> Result<(), StorageError> {
+        if account_id.get_version_num() != 7
+            || user_id.get_version_num() != 7
+            || !valid_failure_code(failure_code)
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        sqlx::query(
+            "\
+            UPDATE calendar_accounts
+            SET status = 'error', last_error_code = $3
+            WHERE id = $1
+              AND user_id = $2
+              AND status IN ('connecting', 'active')",
+        )
+        .bind(account_id)
+        .bind(user_id)
+        .bind(failure_code)
+        .execute(self.pool())
+        .await
+        .map_err(|_| StorageError::PersistenceUnavailable)?;
+        Ok(())
+    }
 }
 
 /// Encrypted material bound to a Calendar record by the application layer.
@@ -362,6 +579,77 @@ pub struct EncryptedCalendarSecret {
     pub ciphertext: Vec<u8>,
     pub nonce: Vec<u8>,
     pub key_version: i32,
+}
+
+/// Encrypted account credential available only to a server sync worker.
+pub struct CalendarSyncConnection {
+    pub account_id: Uuid,
+    pub user_id: Uuid,
+    pub refresh_token: EncryptedCalendarSecret,
+}
+
+#[derive(sqlx::FromRow)]
+struct CalendarSyncConnectionRow {
+    id: Uuid,
+    user_id: Uuid,
+    refresh_token_ciphertext: Option<Vec<u8>>,
+    refresh_token_nonce: Option<Vec<u8>>,
+    encryption_key_version: Option<i32>,
+}
+
+impl TryFrom<CalendarSyncConnectionRow> for CalendarSyncConnection {
+    type Error = StorageError;
+
+    fn try_from(row: CalendarSyncConnectionRow) -> Result<Self, Self::Error> {
+        let refresh_token = EncryptedCalendarSecret {
+            ciphertext: row
+                .refresh_token_ciphertext
+                .ok_or(StorageError::PersistenceUnavailable)?,
+            nonce: row
+                .refresh_token_nonce
+                .ok_or(StorageError::PersistenceUnavailable)?,
+            key_version: row
+                .encryption_key_version
+                .ok_or(StorageError::PersistenceUnavailable)?,
+        };
+        if !refresh_token.valid() {
+            return Err(StorageError::PersistenceUnavailable);
+        }
+        Ok(Self {
+            account_id: row.id,
+            user_id: row.user_id,
+            refresh_token,
+        })
+    }
+}
+
+/// Validated Calendar metadata fetched from Google's Calendar list API.
+pub struct ProviderCalendar {
+    pub provider_calendar_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub time_zone: String,
+    pub color_id: Option<String>,
+    pub access_role: String,
+    pub is_primary: bool,
+    pub provider_selected: bool,
+    pub visibility: ProviderCalendarVisibility,
+    pub provider_etag: Option<String>,
+}
+
+/// Provider visibility normalized before persistence. Hidden calendars remain
+/// in the metadata list but are not selected for event synchronization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderCalendarVisibility {
+    Visible,
+    Hidden,
+    Deleted,
+}
+
+/// Safe count returned after a successful atomic Calendar list application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalendarListSyncResult {
+    pub calendar_count: usize,
 }
 
 impl EncryptedCalendarSecret {
@@ -510,6 +798,35 @@ fn valid_scopes(scopes: &[String]) -> bool {
         })
 }
 
+fn valid_provider_calendars(entries: &[ProviderCalendar]) -> bool {
+    entries.iter().all(|entry| {
+        valid_required_text(&entry.provider_calendar_id, 1_024)
+            && valid_required_text(&entry.name, 500)
+            && valid_required_text(&entry.time_zone, 80)
+            && valid_access_role(&entry.access_role)
+            && entry
+                .description
+                .as_deref()
+                .is_none_or(|value| valid_required_text(value, 8_192))
+            && entry
+                .color_id
+                .as_deref()
+                .is_none_or(|value| valid_required_text(value, 120))
+            && entry
+                .provider_etag
+                .as_deref()
+                .is_none_or(|value| valid_required_text(value, 2_048))
+    })
+}
+
+fn valid_required_text(value: &str, maximum_bytes: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= maximum_bytes && !value.chars().any(char::is_control)
+}
+
+fn valid_access_role(value: &str) -> bool {
+    matches!(value, "free_busy_reader" | "reader" | "writer" | "owner")
+}
+
 fn valid_failure_code(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_FAILURE_CODE_BYTES
@@ -520,11 +837,45 @@ fn valid_failure_code(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::CalendarAccountStatus;
+    use super::{
+        CalendarAccountStatus, ProviderCalendar, ProviderCalendarVisibility,
+        valid_provider_calendars,
+    };
 
     #[test]
     fn calendar_account_status_rejects_unknown_values() {
         assert!(CalendarAccountStatus::parse("active").is_ok());
         assert!(CalendarAccountStatus::parse("unexpected").is_err());
+    }
+
+    #[test]
+    fn provider_calendar_validation_rejects_unknown_access_roles() {
+        let valid = ProviderCalendar {
+            provider_calendar_id: "primary".to_owned(),
+            name: "Personal".to_owned(),
+            description: None,
+            time_zone: "Asia/Seoul".to_owned(),
+            color_id: None,
+            access_role: "owner".to_owned(),
+            is_primary: true,
+            provider_selected: true,
+            visibility: ProviderCalendarVisibility::Visible,
+            provider_etag: None,
+        };
+        assert!(valid_provider_calendars(&[valid]));
+
+        let invalid = ProviderCalendar {
+            provider_calendar_id: "other".to_owned(),
+            name: "Other".to_owned(),
+            description: None,
+            time_zone: "Asia/Seoul".to_owned(),
+            color_id: None,
+            access_role: "admin".to_owned(),
+            is_primary: false,
+            provider_selected: false,
+            visibility: ProviderCalendarVisibility::Hidden,
+            provider_etag: None,
+        };
+        assert!(!valid_provider_calendars(&[invalid]));
     }
 }

@@ -24,10 +24,15 @@ use tokio::sync::Mutex;
 const GOOGLE_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_JWKS_ENDPOINT: &str = "https://www.googleapis.com/oauth2/v3/certs";
 const GOOGLE_AUTHORIZATION_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+const GOOGLE_CALENDAR_LIST_ENDPOINT: &str =
+    "https://www.googleapis.com/calendar/v3/users/me/calendarList";
 const GOOGLE_ISSUERS: [&str; 2] = ["https://accounts.google.com", "accounts.google.com"];
 const MAX_AUTHORIZATION_CODE_BYTES: usize = 4 * 1024;
 const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_JWKS_RESPONSE_BYTES: usize = 256 * 1024;
+const MAX_CALENDAR_LIST_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CALENDAR_LIST_PAGES: usize = 100;
+const MAX_CALENDAR_LIST_ITEMS: usize = 10_000;
 const DEFAULT_JWKS_TTL: Duration = Duration::from_mins(5);
 const MAX_JWKS_TTL: Duration = Duration::from_hours(24);
 
@@ -196,6 +201,179 @@ pub struct GoogleIdentityAdapter {
     client: Client,
     profiles: BTreeMap<String, GoogleOAuthProfile>,
     jwks: Mutex<Option<CachedJwks>>,
+}
+
+/// Fixed Google Calendar provider adapter. It owns no persisted credentials:
+/// callers pass a short-lived access token or a refresh token decrypted only
+/// in the server process.
+pub struct GoogleCalendarAdapter {
+    client: Client,
+    client_id: String,
+    client_secret: SecretString,
+}
+
+/// One validated Calendar list entry. Provider IDs remain server-only and are
+/// intentionally not serializable or printable.
+pub struct GoogleCalendarListEntry {
+    pub provider_calendar_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub time_zone: String,
+    pub color_id: Option<String>,
+    pub access_role: String,
+    pub is_primary: bool,
+    pub provider_selected: bool,
+    pub visibility: GoogleCalendarVisibility,
+    pub provider_etag: Option<String>,
+}
+
+/// Provider visibility normalized from `deleted` and `hidden` flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoogleCalendarVisibility {
+    Visible,
+    Hidden,
+    Deleted,
+}
+
+impl GoogleCalendarAdapter {
+    /// Creates a Google Calendar adapter with fixed provider endpoints.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GoogleAuthError::InvalidRequest`] for malformed deployment
+    /// client settings or [`GoogleAuthError::ProviderUnavailable`] when the
+    /// HTTP client cannot be configured.
+    pub fn new(
+        client_id: impl Into<String>,
+        client_secret: SecretString,
+    ) -> Result<Self, GoogleAuthError> {
+        let client_id = validate_text(client_id.into(), 255)?;
+        if client_secret.expose_secret().is_empty()
+            || client_secret.expose_secret().len() > 4_096
+            || client_secret.expose_secret().chars().any(char::is_control)
+        {
+            return Err(GoogleAuthError::InvalidRequest);
+        }
+        let client = Client::builder()
+            .redirect(Policy::none())
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        Ok(Self {
+            client,
+            client_id,
+            client_secret,
+        })
+    }
+
+    /// Exchanges a stored refresh token for a short-lived access token.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider error without exposing token data.
+    pub async fn refresh_access_token(
+        &self,
+        refresh_token: &SecretString,
+    ) -> Result<SecretString, GoogleAuthError> {
+        let value = refresh_token.expose_secret();
+        if value.is_empty()
+            || value.len() > MAX_TOKEN_RESPONSE_BYTES
+            || value.chars().any(char::is_control)
+        {
+            return Err(GoogleAuthError::InvalidRequest);
+        }
+        let response = self
+            .client
+            .post(GOOGLE_TOKEN_ENDPOINT)
+            .form(&[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", value),
+                ("client_id", self.client_id.as_str()),
+                ("client_secret", self.client_secret.expose_secret()),
+            ])
+            .send()
+            .await
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        if !response.status().is_success() {
+            return Err(classify_provider_status(response.status().as_u16()));
+        }
+        if !is_json_response(&response) {
+            return Err(GoogleAuthError::ProviderUnavailable);
+        }
+        let payload = bounded_body(response, MAX_TOKEN_RESPONSE_BYTES).await?;
+        let response: GoogleRefreshTokenResponse =
+            serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
+        if response.access_token.is_empty()
+            || response.access_token.len() > MAX_TOKEN_RESPONSE_BYTES
+            || response.access_token.chars().any(char::is_control)
+        {
+            return Err(GoogleAuthError::ProviderRejected);
+        }
+        Ok(SecretString::from(response.access_token))
+    }
+
+    /// Loads every page of the Google Calendar list with the stable full-sync
+    /// query parameters required by the provider contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized provider error for an unavailable, rejected, or
+    /// malformed response. It never retains provider response bodies.
+    pub async fn list_calendars(
+        &self,
+        access_token: &SecretString,
+    ) -> Result<Vec<GoogleCalendarListEntry>, GoogleAuthError> {
+        let token = access_token.expose_secret();
+        if token.is_empty()
+            || token.len() > MAX_TOKEN_RESPONSE_BYTES
+            || token.chars().any(char::is_control)
+        {
+            return Err(GoogleAuthError::InvalidRequest);
+        }
+        let mut next_page_token: Option<String> = None;
+        let mut calendars = Vec::new();
+        for _ in 0..MAX_CALENDAR_LIST_PAGES {
+            let mut url = reqwest::Url::parse(GOOGLE_CALENDAR_LIST_ENDPOINT)
+                .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+            {
+                let mut query = url.query_pairs_mut();
+                query.append_pair("showDeleted", "true");
+                query.append_pair("showHidden", "true");
+                query.append_pair("maxResults", "250");
+                if let Some(page_token) = &next_page_token {
+                    query.append_pair("pageToken", page_token);
+                }
+            }
+            let response = self
+                .client
+                .get(url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+            if !response.status().is_success() {
+                return Err(classify_provider_status(response.status().as_u16()));
+            }
+            if !is_json_response(&response) {
+                return Err(GoogleAuthError::ProviderUnavailable);
+            }
+            let payload = bounded_body(response, MAX_CALENDAR_LIST_RESPONSE_BYTES).await?;
+            let page: GoogleCalendarListPage =
+                serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
+            for item in page.items {
+                calendars.push(normalize_calendar_list_item(item)?);
+                if calendars.len() > MAX_CALENDAR_LIST_ITEMS {
+                    return Err(GoogleAuthError::ProviderRejected);
+                }
+            }
+            next_page_token = page.next_page_token;
+            if next_page_token.is_none() {
+                return Ok(calendars);
+            }
+        }
+        Err(GoogleAuthError::ProviderRejected)
+    }
 }
 
 impl GoogleIdentityAdapter {
@@ -448,6 +626,43 @@ struct GoogleTokenResponse {
 }
 
 #[derive(Deserialize)]
+struct GoogleRefreshTokenResponse {
+    access_token: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleCalendarListPage {
+    #[serde(default)]
+    items: Vec<GoogleCalendarListItem>,
+    next_page_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "The Google Calendar REST payload represents primary, selected, deleted, and hidden as independent provider flags."
+)]
+struct GoogleCalendarListItem {
+    id: String,
+    summary: Option<String>,
+    description: Option<String>,
+    time_zone: Option<String>,
+    color_id: Option<String>,
+    access_role: String,
+    #[serde(default)]
+    primary: bool,
+    #[serde(default)]
+    selected: bool,
+    #[serde(default)]
+    deleted: bool,
+    #[serde(default)]
+    hidden: bool,
+    etag: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct GoogleIdClaims {
     iss: String,
     aud: String,
@@ -505,6 +720,58 @@ fn parse_scopes(scope: Option<String>) -> Vec<String> {
     scopes.sort();
     scopes.dedup();
     scopes
+}
+
+fn normalize_calendar_list_item(
+    item: GoogleCalendarListItem,
+) -> Result<GoogleCalendarListEntry, GoogleAuthError> {
+    let provider_calendar_id = validate_text(item.id, 1_024)?;
+    let name = item
+        .summary
+        .map(|value| validate_text(value, 500))
+        .transpose()?
+        .ok_or(GoogleAuthError::ProviderRejected)?;
+    let description = item
+        .description
+        .map(|value| validate_text(value, 8_192))
+        .transpose()?;
+    let time_zone = item
+        .time_zone
+        .map(|value| validate_text(value, 80))
+        .transpose()?
+        .ok_or(GoogleAuthError::ProviderRejected)?;
+    let color_id = item
+        .color_id
+        .map(|value| validate_text(value, 120))
+        .transpose()?;
+    let access_role = match item.access_role.as_str() {
+        "freeBusyReader" => "free_busy_reader",
+        "reader" | "writer" | "owner" => item.access_role.as_str(),
+        _ => return Err(GoogleAuthError::ProviderRejected),
+    }
+    .to_owned();
+    let provider_etag = item
+        .etag
+        .map(|value| validate_text(value, 2_048))
+        .transpose()?;
+    Ok(GoogleCalendarListEntry {
+        provider_calendar_id,
+        name,
+        description,
+        time_zone,
+        color_id,
+        access_role,
+        is_primary: item.primary,
+        provider_selected: item.selected,
+        visibility: if item.deleted {
+            GoogleCalendarVisibility::Deleted
+        } else if item.hidden {
+            GoogleCalendarVisibility::Hidden
+        } else {
+            GoogleCalendarVisibility::Visible
+        },
+        provider_etag,
+    })
 }
 
 fn valid_url_safe_value(value: &str, maximum_bytes: usize) -> bool {
@@ -612,5 +879,26 @@ mod tests {
     #[test]
     fn cache_control_ttl_is_bounded() {
         assert_eq!(MAX_JWKS_TTL, Duration::from_hours(24));
+    }
+
+    #[test]
+    fn calendar_list_entry_normalizes_visibility_and_access_role() {
+        let item: GoogleCalendarListItem = serde_json::from_str(
+            r#"{
+                "id": "primary",
+                "summary": "Personal",
+                "timeZone": "Asia/Seoul",
+                "accessRole": "owner",
+                "primary": true,
+                "selected": true,
+                "hidden": true
+            }"#,
+        )
+        .expect("fixture should deserialize");
+
+        let entry = normalize_calendar_list_item(item).expect("entry should normalize");
+
+        assert_eq!(entry.access_role, "owner");
+        assert_eq!(entry.visibility, GoogleCalendarVisibility::Hidden);
     }
 }

@@ -2136,12 +2136,8 @@ async fn complete_google_calendar_authorization(
     let code = SecretString::from(query.code.unwrap_or_default());
     let authorization_id = claimed.id;
     let completion = calendar_oauth.complete_authorization(claimed, code).await;
-    let result = match completion {
-        Ok(command) => {
-            planning
-                .complete_calendar_oauth_authorization(&command)
-                .await
-        }
+    let command = match completion {
+        Ok(command) => command,
         Err(error) => {
             let _ = planning
                 .fail_calendar_oauth_authorization(authorization_id, error.failure_code())
@@ -2149,18 +2145,18 @@ async fn complete_google_calendar_authorization(
             return calendar_callback_error_page(error);
         }
     };
-    match result {
-        Ok(_) => calendar_callback_page(
-            StatusCode::OK,
-            "Google Calendar를 연결했어요",
-            "초기 일정을 불러오는 중이에요. 이제 앱으로 돌아가도 됩니다.",
-        ),
+    let user_id = command.user_id;
+    let account = match planning
+        .complete_calendar_oauth_authorization(&command)
+        .await
+    {
+        Ok(account) => account,
         Err(error) => {
             let failure_code = storage_failure_code(&error);
             let _ = planning
                 .fail_calendar_oauth_authorization(authorization_id, failure_code)
                 .await;
-            calendar_callback_page(
+            return calendar_callback_page(
                 if matches!(
                     error,
                     StorageError::PersistenceUnavailable | StorageError::MigrationUnavailable
@@ -2171,8 +2167,56 @@ async fn complete_google_calendar_authorization(
                 },
                 "연결을 완료하지 못했어요",
                 "앱에서 Google Calendar 연결을 다시 시도해 주세요.",
-            )
+            );
         }
+    };
+    finish_initial_calendar_sync(planning, calendar_oauth, account.id, user_id).await
+}
+
+async fn finish_initial_calendar_sync(
+    planning: &Database,
+    calendar_oauth: &CalendarOAuthRuntime,
+    account_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+) -> Response {
+    let Ok(Some(connection)) = planning.calendar_sync_connection(account_id, user_id).await else {
+        let _ = planning
+            .mark_calendar_sync_failure(account_id, user_id, "calendar.provider_unavailable")
+            .await;
+        return calendar_callback_page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "연결했지만 일정을 불러오지 못했어요",
+            "잠시 후 앱에서 다시 연결해 주세요.",
+        );
+    };
+    let entries = match calendar_oauth.initial_calendar_list_sync(&connection).await {
+        Ok(entries) => entries,
+        Err(error) => {
+            let _ = planning
+                .mark_calendar_sync_failure(account_id, user_id, error.failure_code())
+                .await;
+            return calendar_callback_error_page(error);
+        }
+    };
+    if planning
+        .apply_calendar_list_sync(account_id, user_id, &entries)
+        .await
+        .is_ok()
+    {
+        calendar_callback_page(
+            StatusCode::OK,
+            "Google Calendar를 연결했어요",
+            "일정을 불러왔어요. 이제 앱으로 돌아가도 됩니다.",
+        )
+    } else {
+        let _ = planning
+            .mark_calendar_sync_failure(account_id, user_id, "calendar.provider_unavailable")
+            .await;
+        calendar_callback_page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "연결했지만 일정을 불러오지 못했어요",
+            "잠시 후 앱에서 다시 연결해 주세요.",
+        )
     }
 }
 
