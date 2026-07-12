@@ -46,6 +46,11 @@ import { createUuidV7 } from "./uuid";
 type AppMode =
   "configuration" | "server-unreachable" | "loading" | "ready" | "error";
 type ConversationJobs = Record<string, AgentJob>;
+type AssistantDraft = {
+  id: string;
+  text: string;
+  autoSend: boolean;
+};
 
 export default function App() {
   const apiBaseUrl = personalServerBaseUrl ?? "";
@@ -60,9 +65,9 @@ export default function App() {
   const [selectedConversationId, setSelectedConversationId] = useState<
     string | undefined
   >(undefined);
-  const [assistantDraft, setAssistantDraft] = useState<string | undefined>(
-    undefined,
-  );
+  const [assistantDraft, setAssistantDraft] = useState<
+    AssistantDraft | undefined
+  >(undefined);
   const [conversationMessages, setConversationMessages] = useState<
     ConversationMessage[]
   >([]);
@@ -408,7 +413,7 @@ export default function App() {
 
   function handleVoiceTranscript(value: string) {
     startConversation();
-    setAssistantDraft(value);
+    setAssistantDraft({ id: createUuidV7(), text: value, autoSend: true });
     setDestination("chat");
   }
 

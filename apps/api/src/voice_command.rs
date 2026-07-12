@@ -83,7 +83,7 @@ pub(crate) fn interpret(
     }
     let text = text.trim();
 
-    if contains_task_reference(text) {
+    if let Some(task_marker) = task_reference_marker(text) {
         if has_create_verb(text) {
             return Ok(
                 extract_task_title(text).map_or(VoiceCommand::NeedsTaskDetails, |title| {
@@ -91,7 +91,9 @@ pub(crate) fn interpret(
                 }),
             );
         }
-        return Ok(VoiceCommand::ListTasks);
+        if is_explicit_task_reference(task_marker) {
+            return Ok(VoiceCommand::ListTasks);
+        }
     }
 
     if text.contains("일정") {
@@ -130,8 +132,15 @@ fn valid_input(value: &str, maximum_chars: usize) -> bool {
         && !value.chars().any(char::is_control)
 }
 
-fn contains_task_reference(text: &str) -> bool {
-    text.contains("할 일") || text.contains("할일")
+fn task_reference_marker(text: &str) -> Option<&'static str> {
+    ["할 일", "할일", "일을", "업무를"]
+        .iter()
+        .find(|marker| text.contains(**marker))
+        .copied()
+}
+
+fn is_explicit_task_reference(marker: &str) -> bool {
+    matches!(marker, "할 일" | "할일")
 }
 
 fn has_create_verb(text: &str) -> bool {
@@ -263,14 +272,18 @@ fn extract_schedule_title(text: &str) -> Option<String> {
 }
 
 fn extract_task_title(text: &str) -> Option<String> {
-    let marker = if text.contains("할 일") {
-        "할 일"
-    } else {
-        "할일"
-    };
+    let marker = task_reference_marker(text)?;
     let (before, after) = text.split_once(marker)?;
     let after = clean_action_tail(trim_task_reference_particle(after)).trim();
-    clean_title(after).or_else(|| clean_title(trim_object_particle(before)))
+    clean_title(after).or_else(|| clean_task_title_before_marker(before))
+}
+
+fn clean_task_title_before_marker(value: &str) -> Option<String> {
+    let words = trim_object_particle(value)
+        .split_whitespace()
+        .filter(|word| !matches!(*word, "오늘" | "내일" | "모레"))
+        .collect::<Vec<_>>();
+    clean_title(&words.join(" "))
 }
 
 fn trim_task_reference_particle(value: &str) -> &str {
@@ -438,6 +451,27 @@ mod tests {
     #[test]
     fn accepts_the_subject_particle_after_the_task_phrase() {
         let command = interpret("할 일이 장보기 추가해 줘", reference_at(), "Asia/Seoul")
+            .expect("voice command should parse");
+
+        assert_eq!(
+            command,
+            VoiceCommand::CreateTask {
+                title: "장보기".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn asks_which_task_to_add_for_a_natural_task_request() {
+        let command = interpret("일을 추가해줘", reference_at(), "Asia/Seoul")
+            .expect("voice command should parse");
+
+        assert_eq!(command, VoiceCommand::NeedsTaskDetails);
+    }
+
+    #[test]
+    fn creates_a_task_when_natural_task_wording_includes_a_title() {
+        let command = interpret("장보기 일을 추가해줘", reference_at(), "Asia/Seoul")
             .expect("voice command should parse");
 
         assert_eq!(

@@ -37,7 +37,13 @@ type ConversationWorkspaceProps = {
   authenticationRequesting: boolean;
   loading: boolean;
   error: string | undefined;
-  initialDraft: string | undefined;
+  initialDraft:
+    | {
+        id: string;
+        text: string;
+        autoSend: boolean;
+      }
+    | undefined;
   onSelect(conversationId: string): void;
   onInitialDraftApplied(): void;
   onStartConversation(): void;
@@ -68,21 +74,14 @@ export function ConversationWorkspace({
   const composer = useRef<HTMLTextAreaElement>(null);
   const pendingMessageId = useRef<string | undefined>(undefined);
   const pendingMessageText = useRef<string | undefined>(undefined);
+  const appliedInitialDraftId = useRef<string | undefined>(undefined);
   const isWaiting = hasActiveJob;
   const isNewConversation = !selectedConversationId;
   const canSend = authentication?.state === "ready";
 
-  useEffect(() => {
-    if (!initialDraft) return;
-    setDraft(initialDraft);
-    onInitialDraftApplied();
-    requestAnimationFrame(() => composer.current?.focus());
-  }, [initialDraft, onInitialDraftApplied]);
-
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const text = draft.trim();
-    if (!text) return;
+  async function sendText(value: string): Promise<boolean> {
+    const text = value.trim();
+    if (!text) return false;
     const clientMessageId =
       pendingMessageId.current && pendingMessageText.current === text
         ? pendingMessageId.current
@@ -93,8 +92,28 @@ export function ConversationWorkspace({
     if (sent) {
       pendingMessageId.current = undefined;
       pendingMessageText.current = undefined;
-      setDraft("");
+      setDraft((current) => (current.trim() === text ? "" : current));
     }
+    return sent;
+  }
+
+  useEffect(() => {
+    if (!initialDraft || appliedInitialDraftId.current === initialDraft.id) {
+      return;
+    }
+    appliedInitialDraftId.current = initialDraft.id;
+    setDraft(initialDraft.text);
+    onInitialDraftApplied();
+    requestAnimationFrame(() => composer.current?.focus());
+
+    if (initialDraft.autoSend && canSend) {
+      void sendText(initialDraft.text);
+    }
+  }, [canSend, initialDraft, onInitialDraftApplied]);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await sendText(draft);
   }
 
   function startConversation() {

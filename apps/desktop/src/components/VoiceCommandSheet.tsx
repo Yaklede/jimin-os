@@ -205,7 +205,12 @@ export function VoiceCommandSheet({
 
     void onProcessTranscript(value)
       .then((outcome) => {
-        if (!cancelled) setCommandOutcome(outcome);
+        if (cancelled) return;
+        if (outcome.kind === "conversation") {
+          onOpenTextInput(value);
+          return;
+        }
+        setCommandOutcome(outcome);
       })
       .catch(() => {
         if (!cancelled) {
@@ -222,7 +227,14 @@ export function VoiceCommandSheet({
     return () => {
       cancelled = true;
     };
-  }, [commandOutcome, onProcessTranscript, open, state, transcript]);
+  }, [
+    commandOutcome,
+    onOpenTextInput,
+    onProcessTranscript,
+    open,
+    state,
+    transcript,
+  ]);
 
   useEffect(() => {
     if (!open) return;
