@@ -104,9 +104,10 @@ export function OsShell({
           className="os-sidebar__assistant focus-visible-control"
           type="button"
           onClick={openChat}
+          aria-label={copy.actions.startAssistantConversation}
         >
           <Mic aria-hidden="true" />
-          {copy.actions.startAssistantConversation}
+          <span>{copy.actions.startAssistantConversation}</span>
         </button>
       </aside>
 
@@ -132,11 +133,23 @@ export function OsShell({
             >
               <RefreshCw
                 aria-hidden="true"
-                className={refreshing ? "spin" : undefined}
+                className={refreshing ? "spin" : ""}
               />
             </button>
           </div>
         </header>
+        <div
+          className="os-page-load"
+          data-active={refreshing}
+          aria-hidden={!refreshing}
+        >
+          <span className="os-page-load__bar" aria-hidden="true" />
+          {refreshing && (
+            <span className="sr-only" role="status" aria-live="polite">
+              {copy.home.loadingDescription}
+            </span>
+          )}
+        </div>
         <main className="os-content">{children}</main>
       </section>
 
@@ -213,7 +226,8 @@ function NavigationButton({
       data-active={active}
       type="button"
       onClick={onClick}
-      aria-current={active ? "page" : undefined}
+      aria-label={label}
+      {...(active ? { "aria-current": "page" as const } : {})}
     >
       {icon}
       <span>{label}</span>
