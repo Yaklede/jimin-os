@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod config;
 pub mod probe;
+mod voice_command;
 
 use std::{collections::BTreeMap, future::Future, sync::Arc};
 
@@ -32,6 +33,8 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use utoipa::{OpenApi, ToSchema};
+
+use crate::voice_command::{VoiceCommand, VoiceCommandError};
 
 #[async_trait]
 pub trait ReadinessProbe: Send + Sync {
@@ -348,6 +351,32 @@ pub struct AgentAuthenticationResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum VoiceCommandKind {
+    ScheduleListed,
+    ScheduleCreated,
+    TasksListed,
+    TaskCreated,
+    NeedsDetails,
+    ContinueConversation,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum VoiceCommandDestination {
+    Calendar,
+    Conversation,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct VoiceCommandResponse {
+    kind: VoiceCommandKind,
+    message: String,
+    destination: VoiceCommandDestination,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceSessionResponse {
     access_token: String,
@@ -400,6 +429,14 @@ struct CreateTaskRequest {
     notes: Option<String>,
     priority: i16,
     due_at: Option<String>,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct VoiceCommandRequest {
+    text: String,
+    reference_at: String,
+    time_zone: String,
 }
 
 #[derive(serde::Deserialize, ToSchema)]
@@ -479,6 +516,7 @@ pub(crate) fn error_response(
         list_open_tasks,
         create_task,
         complete_task,
+        execute_voice_command,
         list_conversations,
         create_conversation,
         list_conversation_messages,
@@ -508,6 +546,9 @@ pub(crate) fn error_response(
         ScheduleListResponse,
         TaskResponse,
         TaskListResponse,
+        VoiceCommandKind,
+        VoiceCommandDestination,
+        VoiceCommandResponse,
         HomeSnapshotResponse,
         ConversationResponse,
         ConversationListResponse,
@@ -518,7 +559,8 @@ pub(crate) fn error_response(
         AgentAuthenticationResponse,
         CreateConversationRequest,
         CreateAgentTurnRequest,
-        AgentTurnInput
+        AgentTurnInput,
+        VoiceCommandRequest
     )),
     tags((name = "health", description = "Process and dependency health"))
 )]
@@ -547,6 +589,10 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/tasks/{task_id}/complete",
             axum::routing::post(complete_task),
+        )
+        .route(
+            "/v1/assistant/voice-commands",
+            axum::routing::post(execute_voice_command),
         )
         .route(
             "/v1/conversations",
@@ -977,6 +1023,231 @@ async fn create_task(
             Err(()) => unavailable_response(request_id),
         },
         Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/assistant/voice-commands",
+    tag = "assistant",
+    request_body = VoiceCommandRequest,
+    responses((status = 200, body = VoiceCommandResponse), (status = 201, body = VoiceCommandResponse), (status = 400), (status = 401), (status = 503))
+)]
+async fn execute_voice_command(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Json(body): Json<VoiceCommandRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Ok(reference_at) = OffsetDateTime::parse(&body.reference_at, &Rfc3339) else {
+        return invalid_request_response(request_id);
+    };
+    let command = match voice_command::interpret(&body.text, reference_at, &body.time_zone) {
+        Ok(command) => command,
+        Err(VoiceCommandError::InvalidInput) => return invalid_request_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let user_id = principal.identity().user_id();
+
+    handle_voice_command(planning, user_id, command, body.time_zone, request_id).await
+}
+
+async fn handle_voice_command(
+    planning: &Database,
+    user_id: uuid::Uuid,
+    command: VoiceCommand,
+    time_zone: String,
+    request_id: RequestId,
+) -> Response {
+    match command {
+        VoiceCommand::ListSchedule {
+            label,
+            starts_at,
+            ends_at,
+        } => list_voice_schedule(planning, user_id, label, starts_at, ends_at, request_id).await,
+        VoiceCommand::CreateSchedule {
+            label,
+            title,
+            starts_at,
+            ends_at,
+        } => {
+            create_voice_schedule(
+                planning,
+                user_id,
+                VoiceScheduleInput {
+                    label,
+                    title,
+                    starts_at,
+                    ends_at,
+                    time_zone,
+                },
+                request_id,
+            )
+            .await
+        }
+        VoiceCommand::ListTasks => list_voice_tasks(planning, user_id, request_id).await,
+        VoiceCommand::CreateTask { title } => {
+            create_voice_task(planning, user_id, title, request_id).await
+        }
+        VoiceCommand::NeedsScheduleDetails => Json(VoiceCommandResponse {
+            kind: VoiceCommandKind::NeedsDetails,
+            message: "일정 이름과 시간을 함께 말해 주세요. 예: 내일 오후 3시에 치과 일정 등록해 줘"
+                .to_owned(),
+            destination: VoiceCommandDestination::Conversation,
+        })
+        .into_response(),
+        VoiceCommand::NeedsTaskDetails => Json(VoiceCommandResponse {
+            kind: VoiceCommandKind::NeedsDetails,
+            message: "추가할 할 일을 함께 말해 주세요. 예: 할 일에 장보기 추가해 줘".to_owned(),
+            destination: VoiceCommandDestination::Conversation,
+        })
+        .into_response(),
+        VoiceCommand::ContinueConversation => Json(VoiceCommandResponse {
+            kind: VoiceCommandKind::ContinueConversation,
+            message: "일정이나 할 일 외의 요청은 대화에서 이어서 도와드릴게요.".to_owned(),
+            destination: VoiceCommandDestination::Conversation,
+        })
+        .into_response(),
+    }
+}
+
+struct VoiceScheduleInput {
+    label: &'static str,
+    title: String,
+    starts_at: OffsetDateTime,
+    ends_at: OffsetDateTime,
+    time_zone: String,
+}
+
+async fn list_voice_schedule(
+    planning: &Database,
+    user_id: uuid::Uuid,
+    label: &str,
+    starts_at: OffsetDateTime,
+    ends_at: OffsetDateTime,
+    request_id: RequestId,
+) -> Response {
+    match planning
+        .schedule_entries_in_range(user_id, starts_at, ends_at)
+        .await
+    {
+        Ok(entries) => Json(VoiceCommandResponse {
+            kind: VoiceCommandKind::ScheduleListed,
+            message: schedule_list_message(label, &entries),
+            destination: VoiceCommandDestination::Calendar,
+        })
+        .into_response(),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+async fn create_voice_schedule(
+    planning: &Database,
+    user_id: uuid::Uuid,
+    input: VoiceScheduleInput,
+    request_id: RequestId,
+) -> Response {
+    let VoiceScheduleInput {
+        label,
+        title,
+        starts_at,
+        ends_at,
+        time_zone,
+    } = input;
+    match planning
+        .create_schedule_entry(&NewScheduleEntry {
+            id: uuid::Uuid::now_v7(),
+            user_id,
+            title: title.clone(),
+            notes: None,
+            starts_at,
+            ends_at,
+            time_zone,
+        })
+        .await
+    {
+        Ok(entry) => (
+            StatusCode::CREATED,
+            Json(VoiceCommandResponse {
+                kind: VoiceCommandKind::ScheduleCreated,
+                message: format!(
+                    "{label} {:02}:{:02}에 {title} 일정을 등록했어요.",
+                    entry.starts_at.hour(),
+                    entry.starts_at.minute(),
+                ),
+                destination: VoiceCommandDestination::Calendar,
+            }),
+        )
+            .into_response(),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+async fn list_voice_tasks(
+    planning: &Database,
+    user_id: uuid::Uuid,
+    request_id: RequestId,
+) -> Response {
+    match planning.open_tasks_for_user(user_id).await {
+        Ok(tasks) => Json(VoiceCommandResponse {
+            kind: VoiceCommandKind::TasksListed,
+            message: if tasks.is_empty() {
+                "열린 할 일이 없어요.".to_owned()
+            } else {
+                format!("열린 할 일이 {}개 있어요.", tasks.len())
+            },
+            destination: VoiceCommandDestination::Calendar,
+        })
+        .into_response(),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+async fn create_voice_task(
+    planning: &Database,
+    user_id: uuid::Uuid,
+    title: String,
+    request_id: RequestId,
+) -> Response {
+    match planning
+        .create_task(&NewTask {
+            id: uuid::Uuid::now_v7(),
+            user_id,
+            title: title.clone(),
+            notes: None,
+            priority: 1,
+            due_at: None,
+        })
+        .await
+    {
+        Ok(_) => (
+            StatusCode::CREATED,
+            Json(VoiceCommandResponse {
+                kind: VoiceCommandKind::TaskCreated,
+                message: format!("{title} 할 일을 추가했어요."),
+                destination: VoiceCommandDestination::Calendar,
+            }),
+        )
+            .into_response(),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+fn schedule_list_message(label: &str, entries: &[ScheduleEntry]) -> String {
+    match entries {
+        [] => format!("{label} 일정은 없어요."),
+        [entry] => format!("{label} 일정은 1개예요. {}", entry.title),
+        [first, ..] => format!(
+            "{label} 일정은 {}개예요. 첫 일정은 {}예요.",
+            entries.len(),
+            first.title
+        ),
     }
 }
 
@@ -1965,6 +2236,7 @@ mod tests {
                 "/v1/access/session",
                 "/v1/agent/authentication",
                 "/v1/agent/jobs/{job_id}",
+                "/v1/assistant/voice-commands",
                 "/v1/auth/refresh",
                 "/v1/conversations",
                 "/v1/conversations/{conversation_id}/jobs/latest",
@@ -2036,6 +2308,26 @@ mod tests {
                 .expect("handler should respond");
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
+    }
+
+    #[tokio::test]
+    async fn voice_command_endpoint_requires_a_live_signed_session() {
+        let (state, _, _) = signed_auth_state(true);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/assistant/voice-commands")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"text":"내일 일정 알려줘","referenceAt":"2026-07-12T09:00:00+09:00","timeZone":"Asia/Seoul"}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]

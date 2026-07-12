@@ -9,6 +9,7 @@ import {
   type Task,
 } from "./api/planning";
 import { type HomeSnapshot, fetchHomeSnapshot } from "./api/home";
+import { processVoiceCommand } from "./api/voice";
 import {
   AgentRequestError,
   createConversation,
@@ -30,6 +31,7 @@ import { MemoryWorkspace } from "./components/MemoryWorkspace";
 import { OsShell, type OsDestination } from "./components/OsShell";
 import { PlanningWorkspace } from "./components/PlanningWorkspace";
 import { SettingsWorkspace } from "./components/SettingsWorkspace";
+import { type VoiceCommandOutcome } from "./components/VoiceCommandSheet";
 import { copy } from "./copy";
 import {
   clearDeviceSession,
@@ -418,6 +420,46 @@ export default function App() {
     setDestination("chat");
   }
 
+  async function handleVoiceCommand(
+    value: string,
+  ): Promise<VoiceCommandOutcome> {
+    if (!tokens) {
+      return {
+        kind: "failed",
+        message: copy.voice.commandFailed,
+      };
+    }
+    try {
+      const result = await processVoiceCommand(
+        apiBaseUrl,
+        tokens.accessToken,
+        value,
+      );
+      if (
+        result.kind === "schedule_listed" ||
+        result.kind === "schedule_created" ||
+        result.kind === "tasks_listed" ||
+        result.kind === "task_created"
+      ) {
+        void loadHomeSnapshot();
+        return {
+          kind: "handled",
+          message: result.message,
+          destination: "calendar",
+        };
+      }
+      if (result.kind === "needs_details") {
+        return { kind: "needs-details", message: result.message };
+      }
+      return { kind: "conversation", message: result.message };
+    } catch {
+      return {
+        kind: "failed",
+        message: copy.voice.commandFailed,
+      };
+    }
+  }
+
   async function beginAgentAuthentication(): Promise<void> {
     if (!tokens || authenticationRequesting) return;
     setAuthenticationRequesting(true);
@@ -508,6 +550,7 @@ export default function App() {
           destination={destination}
           onNavigate={setDestination}
           onVoiceTranscript={handleVoiceTranscript}
+          onVoiceCommand={handleVoiceCommand}
           onRefresh={() => void refresh()}
           refreshing={mode === "loading"}
           rail={

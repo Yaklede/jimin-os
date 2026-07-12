@@ -51,18 +51,31 @@ type SpeechRecognitionLike = {
 
 type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
 
+export type VoiceCommandOutcome =
+  | {
+      kind: "handled";
+      message: string;
+      destination: "calendar";
+    }
+  | {
+      kind: "needs-details" | "conversation" | "failed";
+      message: string;
+    };
+
 type VoiceCommandSheetProps = {
   open: boolean;
   onClose(): void;
-  onUseTranscript(value: string): void;
-  onOpenTextInput(): void;
+  onProcessTranscript(value: string): Promise<VoiceCommandOutcome>;
+  onOpenTextInput(value?: string): void;
+  onOpenDestination(destination: "calendar"): void;
 };
 
 export function VoiceCommandSheet({
   open,
   onClose,
-  onUseTranscript,
+  onProcessTranscript,
   onOpenTextInput,
+  onOpenDestination,
 }: VoiceCommandSheetProps) {
   const recognizerRef = useRef<SpeechRecognitionLike | undefined>(undefined);
   const usingNativeRecognitionRef = useRef(false);
@@ -70,6 +83,10 @@ export function VoiceCommandSheet({
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<RecognitionState>("listening");
   const [transcript, setTranscript] = useState("");
+  const [commandOutcome, setCommandOutcome] = useState<
+    VoiceCommandOutcome | undefined
+  >(undefined);
+  const [processingCommand, setProcessingCommand] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -77,6 +94,8 @@ export function VoiceCommandSheet({
     completedRef.current = false;
     setTranscript("");
     setState("listening");
+    setCommandOutcome(undefined);
+    setProcessingCommand(false);
 
     if (usesAndroidNativeRecognition()) {
       usingNativeRecognitionRef.current = true;
@@ -159,6 +178,8 @@ export function VoiceCommandSheet({
   if (!open) return null;
 
   function retry() {
+    setCommandOutcome(undefined);
+    setProcessingCommand(false);
     if (usingNativeRecognitionRef.current) {
       setAttempt((current) => current + 1);
       return;
@@ -182,9 +203,28 @@ export function VoiceCommandSheet({
     setState(transcript.trim() ? "heard" : "no-speech");
   }
 
-  function useTranscript() {
+  async function processTranscript() {
     if (!transcript.trim()) return;
-    onUseTranscript(transcript.trim());
+    setProcessingCommand(true);
+    try {
+      setCommandOutcome(await onProcessTranscript(transcript.trim()));
+    } catch {
+      setCommandOutcome({
+        kind: "failed",
+        message: copy.voice.commandFailed,
+      });
+    } finally {
+      setProcessingCommand(false);
+    }
+  }
+
+  function continueConversation() {
+    onOpenTextInput(transcript.trim());
+  }
+
+  function openCommandDestination() {
+    if (commandOutcome?.kind !== "handled") return;
+    onOpenDestination(commandOutcome.destination);
   }
 
   return (
@@ -207,18 +247,28 @@ export function VoiceCommandSheet({
 
         <span
           className="voice-sheet__orb"
-          data-state={state}
+          data-state={processingCommand ? "processing" : state}
           aria-hidden="true"
         >
-          {isRecordingState(state) ? (
+          {isRecordingState(state) || processingCommand ? (
             <LoaderCircle className="spin" />
           ) : (
             <Mic />
           )}
         </span>
-        <h2 id="voice-sheet-title">{titleFor(state)}</h2>
+        <h2 id="voice-sheet-title">
+          {commandOutcome
+            ? titleForOutcome(commandOutcome)
+            : processingCommand
+              ? copy.voice.processingCommandTitle
+              : titleFor(state)}
+        </h2>
         <p className="voice-sheet__description" aria-live="polite">
-          {descriptionFor(state)}
+          {commandOutcome
+            ? commandOutcome.message
+            : processingCommand
+              ? copy.voice.processingCommandDescription
+              : descriptionFor(state)}
         </p>
 
         {isRecordingState(state) && (
@@ -238,9 +288,8 @@ export function VoiceCommandSheet({
           </>
         )}
 
-        {state === "heard" && transcript && (
-          <p className="voice-sheet__transcript">{transcript}</p>
-        )}
+        {(state === "heard" || processingCommand || commandOutcome) &&
+          transcript && <p className="voice-sheet__transcript">{transcript}</p>}
 
         {isRecoveryState(state) && (
           <p className="voice-sheet__notice" role="alert">
@@ -250,14 +299,55 @@ export function VoiceCommandSheet({
         )}
 
         <div className="voice-sheet__actions">
-          {state === "heard" ? (
+          {processingCommand ? (
+            <button className="primary-button" type="button" disabled>
+              <LoaderCircle className="spin" aria-hidden="true" />
+              {copy.voice.processingCommandAction}
+            </button>
+          ) : commandOutcome?.kind === "handled" ? (
+            <>
+              <button
+                className="primary-button focus-visible-control"
+                type="button"
+                onClick={openCommandDestination}
+              >
+                <SendHorizontal aria-hidden="true" />
+                {copy.voice.openSchedule}
+              </button>
+              <button
+                className="voice-sheet__secondary focus-visible-control"
+                type="button"
+                onClick={onClose}
+              >
+                {copy.voice.close}
+              </button>
+            </>
+          ) : commandOutcome ? (
+            <>
+              <button
+                className="primary-button focus-visible-control"
+                type="button"
+                onClick={retry}
+              >
+                <Mic aria-hidden="true" />
+                {copy.voice.retry}
+              </button>
+              <button
+                className="voice-sheet__secondary focus-visible-control"
+                type="button"
+                onClick={continueConversation}
+              >
+                {copy.voice.continueConversation}
+              </button>
+            </>
+          ) : state === "heard" ? (
             <button
               className="primary-button focus-visible-control"
               type="button"
-              onClick={useTranscript}
+              onClick={() => void processTranscript()}
             >
               <SendHorizontal aria-hidden="true" />
-              {copy.voice.useTranscript}
+              {copy.voice.processTranscript}
             </button>
           ) : state === "listening" ? (
             <>
@@ -272,7 +362,7 @@ export function VoiceCommandSheet({
               <button
                 className="voice-sheet__secondary focus-visible-control"
                 type="button"
-                onClick={onOpenTextInput}
+                onClick={() => onOpenTextInput()}
               >
                 {copy.voice.useTextInput}
               </button>
@@ -295,7 +385,7 @@ export function VoiceCommandSheet({
               <button
                 className="voice-sheet__secondary focus-visible-control"
                 type="button"
-                onClick={onOpenTextInput}
+                onClick={() => onOpenTextInput()}
               >
                 {copy.voice.useTextInput}
               </button>
@@ -312,6 +402,15 @@ export function VoiceCommandSheet({
       </section>
     </div>
   );
+}
+
+function titleForOutcome(outcome: VoiceCommandOutcome): string {
+  if (outcome.kind === "handled") return copy.voice.commandHandledTitle;
+  if (outcome.kind === "needs-details")
+    return copy.voice.commandNeedsDetailsTitle;
+  if (outcome.kind === "conversation")
+    return copy.voice.commandConversationTitle;
+  return copy.voice.commandFailedTitle;
 }
 
 function recognitionConstructor(): SpeechRecognitionConstructor | undefined {

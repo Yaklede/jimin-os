@@ -11,7 +11,10 @@ import {
 import { type ReactNode, useState } from "react";
 
 import { copy } from "../copy";
-import { VoiceCommandSheet } from "./VoiceCommandSheet";
+import {
+  type VoiceCommandOutcome,
+  VoiceCommandSheet,
+} from "./VoiceCommandSheet";
 
 export type OsDestination =
   "home" | "calendar" | "chat" | "memory" | "settings";
@@ -22,6 +25,7 @@ type OsShellProps = {
   rail?: ReactNode;
   onNavigate(destination: OsDestination): void;
   onVoiceTranscript(value: string): void;
+  onVoiceCommand(value: string): Promise<VoiceCommandOutcome>;
   onRefresh(): void;
   refreshing: boolean;
 };
@@ -32,6 +36,7 @@ export function OsShell({
   rail,
   onNavigate,
   onVoiceTranscript,
+  onVoiceCommand,
   onRefresh,
   refreshing,
 }: OsShellProps) {
@@ -39,14 +44,18 @@ export function OsShell({
   const openChat = () => onNavigate("chat");
   const openVoiceSheet = () => setVoiceSheetOpen(true);
 
-  function openTextInput() {
+  function openTextInput(value?: string) {
     setVoiceSheetOpen(false);
+    if (value) {
+      onVoiceTranscript(value);
+      return;
+    }
     openChat();
   }
 
-  function useVoiceTranscript(value: string) {
+  function openVoiceDestination(destination: "calendar") {
     setVoiceSheetOpen(false);
-    onVoiceTranscript(value);
+    onNavigate(destination);
   }
 
   return (
@@ -172,7 +181,8 @@ export function OsShell({
         open={voiceSheetOpen}
         onClose={() => setVoiceSheetOpen(false)}
         onOpenTextInput={openTextInput}
-        onUseTranscript={useVoiceTranscript}
+        onOpenDestination={openVoiceDestination}
+        onProcessTranscript={onVoiceCommand}
       />
     </div>
   );
