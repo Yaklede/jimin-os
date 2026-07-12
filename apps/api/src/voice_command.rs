@@ -133,14 +133,14 @@ fn valid_input(value: &str, maximum_chars: usize) -> bool {
 }
 
 fn task_reference_marker(text: &str) -> Option<&'static str> {
-    ["할 일", "할일", "일을", "업무를"]
+    ["할 일", "할일", "일감", "일을", "업무를"]
         .iter()
         .find(|marker| text.contains(**marker))
         .copied()
 }
 
 fn is_explicit_task_reference(marker: &str) -> bool {
-    matches!(marker, "할 일" | "할일")
+    matches!(marker, "할 일" | "할일" | "일감")
 }
 
 fn has_create_verb(text: &str) -> bool {
@@ -281,9 +281,26 @@ fn extract_task_title(text: &str) -> Option<String> {
 fn clean_task_title_before_marker(value: &str) -> Option<String> {
     let words = trim_object_particle(value)
         .split_whitespace()
-        .filter(|word| !matches!(*word, "오늘" | "내일" | "모레"))
+        .filter(|word| !matches!(*word, "오늘" | "금일" | "내일" | "모레"))
         .collect::<Vec<_>>();
-    clean_title(&words.join(" "))
+    clean_title(trim_task_intent_suffix(&words.join(" ")))
+}
+
+fn trim_task_intent_suffix(value: &str) -> &str {
+    [
+        "해야 한다고",
+        "해야한다고",
+        "해야 해",
+        "해야해",
+        "해야 함",
+        "해야함",
+        "해야 할",
+        "해야할",
+    ]
+    .iter()
+    .find_map(|suffix| value.trim_end().strip_suffix(suffix))
+    .unwrap_or(value)
+    .trim_end()
 }
 
 fn trim_task_reference_particle(value: &str) -> &str {
@@ -304,7 +321,7 @@ fn is_time_word(value: &str) -> bool {
 }
 
 fn clean_action_tail(value: &str) -> &str {
-    const ACTIONS: [&str; 20] = [
+    const ACTIONS: [&str; 22] = [
         "일정을 등록해줘",
         "일정 추가해줘",
         "일정을 넣어줘",
@@ -321,6 +338,8 @@ fn clean_action_tail(value: &str) -> &str {
         "추가해 줘",
         "넣어 줘",
         "잡아 줘",
+        "등록",
+        "추가",
         "등록해",
         "추가해",
         "넣어",
@@ -478,6 +497,23 @@ mod tests {
             command,
             VoiceCommand::CreateTask {
                 title: "장보기".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn creates_a_task_from_a_natural_work_item_request() {
+        let command = interpret(
+            "금일 비스켓링크 내용정리 회의록 정리해야한다고 일감추가",
+            reference_at(),
+            "Asia/Seoul",
+        )
+        .expect("voice command should parse");
+
+        assert_eq!(
+            command,
+            VoiceCommand::CreateTask {
+                title: "비스켓링크 내용정리 회의록 정리".to_owned()
             }
         );
     }

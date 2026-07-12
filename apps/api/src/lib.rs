@@ -3232,6 +3232,18 @@ mod tests {
     }
 
     #[test]
+    fn conversation_work_item_request_uses_the_immediate_task_action() {
+        assert_eq!(
+            pending_action_from_conversation_text(
+                "금일 비스켓링크 내용정리 회의록 정리해야한다고 일감추가",
+            ),
+            Some(PendingAgentAction::CreateTask {
+                title: "비스켓링크 내용정리 회의록 정리".to_owned(),
+            }),
+        );
+    }
+
+    #[test]
     fn missing_agent_authentication_maps_to_a_login_request_without_code() {
         let response = agent_authentication_response(None);
         assert_eq!(response.state, "needs_login");
