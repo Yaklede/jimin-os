@@ -600,6 +600,7 @@ pub(crate) fn error_response(
         get_google_calendar_connection,
         start_google_calendar_authorization,
         complete_google_calendar_authorization,
+        sync_google_calendar,
         get_home_snapshot,
         create_schedule_entry,
         list_open_tasks,
@@ -691,6 +692,10 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/calendar/connections/google/authorizations",
             post(start_google_calendar_authorization),
+        )
+        .route(
+            "/v1/calendar/connections/google/sync",
+            post(sync_google_calendar),
         )
         .route("/v1/home", get(get_home_snapshot))
         .route("/v1/tasks", get(list_open_tasks).post(create_task))
@@ -2214,82 +2219,116 @@ async fn finish_initial_calendar_sync(
     account_id: uuid::Uuid,
     user_id: uuid::Uuid,
 ) -> Response {
-    let Ok(Some(connection)) = planning.calendar_sync_connection(account_id, user_id).await else {
-        let _ = planning
-            .mark_calendar_sync_failure(account_id, user_id, "calendar.provider_unavailable")
-            .await;
-        return calendar_callback_page(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "연결했지만 일정을 불러오지 못했어요",
-            "잠시 후 앱에서 다시 연결해 주세요.",
-        );
-    };
-    let entries = match calendar_oauth.initial_calendar_list_sync(&connection).await {
-        Ok(entries) => entries,
+    match synchronize_google_calendar(planning, calendar_oauth, account_id, user_id).await {
+        Ok(()) => calendar_callback_page(
+            StatusCode::OK,
+            "Google Calendar를 연결했어요",
+            "일정을 불러왔어요. 이제 앱으로 돌아가도 됩니다.",
+        ),
         Err(error) => {
             let _ = planning
                 .mark_calendar_sync_failure(account_id, user_id, error.failure_code())
                 .await;
-            return calendar_callback_error_page(error);
+            calendar_callback_error_page(error)
         }
-    };
-    if planning
-        .apply_calendar_list_sync(account_id, user_id, &entries)
-        .await
-        .is_err()
-    {
-        let _ = planning
-            .mark_calendar_sync_failure(account_id, user_id, "calendar.provider_unavailable")
-            .await;
-        return calendar_callback_page(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "연결했지만 일정을 불러오지 못했어요",
-            "잠시 후 앱에서 다시 연결해 주세요.",
-        );
     }
-    let Ok(targets) = planning.calendar_sync_targets(account_id, user_id).await else {
-        let _ = planning
-            .mark_calendar_sync_failure(account_id, user_id, "calendar.provider_unavailable")
-            .await;
-        return calendar_callback_page(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "연결했지만 일정을 불러오지 못했어요",
-            "잠시 후 앱에서 다시 연결해 주세요.",
-        );
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/calendar/connections/google/sync",
+    tag = "calendar",
+    responses(
+        (status = 200, body = GoogleCalendarConnectionResponse),
+        (status = 401),
+        (status = 409),
+        (status = 503)
+    )
+)]
+async fn sync_google_calendar(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
     };
-    let events = match calendar_oauth
-        .initial_calendar_event_sync(&connection, &targets)
-        .await
-    {
-        Ok(events) => events,
-        Err(error) => {
-            let _ = planning
-                .mark_calendar_sync_failure(account_id, user_id, error.failure_code())
-                .await;
-            return calendar_callback_error_page(error);
-        }
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
     };
-    for (calendar_id, events) in events {
-        if planning
-            .apply_calendar_event_full_sync(account_id, user_id, calendar_id, &events)
-            .await
-            .is_err()
-        {
-            let _ = planning
-                .mark_calendar_sync_failure(account_id, user_id, "calendar.provider_unavailable")
-                .await;
-            return calendar_callback_page(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "연결했지만 일정을 불러오지 못했어요",
-                "잠시 후 앱에서 다시 연결해 주세요.",
+    let Some(calendar_oauth) = state.calendar_oauth() else {
+        return calendar_oauth_error_response(CalendarOAuthError::Configuration, request_id);
+    };
+    let user_id = principal.identity().user_id();
+    let account = match planning.calendar_account_for_user(user_id).await {
+        Ok(Some(account)) if account.status == CalendarAccountStatus::Active => account,
+        Ok(Some(_)) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "calendar.connection_needs_attention",
+                "Google Calendar 연결을 다시 확인해 주세요.",
+                request_id,
+                false,
             );
         }
+        Ok(None) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "calendar.connection_missing",
+                "먼저 Google Calendar를 연결해 주세요.",
+                request_id,
+                false,
+            );
+        }
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    match synchronize_google_calendar(planning, calendar_oauth, account.id, user_id).await {
+        Ok(()) => match planning.calendar_account_for_user(user_id).await {
+            Ok(connection) => Json(calendar_connection_response(connection)).into_response(),
+            Err(error) => storage_error_response(&error, request_id),
+        },
+        Err(error) => {
+            let _ = planning
+                .mark_calendar_sync_failure(account.id, user_id, error.failure_code())
+                .await;
+            calendar_oauth_error_response(error, request_id)
+        }
     }
-    calendar_callback_page(
-        StatusCode::OK,
-        "Google Calendar를 연결했어요",
-        "일정을 불러왔어요. 이제 앱으로 돌아가도 됩니다.",
-    )
+}
+
+async fn synchronize_google_calendar(
+    planning: &Database,
+    calendar_oauth: &CalendarOAuthRuntime,
+    account_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+) -> Result<(), CalendarOAuthError> {
+    let connection = planning
+        .calendar_sync_connection(account_id, user_id)
+        .await
+        .map_err(|_| CalendarOAuthError::ProviderUnavailable)?
+        .ok_or(CalendarOAuthError::ProviderUnavailable)?;
+    let entries = calendar_oauth
+        .initial_calendar_list_sync(&connection)
+        .await?;
+    planning
+        .apply_calendar_list_sync(account_id, user_id, &entries)
+        .await
+        .map_err(|_| CalendarOAuthError::ProviderUnavailable)?;
+    let targets = planning
+        .calendar_sync_targets(account_id, user_id)
+        .await
+        .map_err(|_| CalendarOAuthError::ProviderUnavailable)?;
+    let events = calendar_oauth
+        .initial_calendar_event_sync(&connection, &targets)
+        .await?;
+    for (calendar_id, events) in events {
+        planning
+            .apply_calendar_event_full_sync(account_id, user_id, calendar_id, &events)
+            .await
+            .map_err(|_| CalendarOAuthError::ProviderUnavailable)?;
+    }
+    Ok(())
 }
 
 fn calendar_oauth_error_response(error: CalendarOAuthError, request_id: RequestId) -> Response {
@@ -3042,6 +3081,7 @@ mod tests {
                 "/v1/auth/refresh",
                 "/v1/calendar/connections/google",
                 "/v1/calendar/connections/google/authorizations",
+                "/v1/calendar/connections/google/sync",
                 "/v1/conversations",
                 "/v1/conversations/{conversation_id}/jobs/latest",
                 "/v1/conversations/{conversation_id}/messages",
@@ -3094,19 +3134,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn calendar_connection_endpoint_requires_a_live_signed_session() {
+    async fn calendar_connection_endpoints_require_a_live_signed_session() {
         let (state, _, _) = signed_auth_state(true);
-        let response = router(state)
-            .oneshot(
-                Request::builder()
-                    .uri("/v1/calendar/connections/google")
-                    .body(Body::empty())
-                    .expect("request should be valid"),
-            )
-            .await
-            .expect("handler should respond");
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        for request in [
+            Request::builder()
+                .uri("/v1/calendar/connections/google")
+                .body(Body::empty())
+                .expect("request should be valid"),
+            Request::builder()
+                .method("POST")
+                .uri("/v1/calendar/connections/google/sync")
+                .body(Body::empty())
+                .expect("request should be valid"),
+        ] {
+            let response = router(state.clone())
+                .oneshot(request)
+                .await
+                .expect("handler should respond");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
     }
 
     #[tokio::test]
