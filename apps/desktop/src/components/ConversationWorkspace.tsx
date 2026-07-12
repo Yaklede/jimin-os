@@ -288,22 +288,30 @@ function AssistantWelcome({
         <span>{copy.conversations.description}</span>
       </header>
       {canSend ? (
-        <div
-          className="assistant-starter-list"
-          aria-label={copy.conversations.startersLabel}
+        <section
+          className="assistant-starters"
+          aria-labelledby="assistant-starters-title"
         >
-          {copy.conversations.starters.map((starter) => (
-            <button
-              className="assistant-starter-list__item focus-visible-control"
-              type="button"
-              key={starter}
-              onClick={() => onChooseStarter(starter)}
-            >
-              <span>{starter}</span>
-              <ArrowUpRight aria-hidden="true" />
-            </button>
-          ))}
-        </div>
+          <h2
+            className="assistant-starter-list__label"
+            id="assistant-starters-title"
+          >
+            {copy.conversations.startersLabel}
+          </h2>
+          <div className="assistant-starter-list">
+            {copy.conversations.starters.map((starter) => (
+              <button
+                className="assistant-starter-list__item focus-visible-control"
+                type="button"
+                key={starter}
+                onClick={() => onChooseStarter(starter)}
+              >
+                <span>{starter}</span>
+                <ArrowUpRight aria-hidden="true" />
+              </button>
+            ))}
+          </div>
+        </section>
       ) : (
         <AssistantAuthenticationGate
           authentication={authentication}
@@ -341,10 +349,11 @@ function ConversationThread({
         <button
           className="assistant-thread-header__new focus-visible-control"
           type="button"
+          aria-label={copy.actions.startConversation}
           onClick={onStartConversation}
         >
           <Plus aria-hidden="true" />
-          {copy.conversations.newConversation}
+          <span>{copy.conversations.newConversation}</span>
         </button>
       </header>
       <div className="assistant-transcript" aria-live="off">
@@ -427,7 +436,9 @@ function AssistantComposer({
       data-welcome={isNewConversation}
       onSubmit={onSubmit}
     >
-      <label htmlFor="agent-message">{copy.conversations.composerLabel}</label>
+      <label className="assistant-request-field__label" htmlFor="agent-message">
+        {copy.conversations.composerLabel}
+      </label>
       <textarea
         ref={composer}
         id="agent-message"
@@ -444,10 +455,13 @@ function AssistantComposer({
         <button
           className="assistant-request-field__send focus-visible-control"
           type="submit"
+          aria-label={copy.actions.sendRequest}
           disabled={loading || waiting || !draft.trim()}
         >
           <SendHorizontal aria-hidden="true" />
-          {waiting ? copy.actions.sendingRequest : copy.actions.sendRequest}
+          <span>
+            {waiting ? copy.actions.sendingRequest : copy.actions.sendRequest}
+          </span>
         </button>
       </div>
     </form>

@@ -1204,7 +1204,7 @@ svg {
 .assistant-welcome-panel {
   display: grid;
   align-content: start;
-  gap: 20px;
+  gap: 24px;
   max-width: 640px;
   margin: auto;
   padding: 32px 12px;
@@ -1246,6 +1246,18 @@ svg {
   margin-top: 6px;
   color: var(--muted);
   font-size: 14px;
+}
+
+.assistant-starters {
+  display: grid;
+  gap: 12px;
+}
+
+.assistant-starter-list__label {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .assistant-starter-list {
@@ -1872,12 +1884,16 @@ svg {
   }
 
   .assistant-mobile-identity {
+    position: sticky;
+    top: 0;
+    z-index: 3;
     display: flex;
     align-items: center;
     gap: 10px;
-    min-height: 58px;
+    min-height: 64px;
     border-bottom: 1px solid var(--border);
-    padding: 8px 0;
+    padding: 10px 0;
+    background: var(--canvas);
   }
 
   .assistant-mobile-identity > span {
@@ -1904,14 +1920,17 @@ svg {
   .assistant-mobile-identity p {
     margin: 1px 0 0;
     color: var(--muted);
-    font-size: 12px;
+    font-size: 13px;
   }
 
   .assistant-welcome-panel {
+    display: flex;
+    flex-direction: column;
     flex: 1;
     width: 100%;
     margin: 0;
-    padding: 28px 0 20px;
+    gap: 32px;
+    padding: 32px 0 20px;
   }
 
   .assistant-welcome-panel header {
@@ -1923,65 +1942,95 @@ svg {
   }
 
   .assistant-welcome-panel h1 {
-    max-width: 300px;
-    font-size: 24px;
-    line-height: 1.4;
+    max-width: 340px;
+    font-size: 32px;
+    line-height: 1.25;
   }
 
   .assistant-welcome-panel header > span {
-    max-width: 300px;
-    margin-top: 8px;
-    font-size: 14px;
-    line-height: 1.55;
+    max-width: 340px;
+    margin-top: 12px;
+    font-size: 16px;
+    line-height: 1.5;
+  }
+
+  .assistant-starters {
+    gap: 12px;
   }
 
   .assistant-starter-list {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
     gap: 8px;
-    margin-top: 4px;
   }
 
   .assistant-starter-list__item {
-    min-height: 38px;
-    width: auto;
-    border-radius: 99px;
-    padding: 8px 12px;
-    color: var(--accent);
-    font-size: 13px;
+    min-height: 48px;
+    width: 100%;
+    border-radius: var(--radius-control);
+    padding: 12px;
+    color: var(--text);
+    font-size: 14px;
   }
 
   .assistant-starter-list__item svg {
-    display: none;
+    width: 17px;
+    height: 17px;
+    color: var(--accent);
   }
 
   .assistant-thread-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 44px;
+    align-items: center;
+    min-height: 64px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .assistant-thread-header > div > p,
+  .assistant-thread-header > div > span {
     display: none;
   }
 
-  .assistant-thread-header__new {
-    min-width: 36px;
-    padding: 8px;
+  .assistant-thread-header h1 {
+    overflow: hidden;
+    color: var(--text-strong);
+    font-size: 16px;
+    line-height: 1.4;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .assistant-thread-header__new:not(svg) {
+  .assistant-thread-header__new {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 10px;
+  }
+
+  .assistant-thread-header__new > span {
     font-size: 0;
   }
 
   .assistant-transcript {
     min-height: 250px;
-    padding: 24px 0 18px;
+    padding: 20px 0 24px;
   }
 
   .assistant-message {
-    max-width: 92%;
+    max-width: 88%;
+  }
+
+  .assistant-message-list {
+    gap: 20px;
   }
 
   .assistant-request-field {
     position: sticky;
     bottom: calc(80px + env(safe-area-inset-bottom));
     margin-top: 16px;
+    border-radius: var(--radius-panel);
     background: var(--surface);
+    box-shadow: var(--shadow-panel);
   }
 
   .assistant-request-field[data-welcome="true"] {
@@ -1989,11 +2038,35 @@ svg {
   }
 
   .assistant-request-field textarea {
-    min-height: 52px;
+    min-height: 72px;
+    resize: none;
+  }
+
+  .assistant-request-field__label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 
   .assistant-request-field__footer > span {
     display: none;
+  }
+
+  .assistant-request-field__footer {
+    justify-content: flex-end;
+  }
+
+  .assistant-request-field__send {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 10px;
+  }
+
+  .assistant-request-field__send > span {
+    font-size: 0;
   }
 
   .assistant-auth-gate {
