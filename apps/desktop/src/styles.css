@@ -22,6 +22,7 @@
   --radius-panel: 16px;
   --safe-area-top: env(safe-area-inset-top, 0px);
   --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --mobile-top-clearance: max(32px, var(--safe-area-top));
   --font-sans:
     Pretendard Variable, Pretendard, "Apple SD Gothic Neo", system-ui,
     sans-serif;
@@ -1626,12 +1627,12 @@ svg {
 
   .os-content {
     min-height: 100dvh;
-    padding: max(20px, var(--safe-area-top)) 16px
+    padding: var(--mobile-top-clearance) 16px
       calc(104px + var(--safe-area-bottom));
   }
 
   .os-shell[data-destination="chat"] .os-content {
-    padding-top: max(16px, var(--safe-area-top));
+    padding-top: var(--mobile-top-clearance);
     padding-bottom: calc(140px + var(--safe-area-bottom));
   }
 
@@ -1834,7 +1835,7 @@ svg {
 
   .assistant-mobile-identity {
     position: sticky;
-    top: 0;
+    top: var(--mobile-top-clearance);
     z-index: 3;
     display: grid;
     grid-template-columns: 34px minmax(0, 1fr) 44px;
