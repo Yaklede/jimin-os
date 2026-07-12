@@ -739,19 +739,19 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/me", get(me))
         .route("/v1/devices", get(devices));
 
+    let allowed_origins = allowed_client_origins(state.trusted_network());
+
     router
         .fallback(not_found)
         .with_state(state)
         .layer(
             CorsLayer::new()
                 // The desktop and mobile WebViews use fixed Tauri origins.
+                // A loopback-only trusted-network deployment additionally
+                // permits the local Vite dev server for desktop app testing.
                 // Do not widen this to arbitrary web origins: this API accepts
                 // bearer tokens from the installed personal client.
-                .allow_origin([
-                    HeaderValue::from_static("tauri://localhost"),
-                    HeaderValue::from_static("http://tauri.localhost"),
-                    HeaderValue::from_static("https://tauri.localhost"),
-                ])
+                .allow_origin(allowed_origins)
                 .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
                 .allow_headers([
                     axum::http::header::AUTHORIZATION,
@@ -759,6 +759,21 @@ pub fn router(state: ApiState) -> Router {
                 ]),
         )
         .layer(middleware::from_fn(request_context))
+}
+
+fn allowed_client_origins(trusted_network: bool) -> Vec<HeaderValue> {
+    let mut origins = vec![
+        HeaderValue::from_static("tauri://localhost"),
+        HeaderValue::from_static("http://tauri.localhost"),
+        HeaderValue::from_static("https://tauri.localhost"),
+    ];
+    if trusted_network {
+        origins.extend([
+            HeaderValue::from_static("http://localhost:1420"),
+            HeaderValue::from_static("http://127.0.0.1:1420"),
+        ]);
+    }
+    origins
 }
 
 /// Serves the router until the supplied shutdown future resolves.
@@ -3248,6 +3263,30 @@ mod tests {
         assert_eq!(
             response.headers().get("access-control-allow-origin"),
             Some(&HeaderValue::from_static("http://tauri.localhost"))
+        );
+    }
+
+    #[tokio::test]
+    async fn trusted_network_desktop_dev_origin_can_preflight_session_bootstrap() {
+        let state = ApiState::new("test-sha", false, None).with_trusted_network(true);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/v1/access/session")
+                    .header("origin", "http://localhost:1420")
+                    .header("access-control-request-method", "POST")
+                    .header("access-control-request-headers", "content-type")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("access-control-allow-origin"),
+            Some(&HeaderValue::from_static("http://localhost:1420"))
         );
     }
 
