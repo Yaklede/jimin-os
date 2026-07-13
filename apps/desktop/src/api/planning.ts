@@ -17,6 +17,7 @@ export interface ScheduleEntry {
 
 export interface Task {
   id: string;
+  projectId: string | null;
   title: string;
   notes: string | null;
   status: "open" | "completed" | "cancelled";
@@ -156,9 +157,16 @@ export async function fetchPlanning(
 export async function createTask(
   baseUrl: string,
   access: string,
-  input: { title: string; notes?: string; priority: number; dueAt?: string },
+  input: {
+    title: string;
+    notes?: string;
+    priority: number;
+    dueAt?: string;
+    projectId?: string;
+  },
 ): Promise<Task> {
   return request<Task>(baseUrl, access, "/v1/tasks", "POST", {
+    projectId: input.projectId || null,
     title: input.title,
     notes: input.notes || null,
     priority: input.priority,
@@ -244,7 +252,9 @@ function errorFromStatus(status: number): PlanningRequestError {
   return new PlanningRequestError("unavailable");
 }
 
-function isDeviceSessionResponse(value: unknown): value is DeviceSessionResponse {
+function isDeviceSessionResponse(
+  value: unknown,
+): value is DeviceSessionResponse {
   return (
     isRecord(value) &&
     typeof value.accessToken === "string" &&

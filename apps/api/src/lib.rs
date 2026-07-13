@@ -34,6 +34,7 @@ use jimin_storage::{
     planning::{
         NewScheduleEntry, NewTask, ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus,
     },
+    work::{NewProject, Project, ProjectStatus, Workspace, WorkspaceScope},
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -283,6 +284,7 @@ pub struct ScheduleListResponse {
 #[serde(rename_all = "camelCase")]
 pub struct TaskResponse {
     id: uuid::Uuid,
+    project_id: Option<uuid::Uuid>,
     title: String,
     notes: Option<String>,
     status: String,
@@ -296,6 +298,46 @@ pub struct TaskResponse {
 #[serde(rename_all = "camelCase")]
 pub struct TaskListResponse {
     items: Vec<TaskResponse>,
+    next_cursor: Option<String>,
+}
+
+/// A personal or company work scope owned by the signed-in user.
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceResponse {
+    id: uuid::Uuid,
+    scope: String,
+    name: String,
+    version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceListResponse {
+    items: Vec<WorkspaceResponse>,
+    next_cursor: Option<String>,
+}
+
+/// The current operational state of one project.
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectResponse {
+    id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+    title: String,
+    objective: Option<String>,
+    status: String,
+    risk_level: i16,
+    next_action: Option<String>,
+    due_at: Option<String>,
+    open_task_count: i64,
+    version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectListResponse {
+    items: Vec<ProjectResponse>,
     next_cursor: Option<String>,
 }
 
@@ -505,10 +547,34 @@ struct CreateScheduleRequest {
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CreateTaskRequest {
+    project_id: Option<uuid::Uuid>,
     title: String,
     notes: Option<String>,
     priority: i16,
     due_at: Option<String>,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CreateProjectRequest {
+    workspace_id: uuid::Uuid,
+    title: String,
+    objective: Option<String>,
+    risk_level: i16,
+    next_action: Option<String>,
+    due_at: Option<String>,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ProjectListQuery {
+    workspace_id: uuid::Uuid,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct TaskListQuery {
+    project_id: Option<uuid::Uuid>,
 }
 
 #[derive(serde::Deserialize, ToSchema)]
@@ -603,6 +669,9 @@ pub(crate) fn error_response(
         sync_google_calendar,
         get_home_snapshot,
         create_schedule_entry,
+        list_workspaces,
+        list_projects,
+        create_project,
         list_open_tasks,
         create_task,
         complete_task,
@@ -641,6 +710,10 @@ pub(crate) fn error_response(
         StartGoogleCalendarAuthorizationResponse,
         TaskResponse,
         TaskListResponse,
+        WorkspaceResponse,
+        WorkspaceListResponse,
+        ProjectResponse,
+        ProjectListResponse,
         VoiceCommandKind,
         VoiceCommandDestination,
         VoiceCommandResponse,
@@ -654,9 +727,12 @@ pub(crate) fn error_response(
         PendingAgentActionResponse,
         AgentAuthenticationResponse,
         CreateConversationRequest,
+        CreateProjectRequest,
         CreateAgentTurnRequest,
         ResolveAgentActionRequest,
         AgentTurnInput,
+        ProjectListQuery,
+        TaskListQuery,
         VoiceCommandRequest
     )),
     tags((name = "health", description = "Process and dependency health"))
@@ -698,6 +774,8 @@ pub fn router(state: ApiState) -> Router {
             post(sync_google_calendar),
         )
         .route("/v1/home", get(get_home_snapshot))
+        .route("/v1/workspaces", get(list_workspaces))
+        .route("/v1/projects", get(list_projects).post(create_project))
         .route("/v1/tasks", get(list_open_tasks).post(create_task))
         .route(
             "/v1/tasks/{task_id}/complete",
@@ -1081,11 +1159,11 @@ async fn create_schedule_entry(
 
 #[utoipa::path(
     get,
-    path = "/v1/tasks",
-    tag = "planning",
-    responses((status = 200, body = TaskListResponse), (status = 401), (status = 503))
+    path = "/v1/workspaces",
+    tag = "work",
+    responses((status = 200, body = WorkspaceListResponse), (status = 401), (status = 503))
 )]
-async fn list_open_tasks(
+async fn list_workspaces(
     State(state): State<ApiState>,
     Extension(request_id): Extension<RequestId>,
     headers: HeaderMap,
@@ -1098,9 +1176,132 @@ async fn list_open_tasks(
         return unavailable_response(request_id);
     };
     match planning
-        .open_tasks_for_user(principal.identity().user_id())
+        .workspaces_for_user(principal.identity().user_id())
         .await
     {
+        Ok(workspaces) => Json(WorkspaceListResponse {
+            items: workspaces.into_iter().map(workspace_response).collect(),
+            next_cursor: None,
+        })
+        .into_response(),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/projects",
+    tag = "work",
+    params(("workspaceId" = String, Query)),
+    responses((status = 200, body = ProjectListResponse), (status = 400), (status = 401), (status = 503))
+)]
+async fn list_projects(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    axum::extract::Query(query): axum::extract::Query<ProjectListQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .projects_for_workspace(principal.identity().user_id(), query.workspace_id)
+        .await
+    {
+        Ok(projects) => match projects
+            .into_iter()
+            .map(project_response)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(items) => Json(ProjectListResponse {
+                items,
+                next_cursor: None,
+            })
+            .into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/projects",
+    tag = "work",
+    request_body = CreateProjectRequest,
+    responses((status = 201, body = ProjectResponse), (status = 400), (status = 401), (status = 503))
+)]
+async fn create_project(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Json(body): Json<CreateProjectRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let due_at = match body.due_at {
+        Some(value) => match OffsetDateTime::parse(&value, &Rfc3339) {
+            Ok(value) => Some(value),
+            Err(_) => return invalid_request_response(request_id),
+        },
+        None => None,
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .create_project(&NewProject {
+            id: uuid::Uuid::now_v7(),
+            user_id: principal.identity().user_id(),
+            workspace_id: body.workspace_id,
+            title: body.title,
+            objective: body.objective,
+            risk_level: body.risk_level,
+            next_action: body.next_action,
+            due_at,
+        })
+        .await
+    {
+        Ok(project) => match project_response(project) {
+            Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/tasks",
+    tag = "planning",
+    params(("projectId" = Option<String>, Query)),
+    responses((status = 200, body = TaskListResponse), (status = 400), (status = 401), (status = 503))
+)]
+async fn list_open_tasks(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    axum::extract::Query(query): axum::extract::Query<TaskListQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let user_id = principal.identity().user_id();
+    let result = match query.project_id {
+        Some(project_id) => planning.open_tasks_for_project(user_id, project_id).await,
+        None => planning.open_tasks_for_user(user_id).await,
+    };
+    match result {
         Ok(tasks) => match tasks
             .into_iter()
             .map(task_response)
@@ -1147,6 +1348,7 @@ async fn create_task(
         .create_task(&NewTask {
             id: uuid::Uuid::now_v7(),
             user_id: principal.identity().user_id(),
+            project_id: body.project_id,
             title: body.title,
             notes: body.notes,
             priority: body.priority,
@@ -1355,6 +1557,7 @@ async fn create_voice_task(
         .create_task(&NewTask {
             id: uuid::Uuid::now_v7(),
             user_id,
+            project_id: None,
             title: title.clone(),
             notes: None,
             priority: 1,
@@ -2650,6 +2853,7 @@ fn schedule_entry_response(entry: ScheduleEntry) -> Result<ScheduleEntryResponse
 fn task_response(task: Task) -> Result<TaskResponse, ()> {
     Ok(TaskResponse {
         id: task.id,
+        project_id: task.project_id,
         title: task.title,
         notes: task.notes,
         status: match task.status {
@@ -2667,6 +2871,40 @@ fn task_response(task: Task) -> Result<TaskResponse, ()> {
             .map(|value| value.format(&Rfc3339).map_err(|_| ()))
             .transpose()?,
         version: task.version,
+    })
+}
+
+fn workspace_response(workspace: Workspace) -> WorkspaceResponse {
+    WorkspaceResponse {
+        id: workspace.id,
+        scope: match workspace.scope {
+            WorkspaceScope::Personal => "personal".to_owned(),
+            WorkspaceScope::Company => "company".to_owned(),
+        },
+        name: workspace.name,
+        version: workspace.version,
+    }
+}
+
+fn project_response(project: Project) -> Result<ProjectResponse, ()> {
+    Ok(ProjectResponse {
+        id: project.id,
+        workspace_id: project.workspace_id,
+        title: project.title,
+        objective: project.objective,
+        status: match project.status {
+            ProjectStatus::Active => "active".to_owned(),
+            ProjectStatus::Paused => "paused".to_owned(),
+            ProjectStatus::Completed => "completed".to_owned(),
+        },
+        risk_level: project.risk_level,
+        next_action: project.next_action,
+        due_at: project
+            .due_at
+            .map(|value| value.format(&Rfc3339).map_err(|_| ()))
+            .transpose()?,
+        open_task_count: project.open_task_count,
+        version: project.version,
     })
 }
 
@@ -3124,9 +3362,11 @@ mod tests {
                 "/v1/devices",
                 "/v1/home",
                 "/v1/me",
+                "/v1/projects",
                 "/v1/schedule-entries",
                 "/v1/tasks",
-                "/v1/tasks/{task_id}/complete"
+                "/v1/tasks/{task_id}/complete",
+                "/v1/workspaces"
             ]
         );
     }
@@ -3165,6 +3405,32 @@ mod tests {
             .expect("handler should respond");
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn work_endpoints_require_a_live_signed_session() {
+        let (state, _, _) = signed_auth_state(true);
+        let workspace_response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/workspaces")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+        assert_eq!(workspace_response.status(), StatusCode::UNAUTHORIZED);
+
+        let project_response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/projects?workspaceId=019f68cb-9400-7000-8000-000000000000")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+        assert_eq!(project_response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

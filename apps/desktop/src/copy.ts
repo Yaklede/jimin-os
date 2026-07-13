@@ -1,3 +1,5 @@
+import { projectCopy } from "./copy/projects";
+
 const settingsTab = "설정";
 
 export const copy = {
@@ -12,7 +14,11 @@ export const copy = {
     checking: "확인하고 있어요",
     refresh: "새로고침",
     addTask: "할 일 추가하기",
+    addWorkItem: "일 추가하기",
     addSchedule: "일정 추가하기",
+    createProject: "프로젝트 만들기",
+    cancel: "취소",
+    saving: "저장하는 중",
     complete: "완료하기",
     startConversation: "새 요청",
     sendRequest: "보내기",
@@ -36,6 +42,7 @@ export const copy = {
     home: "나의 하루",
     mobileHome: "홈",
     schedule: "일정",
+    projects: "프로젝트",
     chat: "채팅",
     memory: "기억",
     settings: settingsTab,
@@ -119,6 +126,7 @@ export const copy = {
     description: "완료하지 않은 일을 우선순위대로 보여줘요.",
     empty: "열린 할 일이 없어요. 다음에 할 일을 추가해 보세요.",
   },
+  projects: projectCopy,
   memory: {
     title: "기억",
     description: "대화에서 남길 내용을 직접 고르고 다시 확인할 수 있어요.",
@@ -236,6 +244,12 @@ export const copy = {
     serverOffline: "VPN 연결과 개인 서버 상태를 확인한 뒤 다시 시도해 주세요.",
     homeLoadNotice:
       "오늘 정보를 불러오지 못했어요. 새로고침한 뒤 다시 확인해 주세요.",
+    projectsLoadNotice:
+      "프로젝트 정보를 불러오지 못했어요. 다시 시도해 주세요.",
+    projectSaveNotice:
+      "프로젝트를 저장하지 못했어요. 입력한 내용을 확인한 뒤 다시 시도해 주세요.",
+    projectTaskSaveNotice:
+      "프로젝트에 일을 추가하지 못했어요. 잠시 후 다시 시도해 주세요.",
     loadFailed: "계획을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
     saveFailed: "변경 내용을 저장하지 못했어요. 다시 시도해 주세요.",
     taskAdded: "할 일을 추가했어요.",

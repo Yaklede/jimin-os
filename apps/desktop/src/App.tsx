@@ -4,10 +4,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   bootstrapTrustedNetworkSession,
   completeTask,
+  createTask,
   refreshDeviceSession,
   type SessionTokens,
   type Task,
 } from "./api/planning";
+import {
+  createProject,
+  fetchProjects,
+  fetchProjectTasks,
+  fetchWorkspaces,
+  type Project,
+  type Workspace,
+} from "./api/projects";
 import { type HomeSnapshot, fetchHomeSnapshot } from "./api/home";
 import { processVoiceCommand } from "./api/voice";
 import {
@@ -31,6 +40,7 @@ import { AssistantRail, HomeWorkspace } from "./components/HomeWorkspace";
 import { MemoryWorkspace } from "./components/MemoryWorkspace";
 import { OsShell, type OsDestination } from "./components/OsShell";
 import { PlanningWorkspace } from "./components/PlanningWorkspace";
+import { ProjectsWorkspace } from "./components/ProjectsWorkspace";
 import { SettingsWorkspace } from "./components/SettingsWorkspace";
 import { type VoiceCommandOutcome } from "./components/VoiceCommandSheet";
 import { copy } from "./copy";
@@ -66,6 +76,14 @@ export default function App() {
   const [homeSnapshot, setHomeSnapshot] = useState<HomeSnapshot | undefined>();
   const [homeLoading, setHomeLoading] = useState(false);
   const [homeError, setHomeError] = useState<string | undefined>();
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectTasks, setProjectTasks] = useState<Task[]>([]);
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>();
+  const [selectedProjectId, setSelectedProjectId] = useState<string>();
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [projectsSaving, setProjectsSaving] = useState(false);
+  const [projectsError, setProjectsError] = useState<string>();
   const [selectedConversationId, setSelectedConversationId] = useState<
     string | undefined
   >(undefined);
@@ -193,6 +211,75 @@ export default function App() {
     }
   }, [apiBaseUrl, tokens, withAuthenticatedSession]);
 
+  const loadWorkspaces = useCallback(async () => {
+    if (!tokens) return;
+    setProjectsLoading(true);
+    setProjectsError(undefined);
+    try {
+      const items = await withAuthenticatedSession((accessToken) =>
+        fetchWorkspaces(apiBaseUrl, accessToken),
+      );
+      setWorkspaces(items);
+      setSelectedWorkspaceId((current) =>
+        items.some((workspace) => workspace.id === current)
+          ? current
+          : items[0]?.id,
+      );
+    } catch {
+      setProjectsError(copy.messages.projectsLoadNotice);
+    } finally {
+      setProjectsLoading(false);
+    }
+  }, [apiBaseUrl, tokens, withAuthenticatedSession]);
+
+  const loadProjectsForWorkspace = useCallback(
+    async (workspaceId: string, preferredProjectId?: string) => {
+      if (!tokens) return;
+      setProjectsLoading(true);
+      setProjectsError(undefined);
+      try {
+        const items = await withAuthenticatedSession((accessToken) =>
+          fetchProjects(apiBaseUrl, accessToken, workspaceId),
+        );
+        setProjects(items);
+        setSelectedProjectId((current) => {
+          const next = preferredProjectId ?? current;
+          return items.some((project) => project.id === next)
+            ? next
+            : items[0]?.id;
+        });
+      } catch {
+        setProjects([]);
+        setSelectedProjectId(undefined);
+        setProjectTasks([]);
+        setProjectsError(copy.messages.projectsLoadNotice);
+      } finally {
+        setProjectsLoading(false);
+      }
+    },
+    [apiBaseUrl, tokens, withAuthenticatedSession],
+  );
+
+  const loadProjectTasks = useCallback(
+    async (projectId: string) => {
+      if (!tokens) return;
+      setProjectsLoading(true);
+      try {
+        setProjectTasks(
+          await withAuthenticatedSession((accessToken) =>
+            fetchProjectTasks(apiBaseUrl, accessToken, projectId),
+          ),
+        );
+      } catch {
+        setProjectTasks([]);
+        setProjectsError(copy.messages.projectsLoadNotice);
+      } finally {
+        setProjectsLoading(false);
+      }
+    },
+    [apiBaseUrl, tokens, withAuthenticatedSession],
+  );
+
   const loadConversationMessages = useCallback(
     async (conversationId: string, background = false) => {
       if (!tokens) return;
@@ -259,6 +346,12 @@ export default function App() {
       setConversations([]);
       setHomeSnapshot(undefined);
       setHomeError(undefined);
+      setWorkspaces([]);
+      setProjects([]);
+      setProjectTasks([]);
+      setSelectedWorkspaceId(undefined);
+      setSelectedProjectId(undefined);
+      setProjectsError(undefined);
       setConversationMessages([]);
       setSelectedConversationId(undefined);
       setAssistantDraft(undefined);
@@ -307,6 +400,24 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    void loadWorkspaces();
+  }, [loadWorkspaces]);
+
+  useEffect(() => {
+    if (selectedWorkspaceId) {
+      void loadProjectsForWorkspace(selectedWorkspaceId);
+    }
+  }, [loadProjectsForWorkspace, selectedWorkspaceId]);
+
+  useEffect(() => {
+    if (selectedProjectId) {
+      void loadProjectTasks(selectedProjectId);
+    } else {
+      setProjectTasks([]);
+    }
+  }, [loadProjectTasks, selectedProjectId]);
 
   useEffect(() => {
     if (
@@ -455,6 +566,99 @@ export default function App() {
     } catch {
       setHomeError(copy.messages.taskCompletionNotice);
       void loadHomeSnapshot();
+    }
+  }
+
+  function selectWorkspace(workspaceId: string) {
+    if (workspaceId === selectedWorkspaceId) return;
+    setSelectedWorkspaceId(workspaceId);
+    setSelectedProjectId(undefined);
+    setProjectTasks([]);
+  }
+
+  async function createWorkspaceProject(input: {
+    title: string;
+    objective?: string;
+    riskLevel: number;
+    nextAction?: string;
+  }): Promise<void> {
+    if (!selectedWorkspaceId) throw new Error("workspace unavailable");
+    setProjectsSaving(true);
+    setProjectsError(undefined);
+    try {
+      const project = await withAuthenticatedSession((accessToken) =>
+        createProject(apiBaseUrl, accessToken, {
+          workspaceId: selectedWorkspaceId,
+          ...input,
+        }),
+      );
+      await loadProjectsForWorkspace(selectedWorkspaceId, project.id);
+    } catch (error) {
+      setProjectsError(copy.messages.projectSaveNotice);
+      throw error;
+    } finally {
+      setProjectsSaving(false);
+    }
+  }
+
+  async function createProjectTask(title: string): Promise<void> {
+    if (!selectedProjectId) throw new Error("project unavailable");
+    setProjectsSaving(true);
+    setProjectsError(undefined);
+    try {
+      const task = await withAuthenticatedSession((accessToken) =>
+        createTask(apiBaseUrl, accessToken, {
+          title,
+          priority: 1,
+          projectId: selectedProjectId,
+        }),
+      );
+      setProjectTasks((current) => [...current, task]);
+      setProjects((current) =>
+        current.map((project) =>
+          project.id === selectedProjectId
+            ? { ...project, openTaskCount: project.openTaskCount + 1 }
+            : project,
+        ),
+      );
+      void loadHomeSnapshot();
+    } catch (error) {
+      setProjectsError(copy.messages.projectTaskSaveNotice);
+      throw error;
+    } finally {
+      setProjectsSaving(false);
+    }
+  }
+
+  async function completeProjectTask(task: Task): Promise<void> {
+    if (!tokens) return;
+    setProjectsSaving(true);
+    setProjectsError(undefined);
+    try {
+      await withAuthenticatedSession((accessToken) =>
+        completeTask(apiBaseUrl, accessToken, task),
+      );
+      setProjectTasks((current) =>
+        current.filter((item) => item.id !== task.id),
+      );
+      if (task.projectId) {
+        setProjects((current) =>
+          current.map((project) =>
+            project.id === task.projectId
+              ? {
+                  ...project,
+                  openTaskCount: Math.max(0, project.openTaskCount - 1),
+                }
+              : project,
+          ),
+        );
+      }
+      void loadHomeSnapshot();
+    } catch {
+      setProjectsError(copy.messages.taskCompletionNotice);
+      if (selectedProjectId) void loadProjectTasks(selectedProjectId);
+    } finally {
+      setProjectsSaving(false);
     }
   }
 
@@ -680,6 +884,23 @@ export default function App() {
               loading={homeLoading || mode === "loading"}
               error={homeError ?? (mode === "error" ? message : undefined)}
               onCompleteTask={completeHomeTask}
+            />
+          )}
+          {destination === "projects" && (
+            <ProjectsWorkspace
+              workspaces={workspaces}
+              projects={projects}
+              tasks={projectTasks}
+              selectedWorkspaceId={selectedWorkspaceId}
+              selectedProjectId={selectedProjectId}
+              loading={projectsLoading || mode === "loading"}
+              saving={projectsSaving}
+              error={projectsError}
+              onSelectWorkspace={selectWorkspace}
+              onSelectProject={setSelectedProjectId}
+              onCreateProject={createWorkspaceProject}
+              onCreateTask={createProjectTask}
+              onCompleteTask={completeProjectTask}
             />
           )}
           {destination === "memory" && (

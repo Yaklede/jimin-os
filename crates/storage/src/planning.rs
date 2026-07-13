@@ -47,6 +47,7 @@ impl NewScheduleEntry {
 pub struct NewTask {
     pub id: Uuid,
     pub user_id: Uuid,
+    pub project_id: Option<Uuid>,
     pub title: String,
     pub notes: Option<String>,
     pub priority: i16,
@@ -61,6 +62,7 @@ impl NewTask {
     /// Returns [`StorageError::InvalidConfiguration`] for invalid client data.
     pub fn validate(&self) -> Result<(), StorageError> {
         if !is_v7(self.id)
+            || !self.project_id.is_none_or(is_v7)
             || !valid_text(&self.title, MAX_TITLE_CHARS, false)
             || !self
                 .notes
@@ -106,6 +108,7 @@ pub enum ScheduleSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Task {
     pub id: Uuid,
+    pub project_id: Option<Uuid>,
     pub title: String,
     pub notes: Option<String>,
     pub status: TaskStatus,
@@ -138,6 +141,7 @@ struct ScheduleRow {
 #[derive(sqlx::FromRow)]
 struct TaskRow {
     id: Uuid,
+    project_id: Option<Uuid>,
     title: String,
     notes: Option<String>,
     status: String,
@@ -187,6 +191,7 @@ impl TryFrom<TaskRow> for Task {
         };
         Ok(Self {
             id: row.id,
+            project_id: row.project_id,
             title: row.title,
             notes: row.notes,
             status,
@@ -320,16 +325,24 @@ impl Database {
     /// Returns a classified storage error without exposing personal task text.
     pub async fn create_task(&self, task: &NewTask) -> Result<Task, StorageError> {
         task.validate()?;
+        if let Some(project_id) = task.project_id
+            && !self
+                .project_exists_for_user(task.user_id, project_id)
+                .await?
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
         let user_id = task.user_id;
         let mut transaction = self.pool().begin().await.map_err(classify)?;
         let row = sqlx::query_as::<_, TaskRow>(
             "\
-            INSERT INTO tasks (id, user_id, title, notes, status, priority, due_at)
-            VALUES ($1, $2, $3, $4, 'open', $5, $6)
-            RETURNING id, title, notes, status, priority, due_at, completed_at, version",
+            INSERT INTO tasks (id, user_id, project_id, title, notes, status, priority, due_at)
+            VALUES ($1, $2, $3, $4, $5, 'open', $6, $7)
+            RETURNING id, project_id, title, notes, status, priority, due_at, completed_at, version",
         )
         .bind(task.id)
         .bind(task.user_id)
+        .bind(task.project_id)
         .bind(task.title.trim())
         .bind(
             task.notes
@@ -358,12 +371,41 @@ impl Database {
     pub async fn open_tasks_for_user(&self, user_id: Uuid) -> Result<Vec<Task>, StorageError> {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
-            SELECT id, title, notes, status, priority, due_at, completed_at, version
+            SELECT id, project_id, title, notes, status, priority, due_at, completed_at, version
             FROM tasks
             WHERE user_id = $1 AND status = 'open'
             ORDER BY priority DESC, due_at NULLS LAST, created_at ASC, id ASC",
         )
         .bind(user_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(classify)?;
+        rows.into_iter().map(Task::try_from).collect()
+    }
+
+    /// Lists open tasks for one project owned by the current user.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] when the project is not
+    /// part of the user's work context.
+    pub async fn open_tasks_for_project(
+        &self,
+        user_id: Uuid,
+        project_id: Uuid,
+    ) -> Result<Vec<Task>, StorageError> {
+        if !self.project_exists_for_user(user_id, project_id).await? {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let rows = sqlx::query_as::<_, TaskRow>(
+            "\
+            SELECT id, project_id, title, notes, status, priority, due_at, completed_at, version
+            FROM tasks
+            WHERE user_id = $1 AND project_id = $2 AND status = 'open'
+            ORDER BY priority DESC, due_at NULLS LAST, created_at ASC, id ASC",
+        )
+        .bind(user_id)
+        .bind(project_id)
         .fetch_all(self.pool())
         .await
         .map_err(classify)?;
@@ -394,7 +436,7 @@ impl Database {
             UPDATE tasks
             SET status = 'completed', completed_at = NOW()
             WHERE id = $1 AND user_id = $2 AND status = 'open' AND version = $3
-            RETURNING id, title, notes, status, priority, due_at, completed_at, version",
+            RETURNING id, project_id, title, notes, status, priority, due_at, completed_at, version",
         )
         .bind(task_id)
         .bind(user_id)

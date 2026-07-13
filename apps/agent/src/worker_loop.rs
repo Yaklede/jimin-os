@@ -413,6 +413,7 @@ mod tests {
         };
         let task = Task {
             id: Uuid::now_v7(),
+            project_id: None,
             title: "장보기".to_owned(),
             notes: None,
             status: TaskStatus::Open,

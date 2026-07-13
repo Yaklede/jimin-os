@@ -1,8 +1,8 @@
 import {
   BrainCircuit,
   CalendarDays,
+  FolderKanban,
   House,
-  MessageCircleMore,
   Mic,
   RefreshCw,
   Settings2,
@@ -17,7 +17,7 @@ import {
 } from "./VoiceCommandSheet";
 
 export type OsDestination =
-  "home" | "calendar" | "chat" | "memory" | "settings";
+  "home" | "calendar" | "projects" | "chat" | "memory" | "settings";
 
 type OsShellProps = {
   destination: OsDestination;
@@ -85,6 +85,12 @@ export function OsShell({
             icon={<CalendarDays aria-hidden="true" />}
             label={copy.navigation.schedule}
             onClick={() => onNavigate("calendar")}
+          />
+          <NavigationButton
+            active={destination === "projects"}
+            icon={<FolderKanban aria-hidden="true" />}
+            label={copy.navigation.projects}
+            onClick={() => onNavigate("projects")}
           />
           <NavigationButton
             active={destination === "memory"}
@@ -163,10 +169,10 @@ export function OsShell({
           onClick={() => onNavigate("home")}
         />
         <NavigationButton
-          active={destination === "calendar"}
-          icon={<CalendarDays aria-hidden="true" />}
-          label={copy.navigation.schedule}
-          onClick={() => onNavigate("calendar")}
+          active={destination === "projects"}
+          icon={<FolderKanban aria-hidden="true" />}
+          label={copy.navigation.projects}
+          onClick={() => onNavigate("projects")}
         />
         <button
           className="os-mobile-nav__assistant focus-visible-control"
@@ -177,10 +183,10 @@ export function OsShell({
           <Mic aria-hidden="true" />
         </button>
         <NavigationButton
-          active={destination === "chat"}
-          icon={<MessageCircleMore aria-hidden="true" />}
-          label={copy.navigation.chat}
-          onClick={openChat}
+          active={destination === "calendar"}
+          icon={<CalendarDays aria-hidden="true" />}
+          label={copy.navigation.schedule}
+          onClick={() => onNavigate("calendar")}
         />
         <NavigationButton
           active={destination === "settings"}

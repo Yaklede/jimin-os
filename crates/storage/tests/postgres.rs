@@ -323,6 +323,7 @@ async fn manual_schedule_and_tasks_are_scoped_and_emit_current_state() {
         .create_task(&NewTask {
             id: Uuid::now_v7(),
             user_id: provisioned.profile.id,
+            project_id: None,
             title: "오늘 할 일".to_owned(),
             notes: None,
             priority: 3,
