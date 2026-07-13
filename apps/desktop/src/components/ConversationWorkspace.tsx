@@ -26,6 +26,11 @@ import {
 } from "../api/agent";
 import { copy } from "../copy";
 import { createUuidV7 } from "../uuid";
+import {
+  SkeletonBlock,
+  SkeletonGroup,
+  useDelayedSkeleton,
+} from "./ContentSkeleton";
 
 type ConversationWorkspaceProps = {
   conversations: Conversation[];
@@ -256,10 +261,14 @@ function ConversationHistory({
   disabled: boolean;
   onStartConversation(): void;
 }) {
+  const skeletonVisible = useDelayedSkeleton(loading);
+  const showingSkeleton = loading || skeletonVisible;
+
   return (
     <aside
       className="assistant-history"
       aria-labelledby="conversation-list-title"
+      aria-busy={showingSkeleton}
     >
       <div className="assistant-history__header">
         <div>
@@ -275,9 +284,7 @@ function ConversationHistory({
           <Plus aria-hidden="true" />
         </button>
       </div>
-      {loading ? (
-        <LoadingConversationRows />
-      ) : conversations.length ? (
+      {conversations.length ? (
         <ul className="assistant-history__list">
           {conversations.map((conversation) => {
             const selected = conversation.id === selectedConversationId;
@@ -303,6 +310,8 @@ function ConversationHistory({
             );
           })}
         </ul>
+      ) : showingSkeleton ? (
+        <LoadingConversationRows visible={skeletonVisible} />
       ) : (
         <p className="assistant-history__empty">{copy.conversations.empty}</p>
       )}
@@ -388,12 +397,14 @@ function ConversationThread({
   onRetry(text: string): Promise<void>;
   transcriptEnd: RefObject<HTMLDivElement | null>;
 }) {
+  const skeletonVisible = useDelayedSkeleton(loading);
+  const showingSkeleton = loading || skeletonVisible;
   const lastUserRequest = [...messages]
     .reverse()
     .find((message) => message.role === "user")?.content;
 
   return (
-    <section className="assistant-thread-panel">
+    <section className="assistant-thread-panel" aria-busy={showingSkeleton}>
       <header className="assistant-thread-header">
         <div>
           <h1 id="assistant-title">
@@ -456,8 +467,8 @@ function ConversationThread({
               );
             })}
           </ol>
-        ) : loading ? (
-          <LoadingMessages />
+        ) : showingSkeleton ? (
+          <LoadingMessages visible={skeletonVisible} />
         ) : (
           <p className="assistant-thread-panel__empty">
             {copy.conversations.threadEmpty}
@@ -818,21 +829,45 @@ function formatMessageTime(value: string) {
   }).format(new Date(value));
 }
 
-function LoadingConversationRows() {
+function LoadingConversationRows({ visible }: { visible: boolean }) {
   return (
-    <div className="assistant-history__loading" aria-hidden="true">
-      <span className="skeleton" />
-      <span className="skeleton" />
-      <span className="skeleton" />
-    </div>
+    <SkeletonGroup
+      className="assistant-history__loading"
+      label={copy.home.loadingShort}
+      visible={visible}
+    >
+      {Array.from({ length: 3 }, (_, index) => (
+        <span className="assistant-history-skeleton__row" key={index}>
+          <SkeletonBlock className="skeleton--title" />
+          <SkeletonBlock className="skeleton--caption" />
+        </span>
+      ))}
+    </SkeletonGroup>
   );
 }
 
-function LoadingMessages() {
+function LoadingMessages({ visible }: { visible: boolean }) {
   return (
-    <div className="assistant-transcript__loading" aria-hidden="true">
-      <span className="skeleton" />
-      <span className="skeleton" />
-    </div>
+    <SkeletonGroup
+      className="assistant-transcript__loading"
+      label={copy.home.loadingShort}
+      visible={visible}
+    >
+      <span className="assistant-message-skeleton" data-role="user">
+        <span className="assistant-message-skeleton__meta">
+          <SkeletonBlock className="skeleton--message-author" />
+          <SkeletonBlock className="skeleton--message-time" />
+        </span>
+        <SkeletonBlock className="skeleton--message-line" />
+      </span>
+      <span className="assistant-message-skeleton" data-role="assistant">
+        <span className="assistant-message-skeleton__meta">
+          <SkeletonBlock className="skeleton--message-author" />
+          <SkeletonBlock className="skeleton--message-time" />
+        </span>
+        <SkeletonBlock className="skeleton--message-line" />
+        <SkeletonBlock className="skeleton--message-line-short" />
+      </span>
+    </SkeletonGroup>
   );
 }

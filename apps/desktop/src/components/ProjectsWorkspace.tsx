@@ -12,7 +12,12 @@ import { FormEvent, useEffect, useState } from "react";
 import { type Project, type Workspace } from "../api/projects";
 import { type Task } from "../api/planning";
 import { copy } from "../copy";
-import { EmptySurface, LoadingRows } from "./HomeWorkspace";
+import {
+  SkeletonBlock,
+  SkeletonGroup,
+  useDelayedSkeleton,
+} from "./ContentSkeleton";
+import { EmptySurface } from "./HomeWorkspace";
 
 type ProjectsWorkspaceProps = {
   workspaces: Workspace[];
@@ -57,6 +62,8 @@ export function ProjectsWorkspace({
   const [riskLevel, setRiskLevel] = useState("0");
   const [taskTitle, setTaskTitle] = useState("");
   const [formError, setFormError] = useState<string>();
+  const skeletonVisible = useDelayedSkeleton(loading);
+  const showingSkeleton = loading || skeletonVisible;
 
   const selectedProject = projects.find(
     (project) => project.id === selectedProjectId,
@@ -102,7 +109,7 @@ export function ProjectsWorkspace({
   }
 
   return (
-    <section className="projects-page" aria-busy={loading || saving}>
+    <section className="projects-page" aria-busy={showingSkeleton || saving}>
       <header className="projects-heading">
         <div>
           <p>{copy.projects.eyebrow}</p>
@@ -125,23 +132,27 @@ export function ProjectsWorkspace({
         role="tablist"
         aria-label={copy.projects.scopeLabel}
       >
-        {workspaces.map((workspace) => {
-          const selected = workspace.id === selectedWorkspaceId;
-          return (
-            <button
-              className="workspace-tabs__button focus-visible-control"
-              data-active={selected}
-              type="button"
-              role="tab"
-              aria-selected={selected}
-              key={workspace.id}
-              onClick={() => onSelectWorkspace(workspace.id)}
-            >
-              <BriefcaseBusiness aria-hidden="true" />
-              {workspace.name}
-            </button>
-          );
-        })}
+        {workspaces.length ? (
+          workspaces.map((workspace) => {
+            const selected = workspace.id === selectedWorkspaceId;
+            return (
+              <button
+                className="workspace-tabs__button focus-visible-control"
+                data-active={selected}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                key={workspace.id}
+                onClick={() => onSelectWorkspace(workspace.id)}
+              >
+                <BriefcaseBusiness aria-hidden="true" />
+                {workspace.name}
+              </button>
+            );
+          })
+        ) : showingSkeleton ? (
+          <WorkspaceTabsSkeleton visible={skeletonVisible} />
+        ) : null}
       </div>
 
       {(error || formError) && (
@@ -242,13 +253,13 @@ export function ProjectsWorkspace({
               <FolderKanban aria-hidden="true" />
               <h2 id="projects-list-title">{copy.projects.listTitle}</h2>
             </div>
-            {!loading && (
+            {!showingSkeleton && (
               <span>{copy.projects.projectCount(projects.length)}</span>
             )}
           </div>
           <div className="projects-surface">
-            {loading ? (
-              <LoadingRows rows={4} />
+            {showingSkeleton ? (
+              <ProjectListSkeleton rows={4} visible={skeletonVisible} />
             ) : projects.length ? (
               <ul className="project-list">
                 {projects.map((project) => (
@@ -296,7 +307,9 @@ export function ProjectsWorkspace({
           className="project-detail"
           aria-labelledby="project-detail-title"
         >
-          {selectedProject ? (
+          {showingSkeleton ? (
+            <ProjectDetailSkeleton visible={skeletonVisible} />
+          ) : selectedProject ? (
             <>
               <div className="project-detail__heading">
                 <div>
@@ -330,9 +343,7 @@ export function ProjectsWorkspace({
                   </div>
                   <span>{copy.projects.openTaskCount(tasks.length)}</span>
                 </div>
-                {loading ? (
-                  <LoadingRows rows={3} />
-                ) : tasks.length ? (
+                {tasks.length ? (
                   <ul className="project-task-list">
                     {tasks.map((task) => (
                       <li key={task.id}>
@@ -388,6 +399,83 @@ export function ProjectsWorkspace({
         </section>
       </div>
     </section>
+  );
+}
+
+function WorkspaceTabsSkeleton({ visible }: { visible: boolean }) {
+  return (
+    <SkeletonGroup
+      className="workspace-tabs-skeleton"
+      label={copy.home.loadingShort}
+      visible={visible}
+    >
+      <SkeletonBlock />
+      <SkeletonBlock />
+    </SkeletonGroup>
+  );
+}
+
+function ProjectListSkeleton({
+  rows,
+  visible,
+}: {
+  rows: number;
+  visible: boolean;
+}) {
+  return (
+    <SkeletonGroup
+      className="project-list-skeleton"
+      label={copy.home.loadingShort}
+      visible={visible}
+    >
+      {Array.from({ length: rows }, (_, index) => (
+        <span className="project-list-skeleton__row" key={index}>
+          <span className="skeleton-copy-stack">
+            <SkeletonBlock className="skeleton--title" />
+            <SkeletonBlock className="skeleton--caption" />
+          </span>
+          <SkeletonBlock className="skeleton--project-meta" />
+          <SkeletonBlock className="skeleton--chevron" />
+        </span>
+      ))}
+    </SkeletonGroup>
+  );
+}
+
+function ProjectDetailSkeleton({ visible }: { visible: boolean }) {
+  return (
+    <SkeletonGroup
+      className="project-detail-skeleton"
+      label={copy.home.loadingShort}
+      visible={visible}
+    >
+      <span className="project-detail-skeleton__heading">
+        <SkeletonBlock className="skeleton--label" />
+        <SkeletonBlock className="skeleton--heading" />
+        <SkeletonBlock className="skeleton--description" />
+      </span>
+      <span className="project-detail-skeleton__next-action">
+        <SkeletonBlock className="skeleton--label" />
+        <SkeletonBlock className="skeleton--title" />
+      </span>
+      <span className="project-detail-skeleton__tasks">
+        <span className="project-detail-skeleton__section-heading">
+          <SkeletonBlock className="skeleton--section-icon" />
+          <SkeletonBlock className="skeleton--section-title" />
+          <SkeletonBlock className="skeleton--count" />
+        </span>
+        {Array.from({ length: 3 }, (_, index) => (
+          <span className="project-task-skeleton__row" key={index}>
+            <SkeletonBlock className="skeleton--task-control" />
+            <SkeletonBlock className="skeleton--task-title" />
+          </span>
+        ))}
+        <span className="project-task-form-skeleton">
+          <SkeletonBlock className="skeleton--field" />
+          <SkeletonBlock className="skeleton--button" />
+        </span>
+      </span>
+    </SkeletonGroup>
   );
 }
 

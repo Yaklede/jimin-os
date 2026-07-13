@@ -12,6 +12,11 @@ import { useMemo, useState } from "react";
 import { type HomeSnapshot } from "../api/home";
 import { type ScheduleEntry, type Task } from "../api/planning";
 import { copy } from "../copy";
+import {
+  SkeletonBlock,
+  SkeletonGroup,
+  useDelayedSkeleton,
+} from "./ContentSkeleton";
 
 type HomeWorkspaceProps = {
   snapshot: HomeSnapshot | undefined;
@@ -30,6 +35,8 @@ export function HomeWorkspace({
 }: HomeWorkspaceProps) {
   const [completingTaskId, setCompletingTaskId] = useState<string>();
   const greeting = useMemo(() => greetingForHour(new Date().getHours()), []);
+  const skeletonVisible = useDelayedSkeleton(loading);
+  const showingSkeleton = loading || skeletonVisible;
   const nextSchedule = snapshot?.schedule[0];
   const scheduleCount = snapshot?.schedule.length ?? 0;
   const taskCount = snapshot?.tasks.length ?? 0;
@@ -45,7 +52,7 @@ export function HomeWorkspace({
   }
 
   return (
-    <section className="home-page" aria-busy={loading}>
+    <section className="home-page" aria-busy={showingSkeleton}>
       <header className="home-greeting">
         <div>
           <h1>{greeting}</h1>
@@ -73,16 +80,20 @@ export function HomeWorkspace({
         onClick={onOpenAssistant}
         aria-label={copy.home.askAssistant}
       >
-        <span className="home-briefing__symbol" aria-hidden="true">
-          <Sparkles />
-        </span>
-        <span className="home-briefing__copy">
-          <strong>
-            {briefingHeading(loading, nextSchedule, scheduleCount)}
-          </strong>
-          <span>{briefingSummary(loading, scheduleCount, taskCount)}</span>
-        </span>
-        <ChevronRight aria-hidden="true" />
+        {showingSkeleton ? (
+          <HomeBriefingSkeleton visible={skeletonVisible} />
+        ) : (
+          <>
+            <span className="home-briefing__symbol" aria-hidden="true">
+              <Sparkles />
+            </span>
+            <span className="home-briefing__copy">
+              <strong>{briefingHeading(nextSchedule, scheduleCount)}</strong>
+              <span>{briefingSummary(scheduleCount, taskCount)}</span>
+            </span>
+            <ChevronRight aria-hidden="true" />
+          </>
+        )}
       </button>
 
       <button
@@ -112,8 +123,8 @@ export function HomeWorkspace({
             <span>{relativeScheduleTime(nextSchedule.startsAt)}</span>
           )}
         </div>
-        {loading ? (
-          <LoadingRows rows={1} />
+        {showingSkeleton ? (
+          <ScheduleSkeleton visible={skeletonVisible} />
         ) : nextSchedule ? (
           <ScheduleHighlight entry={nextSchedule} />
         ) : (
@@ -128,12 +139,22 @@ export function HomeWorkspace({
         <div className="home-section-heading">
           <h2 id="today-task-title">{copy.home.taskTitle}</h2>
           <span>
-            {loading ? copy.home.loadingShort : copy.home.taskCount(taskCount)}
+            {showingSkeleton ? (
+              <SkeletonGroup
+                className="skeleton-count"
+                label={copy.home.loadingShort}
+                visible={skeletonVisible}
+              >
+                <SkeletonBlock />
+              </SkeletonGroup>
+            ) : (
+              copy.home.taskCount(taskCount)
+            )}
           </span>
         </div>
         <div className="home-task-surface">
-          {loading ? (
-            <LoadingRows rows={4} />
+          {showingSkeleton ? (
+            <TaskListSkeleton rows={4} visible={skeletonVisible} />
           ) : snapshot?.tasks.length ? (
             <ul className="home-task-list">
               {snapshot.tasks.map((task) => (
@@ -245,13 +266,61 @@ export function EmptySurface({
   );
 }
 
-export function LoadingRows({ rows }: { rows: number }) {
+function HomeBriefingSkeleton({ visible }: { visible: boolean }) {
   return (
-    <div className="loading-rows" aria-label={copy.home.loadingShort}>
+    <SkeletonGroup
+      className="home-briefing-skeleton"
+      label={copy.home.loadingDescription}
+      visible={visible}
+    >
+      <SkeletonBlock className="skeleton--briefing-icon" />
+      <span className="skeleton-copy-stack">
+        <SkeletonBlock className="skeleton--title" />
+        <SkeletonBlock className="skeleton--caption" />
+      </span>
+      <SkeletonBlock className="skeleton--chevron" />
+    </SkeletonGroup>
+  );
+}
+
+function ScheduleSkeleton({ visible }: { visible: boolean }) {
+  return (
+    <SkeletonGroup
+      className="schedule-skeleton"
+      label={copy.home.loadingShort}
+      visible={visible}
+    >
+      <SkeletonBlock className="skeleton--schedule-icon" />
+      <span className="skeleton-copy-stack">
+        <SkeletonBlock className="skeleton--title" />
+        <SkeletonBlock className="skeleton--caption" />
+      </span>
+      <SkeletonBlock className="skeleton--chevron" />
+    </SkeletonGroup>
+  );
+}
+
+function TaskListSkeleton({
+  rows,
+  visible,
+}: {
+  rows: number;
+  visible: boolean;
+}) {
+  return (
+    <SkeletonGroup
+      className="task-list-skeleton"
+      label={copy.home.loadingShort}
+      visible={visible}
+    >
       {Array.from({ length: rows }, (_, index) => (
-        <span key={index} className="skeleton" />
+        <span className="task-row-skeleton" key={index}>
+          <SkeletonBlock className="skeleton--task-control" />
+          <SkeletonBlock className="skeleton--task-title" />
+          <SkeletonBlock className="skeleton--task-date" />
+        </span>
       ))}
-    </div>
+    </SkeletonGroup>
   );
 }
 
@@ -277,22 +346,15 @@ function greetingForHour(hour: number): string {
 }
 
 function briefingHeading(
-  loading: boolean,
   nextSchedule: ScheduleEntry | undefined,
   scheduleCount: number,
 ): string {
-  if (loading) return copy.home.loadingBriefing;
   if (nextSchedule) return copy.home.briefingWithNext(nextSchedule.title);
   if (scheduleCount) return copy.home.briefingWithSchedule(scheduleCount);
   return copy.home.briefingEmpty;
 }
 
-function briefingSummary(
-  loading: boolean,
-  scheduleCount: number,
-  taskCount: number,
-): string {
-  if (loading) return copy.home.loadingDescription;
+function briefingSummary(scheduleCount: number, taskCount: number): string {
   const parts = [`일정 ${scheduleCount}개`, `할 일 ${taskCount}개`];
   return parts.join(" · ");
 }
