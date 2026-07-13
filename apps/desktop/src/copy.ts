@@ -197,8 +197,11 @@ export const copy = {
   },
   schedule: {
     title: "일정",
-    description: "오늘 해야 할 일과 일정을 한곳에서 확인해요.",
-    empty: "아직 등록한 일정이 없어요. 필요한 시간을 먼저 잡아 보세요.",
+    description: "앞으로 예정된 일정과 열린 할 일을 한곳에서 확인해요.",
+    upcomingTitle: "다가오는 일정",
+    empty: "앞으로 90일 안에 일정이 없어요. 필요한 시간을 먼저 잡아 보세요.",
+    todayLabel: "오늘",
+    tomorrowLabel: "내일",
   },
   tasks: {
     title: "열린 할 일",

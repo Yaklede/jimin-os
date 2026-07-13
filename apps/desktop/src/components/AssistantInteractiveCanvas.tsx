@@ -25,7 +25,9 @@ type AssistantInteractiveCanvasProps = {
   onOpenProject(
     project: Pick<Project, "id" | "workspaceId">,
   ): void | Promise<void>;
-  onOpenSchedule(entry: Pick<ScheduleEntry, "id">): void | Promise<void>;
+  onOpenSchedule(
+    entry: Pick<ScheduleEntry, "id" | "startsAt">,
+  ): void | Promise<void>;
   onReset(): void;
 };
 

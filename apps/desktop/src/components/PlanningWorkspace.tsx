@@ -69,7 +69,7 @@ export function PlanningWorkspace({
         <div className="planning-section-heading">
           <div>
             <CalendarDays aria-hidden="true" />
-            <h2 id="planning-schedule-title">오늘 일정</h2>
+            <h2 id="planning-schedule-title">{copy.schedule.upcomingTitle}</h2>
           </div>
           <span>
             {showingSkeleton ? (
@@ -243,7 +243,10 @@ function ScheduleRow({
       data-highlighted={highlighted}
       tabIndex={highlighted ? -1 : undefined}
     >
-      <time dateTime={entry.startsAt}>{formatTime(entry.startsAt)}</time>
+      <time dateTime={entry.startsAt}>
+        <span>{scheduleDayLabel(entry.startsAt)}</span>
+        <strong>{formatTime(entry.startsAt)}</strong>
+      </time>
       <span aria-hidden="true" />
       <div>
         <strong>{entry.title}</strong>
@@ -270,6 +273,31 @@ function formatTime(value: string) {
     minute: "2-digit",
     hour12: false,
   }).format(new Date(value));
+}
+
+function scheduleDayLabel(value: string) {
+  const date = new Date(value);
+  const today = new Date();
+  const startOfToday = new Date(
+    today.getFullYear(),
+    today.getMonth(),
+    today.getDate(),
+  );
+  const startOfDate = new Date(
+    date.getFullYear(),
+    date.getMonth(),
+    date.getDate(),
+  );
+  const difference = Math.round(
+    (startOfDate.getTime() - startOfToday.getTime()) / 86_400_000,
+  );
+  if (difference === 0) return copy.schedule.todayLabel;
+  if (difference === 1) return copy.schedule.tomorrowLabel;
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "numeric",
+    day: "numeric",
+    weekday: "short",
+  }).format(date);
 }
 
 function dueLabel(value: string) {

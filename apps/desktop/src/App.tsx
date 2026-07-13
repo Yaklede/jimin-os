@@ -7,6 +7,7 @@ import {
   createTask,
   refreshDeviceSession,
   updateTask,
+  fetchPlanning,
   type ScheduleEntry,
   type SessionTokens,
   type Task,
@@ -82,6 +83,11 @@ export default function App() {
   const [homeSnapshot, setHomeSnapshot] = useState<HomeSnapshot | undefined>();
   const [homeLoading, setHomeLoading] = useState(false);
   const [homeError, setHomeError] = useState<string | undefined>();
+  const [planningSnapshot, setPlanningSnapshot] = useState<
+    HomeSnapshot | undefined
+  >();
+  const [planningLoading, setPlanningLoading] = useState(false);
+  const [planningError, setPlanningError] = useState<string | undefined>();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectTasks, setProjectTasks] = useState<Task[]>([]);
@@ -226,6 +232,28 @@ export default function App() {
       setHomeLoading(false);
     }
   }, [apiBaseUrl, tokens, withAuthenticatedSession]);
+
+  const loadPlanningSnapshot = useCallback(
+    async (targetStartsAt?: string) => {
+      if (!tokens) return undefined;
+      setPlanningLoading(true);
+      setPlanningError(undefined);
+      try {
+        const [from, to] = currentPlanningRange(targetStartsAt);
+        const snapshot = await withAuthenticatedSession((accessToken) =>
+          fetchPlanning(apiBaseUrl, accessToken, from, to),
+        );
+        setPlanningSnapshot(snapshot);
+        return snapshot;
+      } catch {
+        setPlanningError(copy.messages.homeLoadNotice);
+        return undefined;
+      } finally {
+        setPlanningLoading(false);
+      }
+    },
+    [apiBaseUrl, tokens, withAuthenticatedSession],
+  );
 
   const loadAgentModelSettings = useCallback(async () => {
     if (!tokens) return;
@@ -412,6 +440,8 @@ export default function App() {
       setConversations([]);
       setHomeSnapshot(undefined);
       setHomeError(undefined);
+      setPlanningSnapshot(undefined);
+      setPlanningError(undefined);
       setWorkspaces([]);
       setProjects([]);
       setProjectTasks([]);
@@ -522,6 +552,35 @@ export default function App() {
     };
   }, [agentAuthentication, apiBaseUrl, tokens, withAuthenticatedSession]);
 
+  const synchronizeAssistantDestinations = useCallback(
+    async (messages: ConversationMessage[]): Promise<void> => {
+      const presentation = [...messages]
+        .reverse()
+        .find(
+          (candidate) =>
+            candidate.role === "assistant" && candidate.status === "completed",
+        )?.presentation;
+      if (!presentation) return;
+      const project = [...presentation.items]
+        .reverse()
+        .find((item) => item.type === "project");
+      const schedule = [...presentation.items]
+        .reverse()
+        .find((item) => item.type === "schedule");
+      await Promise.all([
+        project
+          ? loadProjectsForWorkspace(project.workspaceId, project.id).then(
+              (loaded) => {
+                if (loaded) setSelectedWorkspaceId(project.workspaceId);
+              },
+            )
+          : Promise.resolve(),
+        schedule ? loadPlanningSnapshot(schedule.startsAt) : Promise.resolve(),
+      ]);
+    },
+    [loadPlanningSnapshot, loadProjectsForWorkspace],
+  );
+
   const activeJobs = useMemo(
     () =>
       Object.values(conversationJobs)
@@ -560,6 +619,7 @@ export default function App() {
               if (streamedJob && isTerminalAgentJob(streamedJob.state)) {
                 void refreshConversations();
                 void loadHomeSnapshot();
+                void synchronizeAssistantDestinations(snapshot.messages);
               }
             },
           ),
@@ -585,6 +645,7 @@ export default function App() {
     loadHomeSnapshot,
     refreshConversations,
     selectedConversationId,
+    synchronizeAssistantDestinations,
     tokens,
     withAuthenticatedSession,
   ]);
@@ -630,6 +691,14 @@ export default function App() {
         completeTask(apiBaseUrl, accessToken, task),
       );
       setHomeSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              tasks: current.tasks.filter((item) => item.id !== task.id),
+            }
+          : current,
+      );
+      setPlanningSnapshot((current) =>
         current
           ? {
               ...current,
@@ -729,9 +798,10 @@ export default function App() {
   }
 
   async function openScheduleFromAssistant(
-    entry: Pick<ScheduleEntry, "id">,
+    entry: Pick<ScheduleEntry, "id" | "startsAt">,
   ): Promise<void> {
-    if (!(await loadHomeSnapshot())) {
+    const snapshot = await loadPlanningSnapshot(entry.startsAt);
+    if (!snapshot?.schedule.some((item) => item.id === entry.id)) {
       throw new Error("schedule destination unavailable");
     }
     setHighlightedScheduleId(entry.id);
@@ -1077,6 +1147,35 @@ export default function App() {
     .reverse()
     .find((message) => message.role === "assistant");
 
+  function navigate(nextDestination: OsDestination): void {
+    setDestination(nextDestination);
+    if (nextDestination === "calendar") {
+      const latestSchedule = [
+        ...(latestAssistantMessage?.presentation?.items ?? []),
+      ]
+        .reverse()
+        .find((item) => item.type === "schedule");
+      void loadPlanningSnapshot(latestSchedule?.startsAt);
+      return;
+    }
+    if (nextDestination === "projects") {
+      const latestProject = [
+        ...(latestAssistantMessage?.presentation?.items ?? []),
+      ]
+        .reverse()
+        .find((item) => item.type === "project");
+      if (latestProject) {
+        setSelectedWorkspaceId(latestProject.workspaceId);
+        void loadProjectsForWorkspace(
+          latestProject.workspaceId,
+          latestProject.id,
+        );
+      } else if (selectedWorkspaceId) {
+        void loadProjectsForWorkspace(selectedWorkspaceId);
+      }
+    }
+  }
+
   return (
     <div
       className="app-shell"
@@ -1098,7 +1197,7 @@ export default function App() {
       ) : (
         <OsShell
           destination={destination}
-          onNavigate={setDestination}
+          onNavigate={navigate}
           onVoiceTranscript={handleVoiceTranscript}
           onVoiceCommand={handleVoiceCommand}
           onRefresh={() => void refresh()}
@@ -1136,9 +1235,9 @@ export default function App() {
           )}
           {destination === "calendar" && (
             <PlanningWorkspace
-              snapshot={homeSnapshot}
-              loading={homeLoading || mode === "loading"}
-              error={homeError ?? (mode === "error" ? message : undefined)}
+              snapshot={planningSnapshot}
+              loading={planningLoading || mode === "loading"}
+              error={planningError ?? (mode === "error" ? message : undefined)}
               highlightedScheduleId={highlightedScheduleId}
               onCompleteTask={completeHomeTask}
             />
@@ -1294,6 +1393,29 @@ function conversationTitle(value: string) {
 function currentLocalDayRange(now = new Date()): [Date, Date] {
   const from = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const to = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  return [from, to];
+}
+
+function currentPlanningRange(
+  targetStartsAt?: string,
+  now = new Date(),
+): [Date, Date] {
+  const from = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const defaultTo = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate() + 90,
+  );
+  if (!targetStartsAt) return [from, defaultTo];
+  const target = new Date(targetStartsAt);
+  if (Number.isNaN(target.getTime()) || target < defaultTo) {
+    return [from, defaultTo];
+  }
+  const to = new Date(
+    target.getFullYear(),
+    target.getMonth(),
+    target.getDate() + 1,
+  );
   return [from, to];
 }
 

@@ -39,7 +39,9 @@ type HomeWorkspaceProps = {
   onOpenProject(
     project: Pick<Project, "id" | "workspaceId">,
   ): void | Promise<void>;
-  onOpenSchedule(entry: Pick<ScheduleEntry, "id">): void | Promise<void>;
+  onOpenSchedule(
+    entry: Pick<ScheduleEntry, "id" | "startsAt">,
+  ): void | Promise<void>;
 };
 
 export function HomeWorkspace({
@@ -366,7 +368,9 @@ function HomeAssistantCommand({
   onOpenProject(
     project: Pick<Project, "id" | "workspaceId">,
   ): void | Promise<void>;
-  onOpenSchedule(entry: Pick<ScheduleEntry, "id">): void | Promise<void>;
+  onOpenSchedule(
+    entry: Pick<ScheduleEntry, "id" | "startsAt">,
+  ): void | Promise<void>;
 }) {
   const [draft, setDraft] = useState("");
   const [submitted, setSubmitted] = useState(false);
