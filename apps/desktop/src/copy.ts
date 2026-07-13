@@ -93,6 +93,8 @@ export const copy = {
     resultSectionsLabel: "결과 항목",
     resultDetailsLabel: "선택한 내용",
     resultCount: (count: number) => `${count}개`,
+    resultOpening: "화면을 여는 중이에요",
+    resultOpenFailed: "화면을 열지 못했어요. 아래 버튼을 다시 눌러 주세요.",
     verifiedContextLabel: "오늘 확인한 정보",
     verifiedContextSummary: (taskCount: number, scheduleCount: number) =>
       `할 일 ${taskCount}개, 일정 ${scheduleCount}개를 확인했어요.`,
@@ -100,6 +102,20 @@ export const copy = {
     openScheduleContext: (count: number) => `일정 ${count}개 확인하기`,
     taskPriority: (priority: number) =>
       priority >= 3 ? "가장 먼저" : priority === 2 ? "우선 처리" : "일반",
+    taskStatus: (status: "open" | "completed" | "cancelled") =>
+      status === "completed"
+        ? "완료"
+        : status === "cancelled"
+          ? "취소"
+          : "진행 전",
+    scheduleStatus: (status: "confirmed" | "cancelled") =>
+      status === "cancelled" ? "취소" : "예정",
+    projectStatus: (status: "active" | "paused" | "completed") =>
+      status === "completed"
+        ? "완료"
+        : status === "paused"
+          ? "잠시 멈춤"
+          : "진행 중",
     projectTaskCount: (count: number) => `열린 일감 ${count}개`,
     projectNextActionLabel: "다음 행동",
     openTaskAction: "일감 보기",

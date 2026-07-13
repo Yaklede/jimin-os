@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { type ConversationMessage } from "./api/agent";
 import { presentationForMessage } from "./assistantPresentation";
+import { canOpenPresentationItem } from "./components/AssistantInteractiveCanvas";
 
 function assistantMessage(
   presentation: ConversationMessage["presentation"],
@@ -47,6 +48,7 @@ describe("presentationForMessage", () => {
             projectId: null,
             projectTitle: null,
             title: "장보기",
+            status: "open",
             priority: 1,
             dueAt: null,
           },
@@ -56,6 +58,7 @@ describe("presentationForMessage", () => {
             projectId: "project-1",
             projectTitle: "개인 운영체제",
             title: "회의록 정리",
+            status: "open",
             priority: 2,
             dueAt: null,
           },
@@ -63,6 +66,7 @@ describe("presentationForMessage", () => {
             type: "schedule",
             id: "schedule-1",
             title: "주간 회의",
+            status: "confirmed",
             startsAt: "2026-07-13T04:00:00Z",
             endsAt: "2026-07-13T05:00:00Z",
             timeZone: "Asia/Seoul",
@@ -108,6 +112,7 @@ describe("presentationForMessage", () => {
             projectId: null,
             projectTitle: null,
             title: "일감",
+            status: "open",
             priority: 1,
             dueAt: null,
           },
@@ -142,6 +147,7 @@ describe("presentationForMessage", () => {
             projectId: null,
             projectTitle: null,
             title: "일감",
+            status: "open",
             priority: 1,
             dueAt: null,
           },
@@ -152,5 +158,81 @@ describe("presentationForMessage", () => {
     expect(result.sections).toEqual([]);
     expect(result.layout).toBe("stack");
     expect(result.focusItemId).toBeUndefined();
+  });
+});
+
+describe("canOpenPresentationItem", () => {
+  const now = new Date("2026-07-14T03:00:00+09:00");
+
+  it("오늘 목록에 있는 미분류 일감은 열 수 있다", () => {
+    expect(
+      canOpenPresentationItem(
+        {
+          type: "task",
+          id: "task-today",
+          projectId: null,
+          projectTitle: null,
+          title: "오늘 일감",
+          status: "open",
+          priority: 1,
+          dueAt: "2026-07-14T23:59:59+09:00",
+        },
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  it("오늘 목록에 없는 미래 미분류 일감은 결과에 남긴다", () => {
+    expect(
+      canOpenPresentationItem(
+        {
+          type: "task",
+          id: "task-tomorrow",
+          projectId: null,
+          projectTitle: null,
+          title: "내일 일감",
+          status: "open",
+          priority: 1,
+          dueAt: "2026-07-15T23:59:59+09:00",
+        },
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  it("프로젝트 연결 일감은 날짜와 관계없이 프로젝트로 열 수 있다", () => {
+    expect(
+      canOpenPresentationItem(
+        {
+          type: "task",
+          id: "task-project",
+          projectId: "project-1",
+          projectTitle: "Jimin OS",
+          title: "프로젝트 일감",
+          status: "open",
+          priority: 1,
+          dueAt: "2026-07-20T23:59:59+09:00",
+        },
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  it("취소된 프로젝트 일감은 결과에 남긴다", () => {
+    expect(
+      canOpenPresentationItem(
+        {
+          type: "task",
+          id: "task-cancelled",
+          projectId: "project-1",
+          projectTitle: "Jimin OS",
+          title: "취소된 일감",
+          status: "cancelled",
+          priority: 1,
+          dueAt: "2026-07-15T23:59:59+09:00",
+        },
+        now,
+      ),
+    ).toBe(false);
   });
 });

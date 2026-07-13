@@ -614,6 +614,8 @@ pub enum AssistantPresentationItem {
         #[serde(rename = "projectTitle")]
         project_title: Option<String>,
         title: String,
+        #[serde(default = "default_task_presentation_status")]
+        status: String,
         priority: i16,
         #[serde(rename = "dueAt")]
         due_at: Option<String>,
@@ -621,6 +623,8 @@ pub enum AssistantPresentationItem {
     Schedule {
         id: Uuid,
         title: String,
+        #[serde(default = "default_schedule_presentation_status")]
+        status: String,
         #[serde(rename = "startsAt")]
         starts_at: String,
         #[serde(rename = "endsAt")]
@@ -633,6 +637,8 @@ pub enum AssistantPresentationItem {
         #[serde(rename = "workspaceId")]
         workspace_id: Uuid,
         title: String,
+        #[serde(default = "default_project_presentation_status")]
+        status: String,
         objective: Option<String>,
         #[serde(rename = "nextAction")]
         next_action: Option<String>,
@@ -641,6 +647,18 @@ pub enum AssistantPresentationItem {
         #[serde(rename = "openTaskCount")]
         open_task_count: i64,
     },
+}
+
+fn default_task_presentation_status() -> String {
+    "open".to_owned()
+}
+
+fn default_schedule_presentation_status() -> String {
+    "confirmed".to_owned()
+}
+
+fn default_project_presentation_status() -> String {
+    "active".to_owned()
 }
 
 impl AssistantPresentation {
@@ -3179,6 +3197,7 @@ fn valid_presentation_item(item: &AssistantPresentationItem) -> bool {
             project_id,
             project_title,
             title,
+            status,
             priority,
             due_at,
         } => {
@@ -3188,6 +3207,7 @@ fn valid_presentation_item(item: &AssistantPresentationItem) -> bool {
                     .as_deref()
                     .is_none_or(|value| valid_text(value, MAX_TITLE_CHARS, false))
                 && valid_text(title, MAX_TITLE_CHARS, false)
+                && matches!(status.as_str(), "open" | "completed" | "cancelled")
                 && (0..=3).contains(priority)
                 && due_at
                     .as_deref()
@@ -3196,12 +3216,14 @@ fn valid_presentation_item(item: &AssistantPresentationItem) -> bool {
         AssistantPresentationItem::Schedule {
             id,
             title,
+            status,
             starts_at,
             ends_at,
             time_zone,
         } => {
             is_v7(*id)
                 && valid_text(title, MAX_TITLE_CHARS, false)
+                && matches!(status.as_str(), "confirmed" | "cancelled")
                 && valid_text(starts_at, MAX_PRESENTATION_TIMESTAMP_CHARS, false)
                 && valid_text(ends_at, MAX_PRESENTATION_TIMESTAMP_CHARS, false)
                 && valid_time_zone(time_zone)
@@ -3210,6 +3232,7 @@ fn valid_presentation_item(item: &AssistantPresentationItem) -> bool {
             id,
             workspace_id,
             title,
+            status,
             objective,
             next_action,
             risk_level,
@@ -3218,6 +3241,7 @@ fn valid_presentation_item(item: &AssistantPresentationItem) -> bool {
             is_v7(*id)
                 && is_v7(*workspace_id)
                 && valid_text(title, MAX_TITLE_CHARS, false)
+                && matches!(status.as_str(), "active" | "paused" | "completed")
                 && objective
                     .as_deref()
                     .is_none_or(|value| valid_text(value, MAX_PRESENTATION_DETAIL_CHARS, true))
@@ -3326,12 +3350,14 @@ mod tests {
                     project_id: None,
                     project_title: None,
                     title: "회의록 정리".to_owned(),
+                    status: "open".to_owned(),
                     priority: 2,
                     due_at: None,
                 },
                 AssistantPresentationItem::Schedule {
                     id: schedule_id,
                     title: "주간 회의".to_owned(),
+                    status: "confirmed".to_owned(),
                     starts_at: "2026-07-13T04:00:00Z".to_owned(),
                     ends_at: "2026-07-13T05:00:00Z".to_owned(),
                     time_zone: "Asia/Seoul".to_owned(),
@@ -3369,6 +3395,7 @@ mod tests {
                 project_id: None,
                 project_title: None,
                 title: "회의록 정리".to_owned(),
+                status: "open".to_owned(),
                 priority: 2,
                 due_at: None,
             }],
@@ -3385,6 +3412,27 @@ mod tests {
         assert!(matches!(
             presentation.validate(),
             Err(StorageError::InvalidConfiguration)
+        ));
+    }
+
+    #[test]
+    fn legacy_presentation_items_receive_safe_default_statuses() {
+        let task_id = Uuid::now_v7();
+        let item: AssistantPresentationItem = serde_json::from_value(serde_json::json!({
+            "type": "task",
+            "id": task_id,
+            "projectId": null,
+            "projectTitle": null,
+            "title": "기존 할 일",
+            "priority": 1,
+            "dueAt": null
+        }))
+        .expect("legacy task should remain readable");
+
+        assert!(matches!(
+            item,
+            AssistantPresentationItem::Task { id, ref status, .. }
+                if id == task_id && status == "open"
         ));
     }
 }

@@ -7,6 +7,7 @@ import {
   createTask,
   refreshDeviceSession,
   updateTask,
+  type ScheduleEntry,
   type SessionTokens,
   type Task,
 } from "./api/planning";
@@ -208,18 +209,19 @@ export default function App() {
   }, [apiBaseUrl, tokens, withAuthenticatedSession]);
 
   const loadHomeSnapshot = useCallback(async () => {
-    if (!tokens) return;
+    if (!tokens) return undefined;
     setHomeLoading(true);
     setHomeError(undefined);
     try {
       const [from, to] = currentLocalDayRange();
-      setHomeSnapshot(
-        await withAuthenticatedSession((accessToken) =>
-          fetchHomeSnapshot(apiBaseUrl, accessToken, from, to),
-        ),
+      const snapshot = await withAuthenticatedSession((accessToken) =>
+        fetchHomeSnapshot(apiBaseUrl, accessToken, from, to),
       );
+      setHomeSnapshot(snapshot);
+      return snapshot;
     } catch {
       setHomeError(copy.messages.homeLoadNotice);
+      return undefined;
     } finally {
       setHomeLoading(false);
     }
@@ -295,7 +297,7 @@ export default function App() {
 
   const loadProjectsForWorkspace = useCallback(
     async (workspaceId: string, preferredProjectId?: string) => {
-      if (!tokens) return;
+      if (!tokens) return false;
       setProjectsLoading(true);
       setProjectsError(undefined);
       try {
@@ -309,11 +311,13 @@ export default function App() {
             ? next
             : items[0]?.id;
         });
+        return true;
       } catch {
         setProjects([]);
         setSelectedProjectId(undefined);
         setProjectTasks([]);
         setProjectsError(copy.messages.projectsLoadNotice);
+        return false;
       } finally {
         setProjectsLoading(false);
       }
@@ -323,17 +327,18 @@ export default function App() {
 
   const loadProjectTasks = useCallback(
     async (projectId: string) => {
-      if (!tokens) return;
+      if (!tokens) return undefined;
       setProjectsLoading(true);
       try {
-        setProjectTasks(
-          await withAuthenticatedSession((accessToken) =>
-            fetchProjectTasks(apiBaseUrl, accessToken, projectId),
-          ),
+        const items = await withAuthenticatedSession((accessToken) =>
+          fetchProjectTasks(apiBaseUrl, accessToken, projectId),
         );
+        setProjectTasks(items);
+        return items;
       } catch {
         setProjectTasks([]);
         setProjectsError(copy.messages.projectsLoadNotice);
+        return undefined;
       } finally {
         setProjectsLoading(false);
       }
@@ -651,9 +656,17 @@ export default function App() {
     setSelectedProjectId(projectId);
   }
 
-  function openProjectFromAssistant(
+  async function openProjectFromAssistant(
     project: Pick<Project, "id" | "workspaceId">,
-  ) {
+  ): Promise<void> {
+    const loaded = await loadProjectsForWorkspace(
+      project.workspaceId,
+      project.id,
+    );
+    if (!loaded) throw new Error("project destination unavailable");
+    if (!(await loadProjectTasks(project.id))) {
+      throw new Error("project destination unavailable");
+    }
     setHighlightedProjectTaskId(undefined);
     setSelectedWorkspaceId(project.workspaceId);
     setSelectedProjectId(project.id);
@@ -663,11 +676,26 @@ export default function App() {
   async function openTaskFromAssistant(
     task: Pick<Task, "id" | "projectId">,
   ): Promise<void> {
-    if (!task.projectId) return;
+    if (!task.projectId) {
+      const snapshot = await loadHomeSnapshot();
+      if (!snapshot?.tasks.some((item) => item.id === task.id)) {
+        throw new Error("task destination unavailable");
+      }
+      return;
+    }
     const currentProject = projects.find(
       (project) => project.id === task.projectId,
     );
     if (currentProject) {
+      const loaded = await loadProjectsForWorkspace(
+        currentProject.workspaceId,
+        currentProject.id,
+      );
+      if (!loaded) throw new Error("task destination unavailable");
+      const tasks = await loadProjectTasks(currentProject.id);
+      if (!tasks?.some((item) => item.id === task.id)) {
+        throw new Error("task destination unavailable");
+      }
       setHighlightedProjectTaskId(task.id);
       setSelectedProjectId(currentProject.id);
       setDestination("projects");
@@ -683,6 +711,8 @@ export default function App() {
           (item) => item.id === task.projectId,
         );
         if (!project) continue;
+        const tasks = await loadProjectTasks(project.id);
+        if (!tasks?.some((item) => item.id === task.id)) continue;
         setProjects(workspaceProjects);
         setSelectedWorkspaceId(workspace.id);
         setSelectedProjectId(project.id);
@@ -695,6 +725,17 @@ export default function App() {
     }
 
     setHomeError(copy.home.taskDestinationNotice);
+    throw new Error("task destination unavailable");
+  }
+
+  async function openScheduleFromAssistant(
+    entry: Pick<ScheduleEntry, "id">,
+  ): Promise<void> {
+    if (!(await loadHomeSnapshot())) {
+      throw new Error("schedule destination unavailable");
+    }
+    setHighlightedScheduleId(entry.id);
+    setDestination("calendar");
   }
 
   async function createWorkspaceProject(input: {
@@ -1088,12 +1129,9 @@ export default function App() {
                 sendConversationRequest(text, clientMessageId, true)
               }
               onCompleteTask={completeHomeTask}
-              onOpenTask={(task) => void openTaskFromAssistant(task)}
+              onOpenTask={openTaskFromAssistant}
               onOpenProject={openProjectFromAssistant}
-              onOpenSchedule={(entry) => {
-                setHighlightedScheduleId(entry.id);
-                setDestination("calendar");
-              }}
+              onOpenSchedule={openScheduleFromAssistant}
             />
           )}
           {destination === "calendar" && (

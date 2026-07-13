@@ -773,6 +773,24 @@ fn validated_assistant_response(
 ) -> Result<(String, AssistantPresentation, Option<AgentActionCommand>), ()> {
     let structured: StructuredAssistantTurn = serde_json::from_str(response).map_err(|_| ())?;
     let mut answer = structured.answer.trim().to_owned();
+    let action = validated_agent_action(&structured.action, context)?;
+    if action.is_some() {
+        if answer.is_empty() || answer.chars().count() > 24_000 {
+            return Err(());
+        }
+        return Ok((
+            answer,
+            AssistantPresentation {
+                kind: AssistantPresentationKind::Summary,
+                title: "요청을 처리하고 있어요".to_owned(),
+                items: Vec::new(),
+                layout: AssistantPresentationLayout::Stack,
+                sections: Vec::new(),
+                focus_item_id: None,
+            },
+            action,
+        ));
+    }
     let title = structured.presentation.title.trim().to_owned();
     if answer.is_empty()
         || answer.chars().count() > 24_000
@@ -833,7 +851,6 @@ fn validated_assistant_response(
         focus_item_id,
     };
     presentation.validate().map_err(|_| ())?;
-    let action = validated_agent_action(&structured.action, context)?;
     Ok((answer, presentation, action))
 }
 
@@ -1055,6 +1072,7 @@ fn agent_action_result(
                 *id,
                 *project_id,
                 title,
+                TaskStatus::Open,
                 *priority,
                 *due_at,
                 &context.projects,
@@ -1078,6 +1096,7 @@ fn agent_action_result(
                 *id,
                 *project_id,
                 title,
+                TaskStatus::Open,
                 *priority,
                 *due_at,
                 &context.projects,
@@ -1097,7 +1116,15 @@ fn agent_action_result(
                 AssistantPresentationKind::Tasks,
                 AssistantPresentationSectionKind::Tasks,
                 AssistantPresentationView::Checklist,
-                task_presentation_item(task, &context.projects),
+                task_action_presentation_item(
+                    task.id,
+                    task.project_id,
+                    &task.title,
+                    *status,
+                    task.priority,
+                    task.due_at,
+                    &context.projects,
+                ),
             )
         }
         AgentActionCommand::CreateSchedule {
@@ -1114,7 +1141,14 @@ fn agent_action_result(
             AssistantPresentationKind::Schedule,
             AssistantPresentationSectionKind::Schedule,
             AssistantPresentationView::Timeline,
-            schedule_action_presentation_item(*id, title, *starts_at, *ends_at, time_zone)?,
+            schedule_action_presentation_item(
+                *id,
+                title,
+                "confirmed",
+                *starts_at,
+                *ends_at,
+                time_zone,
+            )?,
         ),
         AgentActionCommand::UpdateSchedule {
             id,
@@ -1130,7 +1164,14 @@ fn agent_action_result(
             AssistantPresentationKind::Schedule,
             AssistantPresentationSectionKind::Schedule,
             AssistantPresentationView::Timeline,
-            schedule_action_presentation_item(*id, title, *starts_at, *ends_at, time_zone)?,
+            schedule_action_presentation_item(
+                *id,
+                title,
+                "confirmed",
+                *starts_at,
+                *ends_at,
+                time_zone,
+            )?,
         ),
         AgentActionCommand::CancelSchedule { id, .. } => {
             let entry = context
@@ -1145,7 +1186,14 @@ fn agent_action_result(
                 AssistantPresentationKind::Schedule,
                 AssistantPresentationSectionKind::Schedule,
                 AssistantPresentationView::Timeline,
-                schedule_presentation_item(entry)?,
+                schedule_action_presentation_item(
+                    entry.id,
+                    &entry.title,
+                    "cancelled",
+                    entry.starts_at,
+                    entry.ends_at,
+                    &entry.time_zone,
+                )?,
             )
         }
         AgentActionCommand::CreateProject {
@@ -1167,6 +1215,7 @@ fn agent_action_result(
                 id: *id,
                 workspace_id: *workspace_id,
                 title: title.clone(),
+                status: "active".to_owned(),
                 objective: objective
                     .as_deref()
                     .map(|value| truncate_chars(value, MAX_PRESENTATION_DETAIL_CHARS)),
@@ -1181,6 +1230,7 @@ fn agent_action_result(
             id,
             title,
             objective,
+            status,
             risk_level,
             next_action,
             ..
@@ -1201,6 +1251,7 @@ fn agent_action_result(
                     id: *id,
                     workspace_id: project.workspace_id,
                     title: title.clone(),
+                    status: project_status_name(*status).to_owned(),
                     objective: objective
                         .as_deref()
                         .map(|value| truncate_chars(value, MAX_PRESENTATION_DETAIL_CHARS)),
@@ -1235,6 +1286,7 @@ fn task_action_presentation_item(
     id: Uuid,
     project_id: Option<Uuid>,
     title: &str,
+    status: TaskStatus,
     priority: i16,
     due_at: Option<OffsetDateTime>,
     projects: &[Project],
@@ -1249,6 +1301,7 @@ fn task_action_presentation_item(
                 .map(|project| project.title.clone())
         }),
         title: title.to_owned(),
+        status: task_status_name(status).to_owned(),
         priority,
         due_at: due_at.and_then(format_timestamp),
     }
@@ -1257,6 +1310,7 @@ fn task_action_presentation_item(
 fn schedule_action_presentation_item(
     id: Uuid,
     title: &str,
+    status: &str,
     starts_at: OffsetDateTime,
     ends_at: OffsetDateTime,
     time_zone: &str,
@@ -1264,6 +1318,7 @@ fn schedule_action_presentation_item(
     Ok(AssistantPresentationItem::Schedule {
         id,
         title: title.to_owned(),
+        status: status.to_owned(),
         starts_at: starts_at.format(&Rfc3339).map_err(|_| ())?,
         ends_at: ends_at.format(&Rfc3339).map_err(|_| ())?,
         time_zone: time_zone.to_owned(),
@@ -1477,6 +1532,7 @@ fn task_presentation_item(task: &Task, projects: &[Project]) -> AssistantPresent
                 .map(|project| project.title.clone())
         }),
         title: task.title.clone(),
+        status: task_status_name(task.status).to_owned(),
         priority: task.priority,
         due_at: task.due_at.and_then(format_timestamp),
     }
@@ -1486,6 +1542,11 @@ fn schedule_presentation_item(entry: &ScheduleEntry) -> Result<AssistantPresenta
     Ok(AssistantPresentationItem::Schedule {
         id: entry.id,
         title: entry.title.clone(),
+        status: match entry.status {
+            jimin_storage::planning::ScheduleStatus::Confirmed => "confirmed",
+            jimin_storage::planning::ScheduleStatus::Cancelled => "cancelled",
+        }
+        .to_owned(),
         starts_at: entry.starts_at.format(&Rfc3339).map_err(|_| ())?,
         ends_at: entry.ends_at.format(&Rfc3339).map_err(|_| ())?,
         time_zone: entry.time_zone.clone(),
@@ -1497,6 +1558,7 @@ fn project_presentation_item(project: &Project) -> AssistantPresentationItem {
         id: project.id,
         workspace_id: project.workspace_id,
         title: project.title.clone(),
+        status: project_status_name(project.status).to_owned(),
         objective: project
             .objective
             .as_deref()
@@ -1507,6 +1569,22 @@ fn project_presentation_item(project: &Project) -> AssistantPresentationItem {
             .map(|value| truncate_chars(value, MAX_PRESENTATION_DETAIL_CHARS)),
         risk_level: project.risk_level,
         open_task_count: project.open_task_count,
+    }
+}
+
+const fn task_status_name(status: TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Open => "open",
+        TaskStatus::Completed => "completed",
+        TaskStatus::Cancelled => "cancelled",
+    }
+}
+
+const fn project_status_name(status: ProjectStatus) -> &'static str {
+    match status {
+        ProjectStatus::Active => "active",
+        ProjectStatus::Paused => "paused",
+        ProjectStatus::Completed => "completed",
     }
 }
 
@@ -2048,6 +2126,53 @@ mod tests {
                 ..
             } if title == "일어나기" && actual_due_at == due_at
         ));
+    }
+
+    #[test]
+    fn structured_action_uses_server_owned_processing_presentation() {
+        let context = TurnContext {
+            prompt: String::new(),
+            schedule: Vec::new(),
+            tasks: Vec::new(),
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            requires_daily_task_coverage: false,
+        };
+        let response = serde_json::json!({
+            "answer": "요청을 처리 중입니다.",
+            "presentation": {
+                "title": "",
+                "layout": "stack",
+                "focusEntityId": "",
+                "sections": []
+            },
+            "action": {
+                "kind": "create_task",
+                "entityId": "",
+                "workspaceId": "",
+                "projectId": "",
+                "title": "Jimin OS 실행 검증",
+                "notes": "",
+                "priority": 1,
+                "dueAt": "2026-07-15T23:59:59+09:00",
+                "startsAt": "",
+                "endsAt": "",
+                "timeZone": "Asia/Seoul",
+                "status": "",
+                "riskLevel": 0,
+                "objective": "",
+                "nextAction": ""
+            }
+        })
+        .to_string();
+
+        let (_, presentation, action) =
+            validated_assistant_response(&response, &context).expect("action result");
+
+        assert_eq!(presentation.title, "요청을 처리하고 있어요");
+        assert!(presentation.items.is_empty());
+        assert!(action.is_some());
     }
 
     #[test]

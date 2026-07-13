@@ -866,6 +866,7 @@ svg {
 
 .assistant-canvas__header .text-button {
   flex: 0 0 auto;
+  min-height: 44px;
 }
 
 .assistant-canvas__header .text-button svg,
@@ -1088,6 +1089,14 @@ svg {
 .assistant-canvas__detail > .primary-button svg {
   width: 16px;
   height: 16px;
+}
+
+.assistant-canvas__open-error {
+  grid-column: 2;
+  max-width: 520px;
+  color: var(--danger);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .assistant-canvas__follow-up {

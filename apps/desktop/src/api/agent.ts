@@ -40,6 +40,7 @@ export type AssistantPresentationItem =
       projectId: string | null;
       projectTitle: string | null;
       title: string;
+      status: "open" | "completed" | "cancelled";
       priority: number;
       dueAt: string | null;
     }
@@ -47,6 +48,7 @@ export type AssistantPresentationItem =
       type: "schedule";
       id: string;
       title: string;
+      status: "confirmed" | "cancelled";
       startsAt: string;
       endsAt: string;
       timeZone: string;
@@ -56,6 +58,7 @@ export type AssistantPresentationItem =
       id: string;
       workspaceId: string;
       title: string;
+      status: "active" | "paused" | "completed";
       objective: string | null;
       nextAction: string | null;
       riskLevel: number;
@@ -474,6 +477,9 @@ function isAssistantPresentationItem(
       (value.projectId === null || typeof value.projectId === "string") &&
       (value.projectTitle === null || typeof value.projectTitle === "string") &&
       typeof value.title === "string" &&
+      (value.status === "open" ||
+        value.status === "completed" ||
+        value.status === "cancelled") &&
       typeof value.priority === "number" &&
       (value.dueAt === null || typeof value.dueAt === "string")
     );
@@ -481,6 +487,7 @@ function isAssistantPresentationItem(
   if (value.type === "schedule") {
     return (
       typeof value.title === "string" &&
+      (value.status === "confirmed" || value.status === "cancelled") &&
       typeof value.startsAt === "string" &&
       typeof value.endsAt === "string" &&
       typeof value.timeZone === "string"
@@ -490,6 +497,9 @@ function isAssistantPresentationItem(
     return (
       typeof value.workspaceId === "string" &&
       typeof value.title === "string" &&
+      (value.status === "active" ||
+        value.status === "paused" ||
+        value.status === "completed") &&
       (value.objective === null || typeof value.objective === "string") &&
       (value.nextAction === null || typeof value.nextAction === "string") &&
       typeof value.riskLevel === "number" &&

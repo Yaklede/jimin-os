@@ -35,9 +35,11 @@ type HomeWorkspaceProps = {
   onOpenAssistant(): void;
   onSendAssistant(text: string, clientMessageId: string): Promise<boolean>;
   onCompleteTask(task: Task): Promise<void>;
-  onOpenTask(task: Pick<Task, "id" | "projectId">): void;
-  onOpenProject(project: Pick<Project, "id" | "workspaceId">): void;
-  onOpenSchedule(entry: Pick<ScheduleEntry, "id">): void;
+  onOpenTask(task: Pick<Task, "id" | "projectId">): void | Promise<void>;
+  onOpenProject(
+    project: Pick<Project, "id" | "workspaceId">,
+  ): void | Promise<void>;
+  onOpenSchedule(entry: Pick<ScheduleEntry, "id">): void | Promise<void>;
 };
 
 export function HomeWorkspace({
@@ -184,11 +186,12 @@ export function HomeWorkspace({
         onFocusChange={setAssistantFocused}
         onOpenAssistant={onOpenAssistant}
         onSend={onSendAssistant}
-        onOpenTask={(task) => {
+        onOpenTask={async (task) => {
           if (task.projectId) {
-            onOpenTask(task);
+            await onOpenTask(task);
             return;
           }
+          await onOpenTask(task);
           setHighlightedHomeTaskId(task.id);
           setOverviewFocusTarget("tasks");
           setAssistantFocused(false);
@@ -359,9 +362,11 @@ function HomeAssistantCommand({
   onFocusChange(focused: boolean): void;
   onOpenAssistant(): void;
   onSend(text: string, clientMessageId: string): Promise<boolean>;
-  onOpenTask(task: Pick<Task, "id" | "projectId">): void;
-  onOpenProject(project: Pick<Project, "id" | "workspaceId">): void;
-  onOpenSchedule(entry: Pick<ScheduleEntry, "id">): void;
+  onOpenTask(task: Pick<Task, "id" | "projectId">): void | Promise<void>;
+  onOpenProject(
+    project: Pick<Project, "id" | "workspaceId">,
+  ): void | Promise<void>;
+  onOpenSchedule(entry: Pick<ScheduleEntry, "id">): void | Promise<void>;
 }) {
   const [draft, setDraft] = useState("");
   const [submitted, setSubmitted] = useState(false);

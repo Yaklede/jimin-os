@@ -21,9 +21,11 @@ import { copy } from "../copy";
 type AssistantInteractiveCanvasProps = {
   presentation: AssistantPresentation;
   onOpenAssistant(): void;
-  onOpenTask(task: Pick<Task, "id" | "projectId">): void;
-  onOpenProject(project: Pick<Project, "id" | "workspaceId">): void;
-  onOpenSchedule(entry: Pick<ScheduleEntry, "id">): void;
+  onOpenTask(task: Pick<Task, "id" | "projectId">): void | Promise<void>;
+  onOpenProject(
+    project: Pick<Project, "id" | "workspaceId">,
+  ): void | Promise<void>;
+  onOpenSchedule(entry: Pick<ScheduleEntry, "id">): void | Promise<void>;
   onReset(): void;
 };
 
@@ -36,6 +38,7 @@ export function AssistantInteractiveCanvas({
   onReset,
 }: AssistantInteractiveCanvasProps) {
   const canvasRef = useRef<HTMLElement | null>(null);
+  const mountedRef = useRef(true);
   const initialSection = sectionForItem(
     presentation.sections,
     presentation.focusItemId,
@@ -44,6 +47,8 @@ export function AssistantInteractiveCanvas({
   const [selectedItemId, setSelectedItemId] = useState(
     presentation.focusItemId ?? initialSection?.items[0]?.id,
   );
+  const [opening, setOpening] = useState(false);
+  const [openError, setOpenError] = useState<string>();
 
   const activeSection =
     presentation.sections.find((section) => section.kind === activeKind) ??
@@ -51,9 +56,16 @@ export function AssistantInteractiveCanvas({
   const selectedItem =
     activeSection?.items.find((item) => item.id === selectedItemId) ??
     activeSection?.items[0];
+  const selectedItemCanOpen = selectedItem
+    ? canOpenPresentationItem(selectedItem)
+    : false;
 
   useEffect(() => {
+    mountedRef.current = true;
     canvasRef.current?.focus({ preventScroll: true });
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   function selectSection(section: AssistantPresentationSection) {
@@ -62,6 +74,26 @@ export function AssistantInteractiveCanvas({
       (item) => item.id === presentation.focusItemId,
     );
     setSelectedItemId(focusedItem?.id ?? section.items[0]?.id);
+    setOpenError(undefined);
+  }
+
+  async function openSelectedItem() {
+    if (!selectedItem || opening) return;
+    setOpening(true);
+    setOpenError(undefined);
+    try {
+      if (selectedItem.type === "task") {
+        await onOpenTask(selectedItem);
+      } else if (selectedItem.type === "schedule") {
+        await onOpenSchedule(selectedItem);
+      } else {
+        await onOpenProject(selectedItem);
+      }
+    } catch {
+      if (mountedRef.current) setOpenError(copy.home.resultOpenFailed);
+    } finally {
+      if (mountedRef.current) setOpening(false);
+    }
   }
 
   function moveBetweenTabs(event: KeyboardEvent<HTMLButtonElement>) {
@@ -170,7 +202,10 @@ export function AssistantInteractiveCanvas({
                       type="button"
                       data-selected={item.id === selectedItem.id}
                       aria-current={item.id === selectedItem.id}
-                      onClick={() => setSelectedItemId(item.id)}
+                      onClick={() => {
+                        setSelectedItemId(item.id);
+                        setOpenError(undefined);
+                      }}
                     >
                       <ItemMarker section={activeSection} />
                       <span>
@@ -189,9 +224,10 @@ export function AssistantInteractiveCanvas({
               >
                 <ItemDetail
                   item={selectedItem}
-                  onOpenTask={onOpenTask}
-                  onOpenProject={onOpenProject}
-                  onOpenSchedule={onOpenSchedule}
+                  opening={opening}
+                  error={openError}
+                  canOpen={selectedItemCanOpen}
+                  onOpen={() => void openSelectedItem()}
                 />
               </article>
             </div>
@@ -235,24 +271,32 @@ function itemSummary(
   item: AssistantPresentationSection["items"][number],
 ): string {
   if (item.type === "task") {
-    return item.projectTitle || copy.home.unassignedTask;
+    return item.status === "open"
+      ? item.projectTitle || copy.home.unassignedTask
+      : copy.home.taskStatus(item.status);
   }
   if (item.type === "schedule") {
-    return `${formatTime(item.startsAt)}–${formatTime(item.endsAt)}`;
+    return item.status === "cancelled"
+      ? copy.home.scheduleStatus(item.status)
+      : `${formatTime(item.startsAt)}–${formatTime(item.endsAt)}`;
   }
-  return item.nextAction || item.objective || copy.projects.noNextAction;
+  return item.status === "active"
+    ? item.nextAction || item.objective || copy.projects.noNextAction
+    : copy.home.projectStatus(item.status);
 }
 
 function ItemDetail({
   item,
-  onOpenTask,
-  onOpenProject,
-  onOpenSchedule,
+  opening,
+  error,
+  canOpen,
+  onOpen,
 }: {
   item: AssistantPresentationSection["items"][number];
-  onOpenTask(task: Pick<Task, "id" | "projectId">): void;
-  onOpenProject(project: Pick<Project, "id" | "workspaceId">): void;
-  onOpenSchedule(entry: Pick<ScheduleEntry, "id">): void;
+  opening: boolean;
+  error: string | undefined;
+  canOpen: boolean;
+  onOpen(): void;
 }) {
   if (item.type === "task") {
     return (
@@ -261,21 +305,28 @@ function ItemDetail({
           <CheckCircle2 />
         </span>
         <div className="assistant-canvas__detail-copy">
-          <p>{copy.home.taskPriority(item.priority)}</p>
+          <p>{`${copy.home.taskStatus(item.status)} · ${copy.home.taskPriority(item.priority)}`}</p>
           <h4>{item.title}</h4>
           <span>{item.projectTitle || copy.home.unassignedTask}</span>
           {item.dueAt && (
             <time dateTime={item.dueAt}>{formatDate(item.dueAt)}</time>
           )}
         </div>
-        <button
-          className="primary-button focus-visible-control"
-          type="button"
-          onClick={() => onOpenTask(item)}
-        >
-          {copy.home.openTaskAction}
-          <ArrowRight aria-hidden="true" />
-        </button>
+        {canOpen && (
+          <button
+            className="primary-button focus-visible-control"
+            type="button"
+            disabled={opening}
+            aria-busy={opening}
+            onClick={onOpen}
+          >
+            <DestinationActionContent
+              opening={opening}
+              label={copy.home.openTaskAction}
+            />
+          </button>
+        )}
+        {error && <ResultOpenError message={error} />}
       </>
     );
   }
@@ -286,18 +337,25 @@ function ItemDetail({
           <CalendarDays />
         </span>
         <div className="assistant-canvas__detail-copy">
-          <p>{formatDate(item.startsAt)}</p>
+          <p>{`${copy.home.scheduleStatus(item.status)} · ${formatDate(item.startsAt)}`}</p>
           <h4>{item.title}</h4>
           <span>{`${formatTime(item.startsAt)}–${formatTime(item.endsAt)}`}</span>
         </div>
-        <button
-          className="primary-button focus-visible-control"
-          type="button"
-          onClick={() => onOpenSchedule(item)}
-        >
-          {copy.home.openScheduleAction}
-          <ArrowRight aria-hidden="true" />
-        </button>
+        {canOpen && (
+          <button
+            className="primary-button focus-visible-control"
+            type="button"
+            disabled={opening}
+            aria-busy={opening}
+            onClick={onOpen}
+          >
+            <DestinationActionContent
+              opening={opening}
+              label={copy.home.openScheduleAction}
+            />
+          </button>
+        )}
+        {error && <ResultOpenError message={error} />}
       </>
     );
   }
@@ -307,7 +365,7 @@ function ItemDetail({
         <FolderKanban />
       </span>
       <div className="assistant-canvas__detail-copy">
-        <p>{copy.home.projectTaskCount(item.openTaskCount)}</p>
+        <p>{`${copy.home.projectStatus(item.status)} · ${copy.home.projectTaskCount(item.openTaskCount)}`}</p>
         <h4>{item.title}</h4>
         <span>
           {item.nextAction
@@ -318,13 +376,60 @@ function ItemDetail({
       <button
         className="primary-button focus-visible-control"
         type="button"
-        onClick={() => onOpenProject(item)}
+        disabled={opening}
+        aria-busy={opening}
+        onClick={onOpen}
       >
-        {copy.home.openProjectAction}
-        <ArrowRight aria-hidden="true" />
+        <DestinationActionContent
+          opening={opening}
+          label={copy.home.openProjectAction}
+        />
       </button>
+      {error && <ResultOpenError message={error} />}
     </>
   );
+}
+
+function DestinationActionContent({
+  opening,
+  label,
+}: {
+  opening: boolean;
+  label: string;
+}) {
+  return opening ? (
+    <>
+      <span className="button-spinner" aria-hidden="true" />
+      {copy.home.resultOpening}
+    </>
+  ) : (
+    <>
+      {label}
+      <ArrowRight aria-hidden="true" />
+    </>
+  );
+}
+
+function ResultOpenError({ message }: { message: string }) {
+  return (
+    <p className="assistant-canvas__open-error" role="alert">
+      {message}
+    </p>
+  );
+}
+
+export function canOpenPresentationItem(
+  item: AssistantPresentationSection["items"][number],
+  now = new Date(),
+): boolean {
+  if (item.type === "project") return true;
+  if (item.type === "schedule") return item.status !== "cancelled";
+  if (item.status !== "open") return false;
+  if (item.projectId) return true;
+  if (!item.dueAt) return true;
+  const endOfToday = new Date(now);
+  endOfToday.setHours(24, 0, 0, 0);
+  return new Date(item.dueAt).getTime() < endOfToday.getTime();
 }
 
 function formatTime(value: string): string {
