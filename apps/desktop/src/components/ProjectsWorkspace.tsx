@@ -4,6 +4,8 @@ import {
   ChevronRight,
   Circle,
   CircleAlert,
+  RotateCcw,
+  Trash2,
   FolderKanban,
   ListTodo,
   Pencil,
@@ -52,6 +54,16 @@ type ProjectsWorkspaceProps = {
   ): Promise<void>;
   onCreateTask(title: string): Promise<void>;
   onCompleteTask(task: Task): Promise<void>;
+  onUpdateTask(
+    task: Task,
+    input: {
+      title: string;
+      notes?: string;
+      status: Task["status"];
+      priority: number;
+      dueAt?: string;
+    },
+  ): Promise<void>;
 };
 
 export function ProjectsWorkspace({
@@ -69,6 +81,7 @@ export function ProjectsWorkspace({
   onUpdateProject,
   onCreateTask,
   onCompleteTask,
+  onUpdateTask,
 }: ProjectsWorkspaceProps) {
   const [formOpen, setFormOpen] = useState(false);
   const [title, setTitle] = useState("");
@@ -80,17 +93,21 @@ export function ProjectsWorkspace({
   const [formError, setFormError] = useState<string>();
   const [editingProjectId, setEditingProjectId] = useState<string>();
   const [savedProjectId, setSavedProjectId] = useState<string>();
+  const [editingTaskId, setEditingTaskId] = useState<string>();
   const skeletonVisible = useDelayedSkeleton(loading);
   const showingSkeleton = loading || skeletonVisible;
 
   const selectedProject = projects.find(
     (project) => project.id === selectedProjectId,
   );
+  const openTasks = tasks.filter((task) => task.status === "open");
+  const completedTasks = tasks.filter((task) => task.status === "completed");
 
   useEffect(() => {
     setTaskTitle("");
     setEditingProjectId(undefined);
     setSavedProjectId(undefined);
+    setEditingTaskId(undefined);
   }, [selectedProjectId]);
 
   async function submitProject(event: FormEvent<HTMLFormElement>) {
@@ -439,11 +456,11 @@ export function ProjectsWorkspace({
                     <ListTodo aria-hidden="true" />
                     <h3>{copy.projects.workItemsTitle}</h3>
                   </div>
-                  <span>{copy.projects.openTaskCount(tasks.length)}</span>
+                  <span>{copy.projects.openTaskCount(openTasks.length)}</span>
                 </div>
-                {tasks.length ? (
+                {openTasks.length ? (
                   <ul className="project-task-list">
-                    {tasks.map((task) => (
+                    {openTasks.map((task) => (
                       <li key={task.id}>
                         <button
                           className="project-task-list__complete focus-visible-control"
@@ -454,7 +471,30 @@ export function ProjectsWorkspace({
                         >
                           <Circle aria-hidden="true" />
                         </button>
-                        <span>{task.title}</span>
+                        <button
+                          className="project-task-list__content focus-visible-control"
+                          type="button"
+                          aria-expanded={editingTaskId === task.id}
+                          onClick={() =>
+                            setEditingTaskId((current) =>
+                              current === task.id ? undefined : task.id,
+                            )
+                          }
+                        >
+                          <strong>{task.title}</strong>
+                          <span>{taskMeta(task)}</span>
+                        </button>
+                        {editingTaskId === task.id && (
+                          <TaskEditForm
+                            task={task}
+                            saving={saving}
+                            onCancel={() => setEditingTaskId(undefined)}
+                            onSave={async (input) => {
+                              await onUpdateTask(task, input);
+                              setEditingTaskId(undefined);
+                            }}
+                          />
+                        )}
                       </li>
                     ))}
                   </ul>
@@ -494,6 +534,75 @@ export function ProjectsWorkspace({
                   <p className="project-detail__empty">
                     {copy.projects.completedProjectNotice}
                   </p>
+                )}
+                {completedTasks.length > 0 && (
+                  <section
+                    className="project-completed-tasks"
+                    aria-labelledby="completed-tasks-title"
+                  >
+                    <div className="projects-section-heading">
+                      <div>
+                        <Circle aria-hidden="true" />
+                        <h3 id="completed-tasks-title">
+                          {copy.projects.completedWorkItemsTitle}
+                        </h3>
+                      </div>
+                      <span>
+                        {copy.projects.completedTaskCount(
+                          completedTasks.length,
+                        )}
+                      </span>
+                    </div>
+                    <ul className="project-task-list project-task-list--completed">
+                      {completedTasks.map((task) => (
+                        <li key={task.id}>
+                          <button
+                            className="project-task-list__complete focus-visible-control"
+                            type="button"
+                            disabled={saving}
+                            aria-label={copy.projects.reopenTask(task.title)}
+                            onClick={() =>
+                              void onUpdateTask(task, {
+                                title: task.title,
+                                notes: task.notes ?? undefined,
+                                status: "open",
+                                priority: task.priority,
+                                dueAt: task.dueAt ?? undefined,
+                              })
+                            }
+                          >
+                            <RotateCcw aria-hidden="true" />
+                          </button>
+                          <button
+                            className="project-task-list__content focus-visible-control"
+                            type="button"
+                            aria-expanded={editingTaskId === task.id}
+                            onClick={() =>
+                              setEditingTaskId((current) =>
+                                current === task.id ? undefined : task.id,
+                              )
+                            }
+                          >
+                            <strong>{task.title}</strong>
+                            <span>
+                              {copy.projects.completedTaskMeta(taskMeta(task))}
+                            </span>
+                          </button>
+                          {editingTaskId === task.id && (
+                            <TaskEditForm
+                              task={task}
+                              saving={saving}
+                              onCancel={() => setEditingTaskId(undefined)}
+                              onSave={async (input) => {
+                                await onUpdateTask(task, input);
+                                setEditingTaskId(undefined);
+                              }}
+                            />
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
                 )}
               </div>
             </>
@@ -665,6 +774,180 @@ function ProjectEditForm({
   );
 }
 
+function TaskEditForm({
+  task,
+  saving,
+  onCancel,
+  onSave,
+}: {
+  task: Task;
+  saving: boolean;
+  onCancel(): void;
+  onSave(input: {
+    title: string;
+    notes?: string;
+    status: Task["status"];
+    priority: number;
+    dueAt?: string;
+  }): Promise<void>;
+}) {
+  const [title, setTitle] = useState(task.title);
+  const [notes, setNotes] = useState(task.notes ?? "");
+  const [priority, setPriority] = useState(String(task.priority));
+  const [dueDate, setDueDate] = useState(isoToDateInput(task.dueAt));
+  const [confirmingRemoval, setConfirmingRemoval] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!title.trim()) {
+      setError(copy.projects.workItemTitleRequired);
+      return;
+    }
+    setError(undefined);
+    try {
+      await onSave({
+        title: title.trim(),
+        notes: notes.trim() || undefined,
+        status: task.status,
+        priority: Number(priority),
+        dueAt: dateInputToIso(dueDate),
+      });
+    } catch {
+      setError(copy.projects.taskUpdateNotice);
+    }
+  }
+
+  async function removeTask() {
+    setError(undefined);
+    try {
+      await onSave({
+        title: title.trim() || task.title,
+        notes: notes.trim() || undefined,
+        status: "cancelled",
+        priority: Number(priority),
+        dueAt: dateInputToIso(dueDate),
+      });
+    } catch {
+      setError(copy.projects.taskRemoveNotice);
+    }
+  }
+
+  return (
+    <form
+      className="project-task-edit-form"
+      aria-label={copy.projects.editWorkItem(task.title)}
+      onSubmit={(event) => void save(event)}
+    >
+      {error && (
+        <p className="inline-alert" role="alert">
+          {error}
+        </p>
+      )}
+      <label htmlFor={`task-title-${task.id}`}>
+        <span>{copy.projects.workItemTitleLabel}</span>
+        <input
+          id={`task-title-${task.id}`}
+          value={title}
+          maxLength={200}
+          disabled={saving}
+          onChange={(event) => setTitle(event.target.value)}
+        />
+      </label>
+      <label htmlFor={`task-notes-${task.id}`}>
+        <span>{copy.projects.workItemNotesLabel}</span>
+        <textarea
+          id={`task-notes-${task.id}`}
+          value={notes}
+          maxLength={10_000}
+          rows={3}
+          disabled={saving}
+          placeholder={copy.projects.workItemNotesHint}
+          onChange={(event) => setNotes(event.target.value)}
+        />
+      </label>
+      <div className="project-task-edit-form__fields">
+        <label htmlFor={`task-priority-${task.id}`}>
+          <span>{copy.projects.workItemPriorityLabel}</span>
+          <select
+            id={`task-priority-${task.id}`}
+            value={priority}
+            disabled={saving}
+            onChange={(event) => setPriority(event.target.value)}
+          >
+            {copy.projects.taskPriorities.map((label, level) => (
+              <option value={level} key={label}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label htmlFor={`task-due-${task.id}`}>
+          <span>{copy.projects.dueDateLabel}</span>
+          <input
+            id={`task-due-${task.id}`}
+            type="date"
+            value={dueDate}
+            disabled={saving}
+            onChange={(event) => setDueDate(event.target.value)}
+          />
+        </label>
+      </div>
+      {confirmingRemoval ? (
+        <div className="project-task-edit-form__removal" role="alert">
+          <p>{copy.projects.removeWorkItemConfirm}</p>
+          <div>
+            <button
+              className="secondary-button focus-visible-control"
+              type="button"
+              disabled={saving}
+              onClick={() => setConfirmingRemoval(false)}
+            >
+              {copy.projects.keepWorkItem}
+            </button>
+            <button
+              className="destructive-button focus-visible-control"
+              type="button"
+              disabled={saving}
+              onClick={() => void removeTask()}
+            >
+              {copy.projects.removeWorkItem}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="project-task-edit-form__actions">
+          <button
+            className="destructive-quiet-button focus-visible-control"
+            type="button"
+            disabled={saving}
+            onClick={() => setConfirmingRemoval(true)}
+          >
+            <Trash2 aria-hidden="true" />
+            {copy.projects.removeWorkItem}
+          </button>
+          <span />
+          <button
+            className="secondary-button focus-visible-control"
+            type="button"
+            disabled={saving}
+            onClick={onCancel}
+          >
+            {copy.projects.stopEditingWorkItem}
+          </button>
+          <button
+            className="primary-button focus-visible-control"
+            type="submit"
+            disabled={saving}
+          >
+            {saving ? copy.actions.saving : copy.projects.saveWorkItem}
+          </button>
+        </div>
+      )}
+    </form>
+  );
+}
+
 function WorkspaceTabsSkeleton({ visible }: { visible: boolean }) {
   return (
     <SkeletonGroup
@@ -748,6 +1031,19 @@ function riskLabel(level: number): string {
 
 function statusLabel(status: Project["status"]): string {
   return copy.projects.statuses[status];
+}
+
+function taskMeta(task: Task): string {
+  const priority =
+    copy.projects.taskPriorities[task.priority] ??
+    copy.projects.taskPriorities[0];
+  if (!task.dueAt) return priority;
+  const date = new Date(task.dueAt);
+  if (Number.isNaN(date.getTime())) return priority;
+  return `${priority} · ${new Intl.DateTimeFormat("ko-KR", {
+    month: "short",
+    day: "numeric",
+  }).format(date)}까지`;
 }
 
 function dateInputToIso(value: string): string | undefined {

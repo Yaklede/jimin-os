@@ -190,6 +190,29 @@ export async function completeTask(
   );
 }
 
+export async function updateTask(
+  baseUrl: string,
+  access: string,
+  task: Task,
+  input: {
+    title: string;
+    notes?: string;
+    status: Task["status"];
+    priority: number;
+    dueAt?: string;
+  },
+): Promise<Task> {
+  return request<Task>(baseUrl, access, `/v1/tasks/${task.id}`, "PUT", {
+    projectId: task.projectId,
+    title: input.title,
+    notes: input.notes || null,
+    status: input.status,
+    priority: input.priority,
+    dueAt: input.dueAt || null,
+    expectedVersion: task.version,
+  });
+}
+
 export async function createScheduleEntry(
   baseUrl: string,
   access: string,
@@ -215,7 +238,7 @@ async function request<T>(
   baseUrl: string,
   access: string,
   path: string,
-  method: "POST",
+  method: "POST" | "PUT",
   body: unknown,
 ): Promise<T> {
   const response = await fetch(`${normalizeBaseUrl(baseUrl)}${path}`, {

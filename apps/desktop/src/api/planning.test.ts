@@ -5,6 +5,7 @@ import {
   bootstrapTrustedNetworkSession,
   clientPlatformForUserAgent,
   refreshDeviceSession,
+  updateTask,
 } from "./planning";
 
 afterEach(() => {
@@ -14,12 +15,14 @@ afterEach(() => {
 
 describe("device session client", () => {
   it("starts a private-server session without an interactive pairing step", async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
-      new Response(
-        '{"accessToken":"a","refreshToken":"r","user":{},"device":{},"syncCursor":"0"}',
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
-    );
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          '{"accessToken":"a","refreshToken":"r","user":{},"device":{},"syncCursor":"0"}',
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("navigator", {
       platform: "Linux armv8l",
@@ -66,12 +69,14 @@ describe("device session client", () => {
   });
 
   it("rotates a device session through the server refresh endpoint", async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
-      new Response(
-        '{"accessToken":"a","refreshToken":"r","user":{},"device":{},"syncCursor":"0"}',
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
-    );
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          '{"accessToken":"a","refreshToken":"r","user":{},"device":{},"syncCursor":"0"}',
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
     vi.stubGlobal("fetch", fetchMock);
 
     const session = await refreshDeviceSession(
@@ -90,7 +95,9 @@ describe("device session client", () => {
   it("uses a classified error when the refresh session cannot be used", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 401 })),
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response(null, { status: 401 })),
     );
 
     await expect(
@@ -112,5 +119,63 @@ describe("device session client", () => {
     expect(
       clientPlatformForUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X)"),
     ).toBe("macos");
+  });
+});
+
+describe("task client", () => {
+  it("sends a version-checked task update", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "019f68cb-9400-7000-8000-000000000010",
+          projectId: "019f68cb-9400-7000-8000-000000000011",
+          title: "계약서 검토",
+          notes: "수정본 확인",
+          status: "open",
+          priority: 3,
+          dueAt: null,
+          completedAt: null,
+          version: 5,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await updateTask(
+      "https://jimin-os.example/",
+      "access",
+      {
+        id: "019f68cb-9400-7000-8000-000000000010",
+        projectId: "019f68cb-9400-7000-8000-000000000011",
+        title: "계약서 검토",
+        notes: null,
+        status: "open",
+        priority: 1,
+        dueAt: null,
+        completedAt: null,
+        version: 4,
+      },
+      {
+        title: "계약서 검토",
+        notes: "수정본 확인",
+        status: "open",
+        priority: 3,
+      },
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://jimin-os.example/v1/tasks/019f68cb-9400-7000-8000-000000000010",
+      expect.objectContaining({ method: "PUT" }),
+    );
+    const request = fetchMock.mock.calls[0]?.[1];
+    expect(JSON.parse(String(request?.body))).toMatchObject({
+      projectId: "019f68cb-9400-7000-8000-000000000011",
+      title: "계약서 검토",
+      notes: "수정본 확인",
+      status: "open",
+      priority: 3,
+      expectedVersion: 4,
+    });
   });
 });

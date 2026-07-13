@@ -12,7 +12,7 @@ use jimin_storage::{
         ConsumeDevicePairing, CreateDevicePairing, PairingConsumption, ProvisionLogin,
         RefreshRotation, RotateRefreshToken,
     },
-    planning::{NewScheduleEntry, NewTask, TaskStatus},
+    planning::{NewScheduleEntry, NewTask, TaskStatus, TaskUpdate},
     work::{NewProject, ProjectStatus, ProjectUpdate, WorkspaceScope},
 };
 use secrecy::SecretString;
@@ -444,6 +444,89 @@ async fn manual_schedule_and_tasks_are_scoped_and_emit_current_state() {
             .expect("stale completion should not fail")
             .is_none()
     );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn task_update_reopens_soft_deletes_and_rejects_stale_versions() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let provisioned = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let task = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id: provisioned.profile.id,
+            project_id: None,
+            title: "다시 열 일".to_owned(),
+            notes: None,
+            priority: 1,
+            due_at: None,
+        })
+        .await
+        .expect("task should persist");
+    let completed = database
+        .complete_task(provisioned.profile.id, task.id, task.version)
+        .await
+        .expect("complete should succeed")
+        .expect("open task should complete");
+    let reopened = database
+        .update_task(&TaskUpdate {
+            id: completed.id,
+            user_id: provisioned.profile.id,
+            project_id: None,
+            title: "다시 연 일".to_owned(),
+            notes: Some("수정 내용".to_owned()),
+            status: TaskStatus::Open,
+            priority: 2,
+            due_at: None,
+            expected_version: completed.version,
+        })
+        .await
+        .expect("reopen should succeed")
+        .expect("current task should update");
+    assert_eq!(reopened.status, TaskStatus::Open);
+    assert!(reopened.completed_at.is_none());
+    assert!(
+        database
+            .update_task(&TaskUpdate {
+                id: completed.id,
+                user_id: provisioned.profile.id,
+                project_id: None,
+                title: "오래된 수정".to_owned(),
+                notes: None,
+                status: TaskStatus::Cancelled,
+                priority: 0,
+                due_at: None,
+                expected_version: completed.version,
+            })
+            .await
+            .expect("stale update should not fail")
+            .is_none()
+    );
+    let cancelled = database
+        .update_task(&TaskUpdate {
+            id: reopened.id,
+            user_id: provisioned.profile.id,
+            project_id: None,
+            title: reopened.title.clone(),
+            notes: reopened.notes.clone(),
+            status: TaskStatus::Cancelled,
+            priority: reopened.priority,
+            due_at: reopened.due_at,
+            expected_version: reopened.version,
+        })
+        .await
+        .expect("soft delete should succeed")
+        .expect("current task should cancel");
+    assert_eq!(cancelled.status, TaskStatus::Cancelled);
     database.close().await;
 }
 

@@ -34,6 +34,7 @@ use jimin_storage::{
     calendar::{CalendarAccount, CalendarAccountStatus, CreateCalendarOAuthAuthorization},
     planning::{
         NewScheduleEntry, NewTask, ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus,
+        TaskUpdate,
     },
     work::{NewProject, Project, ProjectStatus, ProjectUpdate, Workspace, WorkspaceScope},
 };
@@ -583,6 +584,18 @@ struct CreateTaskRequest {
 
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UpdateTaskRequest {
+    project_id: Option<uuid::Uuid>,
+    title: String,
+    notes: Option<String>,
+    status: String,
+    priority: i16,
+    due_at: Option<String>,
+    expected_version: i64,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CreateProjectRequest {
     workspace_id: uuid::Uuid,
     title: String,
@@ -614,6 +627,7 @@ struct ProjectListQuery {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct TaskListQuery {
     project_id: Option<uuid::Uuid>,
+    status: Option<String>,
 }
 
 #[derive(serde::Deserialize, ToSchema)]
@@ -721,6 +735,7 @@ pub(crate) fn error_response(
         update_project,
         list_open_tasks,
         create_task,
+        update_task,
         complete_task,
         execute_voice_command,
         list_conversations,
@@ -780,13 +795,16 @@ pub(crate) fn error_response(
         AgentModelSettingsResponse,
         CreateConversationRequest,
         CreateProjectRequest,
+        CreateTaskRequest,
         UpdateProjectRequest,
+        UpdateTaskRequest,
         CreateAgentTurnRequest,
         ResolveAgentActionRequest,
         UpdateAgentModelRequest,
         AgentTurnInput,
         ProjectListQuery,
         TaskListQuery,
+        CompleteTaskRequest,
         VoiceCommandRequest
     )),
     tags((name = "health", description = "Process and dependency health"))
@@ -835,6 +853,7 @@ pub fn router(state: ApiState) -> Router {
             axum::routing::put(update_project),
         )
         .route("/v1/tasks", get(list_open_tasks).post(create_task))
+        .route("/v1/tasks/{task_id}", axum::routing::put(update_task))
         .route(
             "/v1/tasks/{task_id}/complete",
             axum::routing::post(complete_task),
@@ -1406,7 +1425,10 @@ async fn update_project(
     get,
     path = "/v1/tasks",
     tag = "planning",
-    params(("projectId" = Option<String>, Query)),
+    params(
+        ("projectId" = Option<String>, Query),
+        ("status" = Option<String>, Query, description = "Use all with a project to include completed work")
+    ),
     responses((status = 200, body = TaskListResponse), (status = 400), (status = 401), (status = 503))
 )]
 async fn list_open_tasks(
@@ -1423,9 +1445,13 @@ async fn list_open_tasks(
         return unavailable_response(request_id);
     };
     let user_id = principal.identity().user_id();
-    let result = match query.project_id {
-        Some(project_id) => planning.open_tasks_for_project(user_id, project_id).await,
-        None => planning.open_tasks_for_user(user_id).await,
+    let result = match (query.project_id, query.status.as_deref()) {
+        (Some(project_id), Some("all")) => planning.tasks_for_project(user_id, project_id).await,
+        (Some(project_id), None | Some("open")) => {
+            planning.open_tasks_for_project(user_id, project_id).await
+        }
+        (None, None | Some("open")) => planning.open_tasks_for_user(user_id).await,
+        _ => return invalid_request_response(request_id),
     };
     match result {
         Ok(tasks) => match tasks
@@ -1486,6 +1512,70 @@ async fn create_task(
             Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
             Err(()) => unavailable_response(request_id),
         },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/tasks/{task_id}",
+    tag = "planning",
+    params(("task_id" = String, Path)),
+    request_body = UpdateTaskRequest,
+    responses((status = 200, body = TaskResponse), (status = 400), (status = 401), (status = 409), (status = 503))
+)]
+async fn update_task(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(task_id): Path<uuid::Uuid>,
+    Json(body): Json<UpdateTaskRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let due_at = match body.due_at {
+        Some(value) => match OffsetDateTime::parse(&value, &Rfc3339) {
+            Ok(value) => Some(value),
+            Err(_) => return invalid_request_response(request_id),
+        },
+        None => None,
+    };
+    let status = match body.status.as_str() {
+        "open" => TaskStatus::Open,
+        "completed" => TaskStatus::Completed,
+        "cancelled" => TaskStatus::Cancelled,
+        _ => return invalid_request_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .update_task(&TaskUpdate {
+            id: task_id,
+            user_id: principal.identity().user_id(),
+            project_id: body.project_id,
+            title: body.title,
+            notes: body.notes,
+            status,
+            priority: body.priority,
+            due_at,
+            expected_version: body.expected_version,
+        })
+        .await
+    {
+        Ok(Some(task)) => match task_response(task) {
+            Ok(response) => Json(response).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Ok(None) => error_response(
+            StatusCode::CONFLICT,
+            "task.version_conflict",
+            "할 일이 다른 기기에서 변경되었어요. 최신 상태를 확인해 주세요.",
+            request_id,
+            false,
+        ),
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -3587,6 +3677,7 @@ mod tests {
                 "/v1/projects/{project_id}",
                 "/v1/schedule-entries",
                 "/v1/tasks",
+                "/v1/tasks/{task_id}",
                 "/v1/tasks/{task_id}/complete",
                 "/v1/workspaces"
             ]
@@ -3654,7 +3745,7 @@ mod tests {
             .expect("handler should respond");
         assert_eq!(project_response.status(), StatusCode::UNAUTHORIZED);
 
-        let project_update_response = router(state)
+        let project_update_response = router(state.clone())
             .oneshot(
                 Request::builder()
                     .method("PUT")
@@ -3677,6 +3768,30 @@ mod tests {
             .await
             .expect("handler should respond");
         assert_eq!(project_update_response.status(), StatusCode::UNAUTHORIZED);
+
+        let task_update_response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/tasks/019f68cb-9400-7000-8000-000000000002")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "projectId": null,
+                            "title": "계약서 검토",
+                            "notes": null,
+                            "status": "open",
+                            "priority": 1,
+                            "dueAt": null,
+                            "expectedVersion": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+        assert_eq!(task_update_response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

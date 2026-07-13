@@ -54,6 +54,19 @@ pub struct NewTask {
     pub due_at: Option<OffsetDateTime>,
 }
 
+/// A version-checked replacement of the mutable task fields.
+pub struct TaskUpdate {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub project_id: Option<Uuid>,
+    pub title: String,
+    pub notes: Option<String>,
+    pub status: TaskStatus,
+    pub priority: i16,
+    pub due_at: Option<OffsetDateTime>,
+    pub expected_version: i64,
+}
+
 impl NewTask {
     /// Validates a bounded task before it reaches SQL.
     ///
@@ -69,6 +82,31 @@ impl NewTask {
                 .as_deref()
                 .is_none_or(|value| valid_text(value, MAX_NOTES_CHARS, true))
             || !(0..=3).contains(&self.priority)
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
+impl TaskUpdate {
+    /// Validates all mutable task fields before database access.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed IDs,
+    /// text, priority, or optimistic version values.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        if !is_v7(self.id)
+            || !is_v7(self.user_id)
+            || !self.project_id.is_none_or(is_v7)
+            || !valid_text(&self.title, MAX_TITLE_CHARS, false)
+            || !self
+                .notes
+                .as_deref()
+                .is_none_or(|value| valid_text(value, MAX_NOTES_CHARS, true))
+            || !(0..=3).contains(&self.priority)
+            || self.expected_version <= 0
         {
             return Err(StorageError::InvalidConfiguration);
         }
@@ -412,6 +450,113 @@ impl Database {
         rows.into_iter().map(Task::try_from).collect()
     }
 
+    /// Lists the active and completed history for one owned project. Cancelled
+    /// entries remain in storage and sync history but are omitted from the
+    /// user's project view.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] when the project is not
+    /// part of the user's work context.
+    pub async fn tasks_for_project(
+        &self,
+        user_id: Uuid,
+        project_id: Uuid,
+    ) -> Result<Vec<Task>, StorageError> {
+        if !self.project_exists_for_user(user_id, project_id).await? {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let rows = sqlx::query_as::<_, TaskRow>(
+            "\
+            SELECT id, project_id, title, notes, status, priority, due_at, completed_at, version
+            FROM tasks
+            WHERE user_id = $1 AND project_id = $2 AND status IN ('open', 'completed')
+            ORDER BY
+                CASE status WHEN 'open' THEN 0 ELSE 1 END,
+                priority DESC,
+                due_at NULLS LAST,
+                completed_at DESC NULLS LAST,
+                created_at ASC,
+                id ASC",
+        )
+        .bind(user_id)
+        .bind(project_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(classify)?;
+        rows.into_iter().map(Task::try_from).collect()
+    }
+
+    /// Replaces the mutable fields of one owned task when its version still
+    /// matches. A cancelled status is a soft delete so sync and audit history
+    /// remain intact.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for invalid input and a
+    /// classified persistence error when storage is unavailable.
+    pub async fn update_task(&self, update: &TaskUpdate) -> Result<Option<Task>, StorageError> {
+        update.validate()?;
+        if let Some(project_id) = update.project_id
+            && !self
+                .project_exists_for_user(update.user_id, project_id)
+                .await?
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let status = task_status_name(update.status);
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let row = sqlx::query_as::<_, TaskRow>(
+            "\
+            UPDATE tasks
+            SET project_id = $4,
+                title = $5,
+                notes = $6,
+                status = $7,
+                priority = $8,
+                due_at = $9,
+                completed_at = CASE
+                    WHEN $7 = 'completed' THEN COALESCE(completed_at, NOW())
+                    ELSE NULL
+                END
+            WHERE id = $1 AND user_id = $2 AND version = $3
+            RETURNING id, project_id, title, notes, status, priority, due_at, completed_at, version",
+        )
+        .bind(update.id)
+        .bind(update.user_id)
+        .bind(update.expected_version)
+        .bind(update.project_id)
+        .bind(update.title.trim())
+        .bind(
+            update
+                .notes
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(status)
+        .bind(update.priority)
+        .bind(update.due_at)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some(row) = row else {
+            transaction.commit().await.map_err(classify)?;
+            return Ok(None);
+        };
+        let task = Task::try_from(row)?;
+        append_change(
+            &mut transaction,
+            update.user_id,
+            "task",
+            task.id,
+            task.version,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        Ok(Some(task))
+    }
+
     /// Completes one open task with optimistic version matching. A missing,
     /// already-completed, or concurrently changed task returns `Ok(None)` so
     /// the HTTP layer can reload current state without leaking another user's
@@ -467,6 +612,14 @@ fn valid_text(value: &str, maximum: usize, allow_empty: bool) -> bool {
 
 fn valid_time_zone(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= 80 && !value.chars().any(char::is_control)
+}
+
+fn task_status_name(status: TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Open => "open",
+        TaskStatus::Completed => "completed",
+        TaskStatus::Cancelled => "cancelled",
+    }
 }
 
 fn classify(_error: sqlx::Error) -> StorageError {

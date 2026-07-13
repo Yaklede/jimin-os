@@ -6,6 +6,7 @@ import {
   completeTask,
   createTask,
   refreshDeviceSession,
+  updateTask,
   type SessionTokens,
   type Task,
 } from "./api/planning";
@@ -730,11 +731,11 @@ export default function App() {
     setProjectsSaving(true);
     setProjectsError(undefined);
     try {
-      await withAuthenticatedSession((accessToken) =>
+      const completed = await withAuthenticatedSession((accessToken) =>
         completeTask(apiBaseUrl, accessToken, task),
       );
       setProjectTasks((current) =>
-        current.filter((item) => item.id !== task.id),
+        current.map((item) => (item.id === completed.id ? completed : item)),
       );
       if (task.projectId) {
         setProjects((current) =>
@@ -752,6 +753,51 @@ export default function App() {
     } catch {
       setProjectsError(copy.messages.taskCompletionNotice);
       if (selectedProjectId) void loadProjectTasks(selectedProjectId);
+    } finally {
+      setProjectsSaving(false);
+    }
+  }
+
+  async function updateProjectTask(
+    task: Task,
+    input: {
+      title: string;
+      notes?: string;
+      status: Task["status"];
+      priority: number;
+      dueAt?: string;
+    },
+  ): Promise<void> {
+    setProjectsSaving(true);
+    setProjectsError(undefined);
+    try {
+      const updated = await withAuthenticatedSession((accessToken) =>
+        updateTask(apiBaseUrl, accessToken, task, input),
+      );
+      setProjectTasks((current) =>
+        updated.status === "cancelled"
+          ? current.filter((item) => item.id !== updated.id)
+          : current.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      const openDelta =
+        Number(updated.status === "open") - Number(task.status === "open");
+      if (openDelta && task.projectId) {
+        setProjects((current) =>
+          current.map((project) =>
+            project.id === task.projectId
+              ? {
+                  ...project,
+                  openTaskCount: Math.max(0, project.openTaskCount + openDelta),
+                }
+              : project,
+          ),
+        );
+      }
+      void loadHomeSnapshot();
+    } catch {
+      setProjectsError(copy.messages.projectTaskSaveNotice);
+      if (selectedProjectId) void loadProjectTasks(selectedProjectId);
+      throw new Error("task update failed");
     } finally {
       setProjectsSaving(false);
     }
@@ -1011,6 +1057,7 @@ export default function App() {
               onUpdateProject={updateWorkspaceProject}
               onCreateTask={createProjectTask}
               onCompleteTask={completeProjectTask}
+              onUpdateTask={updateProjectTask}
             />
           )}
           {destination === "memory" && (

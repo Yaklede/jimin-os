@@ -49,6 +49,7 @@ export async function fetchProjectTasks(
 ): Promise<Task[]> {
   const url = new URL(`${normalizeBaseUrl(baseUrl)}/v1/tasks`, browserOrigin());
   url.searchParams.set("projectId", projectId);
+  url.searchParams.set("status", "all");
   return requestListFromUrl<Task>(url, access);
 }
 

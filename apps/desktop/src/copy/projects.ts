@@ -43,9 +43,30 @@ export const projectCopy = {
   completedProjectNotice:
     "완료한 프로젝트에는 새 일을 추가하지 않아요. 다시 진행하려면 프로젝트 상태를 바꿔 주세요.",
   workItemsTitle: "지금 할 일",
+  completedWorkItemsTitle: "완료한 일",
+  completedTaskCount: (count: number) => `${count}개`,
+  completedTaskMeta: (meta: string) => `완료 · ${meta}`,
+  reopenTask: (title: string) => `${title} 다시 진행하기`,
   workItemsEmpty: "아직 연결된 일이 없어요. 바로 이어서 할 일을 추가해 보세요.",
   workItemLabel: "프로젝트에 추가할 일",
   workItemHint: "이 프로젝트에서 바로 할 일을 적어 보세요",
+  editWorkItem: (title: string) => `${title} 내용 수정`,
+  workItemTitleLabel: "일 이름",
+  workItemTitleRequired: "일 이름을 적어 주세요.",
+  workItemNotesLabel: "처리할 내용",
+  workItemNotesHint: "완료 조건이나 확인할 내용을 적어 보세요.",
+  workItemPriorityLabel: "우선순위",
+  taskPriorities: ["낮음", "보통", "높음", "가장 먼저"],
+  stopEditingWorkItem: "수정 그만두기",
+  saveWorkItem: "일 내용 저장하기",
+  removeWorkItem: "목록에서 지우기",
+  keepWorkItem: "계속 보관하기",
+  removeWorkItemConfirm:
+    "이 일은 목록에서 사라지지만 변경 기록은 안전하게 보관해요. 지울까요?",
+  taskUpdateNotice:
+    "일을 바꾸지 못했어요. 최신 내용을 불러온 뒤 다시 시도해 주세요.",
+  taskRemoveNotice:
+    "일을 지우지 못했어요. 최신 내용을 불러온 뒤 다시 시도해 주세요.",
   titleRequired: "프로젝트 이름을 적어 주세요.",
   projectSaveNotice:
     "프로젝트를 저장하지 못했어요. 입력한 내용을 확인한 뒤 다시 시도해 주세요.",
