@@ -10,11 +10,47 @@ export interface ConversationMessage {
   id: string;
   role: "user" | "assistant" | "system_event";
   content: string;
+  presentation: AssistantPresentation | null;
   status: "pending" | "streaming" | "completed" | "failed" | "cancelled";
   createdAt: string;
   completedAt: string | null;
   version: number;
 }
+
+export interface AssistantPresentation {
+  kind: "summary" | "tasks" | "schedule" | "projects";
+  title: string;
+  items: AssistantPresentationItem[];
+}
+
+export type AssistantPresentationItem =
+  | {
+      type: "task";
+      id: string;
+      projectId: string | null;
+      projectTitle: string | null;
+      title: string;
+      priority: number;
+      dueAt: string | null;
+    }
+  | {
+      type: "schedule";
+      id: string;
+      title: string;
+      startsAt: string;
+      endsAt: string;
+      timeZone: string;
+    }
+  | {
+      type: "project";
+      id: string;
+      workspaceId: string;
+      title: string;
+      objective: string | null;
+      nextAction: string | null;
+      riskLevel: number;
+      openTaskCount: number;
+    };
 
 export interface AgentJob {
   id: string;
@@ -373,9 +409,60 @@ function isConversationMessage(value: unknown): value is ConversationMessage {
     typeof value.id === "string" &&
     typeof value.role === "string" &&
     typeof value.content === "string" &&
+    (value.presentation === null ||
+      isAssistantPresentation(value.presentation)) &&
     typeof value.status === "string" &&
     typeof value.createdAt === "string"
   );
+}
+
+function isAssistantPresentation(
+  value: unknown,
+): value is AssistantPresentation {
+  return (
+    isRecord(value) &&
+    (value.kind === "summary" ||
+      value.kind === "tasks" ||
+      value.kind === "schedule" ||
+      value.kind === "projects") &&
+    typeof value.title === "string" &&
+    Array.isArray(value.items) &&
+    value.items.every(isAssistantPresentationItem)
+  );
+}
+
+function isAssistantPresentationItem(
+  value: unknown,
+): value is AssistantPresentationItem {
+  if (!isRecord(value) || typeof value.id !== "string") return false;
+  if (value.type === "task") {
+    return (
+      (value.projectId === null || typeof value.projectId === "string") &&
+      (value.projectTitle === null || typeof value.projectTitle === "string") &&
+      typeof value.title === "string" &&
+      typeof value.priority === "number" &&
+      (value.dueAt === null || typeof value.dueAt === "string")
+    );
+  }
+  if (value.type === "schedule") {
+    return (
+      typeof value.title === "string" &&
+      typeof value.startsAt === "string" &&
+      typeof value.endsAt === "string" &&
+      typeof value.timeZone === "string"
+    );
+  }
+  if (value.type === "project") {
+    return (
+      typeof value.workspaceId === "string" &&
+      typeof value.title === "string" &&
+      (value.objective === null || typeof value.objective === "string") &&
+      (value.nextAction === null || typeof value.nextAction === "string") &&
+      typeof value.riskLevel === "number" &&
+      typeof value.openTaskCount === "number"
+    );
+  }
+  return false;
 }
 
 function isPendingAgentAction(value: unknown): value is PendingAgentAction {

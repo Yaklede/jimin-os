@@ -649,14 +649,18 @@ export default function App() {
     setSelectedProjectId(projectId);
   }
 
-  function openProjectFromAssistant(project: Project) {
+  function openProjectFromAssistant(
+    project: Pick<Project, "id" | "workspaceId">,
+  ) {
     setHighlightedProjectTaskId(undefined);
     setSelectedWorkspaceId(project.workspaceId);
     setSelectedProjectId(project.id);
     setDestination("projects");
   }
 
-  async function openTaskFromAssistant(task: Task): Promise<void> {
+  async function openTaskFromAssistant(
+    task: Pick<Task, "id" | "projectId">,
+  ): Promise<void> {
     if (!task.projectId) return;
     const currentProject = projects.find(
       (project) => project.id === task.projectId,
@@ -1077,7 +1081,6 @@ export default function App() {
                   : undefined
               }
               assistantMessage={latestAssistantMessage}
-              projects={projects}
               onOpenAssistant={openNewAssistantRequest}
               onSendAssistant={(text, clientMessageId) =>
                 sendConversationRequest(text, clientMessageId, true)

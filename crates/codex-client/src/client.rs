@@ -420,6 +420,63 @@ where
         prompt: &str,
         model: Option<&str>,
         reasoning_effort: Option<&str>,
+        on_delta: F,
+    ) -> Result<CompletedTurn>
+    where
+        F: FnMut(&str),
+    {
+        self.run_turn_with_response_streaming_internal(
+            thread_id,
+            prompt,
+            model,
+            reasoning_effort,
+            None,
+            on_delta,
+        )
+        .await
+    }
+
+    /// Runs a turn whose final assistant message must satisfy the supplied
+    /// App Server output schema. Model deltas remain raw JSON fragments so the
+    /// caller can expose only validated fields while streaming.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for protocol failures, failed turns, malformed
+    /// arguments, or a final response exceeding the bounded payload.
+    pub async fn run_structured_turn_with_response_streaming_with_options<F>(
+        &mut self,
+        thread_id: &str,
+        prompt: &str,
+        model: Option<&str>,
+        reasoning_effort: Option<&str>,
+        output_schema: &Value,
+        on_delta: F,
+    ) -> Result<CompletedTurn>
+    where
+        F: FnMut(&str),
+    {
+        if !output_schema.is_object() {
+            return Err(Error::InvalidProtocolMessage);
+        }
+        self.run_turn_with_response_streaming_internal(
+            thread_id,
+            prompt,
+            model,
+            reasoning_effort,
+            Some(output_schema),
+            on_delta,
+        )
+        .await
+    }
+
+    async fn run_turn_with_response_streaming_internal<F>(
+        &mut self,
+        thread_id: &str,
+        prompt: &str,
+        model: Option<&str>,
+        reasoning_effort: Option<&str>,
+        output_schema: Option<&Value>,
         mut on_delta: F,
     ) -> Result<CompletedTurn>
     where
@@ -430,22 +487,24 @@ where
             return Err(Error::InvalidProtocolMessage);
         }
 
-        let response: TurnStartResponse = self
-            .connection
-            .request(
-                "turn/start",
-                json!({
-                    "threadId": thread_id,
-                    "input": [{
-                        "type": "text",
-                        "text": prompt,
-                        "text_elements": []
-                    }],
-                    "model": model,
-                    "effort": reasoning_effort
-                }),
-            )
-            .await?;
+        let mut params = json!({
+            "threadId": thread_id,
+            "input": [{
+                "type": "text",
+                "text": prompt,
+                "text_elements": []
+            }],
+            "model": model,
+            "effort": reasoning_effort
+        });
+        if let Some(output_schema) = output_schema {
+            params
+                .as_object_mut()
+                .ok_or(Error::InvalidProtocolMessage)?
+                .insert("outputSchema".to_owned(), output_schema.clone());
+        }
+
+        let response: TurnStartResponse = self.connection.request("turn/start", params).await?;
 
         if response.turn.id.is_empty() {
             return Err(Error::InvalidResponse {
@@ -1125,6 +1184,7 @@ mod tests {
             assert_eq!(turn_request["method"], "turn/start");
             assert_eq!(turn_request["params"]["model"], "gpt-fixture");
             assert_eq!(turn_request["params"]["effort"], "high");
+            assert_eq!(turn_request["params"]["outputSchema"]["type"], "object");
             assert_eq!(
                 turn_request["params"]["input"][0]["text_elements"],
                 json!([])
@@ -1161,12 +1221,19 @@ mod tests {
             .await
             .expect("thread");
         let mut received_deltas = Vec::new();
+        let output_schema = json!({
+            "type": "object",
+            "properties": { "answer": { "type": "string" } },
+            "required": ["answer"],
+            "additionalProperties": false
+        });
         let completed = client
-            .run_turn_with_response_streaming_with_options(
+            .run_structured_turn_with_response_streaming_with_options(
                 &thread_id,
                 "Summarize a generic fixture.",
                 Some("gpt-fixture"),
                 Some("high"),
+                &output_schema,
                 |delta| {
                     received_deltas.push(delta.to_owned());
                 },

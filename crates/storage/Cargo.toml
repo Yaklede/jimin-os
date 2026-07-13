@@ -10,6 +10,7 @@ repository.workspace = true
 jimin-auth = { path = "../auth" }
 jimin-domain = { path = "../domain" }
 secrecy.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 subtle.workspace = true

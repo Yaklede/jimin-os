@@ -5,8 +5,9 @@ use jimin_domain::{ClientPlatform, DeviceRegistration, EmailAddress, GoogleSubje
 use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness,
     agent::{
-        AgentJobState, AgentModelCatalogEntry, AgentReasoningEffort, ConversationMessageRole,
-        NewAgentTurn, NewConversation, PendingAgentAction, PendingAgentActionDecision,
+        AgentJobState, AgentModelCatalogEntry, AgentReasoningEffort, AssistantPresentation,
+        AssistantPresentationKind, ConversationMessageRole, NewAgentTurn, NewConversation,
+        PendingAgentAction, PendingAgentActionDecision,
     },
     auth::{
         ConsumeDevicePairing, CreateDevicePairing, PairingConsumption, ProvisionLogin,
@@ -719,6 +720,11 @@ async fn queued_agent_turn_is_leased_and_completed_once() {
                 runner_id,
                 assistant_message_id,
                 "오늘 일정은 오후 3시에 하나 있어요.",
+                Some(&AssistantPresentation {
+                    kind: AssistantPresentationKind::Summary,
+                    title: "오늘 일정".to_owned(),
+                    items: Vec::new(),
+                }),
             )
             .await
             .expect("job should complete")
@@ -732,6 +738,13 @@ async fn queued_agent_turn_is_leased_and_completed_once() {
     assert_eq!(messages[0].role, ConversationMessageRole::User);
     assert_eq!(messages[1].role, ConversationMessageRole::Assistant);
     assert_eq!(messages[1].content, "오늘 일정은 오후 3시에 하나 있어요.");
+    assert_eq!(
+        messages[1]
+            .presentation
+            .as_ref()
+            .map(|presentation| presentation.title.as_str()),
+        Some("오늘 일정")
+    );
     assert_eq!(
         database
             .agent_job_for_user(provisioned.profile.id, claim.id)

@@ -360,6 +360,39 @@ impl Database {
         rows.into_iter().map(Project::try_from).collect()
     }
 
+    /// Lists every project visible to the current user for assistant context.
+    /// Workspace ownership is retained on each result so a validated assistant
+    /// presentation can navigate to the correct personal or company scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified persistence error if storage is unavailable.
+    pub async fn projects_for_user(&self, user_id: Uuid) -> Result<Vec<Project>, StorageError> {
+        self.ensure_default_workspaces(user_id).await?;
+        let rows = sqlx::query_as::<_, ProjectRow>(
+            "\
+            SELECT
+                projects.id, projects.workspace_id, projects.title, projects.objective,
+                projects.status, projects.risk_level, projects.next_action, projects.due_at,
+                projects.version, COUNT(tasks.id)::BIGINT AS open_task_count
+            FROM projects
+            LEFT JOIN tasks ON tasks.project_id = projects.id AND tasks.status = 'open'
+            WHERE projects.user_id = $1
+            GROUP BY projects.id
+            ORDER BY
+                CASE projects.status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
+                projects.risk_level DESC,
+                projects.due_at NULLS LAST,
+                projects.updated_at DESC,
+                projects.id ASC",
+        )
+        .bind(user_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(classify)?;
+        rows.into_iter().map(Project::try_from).collect()
+    }
+
     /// Returns whether a project belongs to the current user.
     ///
     /// # Errors

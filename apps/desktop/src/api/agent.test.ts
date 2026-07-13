@@ -201,7 +201,7 @@ describe("agent API", () => {
       start(controller) {
         controller.enqueue(
           encoder.encode(
-            'event: snapshot\ndata: {"messages":[{"id":"message-1","role":"assistant","content":"답변을","status":"streaming","createdAt":"2026-07-11T00:00:00Z","completedAt":null,"version":1}],"job":{"id":"job-1","conversationId":"conversation-1","state":"running","createdAt":"2026-07-11T00:00:00Z","finishedAt":null,"version":2,"pendingAction":null}}\n\n',
+            'event: snapshot\ndata: {"messages":[{"id":"message-1","role":"assistant","content":"답변을","presentation":null,"status":"streaming","createdAt":"2026-07-11T00:00:00Z","completedAt":null,"version":1}],"job":{"id":"job-1","conversationId":"conversation-1","state":"running","createdAt":"2026-07-11T00:00:00Z","finishedAt":null,"version":2,"pendingAction":null}}\n\n',
           ),
         );
         controller.close();

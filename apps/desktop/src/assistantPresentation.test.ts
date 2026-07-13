@@ -1,116 +1,87 @@
 import { describe, expect, it } from "vitest";
 
-import { deriveAssistantPresentation } from "./assistantPresentation";
-import { type HomeSnapshot } from "./api/home";
-import { type Project } from "./api/projects";
+import { type ConversationMessage } from "./api/agent";
+import { presentationForMessage } from "./assistantPresentation";
 
-const snapshot: HomeSnapshot = {
-  schedule: [
-    {
-      id: "schedule-1",
-      title: "제품 회의",
-      notes: null,
-      startsAt: "2026-07-13T01:00:00.000Z",
-      endsAt: "2026-07-13T02:00:00.000Z",
-      timeZone: "Asia/Seoul",
-      status: "confirmed",
-      version: 1,
-    },
-  ],
-  tasks: [
-    {
-      id: "task-1",
-      projectId: "project-1",
-      title: "비스켓링크 회의록 정리",
-      notes: null,
-      status: "open",
-      priority: 2,
-      dueAt: null,
-      completedAt: null,
-      version: 1,
-    },
-    {
-      id: "task-2",
-      projectId: null,
-      title: "장보기",
-      notes: null,
-      status: "open",
-      priority: 1,
-      dueAt: null,
-      completedAt: null,
-      version: 1,
-    },
-  ],
-};
-
-const projects: Project[] = [
-  {
-    id: "project-1",
-    workspaceId: "workspace-1",
-    title: "비스켓링크",
-    objective: "회의 내용을 제품 작업으로 연결한다.",
-    status: "active",
-    riskLevel: 1,
-    nextAction: "회의록 정리",
-    dueAt: null,
-    openTaskCount: 1,
+function assistantMessage(
+  presentation: ConversationMessage["presentation"],
+): ConversationMessage {
+  return {
+    id: "message-1",
+    role: "assistant",
+    content: "서버에서 관련 항목을 확인했어요.",
+    presentation,
+    status: "completed",
+    createdAt: "2026-07-13T00:00:00Z",
+    completedAt: "2026-07-13T00:00:01Z",
     version: 1,
-  },
-];
+  };
+}
 
-describe("deriveAssistantPresentation", () => {
-  it("관련 일감을 점수순으로 좁히고 첫 항목을 강조한다", () => {
-    const result = deriveAssistantPresentation(
-      "비스켓링크 일감 찾아줘",
-      "관련 일감을 찾았어요.",
-      snapshot,
-      projects,
+describe("presentationForMessage", () => {
+  it("서버가 확정한 일감 순서와 ID를 그대로 사용한다", () => {
+    const result = presentationForMessage(
+      assistantMessage({
+        kind: "tasks",
+        title: "오늘 할 일",
+        items: [
+          {
+            type: "task",
+            id: "task-2",
+            projectId: null,
+            projectTitle: null,
+            title: "장보기",
+            priority: 1,
+            dueAt: null,
+          },
+          {
+            type: "task",
+            id: "task-1",
+            projectId: "project-1",
+            projectTitle: "개인 운영체제",
+            title: "회의록 정리",
+            priority: 2,
+            dueAt: null,
+          },
+        ],
+      }),
     );
 
     expect(result.kind).toBe("tasks");
     if (result.kind !== "tasks") throw new Error("expected task result");
-    expect(result.items.map((item) => item.id)).toEqual(["task-1"]);
-    expect(result.highlightedTaskId).toBe("task-1");
+    expect(result.items.map((item) => item.id)).toEqual(["task-2", "task-1"]);
+    expect(result.highlightedTaskId).toBe("task-2");
   });
 
-  it("구체 검색어가 없으면 열린 일감 전체를 보여준다", () => {
-    const result = deriveAssistantPresentation(
-      "내 할 일 보여줘",
-      "열린 할 일을 정리했어요.",
-      snapshot,
-      projects,
-    );
-
-    expect(result.kind).toBe("tasks");
-    if (result.kind !== "tasks") throw new Error("expected task result");
-    expect(result.items).toHaveLength(2);
+  it("프레젠테이션이 없는 이전 메시지는 텍스트 요약으로만 표시한다", () => {
+    expect(presentationForMessage(assistantMessage(null))).toEqual({
+      kind: "summary",
+      title: "요청 결과",
+      summary: "서버에서 관련 항목을 확인했어요.",
+    });
   });
 
-  it("일정 요청은 오늘 일정 표면으로 만든다", () => {
-    const result = deriveAssistantPresentation(
-      "오늘 일정 보여줘",
-      "오늘 회의가 하나 있어요.",
-      snapshot,
-      projects,
+  it("종류와 맞지 않는 서버 항목은 렌더링하지 않는다", () => {
+    const result = presentationForMessage(
+      assistantMessage({
+        kind: "schedule",
+        title: "오늘 일정",
+        items: [
+          {
+            type: "task",
+            id: "task-1",
+            projectId: null,
+            projectTitle: null,
+            title: "일감",
+            priority: 1,
+            dueAt: null,
+          },
+        ],
+      }),
     );
 
     expect(result.kind).toBe("schedule");
     if (result.kind !== "schedule") throw new Error("expected schedule result");
-    expect(result.items[0]?.title).toBe("제품 회의");
-  });
-
-  it("일반 질문은 요약 결과로 유지한다", () => {
-    const result = deriveAssistantPresentation(
-      "오늘 무엇부터 하면 좋을까",
-      "회의 준비부터 시작하는 게 좋아요.",
-      snapshot,
-      projects,
-    );
-
-    expect(result).toEqual({
-      kind: "summary",
-      title: "요청 결과",
-      summary: "회의 준비부터 시작하는 게 좋아요.",
-    });
+    expect(result.items).toEqual([]);
   });
 });

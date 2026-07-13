@@ -25,10 +25,10 @@ use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness, StorageError,
     agent::{
         AgentAuthentication, AgentAuthenticationState, AgentJob, AgentJobState,
-        AgentModelCatalogEntry, AgentModelSettings, AgentReasoningEffort, Conversation,
-        ConversationMessage, ConversationMessageRole, ConversationMessageStatus,
-        ConversationStatus, NewAgentTurn, NewConversation, PendingAgentAction,
-        PendingAgentActionDecision, QueuedAgentTurn,
+        AgentModelCatalogEntry, AgentModelSettings, AgentReasoningEffort, AssistantPresentation,
+        AssistantPresentationItem, AssistantPresentationKind, Conversation, ConversationMessage,
+        ConversationMessageRole, ConversationMessageStatus, ConversationStatus, NewAgentTurn,
+        NewConversation, PendingAgentAction, PendingAgentActionDecision, QueuedAgentTurn,
     },
     auth::{Device, DeviceStatus, Profile},
     calendar::{CalendarAccount, CalendarAccountStatus, CreateCalendarOAuthAuthorization},
@@ -424,10 +424,52 @@ pub struct ConversationMessageResponse {
     id: uuid::Uuid,
     role: String,
     content: String,
+    presentation: Option<AssistantPresentationResponse>,
     status: String,
     created_at: String,
     completed_at: Option<String>,
     version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantPresentationResponse {
+    kind: String,
+    title: String,
+    items: Vec<AssistantPresentationItemResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum AssistantPresentationItemResponse {
+    Task {
+        id: uuid::Uuid,
+        project_id: Option<uuid::Uuid>,
+        project_title: Option<String>,
+        title: String,
+        priority: i16,
+        due_at: Option<String>,
+    },
+    Schedule {
+        id: uuid::Uuid,
+        title: String,
+        starts_at: String,
+        ends_at: String,
+        time_zone: String,
+    },
+    Project {
+        id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+        title: String,
+        objective: Option<String>,
+        next_action: Option<String>,
+        risk_level: i16,
+        open_task_count: i64,
+    },
 }
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
@@ -786,6 +828,8 @@ pub(crate) fn error_response(
         ConversationListResponse,
         QueuedAgentTurnResponse,
         ConversationMessageResponse,
+        AssistantPresentationResponse,
+        AssistantPresentationItemResponse,
         ConversationMessageListResponse,
         AgentJobResponse,
         PendingAgentActionResponse,
@@ -3220,6 +3264,7 @@ fn conversation_message_response(
             ConversationMessageRole::SystemEvent => "system_event".to_owned(),
         },
         content: message.content,
+        presentation: message.presentation.map(assistant_presentation_response),
         status: match message.status {
             ConversationMessageStatus::Pending => "pending".to_owned(),
             ConversationMessageStatus::Streaming => "streaming".to_owned(),
@@ -3234,6 +3279,72 @@ fn conversation_message_response(
             .transpose()?,
         version: message.version,
     })
+}
+
+fn assistant_presentation_response(
+    presentation: AssistantPresentation,
+) -> AssistantPresentationResponse {
+    AssistantPresentationResponse {
+        kind: match presentation.kind {
+            AssistantPresentationKind::Summary => "summary",
+            AssistantPresentationKind::Tasks => "tasks",
+            AssistantPresentationKind::Schedule => "schedule",
+            AssistantPresentationKind::Projects => "projects",
+        }
+        .to_owned(),
+        title: presentation.title,
+        items: presentation
+            .items
+            .into_iter()
+            .map(|item| match item {
+                AssistantPresentationItem::Task {
+                    id,
+                    project_id,
+                    project_title,
+                    title,
+                    priority,
+                    due_at,
+                } => AssistantPresentationItemResponse::Task {
+                    id,
+                    project_id,
+                    project_title,
+                    title,
+                    priority,
+                    due_at,
+                },
+                AssistantPresentationItem::Schedule {
+                    id,
+                    title,
+                    starts_at,
+                    ends_at,
+                    time_zone,
+                } => AssistantPresentationItemResponse::Schedule {
+                    id,
+                    title,
+                    starts_at,
+                    ends_at,
+                    time_zone,
+                },
+                AssistantPresentationItem::Project {
+                    id,
+                    workspace_id,
+                    title,
+                    objective,
+                    next_action,
+                    risk_level,
+                    open_task_count,
+                } => AssistantPresentationItemResponse::Project {
+                    id,
+                    workspace_id,
+                    title,
+                    objective,
+                    next_action,
+                    risk_level,
+                    open_task_count,
+                },
+            })
+            .collect(),
+    }
 }
 
 fn agent_job_response(job: &AgentJob) -> Result<AgentJobResponse, ()> {

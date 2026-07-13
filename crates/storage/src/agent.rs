@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -23,6 +24,9 @@ const MAX_REASONING_EFFORT_ID_CHARS: usize = 80;
 const MAX_REASONING_EFFORT_DESCRIPTION_CHARS: usize = 1_000;
 const MAX_REASONING_EFFORT_COUNT: usize = 16;
 const MAX_MODEL_COUNT: usize = 128;
+const MAX_PRESENTATION_ITEMS: usize = 32;
+const MAX_PRESENTATION_DETAIL_CHARS: usize = 500;
+const MAX_PRESENTATION_TIMESTAMP_CHARS: usize = 80;
 const MIN_CLAIM_LEASE: Duration = Duration::from_secs(5);
 const MAX_CLAIM_LEASE: Duration = Duration::from_mins(5);
 
@@ -256,10 +260,107 @@ pub struct ConversationMessage {
     pub id: Uuid,
     pub role: ConversationMessageRole,
     pub content: String,
+    pub presentation: Option<AssistantPresentation>,
     pub status: ConversationMessageStatus,
     pub created_at: OffsetDateTime,
     pub completed_at: Option<OffsetDateTime>,
     pub version: i64,
+}
+
+/// A server-validated result surface selected by the assistant from entities
+/// that were present in the authenticated turn context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantPresentation {
+    pub kind: AssistantPresentationKind,
+    pub title: String,
+    pub items: Vec<AssistantPresentationItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantPresentationKind {
+    Summary,
+    Tasks,
+    Schedule,
+    Projects,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AssistantPresentationItem {
+    Task {
+        id: Uuid,
+        #[serde(rename = "projectId")]
+        project_id: Option<Uuid>,
+        #[serde(rename = "projectTitle")]
+        project_title: Option<String>,
+        title: String,
+        priority: i16,
+        #[serde(rename = "dueAt")]
+        due_at: Option<String>,
+    },
+    Schedule {
+        id: Uuid,
+        title: String,
+        #[serde(rename = "startsAt")]
+        starts_at: String,
+        #[serde(rename = "endsAt")]
+        ends_at: String,
+        #[serde(rename = "timeZone")]
+        time_zone: String,
+    },
+    Project {
+        id: Uuid,
+        #[serde(rename = "workspaceId")]
+        workspace_id: Uuid,
+        title: String,
+        objective: Option<String>,
+        #[serde(rename = "nextAction")]
+        next_action: Option<String>,
+        #[serde(rename = "riskLevel")]
+        risk_level: i16,
+        #[serde(rename = "openTaskCount")]
+        open_task_count: i64,
+    },
+}
+
+impl AssistantPresentation {
+    /// Rejects malformed or internally inconsistent presentation snapshots
+    /// before they reach the durable message stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for invalid data.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        if !valid_text(&self.title, MAX_TITLE_CHARS, false)
+            || self.items.len() > MAX_PRESENTATION_ITEMS
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let matches_kind = self.items.iter().all(|item| {
+            matches!(
+                (self.kind, item),
+                (
+                    AssistantPresentationKind::Tasks,
+                    AssistantPresentationItem::Task { .. }
+                ) | (
+                    AssistantPresentationKind::Schedule,
+                    AssistantPresentationItem::Schedule { .. }
+                ) | (
+                    AssistantPresentationKind::Projects,
+                    AssistantPresentationItem::Project { .. }
+                )
+            )
+        });
+        if (self.kind == AssistantPresentationKind::Summary && !self.items.is_empty())
+            || (self.kind != AssistantPresentationKind::Summary && !matches_kind)
+            || self.items.iter().any(|item| !valid_presentation_item(item))
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -403,6 +504,7 @@ struct ConversationMessageRow {
     id: Uuid,
     role: String,
     content: String,
+    presentation: Option<serde_json::Value>,
     status: String,
     created_at: OffsetDateTime,
     completed_at: Option<OffsetDateTime>,
@@ -528,6 +630,11 @@ impl TryFrom<ConversationMessageRow> for ConversationMessage {
             id: row.id,
             role,
             content: row.content,
+            presentation: row
+                .presentation
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|_| StorageError::PersistenceUnavailable)?,
             status,
             created_at: row.created_at,
             completed_at: row.completed_at,
@@ -1245,7 +1352,7 @@ impl Database {
         }
         let rows = sqlx::query_as::<_, ConversationMessageRow>(
             "\
-            SELECT id, role, content, status, created_at, completed_at, version
+            SELECT id, role, content, presentation, status, created_at, completed_at, version
             FROM messages
             WHERE conversation_id = $1
             ORDER BY created_at ASC, id ASC",
@@ -1831,6 +1938,7 @@ impl Database {
         runner_id: &str,
         assistant_message_id: Uuid,
         content: &str,
+        presentation: Option<&AssistantPresentation>,
     ) -> Result<bool, StorageError> {
         if !is_v7(job_id)
             || !is_v7(assistant_message_id)
@@ -1839,6 +1947,13 @@ impl Database {
         {
             return Err(StorageError::InvalidConfiguration);
         }
+        if let Some(presentation) = presentation {
+            presentation.validate()?;
+        }
+        let presentation = presentation
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|_| StorageError::InvalidConfiguration)?;
         let mut transaction = self
             .pool()
             .begin()
@@ -1870,10 +1985,11 @@ impl Database {
         let message_version = sqlx::query_scalar::<_, i64>(
             "\
             INSERT INTO messages (
-                id, conversation_id, agent_job_id, role, content, status, completed_at
-            ) VALUES ($1, $2, $3, 'assistant', $4, 'completed', NOW())
+                id, conversation_id, agent_job_id, role, content, presentation, status, completed_at
+            ) VALUES ($1, $2, $3, 'assistant', $4, $5, 'completed', NOW())
             ON CONFLICT (id) DO UPDATE
             SET content = EXCLUDED.content,
+                presentation = EXCLUDED.presentation,
                 status = 'completed',
                 completed_at = NOW()
             WHERE messages.conversation_id = EXCLUDED.conversation_id
@@ -1884,6 +2000,7 @@ impl Database {
         .bind(conversation_id)
         .bind(job_id)
         .bind(content.trim())
+        .bind(presentation)
         .fetch_one(&mut *transaction)
         .await
         .map_err(|error| classify(&error))?;
@@ -2274,6 +2391,64 @@ fn valid_text(value: &str, maximum: usize, allow_empty: bool) -> bool {
 
 fn valid_time_zone(value: &str) -> bool {
     valid_text(value, 80, false)
+}
+
+fn valid_presentation_item(item: &AssistantPresentationItem) -> bool {
+    match item {
+        AssistantPresentationItem::Task {
+            id,
+            project_id,
+            project_title,
+            title,
+            priority,
+            due_at,
+        } => {
+            is_v7(*id)
+                && project_id.is_none_or(is_v7)
+                && project_title
+                    .as_deref()
+                    .is_none_or(|value| valid_text(value, MAX_TITLE_CHARS, false))
+                && valid_text(title, MAX_TITLE_CHARS, false)
+                && (0..=3).contains(priority)
+                && due_at
+                    .as_deref()
+                    .is_none_or(|value| valid_text(value, MAX_PRESENTATION_TIMESTAMP_CHARS, false))
+        }
+        AssistantPresentationItem::Schedule {
+            id,
+            title,
+            starts_at,
+            ends_at,
+            time_zone,
+        } => {
+            is_v7(*id)
+                && valid_text(title, MAX_TITLE_CHARS, false)
+                && valid_text(starts_at, MAX_PRESENTATION_TIMESTAMP_CHARS, false)
+                && valid_text(ends_at, MAX_PRESENTATION_TIMESTAMP_CHARS, false)
+                && valid_time_zone(time_zone)
+        }
+        AssistantPresentationItem::Project {
+            id,
+            workspace_id,
+            title,
+            objective,
+            next_action,
+            risk_level,
+            open_task_count,
+        } => {
+            is_v7(*id)
+                && is_v7(*workspace_id)
+                && valid_text(title, MAX_TITLE_CHARS, false)
+                && objective
+                    .as_deref()
+                    .is_none_or(|value| valid_text(value, MAX_PRESENTATION_DETAIL_CHARS, true))
+                && next_action
+                    .as_deref()
+                    .is_none_or(|value| valid_text(value, MAX_PRESENTATION_DETAIL_CHARS, true))
+                && (0..=3).contains(risk_level)
+                && *open_task_count >= 0
+        }
+    }
 }
 
 fn valid_assistant_output(value: &str) -> bool {

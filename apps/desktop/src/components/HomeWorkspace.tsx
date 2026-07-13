@@ -20,7 +20,7 @@ import { type HomeSnapshot } from "../api/home";
 import { type ScheduleEntry, type Task } from "../api/planning";
 import { type Project } from "../api/projects";
 import {
-  deriveAssistantPresentation,
+  presentationForMessage,
   type AssistantPresentation,
 } from "../assistantPresentation";
 import { copy } from "../copy";
@@ -38,12 +38,11 @@ type HomeWorkspaceProps = {
   assistantReady: boolean;
   assistantJob: AgentJob | undefined;
   assistantMessage: ConversationMessage | undefined;
-  projects: Project[];
   onOpenAssistant(): void;
   onSendAssistant(text: string, clientMessageId: string): Promise<boolean>;
   onCompleteTask(task: Task): Promise<void>;
-  onOpenTask(task: Task): void;
-  onOpenProject(project: Project): void;
+  onOpenTask(task: Pick<Task, "id" | "projectId">): void;
+  onOpenProject(project: Pick<Project, "id" | "workspaceId">): void;
   onOpenSchedule(): void;
 };
 
@@ -54,7 +53,6 @@ export function HomeWorkspace({
   assistantReady,
   assistantJob,
   assistantMessage,
-  projects,
   onOpenAssistant,
   onSendAssistant,
   onCompleteTask,
@@ -118,8 +116,6 @@ export function HomeWorkspace({
         ready={assistantReady}
         job={assistantJob}
         message={assistantMessage}
-        snapshot={snapshot}
-        projects={projects}
         focused={assistantFocused}
         onFocusChange={setAssistantFocused}
         onOpenAssistant={onOpenAssistant}
@@ -276,8 +272,6 @@ function HomeAssistantCommand({
   ready,
   job,
   message,
-  snapshot,
-  projects,
   focused,
   onFocusChange,
   onOpenAssistant,
@@ -289,19 +283,16 @@ function HomeAssistantCommand({
   ready: boolean;
   job: AgentJob | undefined;
   message: ConversationMessage | undefined;
-  snapshot: HomeSnapshot | undefined;
-  projects: Project[];
   focused: boolean;
   onFocusChange(focused: boolean): void;
   onOpenAssistant(): void;
   onSend(text: string, clientMessageId: string): Promise<boolean>;
-  onOpenTask(task: Task): void;
-  onOpenProject(project: Project): void;
+  onOpenTask(task: Pick<Task, "id" | "projectId">): void;
+  onOpenProject(project: Pick<Project, "id" | "workspaceId">): void;
   onOpenSchedule(): void;
 }) {
   const [draft, setDraft] = useState("");
   const [submitted, setSubmitted] = useState(false);
-  const [lastRequest, setLastRequest] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
   const active = Boolean(job && !isTerminalJob(job.state));
@@ -316,7 +307,6 @@ function HomeAssistantCommand({
     if (sent) {
       setDraft("");
       setSubmitted(true);
-      setLastRequest(request);
       onFocusChange(true);
     } else {
       setError(copy.home.commandFailed);
@@ -327,12 +317,7 @@ function HomeAssistantCommand({
   const status = submitted && focused ? commandStatus(job, message) : undefined;
   const presentation =
     focused && submitted && job?.state === "completed" && message
-      ? deriveAssistantPresentation(
-          lastRequest,
-          message.content,
-          snapshot,
-          projects,
-        )
+      ? presentationForMessage(message)
       : undefined;
 
   return (
@@ -390,7 +375,6 @@ function HomeAssistantCommand({
       {presentation ? (
         <AdaptiveAssistantResult
           presentation={presentation}
-          projects={projects}
           onOpenAssistant={onOpenAssistant}
           onOpenTask={onOpenTask}
           onOpenProject={onOpenProject}
@@ -420,7 +404,6 @@ function HomeAssistantCommand({
 
 function AdaptiveAssistantResult({
   presentation,
-  projects,
   onOpenAssistant,
   onOpenTask,
   onOpenProject,
@@ -428,10 +411,9 @@ function AdaptiveAssistantResult({
   onReset,
 }: {
   presentation: AssistantPresentation;
-  projects: Project[];
   onOpenAssistant(): void;
-  onOpenTask(task: Task): void;
-  onOpenProject(project: Project): void;
+  onOpenTask(task: Pick<Task, "id" | "projectId">): void;
+  onOpenProject(project: Pick<Project, "id" | "workspaceId">): void;
   onOpenSchedule(): void;
   onReset(): void;
 }) {
@@ -461,7 +443,6 @@ function AdaptiveAssistantResult({
       {presentation.kind === "tasks" && (
         <AssistantTaskResult
           presentation={presentation}
-          projects={projects}
           onOpenTask={onOpenTask}
         />
       )}
@@ -493,12 +474,10 @@ function AdaptiveAssistantResult({
 
 function AssistantTaskResult({
   presentation,
-  projects,
   onOpenTask,
 }: {
   presentation: Extract<AssistantPresentation, { kind: "tasks" }>;
-  projects: Project[];
-  onOpenTask(task: Task): void;
+  onOpenTask(task: Pick<Task, "id" | "projectId">): void;
 }) {
   if (!presentation.items.length) {
     return (
@@ -511,7 +490,6 @@ function AssistantTaskResult({
   return (
     <ul className="assistant-result-list assistant-result-list--tasks">
       {presentation.items.map((task) => {
-        const project = projects.find((item) => item.id === task.projectId);
         return (
           <li
             key={task.id}
@@ -527,7 +505,7 @@ function AssistantTaskResult({
               </span>
               <span className="assistant-result-row__main">
                 <strong>{task.title}</strong>
-                <span>{project?.title || copy.home.unassignedTask}</span>
+                <span>{task.projectTitle || copy.home.unassignedTask}</span>
               </span>
               <span className="assistant-result-row__meta">
                 {task.dueAt && (
@@ -573,7 +551,7 @@ function AssistantScheduleResult({
             </span>
             <span className="assistant-result-row__main">
               <strong>{entry.title}</strong>
-              <span>{scheduleDetail(entry)}</span>
+              <span>{assistantScheduleDetail(entry)}</span>
             </span>
             <span className="assistant-result-row__meta">
               <span>{copy.home.openScheduleAction}</span>
@@ -591,7 +569,7 @@ function AssistantProjectResult({
   onOpenProject,
 }: {
   presentation: Extract<AssistantPresentation, { kind: "projects" }>;
-  onOpenProject(project: Project): void;
+  onOpenProject(project: Pick<Project, "id" | "workspaceId">): void;
 }) {
   if (!presentation.items.length) {
     return (
@@ -818,6 +796,12 @@ function briefingSummary(scheduleCount: number, taskCount: number): string {
 function scheduleDetail(entry: ScheduleEntry): string {
   const time = `${formatTime(entry.startsAt)} · ${formatTime(entry.endsAt)}`;
   return entry.notes ? `${time} · ${entry.notes}` : time;
+}
+
+function assistantScheduleDetail(
+  entry: Extract<AssistantPresentation, { kind: "schedule" }>["items"][number],
+): string {
+  return `${formatTime(entry.startsAt)} · ${formatTime(entry.endsAt)}`;
 }
 
 function relativeScheduleTime(value: string): string {
