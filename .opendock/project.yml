@@ -12,6 +12,12 @@ docks:
     version: 1.0.3
     platform: macos
     workdir: .opendock/workdirs/opendock__design-ultrawork__54093992ce81
+  - id: opendock/interactive-ui-ultrawork
+    name: opendock/interactive-ui-ultrawork
+    requested: 1.0.0
+    version: 1.0.0
+    platform: macos
+    workdir: .opendock/workdirs/opendock__interactive-ui-ultrawork__ae02dc4a3386
   - id: opendock/korea-equity-research
     name: Korea Equity Research
     requested: 0.1.2

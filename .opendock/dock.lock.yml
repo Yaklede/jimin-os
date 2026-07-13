@@ -168,6 +168,87 @@ docks:
         mode: managed_file
         checksum: 87d23fa6db3d6f9a4df0c7984a8610813b3f0a9ec7bf8476be60d0fc0d294acb
         source: files
+  - id: opendock/interactive-ui-ultrawork
+    name: opendock/interactive-ui-ultrawork
+    requested: 1.0.0
+    version: 1.0.0
+    checksum: da53bb808ec68f23f03bc539533ca784e2dd6acd3cb7f7bc2c67fd0a568fe4b4
+    signature: gvkDNSRCK7qS5XLh0ygNhxIaDt4nl2w4KSLsZ5qNfbyqFSdjQCXPJlYmBhDjAXwhMwOj7WqHVDIp+WH7P6XNDg==
+    platform: macos
+    workdir: .opendock/workdirs/opendock__interactive-ui-ultrawork__ae02dc4a3386
+    runtimes:
+      - name: node
+        requested: ">=22.0.0 <25.0.0"
+        source: host
+        version: 23.5.0
+        path: /Users/jimin/.opendock/runtimes/node/23.5.0/bin
+        commands:
+          - node
+    tools: []
+    dependencies: []
+    files:
+      - path: README.md
+        mode: managed_block
+        checksum: a4991aecec1d2733d823c001129ce41adc3bdb3b28ea8c75f8e3914178846e03
+        markerId: files:README.md
+        source: files
+      - path: AGENTS.md
+        mode: managed_block
+        checksum: 5342e5790683c3c8c32772ae8e412f66044ade60f8177cab6ab78b31de3b9a48
+        markerId: files:AGENTS.md
+        source: files
+      - path: HARNESS.md
+        mode: managed_block
+        checksum: 75823e356608b7e0d0e3099a96b914ba84c7c10188f54d98a993982cea621bd6
+        markerId: files:HARNESS.md
+        source: files
+      - path: INTERACTION_PLAYBOOK.md
+        mode: managed_block
+        checksum: d7652db9a971bbfbbc76869c248ff60c7dd96e2200f336eaaa89dd59529a40ca
+        markerId: files:INTERACTION_PLAYBOOK.md
+        source: files
+      - path: .agents/skills/opendock-interactive-ui-ultrawork/SKILL.md
+        mode: managed_file
+        checksum: 05139ee4b54831d69fd2913679fabe5468d7e86809a491677bdfe3acbdcede23
+        source: files
+      - path: .agents/workflows/opendock-interactive-ui-ultrawork/quality-gate.md
+        mode: managed_file
+        checksum: 278c4057c820c507178b97f0fe63ed7b665046aaad6c78af0db8682b0f7e9ab6
+        source: files
+      - path: .opendock/templates/interactive-ui/INTERACTION_RUN.md
+        mode: managed_block
+        checksum: 7566c1d3d10463d38330c1e4d6b452ad8f50eee500beab575ee52d5680790351
+        markerId: files:.opendock/templates/interactive-ui/INTERACTION_RUN.md
+        source: files
+      - path: .opendock/harness/opendock__interactive-ui-ultrawork/check.mjs
+        mode: managed_file
+        checksum: c78f3fb12851a956743ed087a5bc4f978ab26be0beaafe0ce683b8cf99845a29
+        source: files
+      - path: .opendock/harness/opendock__interactive-ui-ultrawork/check.ps1
+        mode: managed_file
+        checksum: 1d3f0fad0d350942cb03d2618614332e89c8152ab5536a2a53c82c66b8532777
+        source: files
+      - path: .opendock/harness/opendock__interactive-ui-ultrawork/check.sh
+        mode: managed_file
+        checksum: cb11968f4776d54fe2fc69930fff7c227850e3e3c0c18fb1d5b48928be043607
+        source: files
+        executable: true
+      - path: .opendock/harness/opendock__interactive-ui-ultrawork/constants.mjs
+        mode: managed_file
+        checksum: e88246de8046df932777505db71a624216be4a758340c36c1414dc5bf095d094
+        source: files
+      - path: .opendock/harness/opendock__interactive-ui-ultrawork/run-validation.mjs
+        mode: managed_file
+        checksum: 864e1b156ebf92935c9a58e0cf669fbb2c41468f51d45302435fbede339bbc46
+        source: files
+      - path: .opendock/harness/opendock__interactive-ui-ultrawork/source-validation.mjs
+        mode: managed_file
+        checksum: b4c935bc4e60fc71cd69011373a870f98207dd4d448804a2f67952c2866cb10a
+        source: files
+      - path: .opendock/harness/opendock__interactive-ui-ultrawork/utils.mjs
+        mode: managed_file
+        checksum: 532551a48f0df97127bfe4ec8d2f65abda54cfd762d83f306d5123174da774d8
+        source: files
   - id: opendock/korea-equity-research
     name: Korea Equity Research
     requested: 0.1.2
