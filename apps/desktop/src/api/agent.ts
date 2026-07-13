@@ -61,6 +61,18 @@ export interface AgentAuthentication {
   userCode: string | null;
 }
 
+export interface AgentModel {
+  id: string;
+  displayName: string;
+  description: string;
+  isDefault: boolean;
+}
+
+export interface AgentModelSettings {
+  items: AgentModel[];
+  selectedModelId: string | null;
+}
+
 interface ListResponse<T> {
   items: T[];
   nextCursor: string | null;
@@ -123,6 +135,37 @@ export async function requestAgentAuthentication(
   );
   const body = await readJson(response);
   if (!response.ok || !isAgentAuthentication(body)) {
+    throw errorFromStatus(response.status);
+  }
+  return body;
+}
+
+export async function fetchAgentModelSettings(
+  baseUrl: string,
+  access: string,
+): Promise<AgentModelSettings> {
+  const response = await fetch(`${normalizeBaseUrl(baseUrl)}/v1/agent/models`, {
+    headers: authHeaders(access),
+  });
+  const body = await readJson(response);
+  if (!response.ok || !isAgentModelSettings(body)) {
+    throw errorFromStatus(response.status);
+  }
+  return body;
+}
+
+export async function updateAgentModelSettings(
+  baseUrl: string,
+  access: string,
+  modelId: string | null,
+): Promise<AgentModelSettings> {
+  const response = await fetch(`${normalizeBaseUrl(baseUrl)}/v1/agent/models`, {
+    method: "PUT",
+    headers: { ...authHeaders(access), "Content-Type": "application/json" },
+    body: JSON.stringify({ modelId }),
+  });
+  const body = await readJson(response);
+  if (!response.ok || !isAgentModelSettings(body)) {
     throw errorFromStatus(response.status);
   }
   return body;
@@ -377,6 +420,26 @@ function isAgentAuthentication(value: unknown): value is AgentAuthentication {
     (value.verificationUrl === null ||
       typeof value.verificationUrl === "string") &&
     (value.userCode === null || typeof value.userCode === "string")
+  );
+}
+
+function isAgentModelSettings(value: unknown): value is AgentModelSettings {
+  return (
+    isRecord(value) &&
+    Array.isArray(value.items) &&
+    value.items.every(isAgentModel) &&
+    (value.selectedModelId === null ||
+      typeof value.selectedModelId === "string")
+  );
+}
+
+function isAgentModel(value: unknown): value is AgentModel {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.displayName === "string" &&
+    typeof value.description === "string" &&
+    typeof value.isDefault === "boolean"
   );
 }
 

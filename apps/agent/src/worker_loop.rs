@@ -3,7 +3,7 @@ use std::{fmt::Write as _, path::Path, time::Duration};
 use jimin_codex_client::{AppServerClient, Error as CodexError};
 use jimin_storage::{
     Database, StorageError,
-    agent::ClaimedAgentJob,
+    agent::{AgentModelCatalogEntry, ClaimedAgentJob},
     gmail::GmailMessage,
     planning::{ScheduleEntry, ScheduleSource, Task},
 };
@@ -67,6 +67,7 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    synchronize_processing_models(client, database).await?;
     let shutdown = wait_for_shutdown_signal();
     tokio::pin!(shutdown);
     let recovery_interval = lease / 2;
@@ -106,6 +107,28 @@ where
     }
 }
 
+async fn synchronize_processing_models<R, W>(
+    client: &mut AppServerClient<R, W>,
+    database: &Database,
+) -> Result<(), WorkerError>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let models = client.list_processing_models().await?;
+    let catalog = models
+        .into_iter()
+        .map(|model| AgentModelCatalogEntry {
+            id: model.id,
+            display_name: model.display_name,
+            description: model.description,
+            is_default: model.is_default,
+        })
+        .collect::<Vec<_>>();
+    database.replace_agent_model_catalog(&catalog).await?;
+    Ok(())
+}
+
 async fn execute_job<R, W>(
     client: &mut AppServerClient<R, W>,
     database: &Database,
@@ -121,10 +144,18 @@ where
     let thread_result = match job.codex_thread_id.as_deref() {
         Some(thread_id) => {
             client
-                .resume_persistent_thread_in(thread_id, workspace, None)
+                .resume_persistent_thread_in(
+                    thread_id,
+                    workspace,
+                    job.processing_model_id.as_deref(),
+                )
                 .await
         }
-        None => client.start_persistent_thread_in(workspace, None).await,
+        None => {
+            client
+                .start_persistent_thread_in(workspace, job.processing_model_id.as_deref())
+                .await
+        }
     };
     let thread_id = match thread_result {
         Ok(thread_id) => thread_id,

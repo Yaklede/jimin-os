@@ -1,7 +1,7 @@
 //! Durable, server-owned agent conversation queues. The runtime claims these
 //! jobs later; API requests never connect to Codex directly.
 
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -13,6 +13,10 @@ const MAX_TITLE_CHARS: usize = 200;
 const MAX_RUNNER_ID_CHARS: usize = 200;
 const MAX_AUTH_URL_CHARS: usize = 2_048;
 const MAX_AUTH_USER_CODE_CHARS: usize = 256;
+const MAX_MODEL_ID_CHARS: usize = 200;
+const MAX_MODEL_NAME_CHARS: usize = 200;
+const MAX_MODEL_DESCRIPTION_CHARS: usize = 2_000;
+const MAX_MODEL_COUNT: usize = 128;
 const MIN_CLAIM_LEASE: Duration = Duration::from_secs(5);
 const MAX_CLAIM_LEASE: Duration = Duration::from_mins(5);
 
@@ -199,6 +203,23 @@ pub struct ClaimedAgentJob {
     pub input_message_id: Uuid,
     pub input_content: String,
     pub codex_thread_id: Option<String>,
+    pub processing_model_id: Option<String>,
+}
+
+/// A validated model picker entry reported by the managed Codex runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentModelCatalogEntry {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    pub is_default: bool,
+}
+
+/// The available model choices and the user's optional pinned selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentModelSettings {
+    pub models: Vec<AgentModelCatalogEntry>,
+    pub selected_model_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,6 +346,15 @@ struct ClaimedJobRow {
     input_message_id: Uuid,
     input_content: String,
     codex_thread_id: Option<String>,
+    processing_model_id: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct AgentModelRow {
+    id: String,
+    display_name: String,
+    description: String,
+    is_default: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -412,6 +442,18 @@ impl From<ClaimedJobRow> for ClaimedAgentJob {
             input_message_id: row.input_message_id,
             input_content: row.input_content,
             codex_thread_id: row.codex_thread_id,
+            processing_model_id: row.processing_model_id,
+        }
+    }
+}
+
+impl From<AgentModelRow> for AgentModelCatalogEntry {
+    fn from(row: AgentModelRow) -> Self {
+        Self {
+            id: row.id,
+            display_name: row.display_name,
+            description: row.description,
+            is_default: row.is_default,
         }
     }
 }
@@ -511,6 +553,192 @@ impl From<RequestedAgentAuthenticationRow> for RequestedAgentAuthentication {
 }
 
 impl Database {
+    /// Replaces the available portion of the runtime model catalog without
+    /// deleting historical IDs that may still be referenced by preferences.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] when the runtime returns
+    /// malformed or duplicate entries, and a classified persistence error for
+    /// database failures.
+    pub async fn replace_agent_model_catalog(
+        &self,
+        models: &[AgentModelCatalogEntry],
+    ) -> Result<(), StorageError> {
+        if models.is_empty() || models.len() > MAX_MODEL_COUNT {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut ids = HashSet::with_capacity(models.len());
+        let mut default_count = 0usize;
+        for model in models {
+            if !valid_text(&model.id, MAX_MODEL_ID_CHARS, false)
+                || !valid_text(&model.display_name, MAX_MODEL_NAME_CHARS, false)
+                || !valid_text(&model.description, MAX_MODEL_DESCRIPTION_CHARS, true)
+                || !ids.insert(model.id.as_str())
+            {
+                return Err(StorageError::InvalidConfiguration);
+            }
+            default_count += usize::from(model.is_default);
+        }
+        if default_count != 1 {
+            return Err(StorageError::InvalidConfiguration);
+        }
+
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| classify(&error))?;
+        sqlx::query("UPDATE agent_models SET available = FALSE, is_default = FALSE")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| classify(&error))?;
+        for model in models {
+            sqlx::query(
+                "\
+                INSERT INTO agent_models (
+                    id, display_name, description, is_default, available, synced_at
+                )
+                VALUES ($1, $2, $3, $4, TRUE, NOW())
+                ON CONFLICT (id) DO UPDATE
+                SET display_name = EXCLUDED.display_name,
+                    description = EXCLUDED.description,
+                    is_default = EXCLUDED.is_default,
+                    available = TRUE,
+                    synced_at = NOW()",
+            )
+            .bind(&model.id)
+            .bind(&model.display_name)
+            .bind(&model.description)
+            .bind(model.is_default)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| classify(&error))?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| classify(&error))?;
+        Ok(())
+    }
+
+    /// Returns visible model choices and the user's pinned model, if one is
+    /// still available. A missing selection means the Codex runtime default.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified storage error for invalid identifiers or query
+    /// failures.
+    pub async fn agent_model_settings_for_user(
+        &self,
+        user_id: Uuid,
+    ) -> Result<AgentModelSettings, StorageError> {
+        if !is_v7(user_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let models = sqlx::query_as::<_, AgentModelRow>(
+            "\
+            SELECT id, display_name, description, is_default
+            FROM agent_models
+            WHERE available = TRUE
+            ORDER BY is_default DESC, display_name ASC, id ASC",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(|error| classify(&error))?
+        .into_iter()
+        .map(AgentModelCatalogEntry::from)
+        .collect();
+        let selected_model_id = sqlx::query_scalar::<_, String>(
+            "\
+            SELECT preference.model_id
+            FROM agent_preferences AS preference
+            INNER JOIN agent_models AS model
+                ON model.id = preference.model_id AND model.available = TRUE
+            WHERE preference.user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|error| classify(&error))?;
+        Ok(AgentModelSettings {
+            models,
+            selected_model_id,
+        })
+    }
+
+    /// Pins one available model for future user turns, or clears the pin to
+    /// follow the runtime default.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for an unknown model or
+    /// malformed user identifier, and a classified persistence error otherwise.
+    pub async fn set_agent_model_for_user(
+        &self,
+        user_id: Uuid,
+        model_id: Option<&str>,
+    ) -> Result<AgentModelSettings, StorageError> {
+        if !is_v7(user_id) || model_id.is_some_and(|id| !valid_text(id, MAX_MODEL_ID_CHARS, false))
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| classify(&error))?;
+        if let Some(model_id) = model_id {
+            let available = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM agent_models WHERE id = $1 AND available = TRUE)",
+            )
+            .bind(model_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|error| classify(&error))?;
+            if !available {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|error| classify(&error))?;
+                return Err(StorageError::InvalidConfiguration);
+            }
+            let version = sqlx::query_scalar::<_, i64>(
+                "\
+                INSERT INTO agent_preferences (user_id, model_id)
+                VALUES ($1, $2)
+                ON CONFLICT (user_id) DO UPDATE
+                SET model_id = EXCLUDED.model_id,
+                    version = agent_preferences.version + 1
+                RETURNING version",
+            )
+            .bind(user_id)
+            .bind(model_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|error| classify(&error))?;
+            append_change(
+                &mut transaction,
+                user_id,
+                "agent_preference",
+                user_id,
+                version,
+            )
+            .await?;
+        } else {
+            sqlx::query("DELETE FROM agent_preferences WHERE user_id = $1")
+                .bind(user_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| classify(&error))?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| classify(&error))?;
+        self.agent_model_settings_for_user(user_id).await
+    }
+
     /// Returns the newest authentication state owned by this personal user.
     /// The row carries only presentation fields for the official device-code
     /// flow; Codex owns the actual OAuth credentials.
@@ -1331,10 +1559,14 @@ impl Database {
                    job.conversation_id,
                    job.input_message_id,
                    input.content AS input_content,
-                   conversation.codex_thread_id
+                   conversation.codex_thread_id,
+                   model.id AS processing_model_id
             FROM claimed AS job
             INNER JOIN messages AS input ON input.id = job.input_message_id
-            INNER JOIN conversations AS conversation ON conversation.id = job.conversation_id",
+            INNER JOIN conversations AS conversation ON conversation.id = job.conversation_id
+            LEFT JOIN agent_preferences AS preference ON preference.user_id = job.user_id
+            LEFT JOIN agent_models AS model
+                ON model.id = preference.model_id AND model.available = TRUE",
         )
         .bind(runner_id)
         .bind(lease_millis)

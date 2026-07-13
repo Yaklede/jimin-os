@@ -155,6 +155,9 @@ services:
       - agent_egress
       - api_database
     depends_on:
+      api:
+        condition: service_healthy
+        restart: true
       postgres:
         condition: service_started
         restart: true

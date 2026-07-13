@@ -23,6 +23,7 @@ import {
   AgentRequestError,
   createConversation,
   fetchAgentAuthentication,
+  fetchAgentModelSettings,
   fetchConversationMessages,
   fetchConversations,
   fetchLatestConversationJob,
@@ -30,8 +31,10 @@ import {
   requestAgentAuthentication,
   resolveAgentAction,
   streamConversationUpdates,
+  updateAgentModelSettings,
   type AgentAuthentication,
   type AgentJob,
+  type AgentModelSettings,
   type Conversation,
   type ConversationMessage,
 } from "./api/agent";
@@ -105,6 +108,12 @@ export default function App() {
   >(undefined);
   const [authenticationRequesting, setAuthenticationRequesting] =
     useState(false);
+  const [agentModelSettings, setAgentModelSettings] = useState<
+    AgentModelSettings | undefined
+  >(undefined);
+  const [agentModelsLoading, setAgentModelsLoading] = useState(false);
+  const [agentModelsSaving, setAgentModelsSaving] = useState(false);
+  const [agentModelsError, setAgentModelsError] = useState<string>();
   const pendingConversationId = useRef<string | undefined>(undefined);
   const activeSessionRef = useRef<SessionTokens | undefined>(undefined);
   const refreshInFlightRef = useRef<Promise<SessionTokens> | undefined>(
@@ -210,6 +219,45 @@ export default function App() {
       setHomeLoading(false);
     }
   }, [apiBaseUrl, tokens, withAuthenticatedSession]);
+
+  const loadAgentModelSettings = useCallback(async () => {
+    if (!tokens) return;
+    setAgentModelsLoading(true);
+    setAgentModelsError(undefined);
+    try {
+      setAgentModelSettings(
+        await withAuthenticatedSession((accessToken) =>
+          fetchAgentModelSettings(apiBaseUrl, accessToken),
+        ),
+      );
+    } catch {
+      setAgentModelsError(copy.settings.modelLoadFailed);
+    } finally {
+      setAgentModelsLoading(false);
+    }
+  }, [apiBaseUrl, tokens, withAuthenticatedSession]);
+
+  const saveAgentModelSettings = useCallback(
+    async (modelId: string | null): Promise<boolean> => {
+      if (!tokens) return false;
+      setAgentModelsSaving(true);
+      setAgentModelsError(undefined);
+      try {
+        setAgentModelSettings(
+          await withAuthenticatedSession((accessToken) =>
+            updateAgentModelSettings(apiBaseUrl, accessToken, modelId),
+          ),
+        );
+        return true;
+      } catch {
+        setAgentModelsError(copy.settings.modelSaveFailed);
+        return false;
+      } finally {
+        setAgentModelsSaving(false);
+      }
+    },
+    [apiBaseUrl, tokens, withAuthenticatedSession],
+  );
 
   const loadWorkspaces = useCallback(async () => {
     if (!tokens) return;
@@ -357,6 +405,8 @@ export default function App() {
       setAssistantDraft(undefined);
       setConversationJobs({});
       setAgentAuthentication(undefined);
+      setAgentModelSettings(undefined);
+      setAgentModelsError(undefined);
       pendingConversationId.current = undefined;
       await bootstrapTrustedNetworkDevice();
     }
@@ -400,6 +450,10 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    void loadAgentModelSettings();
+  }, [loadAgentModelSettings]);
 
   useEffect(() => {
     void loadWorkspaces();
@@ -910,7 +964,13 @@ export default function App() {
             <SettingsWorkspace
               authentication={agentAuthentication}
               requesting={authenticationRequesting}
+              modelSettings={agentModelSettings}
+              modelsLoading={agentModelsLoading}
+              modelsSaving={agentModelsSaving}
+              modelsError={agentModelsError}
               onStartAuthentication={beginAgentAuthentication}
+              onReloadModels={loadAgentModelSettings}
+              onSaveModel={saveAgentModelSettings}
             />
           )}
           {destination === "chat" && (

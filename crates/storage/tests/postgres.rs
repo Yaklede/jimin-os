@@ -5,8 +5,8 @@ use jimin_domain::{ClientPlatform, DeviceRegistration, EmailAddress, GoogleSubje
 use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness,
     agent::{
-        AgentJobState, ConversationMessageRole, NewAgentTurn, NewConversation, PendingAgentAction,
-        PendingAgentActionDecision,
+        AgentJobState, AgentModelCatalogEntry, ConversationMessageRole, NewAgentTurn,
+        NewConversation, PendingAgentAction, PendingAgentActionDecision,
     },
     auth::{
         ConsumeDevicePairing, CreateDevicePairing, PairingConsumption, ProvisionLogin,
@@ -44,6 +44,64 @@ async fn baseline_migration_and_schema_version_are_consistent() {
         Readiness::SchemaMismatch { .. }
     ));
 
+    database.close().await;
+}
+
+#[tokio::test]
+async fn agent_model_catalog_and_user_selection_round_trip() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database
+        .migrate()
+        .await
+        .expect("model preference migration should succeed");
+
+    let user_id = Uuid::now_v7();
+    database
+        .provision_login(&provision_login_command(user_id, Uuid::now_v7()))
+        .await
+        .expect("model preference owner should exist");
+    let models = vec![
+        AgentModelCatalogEntry {
+            id: "provider-default".to_owned(),
+            display_name: "Provider Default".to_owned(),
+            description: "Default fixture model".to_owned(),
+            is_default: true,
+        },
+        AgentModelCatalogEntry {
+            id: "provider-fast".to_owned(),
+            display_name: "Provider Fast".to_owned(),
+            description: "Fast fixture model".to_owned(),
+            is_default: false,
+        },
+    ];
+    database
+        .replace_agent_model_catalog(&models)
+        .await
+        .expect("runtime model catalog should persist");
+
+    let initial = database
+        .agent_model_settings_for_user(user_id)
+        .await
+        .expect("model settings should load");
+    assert_eq!(initial.models, models);
+    assert_eq!(initial.selected_model_id, None);
+
+    let selected = database
+        .set_agent_model_for_user(user_id, Some("provider-fast"))
+        .await
+        .expect("available model should be selectable");
+    assert_eq!(selected.selected_model_id.as_deref(), Some("provider-fast"));
+
+    let automatic = database
+        .set_agent_model_for_user(user_id, None)
+        .await
+        .expect("runtime default should be restorable");
+    assert_eq!(automatic.selected_model_id, None);
     database.close().await;
 }
 

@@ -24,10 +24,10 @@ use jimin_observability::{RequestId, request_context};
 use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness, StorageError,
     agent::{
-        AgentAuthentication, AgentAuthenticationState, AgentJob, AgentJobState, Conversation,
-        ConversationMessage, ConversationMessageRole, ConversationMessageStatus,
-        ConversationStatus, NewAgentTurn, NewConversation, PendingAgentAction,
-        PendingAgentActionDecision, QueuedAgentTurn,
+        AgentAuthentication, AgentAuthenticationState, AgentJob, AgentJobState,
+        AgentModelCatalogEntry, AgentModelSettings, Conversation, ConversationMessage,
+        ConversationMessageRole, ConversationMessageStatus, ConversationStatus, NewAgentTurn,
+        NewConversation, PendingAgentAction, PendingAgentActionDecision, QueuedAgentTurn,
     },
     auth::{Device, DeviceStatus, Profile},
     calendar::{CalendarAccount, CalendarAccountStatus, CreateCalendarOAuthAuthorization},
@@ -472,6 +472,22 @@ pub struct AgentAuthenticationResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentModelResponse {
+    id: String,
+    display_name: String,
+    description: String,
+    is_default: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentModelSettingsResponse {
+    items: Vec<AgentModelResponse>,
+    selected_model_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum VoiceCommandKind {
     ScheduleListed,
@@ -607,6 +623,12 @@ struct ResolveAgentActionRequest {
 
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UpdateAgentModelRequest {
+    model_id: Option<String>,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct AgentTurnInput {
     #[serde(rename = "type")]
     kind: String,
@@ -686,6 +708,8 @@ pub(crate) fn error_response(
         resolve_agent_action,
         get_agent_authentication,
         request_agent_authentication,
+        get_agent_model_settings,
+        update_agent_model_settings,
         live,
         ready,
         me,
@@ -726,10 +750,13 @@ pub(crate) fn error_response(
         AgentJobResponse,
         PendingAgentActionResponse,
         AgentAuthenticationResponse,
+        AgentModelResponse,
+        AgentModelSettingsResponse,
         CreateConversationRequest,
         CreateProjectRequest,
         CreateAgentTurnRequest,
         ResolveAgentActionRequest,
+        UpdateAgentModelRequest,
         AgentTurnInput,
         ProjectListQuery,
         TaskListQuery,
@@ -809,6 +836,10 @@ pub fn router(state: ApiState) -> Router {
             "/v1/agent/authentication",
             get(get_agent_authentication).post(request_agent_authentication),
         )
+        .route(
+            "/v1/agent/models",
+            get(get_agent_model_settings).put(update_agent_model_settings),
+        )
         .route("/v1/agent/jobs/{job_id}", get(get_agent_job))
         .route(
             "/v1/agent/jobs/{job_id}/approval",
@@ -830,7 +861,7 @@ pub fn router(state: ApiState) -> Router {
                 // Do not widen this to arbitrary web origins: this API accepts
                 // bearer tokens from the installed personal client.
                 .allow_origin(allowed_origins)
-                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
                 .allow_headers([
                     axum::http::header::AUTHORIZATION,
                     axum::http::header::CONTENT_TYPE,
@@ -2092,6 +2123,62 @@ async fn request_agent_authentication(
 
 #[utoipa::path(
     get,
+    path = "/v1/agent/models",
+    tag = "agent",
+    responses((status = 200, body = AgentModelSettingsResponse), (status = 401), (status = 503))
+)]
+async fn get_agent_model_settings(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(agent) = state.agent() else {
+        return unavailable_response(request_id);
+    };
+    match agent
+        .agent_model_settings_for_user(principal.identity().user_id())
+        .await
+    {
+        Ok(settings) => no_store_json(agent_model_settings_response(settings)),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/agent/models",
+    tag = "agent",
+    request_body = UpdateAgentModelRequest,
+    responses((status = 200, body = AgentModelSettingsResponse), (status = 400), (status = 401), (status = 503))
+)]
+async fn update_agent_model_settings(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateAgentModelRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(agent) = state.agent() else {
+        return unavailable_response(request_id);
+    };
+    match agent
+        .set_agent_model_for_user(principal.identity().user_id(), request.model_id.as_deref())
+        .await
+    {
+        Ok(settings) => no_store_json(agent_model_settings_response(settings)),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    get,
     path = "/v1/agent/jobs/{job_id}",
     tag = "agent",
     params(("job_id" = String, Path)),
@@ -3026,6 +3113,26 @@ fn agent_authentication_response(
     }
 }
 
+fn agent_model_settings_response(settings: AgentModelSettings) -> AgentModelSettingsResponse {
+    AgentModelSettingsResponse {
+        items: settings
+            .models
+            .into_iter()
+            .map(agent_model_response)
+            .collect(),
+        selected_model_id: settings.selected_model_id,
+    }
+}
+
+fn agent_model_response(model: AgentModelCatalogEntry) -> AgentModelResponse {
+    AgentModelResponse {
+        id: model.id,
+        display_name: model.display_name,
+        description: model.description,
+        is_default: model.is_default,
+    }
+}
+
 const fn agent_job_state_name(state: AgentJobState) -> &'static str {
     match state {
         AgentJobState::Queued => "queued",
@@ -3349,6 +3456,7 @@ mod tests {
                 "/v1/agent/authentication",
                 "/v1/agent/jobs/{job_id}",
                 "/v1/agent/jobs/{job_id}/approval",
+                "/v1/agent/models",
                 "/v1/assistant/voice-commands",
                 "/v1/auth/refresh",
                 "/v1/calendar/connections/google",
@@ -3467,6 +3575,29 @@ mod tests {
                 .method("POST")
                 .uri("/v1/agent/authentication")
                 .body(Body::empty())
+                .expect("request should be valid"),
+        ] {
+            let response = router(state.clone())
+                .oneshot(request)
+                .await
+                .expect("handler should respond");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_model_endpoints_require_a_live_signed_session() {
+        let (state, _, _) = signed_auth_state(true);
+        for request in [
+            Request::builder()
+                .uri("/v1/agent/models")
+                .body(Body::empty())
+                .expect("request should be valid"),
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/agent/models")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"modelId":null}"#))
                 .expect("request should be valid"),
         ] {
             let response = router(state.clone())

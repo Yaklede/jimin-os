@@ -40,6 +40,17 @@ pub struct TurnSummary {
     pub response_sha256: String,
 }
 
+/// A model currently exposed by the managed Codex runtime. The model ID is
+/// passed back to `thread/start` or `thread/resume`; no provider model names
+/// are compiled into Jimin OS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessingModel {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    pub is_default: bool,
+}
+
 /// Device-code details that are safe to present to the personal app. The
 /// managed Codex runtime owns the `ChatGPT` OAuth tokens and refresh lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -124,6 +135,48 @@ where
             .await?;
 
         Ok(summarize_account(response))
+    }
+
+    /// Lists the visible processing models exposed by the current Codex
+    /// runtime. Pagination is exhausted so settings never show a partial list.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed transport or protocol error when the response is
+    /// malformed, or [`Error::NotInitialized`] before a successful handshake.
+    pub async fn list_processing_models(&mut self) -> Result<Vec<ProcessingModel>> {
+        self.require_initialized()?;
+        let mut models = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let response: ModelListResponse = self
+                .connection
+                .request(
+                    "model/list",
+                    json!({
+                        "cursor": cursor,
+                        "limit": 100,
+                        "includeHidden": false
+                    }),
+                )
+                .await?;
+            models.extend(response.data.into_iter().map(ProcessingModel::from));
+            let Some(next_cursor) = response.next_cursor else {
+                break;
+            };
+            if next_cursor.is_empty() {
+                return Err(Error::InvalidResponse {
+                    method: "model/list",
+                });
+            }
+            cursor = Some(next_cursor);
+        }
+        if models.is_empty() {
+            return Err(Error::InvalidResponse {
+                method: "model/list",
+            });
+        }
+        Ok(models)
     }
 
     /// Starts Codex-managed `ChatGPT` device-code login. The caller shows the
@@ -654,6 +707,33 @@ struct AccountResponse {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ModelListResponse {
+    data: Vec<ModelListItem>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelListItem {
+    id: String,
+    display_name: String,
+    description: String,
+    is_default: bool,
+}
+
+impl From<ModelListItem> for ProcessingModel {
+    fn from(model: ModelListItem) -> Self {
+        Self {
+            id: model.id,
+            display_name: model.display_name,
+            description: model.description,
+            is_default: model.is_default,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DeviceCodeLoginResponse {
     #[serde(rename = "type")]
     login_type: String,
@@ -808,6 +888,52 @@ mod tests {
         assert_eq!(summary.account_type, "chatgpt");
         assert_eq!(summary.plan_type, Some("plus"));
         assert!(!encoded.contains("private@example.com"));
+        server_task.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn model_list_is_paginated_without_hardcoded_provider_ids() {
+        let (client, server) = tokio::io::duplex(32 * 1024);
+        let (client_reader, client_writer) = split(client);
+        let mut client = AppServerClient::new(BufReader::new(client_reader), client_writer);
+
+        let server_task = tokio::spawn(async move {
+            let (server_reader, mut server_writer) = split(server);
+            let mut server_reader = BufReader::new(server_reader);
+            let _initialize = read_json_line(&mut server_reader).await;
+            server_writer
+                .write_all(b"{\"id\":1,\"result\":{\"userAgent\":\"fixture\",\"codexHome\":\"/tmp\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}\n")
+                .await
+                .expect("initialize response");
+            let _initialized = read_json_line(&mut server_reader).await;
+
+            let first = read_json_line(&mut server_reader).await;
+            assert_eq!(first["method"], "model/list");
+            assert_eq!(first["params"]["cursor"], Value::Null);
+            assert_eq!(first["params"]["includeHidden"], false);
+            server_writer
+                .write_all(b"{\"id\":2,\"result\":{\"data\":[{\"id\":\"provider-default\",\"displayName\":\"Provider Default\",\"description\":\"Default model\",\"isDefault\":true}],\"nextCursor\":\"page-2\"}}\n")
+                .await
+                .expect("first model page");
+
+            let second = read_json_line(&mut server_reader).await;
+            assert_eq!(second["method"], "model/list");
+            assert_eq!(second["params"]["cursor"], "page-2");
+            server_writer
+                .write_all(b"{\"id\":3,\"result\":{\"data\":[{\"id\":\"provider-fast\",\"displayName\":\"Provider Fast\",\"description\":\"Fast model\",\"isDefault\":false}],\"nextCursor\":null}}\n")
+                .await
+                .expect("second model page");
+        });
+
+        client.initialize().await.expect("initialize");
+        let models = client
+            .list_processing_models()
+            .await
+            .expect("models should load");
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "provider-default");
+        assert!(models[0].is_default);
+        assert_eq!(models[1].display_name, "Provider Fast");
         server_task.await.expect("server task");
     }
 

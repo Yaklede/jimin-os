@@ -176,7 +176,23 @@ export const copy = {
   },
   settings: {
     title: settingsTab,
-    description: "지민이 사용할 연결 상태를 확인할 수 있어요.",
+    description: "지민이 사용할 처리 모델과 연결 상태를 관리해요.",
+    modelTitle: "처리 모델",
+    modelDescription:
+      "대화와 요청에 사용할 모델을 선택해요. 다음 요청부터 적용돼요.",
+    modelAutomatic: (name?: string) =>
+      name ? `자동 선택 (${name})` : "자동 선택 (권장)",
+    modelCurrent: (name?: string) =>
+      name ? `현재 ${name} 모델을 사용해요.` : "현재 권장 모델을 사용해요.",
+    modelLoading: "사용할 수 있는 모델을 불러오고 있어요.",
+    modelEmpty:
+      "아직 사용할 수 있는 모델이 없어요. 잠시 후 다시 확인해 주세요.",
+    modelSave: "모델 저장하기",
+    modelSaving: "저장하는 중",
+    modelSaved: "처리 모델을 저장했어요.",
+    modelReload: "다시 불러오기",
+    modelLoadFailed: "모델을 불러오지 못했어요. 다시 시도해 주세요.",
+    modelSaveFailed: "모델을 저장하지 못했어요. 다시 시도해 주세요.",
     chatgptTitle: "ChatGPT 연결",
     chatgptReady: "연결되어 있어요",
     chatgptNeedsLogin: "연결이 필요해요",

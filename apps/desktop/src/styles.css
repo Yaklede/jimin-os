@@ -75,7 +75,8 @@ body {
 }
 
 button,
-textarea {
+textarea,
+select {
   font: inherit;
 }
 
@@ -1782,6 +1783,80 @@ svg {
   overflow: hidden;
 }
 
+.settings-model-field {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-model-field__heading {
+  display: grid;
+  gap: 4px;
+}
+
+.settings-model-field__heading label {
+  color: var(--text-strong);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.settings-model-field__heading p {
+  max-width: 680px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.settings-model-field__control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  max-width: 680px;
+}
+
+.settings-model-field__control select {
+  width: 100%;
+  min-height: 48px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  padding: 0 40px 0 14px;
+  background: var(--surface);
+  color: var(--text-strong);
+  font-size: 14px;
+}
+
+.settings-model-field__control select:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.settings-model-field__feedback {
+  min-height: 20px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.settings-model-field__success,
+.settings-model-field__error {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-model-field__success {
+  color: var(--success);
+}
+
+.settings-model-field__success svg {
+  width: 16px;
+  height: 16px;
+}
+
+.settings-model-field__error {
+  color: var(--danger);
+}
+
 .settings-row {
   display: flex;
   align-items: center;
@@ -2941,6 +3016,18 @@ svg {
 
   .settings-row {
     align-items: flex-start;
+  }
+
+  .settings-model-field {
+    padding: 16px;
+  }
+
+  .settings-model-field__control {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-model-field__control .primary-button {
+    width: 100%;
   }
 
   .settings-row .text-button,
