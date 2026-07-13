@@ -30,6 +30,7 @@ const MAX_PRESENTATION_ITEMS: usize = 32;
 const MAX_PRESENTATION_SECTIONS: usize = 3;
 const MAX_PRESENTATION_DETAIL_CHARS: usize = 500;
 const MAX_PRESENTATION_TIMESTAMP_CHARS: usize = 80;
+const MAX_AGENT_ACTIONS: usize = 32;
 const MIN_CLAIM_LEASE: Duration = Duration::from_secs(5);
 const MAX_CLAIM_LEASE: Duration = Duration::from_mins(5);
 
@@ -2351,7 +2352,7 @@ impl Database {
             assistant_message_id,
             content,
             presentation,
-            None,
+            &[],
         )
         .await
     }
@@ -2374,14 +2375,52 @@ impl Database {
         presentation: Option<&AssistantPresentation>,
         action: &AgentActionCommand,
     ) -> Result<bool, StorageError> {
-        action.validate()?;
+        self.complete_agent_job_with_actions(
+            job_id,
+            runner_id,
+            assistant_message_id,
+            content,
+            presentation,
+            std::slice::from_ref(action),
+        )
+        .await
+    }
+
+    /// Atomically commits several validated planning mutations with one final
+    /// assistant response. Every mutation succeeds or the complete turn rolls
+    /// back, including its success message and audit rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for an empty, oversized,
+    /// malformed, or duplicate-target batch. Returns
+    /// [`StorageError::IdentityConflict`] when any target is stale or foreign.
+    pub async fn complete_agent_job_with_actions(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+        assistant_message_id: Uuid,
+        content: &str,
+        presentation: Option<&AssistantPresentation>,
+        actions: &[AgentActionCommand],
+    ) -> Result<bool, StorageError> {
+        if actions.is_empty() || actions.len() > MAX_AGENT_ACTIONS {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut entity_ids = HashSet::with_capacity(actions.len());
+        for action in actions {
+            action.validate()?;
+            if !entity_ids.insert(action.entity_id()) {
+                return Err(StorageError::InvalidConfiguration);
+            }
+        }
         self.complete_agent_job_inner(
             job_id,
             runner_id,
             assistant_message_id,
             content,
             presentation,
-            Some(action),
+            actions,
         )
         .await
     }
@@ -2394,7 +2433,7 @@ impl Database {
         assistant_message_id: Uuid,
         content: &str,
         presentation: Option<&AssistantPresentation>,
-        action: Option<&AgentActionCommand>,
+        actions: &[AgentActionCommand],
     ) -> Result<bool, StorageError> {
         if !is_v7(job_id)
             || !is_v7(assistant_message_id)
@@ -2415,6 +2454,9 @@ impl Database {
             .begin()
             .await
             .map_err(|error| classify(&error))?;
+        let legacy_action = (actions.len() == 1).then(|| &actions[0]);
+        let action_count =
+            i16::try_from(actions.len()).map_err(|_| StorageError::InvalidConfiguration)?;
         let row = sqlx::query_as::<_, (Uuid, Uuid, i64)>(
             "\
             UPDATE agent_jobs
@@ -2425,14 +2467,16 @@ impl Database {
                 executed_action_type = $3,
                 executed_entity_id = $4,
                 executed_at = CASE WHEN $3::text IS NULL THEN NULL ELSE NOW() END,
+                executed_action_count = $5,
                 finished_at = NOW()
             WHERE id = $1 AND claim_owner = $2 AND state = 'running'
             RETURNING user_id, conversation_id, version",
         )
         .bind(job_id)
         .bind(runner_id)
-        .bind(action.map(AgentActionCommand::action_type))
-        .bind(action.map(AgentActionCommand::entity_id))
+        .bind(legacy_action.map(AgentActionCommand::action_type))
+        .bind(legacy_action.map(AgentActionCommand::entity_id))
+        .bind(action_count)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|error| classify(&error))?;
@@ -2443,8 +2487,21 @@ impl Database {
                 .map_err(|error| classify(&error))?;
             return Ok(false);
         };
-        if let Some(action) = action {
+        for (index, action) in actions.iter().enumerate() {
             persist_agent_action(&mut transaction, user_id, action).await?;
+            sqlx::query(
+                "\
+                INSERT INTO agent_job_action_executions (
+                    job_id, action_index, action_type, entity_id
+                ) VALUES ($1, $2, $3, $4)",
+            )
+            .bind(job_id)
+            .bind(i16::try_from(index).map_err(|_| StorageError::InvalidConfiguration)?)
+            .bind(action.action_type())
+            .bind(action.entity_id())
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| classify(&error))?;
         }
         let message_version = sqlx::query_scalar::<_, i64>(
             "\

@@ -36,6 +36,7 @@ const MAX_STREAMED_STRUCTURED_BYTES: usize = 512 * 1024;
 const MAX_PRESENTATION_ITEMS: usize = 32;
 const MAX_PRESENTATION_SECTIONS: usize = 3;
 const MAX_PRESENTATION_DETAIL_CHARS: usize = 500;
+const MAX_AGENT_ACTIONS: usize = 32;
 
 struct TurnContext {
     prompt: String,
@@ -52,6 +53,10 @@ struct TurnContext {
 struct StructuredAssistantTurn {
     answer: String,
     presentation: StructuredPresentation,
+    #[serde(default)]
+    actions: Vec<StructuredAssistantAction>,
+    // Accept the previous single-action response while a running App Server
+    // upgrades. The published output schema only emits `actions`.
     #[serde(default)]
     action: StructuredAssistantAction,
 }
@@ -368,7 +373,7 @@ where
 
     match completed {
         Ok(completed) => {
-            let Ok((mut answer, mut presentation, action)) =
+            let Ok((mut answer, mut presentation, actions)) =
                 validated_assistant_response(&completed.response, &context)
             else {
                 fail_claim(
@@ -380,23 +385,7 @@ where
                 .await?;
                 return Ok(());
             };
-            let completion = if let Some(action) = action.as_ref() {
-                let Ok(result) = agent_action_result(action, &context) else {
-                    fail_claim(database, &job, runner_id, "agent_invalid_action_result").await?;
-                    return Ok(());
-                };
-                (answer, presentation) = result;
-                database
-                    .complete_agent_job_with_action(
-                        job.id,
-                        runner_id,
-                        assistant_message_id,
-                        &answer,
-                        Some(&presentation),
-                        action,
-                    )
-                    .await
-            } else {
+            let completion = if actions.is_empty() {
                 database
                     .complete_agent_job(
                         job.id,
@@ -404,6 +393,22 @@ where
                         assistant_message_id,
                         &answer,
                         Some(&presentation),
+                    )
+                    .await
+            } else {
+                let Ok(result) = agent_action_results(&actions, &context) else {
+                    fail_claim(database, &job, runner_id, "agent_invalid_action_result").await?;
+                    return Ok(());
+                };
+                (answer, presentation) = result;
+                database
+                    .complete_agent_job_with_actions(
+                        job.id,
+                        runner_id,
+                        assistant_message_id,
+                        &answer,
+                        Some(&presentation),
+                        &actions,
                     )
                     .await
             };
@@ -496,12 +501,13 @@ fn render_contextualized_turn(
          focusEntityId must be one selected entity ID or an empty string. Keep answers concise because the client renders \
          the server-validated selection as an interactive surface. \
          Do not claim that an external action was completed unless the conversation contains a confirmed result. \
-         You may select exactly one local planning action in the action object. Use kind none for questions or ambiguous requests. \
+         You may select up to 32 local planning actions in the actions array. Use an empty array for questions or ambiguous requests. \
+         When the user asks to complete, cancel, or update several records, include one action for every matched record. \
          For updates, copy every replacement field from server context and change only what the user requested. \
          Use exact existing entity, workspace, and project IDs; the server creates IDs for new records. \
          Use RFC3339 timestamps with the current +09:00 offset. An empty optional string means no value. \
          Never modify a Google Calendar entry; ask the user to change it in Google Calendar. \
-         If the action kind is not none, answer only that the request is being processed; the server writes the final completion message after commit.\n\n",
+         If actions is not empty, answer only that the request is being processed; the server writes the final completion message after the whole batch commits.\n\n",
     );
     let _ = writeln!(
         prompt,
@@ -709,60 +715,63 @@ fn assistant_output_schema() -> Value {
                 "required": ["title", "layout", "focusEntityId", "sections"],
                 "additionalProperties": false
             },
-            "action": {
-                "type": "object",
-                "properties": {
-                    "kind": {
-                        "type": "string",
-                        "enum": [
-                            "none",
-                            "create_task",
-                            "update_task",
-                            "complete_task",
-                            "cancel_task",
-                            "create_schedule",
-                            "update_schedule",
-                            "cancel_schedule",
-                            "create_project",
-                            "update_project"
-                        ]
+            "actions": {
+                "type": "array",
+                "maxItems": MAX_AGENT_ACTIONS,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": [
+                                "create_task",
+                                "update_task",
+                                "complete_task",
+                                "cancel_task",
+                                "create_schedule",
+                                "update_schedule",
+                                "cancel_schedule",
+                                "create_project",
+                                "update_project"
+                            ]
+                        },
+                        "entityId": { "type": "string" },
+                        "workspaceId": { "type": "string" },
+                        "projectId": { "type": "string" },
+                        "title": { "type": "string" },
+                        "notes": { "type": "string" },
+                        "priority": { "type": "integer" },
+                        "dueAt": { "type": "string" },
+                        "startsAt": { "type": "string" },
+                        "endsAt": { "type": "string" },
+                        "timeZone": { "type": "string" },
+                        "status": { "type": "string" },
+                        "riskLevel": { "type": "integer" },
+                        "objective": { "type": "string" },
+                        "nextAction": { "type": "string" }
                     },
-                    "entityId": { "type": "string" },
-                    "workspaceId": { "type": "string" },
-                    "projectId": { "type": "string" },
-                    "title": { "type": "string" },
-                    "notes": { "type": "string" },
-                    "priority": { "type": "integer" },
-                    "dueAt": { "type": "string" },
-                    "startsAt": { "type": "string" },
-                    "endsAt": { "type": "string" },
-                    "timeZone": { "type": "string" },
-                    "status": { "type": "string" },
-                    "riskLevel": { "type": "integer" },
-                    "objective": { "type": "string" },
-                    "nextAction": { "type": "string" }
-                },
-                "required": [
-                    "kind",
-                    "entityId",
-                    "workspaceId",
-                    "projectId",
-                    "title",
-                    "notes",
-                    "priority",
-                    "dueAt",
-                    "startsAt",
-                    "endsAt",
-                    "timeZone",
-                    "status",
-                    "riskLevel",
-                    "objective",
-                    "nextAction"
-                ],
-                "additionalProperties": false
+                    "required": [
+                        "kind",
+                        "entityId",
+                        "workspaceId",
+                        "projectId",
+                        "title",
+                        "notes",
+                        "priority",
+                        "dueAt",
+                        "startsAt",
+                        "endsAt",
+                        "timeZone",
+                        "status",
+                        "riskLevel",
+                        "objective",
+                        "nextAction"
+                    ],
+                    "additionalProperties": false
+                }
             }
         },
-        "required": ["answer", "presentation", "action"],
+        "required": ["answer", "presentation", "actions"],
         "additionalProperties": false
     })
 }
@@ -770,11 +779,31 @@ fn assistant_output_schema() -> Value {
 fn validated_assistant_response(
     response: &str,
     context: &TurnContext,
-) -> Result<(String, AssistantPresentation, Option<AgentActionCommand>), ()> {
+) -> Result<(String, AssistantPresentation, Vec<AgentActionCommand>), ()> {
     let structured: StructuredAssistantTurn = serde_json::from_str(response).map_err(|_| ())?;
     let mut answer = structured.answer.trim().to_owned();
-    let action = validated_agent_action(&structured.action, context)?;
-    if action.is_some() {
+    if structured.actions.len() > MAX_AGENT_ACTIONS {
+        return Err(());
+    }
+    let mut actions = Vec::with_capacity(structured.actions.len().max(1));
+    for structured_action in &structured.actions {
+        let action = validated_agent_action(structured_action, context)?.ok_or(())?;
+        actions.push(action);
+    }
+    if structured.action.kind != StructuredAssistantActionKind::None {
+        if !actions.is_empty() {
+            return Err(());
+        }
+        actions.push(validated_agent_action(&structured.action, context)?.ok_or(())?);
+    }
+    let mut action_entity_ids = HashSet::with_capacity(actions.len());
+    if actions
+        .iter()
+        .any(|action| !action_entity_ids.insert(agent_action_entity_id(action)))
+    {
+        return Err(());
+    }
+    if !actions.is_empty() {
         if answer.is_empty() || answer.chars().count() > 24_000 {
             return Err(());
         }
@@ -788,7 +817,7 @@ fn validated_assistant_response(
                 sections: Vec::new(),
                 focus_item_id: None,
             },
-            action,
+            actions,
         ));
     }
     let title = structured.presentation.title.trim().to_owned();
@@ -851,7 +880,7 @@ fn validated_assistant_response(
         focus_item_id,
     };
     presentation.validate().map_err(|_| ())?;
-    Ok((answer, presentation, action))
+    Ok((answer, presentation, actions))
 }
 
 #[allow(clippy::too_many_lines)] // Each model-selected action is exhaustively mapped to a server-owned command in one reviewable boundary.
@@ -1046,6 +1075,177 @@ fn optional_action_text(value: &str, maximum: usize) -> Result<Option<String>, (
 
 fn validated_level(value: i16) -> Result<i16, ()> {
     (0..=3).contains(&value).then_some(value).ok_or(())
+}
+
+const fn agent_action_entity_id(action: &AgentActionCommand) -> Uuid {
+    match action {
+        AgentActionCommand::CreateTask { id, .. }
+        | AgentActionCommand::UpdateTask { id, .. }
+        | AgentActionCommand::SetTaskStatus { id, .. }
+        | AgentActionCommand::CreateSchedule { id, .. }
+        | AgentActionCommand::UpdateSchedule { id, .. }
+        | AgentActionCommand::CancelSchedule { id, .. }
+        | AgentActionCommand::CreateProject { id, .. }
+        | AgentActionCommand::UpdateProject { id, .. } => *id,
+    }
+}
+
+#[allow(clippy::too_many_lines)] // The exhaustive batch projection keeps every mutation class and its deterministic completion copy in one auditable boundary.
+fn agent_action_results(
+    actions: &[AgentActionCommand],
+    context: &TurnContext,
+) -> Result<(String, AssistantPresentation), ()> {
+    if actions.is_empty() || actions.len() > MAX_AGENT_ACTIONS {
+        return Err(());
+    }
+    if let [action] = actions {
+        return agent_action_result(action, context);
+    }
+
+    let mut items = Vec::with_capacity(actions.len());
+    let mut task_ids = Vec::new();
+    let mut schedule_ids = Vec::new();
+    let mut project_ids = Vec::new();
+    for action in actions {
+        let (_, result) = agent_action_result(action, context)?;
+        let [item] = result.items.as_slice() else {
+            return Err(());
+        };
+        let item_id = presentation_item_id(item);
+        match item {
+            AssistantPresentationItem::Task { .. } => task_ids.push(item_id),
+            AssistantPresentationItem::Schedule { .. } => schedule_ids.push(item_id),
+            AssistantPresentationItem::Project { .. } => project_ids.push(item_id),
+        }
+        items.push(item.clone());
+    }
+
+    let all_completed_tasks = actions.iter().all(|action| {
+        matches!(
+            action,
+            AgentActionCommand::SetTaskStatus {
+                status: TaskStatus::Completed,
+                ..
+            }
+        )
+    });
+    let all_cancelled_tasks = actions.iter().all(|action| {
+        matches!(
+            action,
+            AgentActionCommand::SetTaskStatus {
+                status: TaskStatus::Cancelled,
+                ..
+            }
+        )
+    });
+    let all_created_tasks = actions
+        .iter()
+        .all(|action| matches!(action, AgentActionCommand::CreateTask { .. }));
+    let all_created_schedules = actions
+        .iter()
+        .all(|action| matches!(action, AgentActionCommand::CreateSchedule { .. }));
+    let all_created_projects = actions
+        .iter()
+        .all(|action| matches!(action, AgentActionCommand::CreateProject { .. }));
+    let count = actions.len();
+    let (answer, title, task_section_title, schedule_section_title, project_section_title) =
+        if all_completed_tasks {
+            (
+                format!("할 일 {count}개를 완료했어요."),
+                format!("할 일 {count}개를 완료했어요"),
+                "완료한 할 일",
+                "처리한 일정",
+                "처리한 프로젝트",
+            )
+        } else if all_cancelled_tasks {
+            (
+                format!("할 일 {count}개를 취소했어요."),
+                format!("할 일 {count}개를 취소했어요"),
+                "취소한 할 일",
+                "처리한 일정",
+                "처리한 프로젝트",
+            )
+        } else if all_created_tasks {
+            (
+                format!("할 일 {count}개를 추가했어요."),
+                format!("할 일 {count}개를 추가했어요"),
+                "추가한 할 일",
+                "처리한 일정",
+                "처리한 프로젝트",
+            )
+        } else if all_created_schedules {
+            (
+                format!("일정 {count}개를 추가했어요."),
+                format!("일정 {count}개를 추가했어요"),
+                "처리한 할 일",
+                "추가한 일정",
+                "처리한 프로젝트",
+            )
+        } else if all_created_projects {
+            (
+                format!("프로젝트 {count}개를 추가했어요."),
+                format!("프로젝트 {count}개를 추가했어요"),
+                "처리한 할 일",
+                "처리한 일정",
+                "추가한 프로젝트",
+            )
+        } else {
+            (
+                format!("요청한 작업 {count}개를 처리했어요."),
+                format!("작업 {count}개를 처리했어요"),
+                "처리한 할 일",
+                "처리한 일정",
+                "처리한 프로젝트",
+            )
+        };
+
+    let mut sections = Vec::with_capacity(MAX_PRESENTATION_SECTIONS);
+    if !task_ids.is_empty() {
+        sections.push(AssistantPresentationSection {
+            kind: AssistantPresentationSectionKind::Tasks,
+            title: task_section_title.to_owned(),
+            view: AssistantPresentationView::Checklist,
+            item_ids: task_ids,
+        });
+    }
+    if !schedule_ids.is_empty() {
+        sections.push(AssistantPresentationSection {
+            kind: AssistantPresentationSectionKind::Schedule,
+            title: schedule_section_title.to_owned(),
+            view: AssistantPresentationView::Timeline,
+            item_ids: schedule_ids,
+        });
+    }
+    if !project_ids.is_empty() {
+        sections.push(AssistantPresentationSection {
+            kind: AssistantPresentationSectionKind::Projects,
+            title: project_section_title.to_owned(),
+            view: AssistantPresentationView::Cards,
+            item_ids: project_ids,
+        });
+    }
+    let kind = match sections.as_slice() {
+        [section] => match section.kind {
+            AssistantPresentationSectionKind::Tasks => AssistantPresentationKind::Tasks,
+            AssistantPresentationSectionKind::Schedule => AssistantPresentationKind::Schedule,
+            AssistantPresentationSectionKind::Projects => AssistantPresentationKind::Projects,
+        },
+        _ => AssistantPresentationKind::Composite,
+    };
+    let presentation = AssistantPresentation {
+        kind,
+        title,
+        items,
+        layout: if sections.len() > 1 {
+            AssistantPresentationLayout::Split
+        } else {
+            AssistantPresentationLayout::Stack
+        },
+        sections,
+        focus_item_id: None,
+    };
+    presentation.validate().map_err(|_| ())?;
+    Ok((answer, presentation))
 }
 
 #[allow(clippy::too_many_lines)] // Each persisted action owns a deterministic completion message and focused presentation in the same exhaustive map.
@@ -1755,6 +1955,7 @@ async fn wait_for_shutdown_signal() -> std::io::Result<()> {
 mod tests {
     use jimin_codex_client::Error as CodexError;
     use jimin_storage::{
+        agent::AgentActionCommand,
         gmail::GmailMessage,
         planning::{ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus},
         work::{Project, ProjectStatus, Workspace, WorkspaceScope},
@@ -1764,8 +1965,9 @@ mod tests {
 
     use super::{
         StructuredAnswerStream, StructuredAssistantAction, StructuredAssistantActionKind,
-        TurnContext, is_daily_overview_request, korea_day_end, render_contextualized_turn,
-        requires_process_restart, validated_agent_action, validated_assistant_response,
+        TurnContext, agent_action_results, is_daily_overview_request, korea_day_end,
+        render_contextualized_turn, requires_process_restart, validated_agent_action,
+        validated_assistant_response,
     };
 
     #[test]
@@ -2172,7 +2374,7 @@ mod tests {
 
         assert_eq!(presentation.title, "요청을 처리하고 있어요");
         assert!(presentation.items.is_empty());
-        assert!(action.is_some());
+        assert_eq!(action.len(), 1);
     }
 
     #[test]
@@ -2214,6 +2416,93 @@ mod tests {
                 expected_version: 7,
             } if id == task.id
         ));
+    }
+
+    #[test]
+    fn structured_batch_completes_every_verified_task() {
+        let first = Task {
+            id: Uuid::now_v7(),
+            project_id: None,
+            title: "회의록 정리".to_owned(),
+            notes: None,
+            status: TaskStatus::Open,
+            priority: 2,
+            due_at: None,
+            completed_at: None,
+            version: 3,
+        };
+        let second = Task {
+            id: Uuid::now_v7(),
+            title: "배포 확인".to_owned(),
+            version: 5,
+            ..first.clone()
+        };
+        let context = TurnContext {
+            prompt: String::new(),
+            schedule: Vec::new(),
+            tasks: vec![first.clone(), second.clone()],
+            daily_tasks: vec![first.clone(), second.clone()],
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            requires_daily_task_coverage: false,
+        };
+        let action = |entity_id: Uuid| {
+            serde_json::json!({
+                "kind": "complete_task",
+                "entityId": entity_id,
+                "workspaceId": "",
+                "projectId": "",
+                "title": "",
+                "notes": "",
+                "priority": 0,
+                "dueAt": "",
+                "startsAt": "",
+                "endsAt": "",
+                "timeZone": "",
+                "status": "",
+                "riskLevel": 0,
+                "objective": "",
+                "nextAction": ""
+            })
+        };
+        let response = serde_json::json!({
+            "answer": "요청을 처리 중입니다.",
+            "presentation": {
+                "title": "",
+                "layout": "stack",
+                "focusEntityId": "",
+                "sections": []
+            },
+            "actions": [action(first.id), action(second.id)]
+        })
+        .to_string();
+
+        let (_, _, actions) =
+            validated_assistant_response(&response, &context).expect("batch action result");
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(
+            &actions[0],
+            AgentActionCommand::SetTaskStatus {
+                id,
+                status: TaskStatus::Completed,
+                expected_version: 3,
+            } if *id == first.id
+        ));
+        assert!(matches!(
+            &actions[1],
+            AgentActionCommand::SetTaskStatus {
+                id,
+                status: TaskStatus::Completed,
+                expected_version: 5,
+            } if *id == second.id
+        ));
+
+        let (answer, presentation) =
+            agent_action_results(&actions, &context).expect("batch presentation");
+        assert_eq!(answer, "할 일 2개를 완료했어요.");
+        assert_eq!(presentation.items.len(), 2);
+        assert_eq!(presentation.sections.len(), 1);
+        assert_eq!(presentation.sections[0].item_ids, vec![first.id, second.id]);
     }
 
     #[test]

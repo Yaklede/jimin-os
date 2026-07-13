@@ -1037,6 +1037,160 @@ async fn structured_agent_action_and_completion_message_commit_together() {
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
+    reason = "The integration test verifies batch mutation atomicity and the ordered audit trail."
+)]
+async fn structured_agent_batch_actions_commit_as_one_turn() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        1,
+        Duration::from_secs(2),
+    )
+    .expect("test database URL should be valid");
+    database
+        .migrate()
+        .await
+        .expect("batch action migration should succeed");
+    let provisioned = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let first = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id: provisioned.profile.id,
+            project_id: None,
+            title: "회의록 정리".to_owned(),
+            notes: None,
+            priority: 2,
+            due_at: None,
+        })
+        .await
+        .expect("first task should persist");
+    let second = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id: provisioned.profile.id,
+            project_id: None,
+            title: "배포 확인".to_owned(),
+            notes: None,
+            priority: 2,
+            due_at: None,
+        })
+        .await
+        .expect("second task should persist");
+    let conversation_id = Uuid::now_v7();
+    database
+        .create_conversation(&NewConversation {
+            id: conversation_id,
+            user_id: provisioned.profile.id,
+            title: Some("여러 건 완료".to_owned()),
+        })
+        .await
+        .expect("conversation should persist");
+    let queued = database
+        .enqueue_agent_turn(&NewAgentTurn {
+            job_id: Uuid::now_v7(),
+            message_id: Uuid::now_v7(),
+            client_message_id: Uuid::now_v7(),
+            user_id: provisioned.profile.id,
+            conversation_id,
+            content: "두 할 일을 모두 완료해 줘".to_owned(),
+        })
+        .await
+        .expect("turn should queue");
+    let runner_id = "structured-batch-agent";
+    let claim = database
+        .claim_next_agent_job(runner_id, Duration::from_secs(30))
+        .await
+        .expect("claim query should succeed")
+        .expect("queued job should be claimed");
+    assert!(
+        database
+            .start_agent_job(
+                claim.id,
+                runner_id,
+                "thread-structured-batch",
+                Duration::from_secs(30),
+            )
+            .await
+            .expect("job should start")
+    );
+    let actions = vec![
+        AgentActionCommand::SetTaskStatus {
+            id: first.id,
+            status: TaskStatus::Completed,
+            expected_version: first.version,
+        },
+        AgentActionCommand::SetTaskStatus {
+            id: second.id,
+            status: TaskStatus::Completed,
+            expected_version: second.version,
+        },
+    ];
+    assert!(
+        database
+            .complete_agent_job_with_actions(
+                claim.id,
+                runner_id,
+                Uuid::now_v7(),
+                "할 일 2개를 완료했어요.",
+                Some(&AssistantPresentation {
+                    kind: AssistantPresentationKind::Summary,
+                    title: "할 일 2개를 완료했어요".to_owned(),
+                    items: Vec::new(),
+                    layout: AssistantPresentationLayout::Stack,
+                    sections: Vec::new(),
+                    focus_item_id: None,
+                }),
+                &actions,
+            )
+            .await
+            .expect("batch and result should commit")
+    );
+    assert!(
+        database
+            .open_tasks_for_user(provisioned.profile.id)
+            .await
+            .expect("tasks should load")
+            .is_empty()
+    );
+
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("test database should be reachable");
+    let audit: (i16, Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT executed_action_count, executed_action_type, executed_entity_id FROM agent_jobs WHERE id = $1",
+    )
+    .bind(queued.job_id)
+    .fetch_one(&pool)
+    .await
+    .expect("batch audit should load");
+    assert_eq!(audit, (2, None, None));
+    let action_audit: Vec<(i16, String, Uuid)> = sqlx::query_as(
+        "SELECT action_index, action_type, entity_id FROM agent_job_action_executions WHERE job_id = $1 ORDER BY action_index",
+    )
+    .bind(queued.job_id)
+    .fetch_all(&pool)
+    .await
+    .expect("ordered action audit should load");
+    assert_eq!(
+        action_audit,
+        vec![
+            (0, "complete_task".to_owned(), first.id),
+            (1, "complete_task".to_owned(), second.id),
+        ]
+    );
+
+    pool.close().await;
+    database.close().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
     reason = "The integration test verifies that an interrupted provider turn is finalized without replay."
 )]
 async fn expired_running_turn_is_failed_without_replaying_the_provider_call() {
