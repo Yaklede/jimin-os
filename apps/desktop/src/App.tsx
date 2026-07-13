@@ -88,6 +88,7 @@ export default function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<string>();
   const [highlightedProjectTaskId, setHighlightedProjectTaskId] =
     useState<string>();
+  const [highlightedScheduleId, setHighlightedScheduleId] = useState<string>();
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [projectsSaving, setProjectsSaving] = useState(false);
   const [projectsError, setProjectsError] = useState<string>();
@@ -412,6 +413,7 @@ export default function App() {
       setSelectedWorkspaceId(undefined);
       setSelectedProjectId(undefined);
       setHighlightedProjectTaskId(undefined);
+      setHighlightedScheduleId(undefined);
       setProjectsError(undefined);
       setConversationMessages([]);
       setSelectedConversationId(undefined);
@@ -1088,7 +1090,10 @@ export default function App() {
               onCompleteTask={completeHomeTask}
               onOpenTask={(task) => void openTaskFromAssistant(task)}
               onOpenProject={openProjectFromAssistant}
-              onOpenSchedule={() => setDestination("calendar")}
+              onOpenSchedule={(entry) => {
+                setHighlightedScheduleId(entry.id);
+                setDestination("calendar");
+              }}
             />
           )}
           {destination === "calendar" && (
@@ -1096,6 +1101,7 @@ export default function App() {
               snapshot={homeSnapshot}
               loading={homeLoading || mode === "loading"}
               error={homeError ?? (mode === "error" ? message : undefined)}
+              highlightedScheduleId={highlightedScheduleId}
               onCompleteTask={completeHomeTask}
             />
           )}

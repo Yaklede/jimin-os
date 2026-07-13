@@ -18,9 +18,19 @@ export interface ConversationMessage {
 }
 
 export interface AssistantPresentation {
-  kind: "summary" | "tasks" | "schedule" | "projects";
+  kind: "summary" | "tasks" | "schedule" | "projects" | "composite";
   title: string;
   items: AssistantPresentationItem[];
+  layout: "stack" | "split" | "focus";
+  sections: AssistantPresentationSection[];
+  focusItemId: string | null;
+}
+
+export interface AssistantPresentationSection {
+  kind: "tasks" | "schedule" | "projects";
+  title: string;
+  view: "list" | "checklist" | "timeline" | "cards";
+  itemIds: string[];
 }
 
 export type AssistantPresentationItem =
@@ -424,10 +434,33 @@ function isAssistantPresentation(
     (value.kind === "summary" ||
       value.kind === "tasks" ||
       value.kind === "schedule" ||
-      value.kind === "projects") &&
+      value.kind === "projects" ||
+      value.kind === "composite") &&
     typeof value.title === "string" &&
     Array.isArray(value.items) &&
-    value.items.every(isAssistantPresentationItem)
+    value.items.every(isAssistantPresentationItem) &&
+    (value.layout === "stack" ||
+      value.layout === "split" ||
+      value.layout === "focus") &&
+    Array.isArray(value.sections) &&
+    value.sections.every(isAssistantPresentationSection) &&
+    (value.focusItemId === null || typeof value.focusItemId === "string")
+  );
+}
+
+function isAssistantPresentationSection(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    (value.kind === "tasks" ||
+      value.kind === "schedule" ||
+      value.kind === "projects") &&
+    typeof value.title === "string" &&
+    (value.view === "list" ||
+      value.view === "checklist" ||
+      value.view === "timeline" ||
+      value.view === "cards") &&
+    Array.isArray(value.itemIds) &&
+    value.itemIds.every((itemId) => typeof itemId === "string")
   );
 }
 

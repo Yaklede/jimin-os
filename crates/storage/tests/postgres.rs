@@ -6,8 +6,8 @@ use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness,
     agent::{
         AgentJobState, AgentModelCatalogEntry, AgentReasoningEffort, AssistantPresentation,
-        AssistantPresentationKind, ConversationMessageRole, NewAgentTurn, NewConversation,
-        PendingAgentAction, PendingAgentActionDecision,
+        AssistantPresentationKind, AssistantPresentationLayout, ConversationMessageRole,
+        NewAgentTurn, NewConversation, PendingAgentAction, PendingAgentActionDecision,
     },
     auth::{
         ConsumeDevicePairing, CreateDevicePairing, PairingConsumption, ProvisionLogin,
@@ -724,6 +724,9 @@ async fn queued_agent_turn_is_leased_and_completed_once() {
                     kind: AssistantPresentationKind::Summary,
                     title: "오늘 일정".to_owned(),
                     items: Vec::new(),
+                    layout: AssistantPresentationLayout::default(),
+                    sections: Vec::new(),
+                    focus_item_id: None,
                 }),
             )
             .await

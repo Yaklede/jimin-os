@@ -1,13 +1,8 @@
 import {
-  ArrowLeft,
-  ArrowRight,
-  BriefcaseBusiness,
   CalendarDays,
   ChevronRight,
   Circle,
   Clock3,
-  FolderKanban,
-  ListTodo,
   MessageCircleMore,
   Mic,
   Send,
@@ -19,10 +14,7 @@ import { type AgentJob, type ConversationMessage } from "../api/agent";
 import { type HomeSnapshot } from "../api/home";
 import { type ScheduleEntry, type Task } from "../api/planning";
 import { type Project } from "../api/projects";
-import {
-  presentationForMessage,
-  type AssistantPresentation,
-} from "../assistantPresentation";
+import { presentationForMessage } from "../assistantPresentation";
 import { copy } from "../copy";
 import { createUuidV7 } from "../uuid";
 import {
@@ -30,6 +22,7 @@ import {
   SkeletonGroup,
   useDelayedSkeleton,
 } from "./ContentSkeleton";
+import { AssistantInteractiveCanvas } from "./AssistantInteractiveCanvas";
 
 type HomeWorkspaceProps = {
   snapshot: HomeSnapshot | undefined;
@@ -43,7 +36,7 @@ type HomeWorkspaceProps = {
   onCompleteTask(task: Task): Promise<void>;
   onOpenTask(task: Pick<Task, "id" | "projectId">): void;
   onOpenProject(project: Pick<Project, "id" | "workspaceId">): void;
-  onOpenSchedule(): void;
+  onOpenSchedule(entry: Pick<ScheduleEntry, "id">): void;
 };
 
 export function HomeWorkspace({
@@ -289,12 +282,13 @@ function HomeAssistantCommand({
   onSend(text: string, clientMessageId: string): Promise<boolean>;
   onOpenTask(task: Pick<Task, "id" | "projectId">): void;
   onOpenProject(project: Pick<Project, "id" | "workspaceId">): void;
-  onOpenSchedule(): void;
+  onOpenSchedule(entry: Pick<ScheduleEntry, "id">): void;
 }) {
   const [draft, setDraft] = useState("");
   const [submitted, setSubmitted] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
+  const inputRef = useRef<HTMLInputElement>(null);
   const active = Boolean(job && !isTerminalJob(job.state));
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -340,6 +334,7 @@ function HomeAssistantCommand({
           {copy.home.commandLabel}
         </label>
         <input
+          ref={inputRef}
           id="home-assistant-command"
           value={draft}
           maxLength={24_000}
@@ -373,13 +368,17 @@ function HomeAssistantCommand({
         </p>
       )}
       {presentation ? (
-        <AdaptiveAssistantResult
+        <AssistantInteractiveCanvas
+          key={message?.id}
           presentation={presentation}
           onOpenAssistant={onOpenAssistant}
           onOpenTask={onOpenTask}
           onOpenProject={onOpenProject}
           onOpenSchedule={onOpenSchedule}
-          onReset={() => onFocusChange(false)}
+          onReset={() => {
+            onFocusChange(false);
+            inputRef.current?.focus();
+          }}
         />
       ) : status ? (
         <div className="home-command__result" role="status" aria-live="polite">
@@ -399,229 +398,6 @@ function HomeAssistantCommand({
         </div>
       ) : null}
     </section>
-  );
-}
-
-function AdaptiveAssistantResult({
-  presentation,
-  onOpenAssistant,
-  onOpenTask,
-  onOpenProject,
-  onOpenSchedule,
-  onReset,
-}: {
-  presentation: AssistantPresentation;
-  onOpenAssistant(): void;
-  onOpenTask(task: Pick<Task, "id" | "projectId">): void;
-  onOpenProject(project: Pick<Project, "id" | "workspaceId">): void;
-  onOpenSchedule(): void;
-  onReset(): void;
-}) {
-  return (
-    <section
-      className="assistant-result"
-      aria-labelledby="assistant-result-title"
-    >
-      <header className="assistant-result__header">
-        <div>
-          <p>{copy.home.resultEyebrow}</p>
-          <h3 id="assistant-result-title">{presentation.title}</h3>
-        </div>
-        <button
-          className="text-button focus-visible-control"
-          type="button"
-          onClick={onReset}
-        >
-          <ArrowLeft aria-hidden="true" />
-          {copy.home.backToBriefing}
-        </button>
-      </header>
-      <p className="assistant-result__summary" aria-live="polite">
-        {presentation.summary}
-      </p>
-
-      {presentation.kind === "tasks" && (
-        <AssistantTaskResult
-          presentation={presentation}
-          onOpenTask={onOpenTask}
-        />
-      )}
-      {presentation.kind === "schedule" && (
-        <AssistantScheduleResult
-          presentation={presentation}
-          onOpenSchedule={onOpenSchedule}
-        />
-      )}
-      {presentation.kind === "projects" && (
-        <AssistantProjectResult
-          presentation={presentation}
-          onOpenProject={onOpenProject}
-        />
-      )}
-      {presentation.kind === "summary" && (
-        <button
-          className="secondary-button assistant-result__follow-up focus-visible-control"
-          type="button"
-          onClick={onOpenAssistant}
-        >
-          {copy.home.continueRequest}
-          <ArrowRight aria-hidden="true" />
-        </button>
-      )}
-    </section>
-  );
-}
-
-function AssistantTaskResult({
-  presentation,
-  onOpenTask,
-}: {
-  presentation: Extract<AssistantPresentation, { kind: "tasks" }>;
-  onOpenTask(task: Pick<Task, "id" | "projectId">): void;
-}) {
-  if (!presentation.items.length) {
-    return (
-      <ResultEmpty
-        icon={<ListTodo aria-hidden="true" />}
-        description={copy.home.noMatchingTasks}
-      />
-    );
-  }
-  return (
-    <ul className="assistant-result-list assistant-result-list--tasks">
-      {presentation.items.map((task) => {
-        return (
-          <li
-            key={task.id}
-            data-highlighted={task.id === presentation.highlightedTaskId}
-          >
-            <button
-              className="assistant-result-row focus-visible-control"
-              type="button"
-              onClick={() => onOpenTask(task)}
-            >
-              <span className="assistant-result-row__icon" aria-hidden="true">
-                <ListTodo />
-              </span>
-              <span className="assistant-result-row__main">
-                <strong>{task.title}</strong>
-                <span>{task.projectTitle || copy.home.unassignedTask}</span>
-              </span>
-              <span className="assistant-result-row__meta">
-                {task.dueAt && (
-                  <time dateTime={task.dueAt}>{dueLabel(task.dueAt)}</time>
-                )}
-                <span>{copy.home.openTaskAction}</span>
-                <ChevronRight aria-hidden="true" />
-              </span>
-            </button>
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
-function AssistantScheduleResult({
-  presentation,
-  onOpenSchedule,
-}: {
-  presentation: Extract<AssistantPresentation, { kind: "schedule" }>;
-  onOpenSchedule(): void;
-}) {
-  if (!presentation.items.length) {
-    return (
-      <ResultEmpty
-        icon={<CalendarDays aria-hidden="true" />}
-        description={copy.home.noScheduleResult}
-      />
-    );
-  }
-  return (
-    <ul className="assistant-result-list">
-      {presentation.items.map((entry) => (
-        <li key={entry.id}>
-          <button
-            className="assistant-result-row focus-visible-control"
-            type="button"
-            onClick={onOpenSchedule}
-          >
-            <span className="assistant-result-row__icon" aria-hidden="true">
-              <CalendarDays />
-            </span>
-            <span className="assistant-result-row__main">
-              <strong>{entry.title}</strong>
-              <span>{assistantScheduleDetail(entry)}</span>
-            </span>
-            <span className="assistant-result-row__meta">
-              <span>{copy.home.openScheduleAction}</span>
-              <ChevronRight aria-hidden="true" />
-            </span>
-          </button>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-function AssistantProjectResult({
-  presentation,
-  onOpenProject,
-}: {
-  presentation: Extract<AssistantPresentation, { kind: "projects" }>;
-  onOpenProject(project: Pick<Project, "id" | "workspaceId">): void;
-}) {
-  if (!presentation.items.length) {
-    return (
-      <ResultEmpty
-        icon={<FolderKanban aria-hidden="true" />}
-        description={copy.home.noMatchingProjects}
-      />
-    );
-  }
-  return (
-    <ul className="assistant-result-list">
-      {presentation.items.map((project) => (
-        <li key={project.id}>
-          <button
-            className="assistant-result-row focus-visible-control"
-            type="button"
-            onClick={() => onOpenProject(project)}
-          >
-            <span className="assistant-result-row__icon" aria-hidden="true">
-              <BriefcaseBusiness />
-            </span>
-            <span className="assistant-result-row__main">
-              <strong>{project.title}</strong>
-              <span>
-                {project.nextAction ||
-                  project.objective ||
-                  copy.projects.noNextAction}
-              </span>
-            </span>
-            <span className="assistant-result-row__meta">
-              <span>{copy.home.openProjectAction}</span>
-              <ChevronRight aria-hidden="true" />
-            </span>
-          </button>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-function ResultEmpty({
-  icon,
-  description,
-}: {
-  icon: React.ReactNode;
-  description: string;
-}) {
-  return (
-    <div className="assistant-result__empty">
-      {icon}
-      <p>{description}</p>
-    </div>
   );
 }
 
@@ -796,12 +572,6 @@ function briefingSummary(scheduleCount: number, taskCount: number): string {
 function scheduleDetail(entry: ScheduleEntry): string {
   const time = `${formatTime(entry.startsAt)} · ${formatTime(entry.endsAt)}`;
   return entry.notes ? `${time} · ${entry.notes}` : time;
-}
-
-function assistantScheduleDetail(
-  entry: Extract<AssistantPresentation, { kind: "schedule" }>["items"][number],
-): string {
-  return `${formatTime(entry.startsAt)} · ${formatTime(entry.endsAt)}`;
 }
 
 function relativeScheduleTime(value: string): string {

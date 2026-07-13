@@ -25,6 +25,7 @@ const MAX_REASONING_EFFORT_DESCRIPTION_CHARS: usize = 1_000;
 const MAX_REASONING_EFFORT_COUNT: usize = 16;
 const MAX_MODEL_COUNT: usize = 128;
 const MAX_PRESENTATION_ITEMS: usize = 32;
+const MAX_PRESENTATION_SECTIONS: usize = 3;
 const MAX_PRESENTATION_DETAIL_CHARS: usize = 500;
 const MAX_PRESENTATION_TIMESTAMP_CHARS: usize = 80;
 const MIN_CLAIM_LEASE: Duration = Duration::from_secs(5);
@@ -275,6 +276,12 @@ pub struct AssistantPresentation {
     pub kind: AssistantPresentationKind,
     pub title: String,
     pub items: Vec<AssistantPresentationItem>,
+    #[serde(default)]
+    pub layout: AssistantPresentationLayout,
+    #[serde(default)]
+    pub sections: Vec<AssistantPresentationSection>,
+    #[serde(default)]
+    pub focus_item_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,6 +291,42 @@ pub enum AssistantPresentationKind {
     Tasks,
     Schedule,
     Projects,
+    Composite,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantPresentationLayout {
+    #[default]
+    Stack,
+    Split,
+    Focus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantPresentationSection {
+    pub kind: AssistantPresentationSectionKind,
+    pub title: String,
+    pub view: AssistantPresentationView,
+    pub item_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantPresentationSectionKind {
+    Tasks,
+    Schedule,
+    Projects,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantPresentationView {
+    List,
+    Checklist,
+    Timeline,
+    Cards,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,27 +378,79 @@ impl AssistantPresentation {
     pub fn validate(&self) -> Result<(), StorageError> {
         if !valid_text(&self.title, MAX_TITLE_CHARS, false)
             || self.items.len() > MAX_PRESENTATION_ITEMS
+            || self.sections.len() > MAX_PRESENTATION_SECTIONS
+            || self.items.iter().any(|item| !valid_presentation_item(item))
         {
             return Err(StorageError::InvalidConfiguration);
         }
-        let matches_kind = self.items.iter().all(|item| {
-            matches!(
-                (self.kind, item),
-                (
-                    AssistantPresentationKind::Tasks,
-                    AssistantPresentationItem::Task { .. }
-                ) | (
-                    AssistantPresentationKind::Schedule,
-                    AssistantPresentationItem::Schedule { .. }
-                ) | (
-                    AssistantPresentationKind::Projects,
-                    AssistantPresentationItem::Project { .. }
-                )
-            )
-        });
-        if (self.kind == AssistantPresentationKind::Summary && !self.items.is_empty())
-            || (self.kind != AssistantPresentationKind::Summary && !matches_kind)
-            || self.items.iter().any(|item| !valid_presentation_item(item))
+
+        let item_ids = self
+            .items
+            .iter()
+            .map(presentation_item_id)
+            .collect::<HashSet<_>>();
+        if item_ids.len() != self.items.len() {
+            return Err(StorageError::InvalidConfiguration);
+        }
+
+        if self.sections.is_empty() {
+            let matches_kind = self
+                .items
+                .iter()
+                .all(|item| presentation_item_matches_kind(item, self.kind));
+            if (self.kind == AssistantPresentationKind::Summary && !self.items.is_empty())
+                || matches!(self.kind, AssistantPresentationKind::Composite)
+                || (self.kind != AssistantPresentationKind::Summary && !matches_kind)
+                || self.focus_item_id.is_some_and(|id| !item_ids.contains(&id))
+            {
+                return Err(StorageError::InvalidConfiguration);
+            }
+            return Ok(());
+        }
+
+        let expected_kind = if self.sections.len() > 1 {
+            AssistantPresentationKind::Composite
+        } else {
+            match self.sections[0].kind {
+                AssistantPresentationSectionKind::Tasks => AssistantPresentationKind::Tasks,
+                AssistantPresentationSectionKind::Schedule => AssistantPresentationKind::Schedule,
+                AssistantPresentationSectionKind::Projects => AssistantPresentationKind::Projects,
+            }
+        };
+        if self.kind != expected_kind {
+            return Err(StorageError::InvalidConfiguration);
+        }
+
+        let mut section_kinds = HashSet::new();
+        let mut referenced_ids = HashSet::new();
+        for section in &self.sections {
+            if !section_kinds.insert(section.kind)
+                || !valid_text(&section.title, MAX_TITLE_CHARS, false)
+                || section.item_ids.is_empty()
+                || section.item_ids.len() > MAX_PRESENTATION_ITEMS
+                || !presentation_view_matches_kind(section.view, section.kind)
+            {
+                return Err(StorageError::InvalidConfiguration);
+            }
+            for id in &section.item_ids {
+                let Some(item) = self
+                    .items
+                    .iter()
+                    .find(|item| presentation_item_id(item) == *id)
+                else {
+                    return Err(StorageError::InvalidConfiguration);
+                };
+                if !referenced_ids.insert(*id)
+                    || !presentation_item_matches_section_kind(item, section.kind)
+                {
+                    return Err(StorageError::InvalidConfiguration);
+                }
+            }
+        }
+        if referenced_ids.len() != self.items.len()
+            || self
+                .focus_item_id
+                .is_some_and(|id| !referenced_ids.contains(&id))
         {
             return Err(StorageError::InvalidConfiguration);
         }
@@ -2393,6 +2488,71 @@ fn valid_time_zone(value: &str) -> bool {
     valid_text(value, 80, false)
 }
 
+fn presentation_item_id(item: &AssistantPresentationItem) -> Uuid {
+    match item {
+        AssistantPresentationItem::Task { id, .. }
+        | AssistantPresentationItem::Schedule { id, .. }
+        | AssistantPresentationItem::Project { id, .. } => *id,
+    }
+}
+
+fn presentation_item_matches_kind(
+    item: &AssistantPresentationItem,
+    kind: AssistantPresentationKind,
+) -> bool {
+    matches!(
+        (kind, item),
+        (
+            AssistantPresentationKind::Tasks,
+            AssistantPresentationItem::Task { .. }
+        ) | (
+            AssistantPresentationKind::Schedule,
+            AssistantPresentationItem::Schedule { .. }
+        ) | (
+            AssistantPresentationKind::Projects,
+            AssistantPresentationItem::Project { .. }
+        )
+    )
+}
+
+fn presentation_item_matches_section_kind(
+    item: &AssistantPresentationItem,
+    kind: AssistantPresentationSectionKind,
+) -> bool {
+    matches!(
+        (kind, item),
+        (
+            AssistantPresentationSectionKind::Tasks,
+            AssistantPresentationItem::Task { .. }
+        ) | (
+            AssistantPresentationSectionKind::Schedule,
+            AssistantPresentationItem::Schedule { .. }
+        ) | (
+            AssistantPresentationSectionKind::Projects,
+            AssistantPresentationItem::Project { .. }
+        )
+    )
+}
+
+fn presentation_view_matches_kind(
+    view: AssistantPresentationView,
+    kind: AssistantPresentationSectionKind,
+) -> bool {
+    matches!(
+        (kind, view),
+        (
+            AssistantPresentationSectionKind::Tasks,
+            AssistantPresentationView::List | AssistantPresentationView::Checklist
+        ) | (
+            AssistantPresentationSectionKind::Schedule,
+            AssistantPresentationView::List | AssistantPresentationView::Timeline
+        ) | (
+            AssistantPresentationSectionKind::Projects,
+            AssistantPresentationView::List | AssistantPresentationView::Cards
+        )
+    )
+}
+
 fn valid_presentation_item(item: &AssistantPresentationItem) -> bool {
     match item {
         AssistantPresentationItem::Task {
@@ -2497,7 +2657,11 @@ fn classify(error: &sqlx::Error) -> StorageError {
 
 #[cfg(test)]
 mod tests {
-    use super::{NewAgentTurn, NewConversation};
+    use super::{
+        AssistantPresentation, AssistantPresentationItem, AssistantPresentationKind,
+        AssistantPresentationLayout, AssistantPresentationSection,
+        AssistantPresentationSectionKind, AssistantPresentationView, NewAgentTurn, NewConversation,
+    };
     use crate::StorageError;
     use uuid::Uuid;
 
@@ -2526,6 +2690,81 @@ mod tests {
         };
         assert!(matches!(
             invalid.validate(),
+            Err(StorageError::InvalidConfiguration)
+        ));
+    }
+
+    #[test]
+    fn assistant_presentation_accepts_a_verified_composite_surface() {
+        let task_id = Uuid::now_v7();
+        let schedule_id = Uuid::now_v7();
+        let presentation = AssistantPresentation {
+            kind: AssistantPresentationKind::Composite,
+            title: "오늘의 실행 계획".to_owned(),
+            items: vec![
+                AssistantPresentationItem::Task {
+                    id: task_id,
+                    project_id: None,
+                    project_title: None,
+                    title: "회의록 정리".to_owned(),
+                    priority: 2,
+                    due_at: None,
+                },
+                AssistantPresentationItem::Schedule {
+                    id: schedule_id,
+                    title: "주간 회의".to_owned(),
+                    starts_at: "2026-07-13T04:00:00Z".to_owned(),
+                    ends_at: "2026-07-13T05:00:00Z".to_owned(),
+                    time_zone: "Asia/Seoul".to_owned(),
+                },
+            ],
+            layout: AssistantPresentationLayout::Focus,
+            sections: vec![
+                AssistantPresentationSection {
+                    kind: AssistantPresentationSectionKind::Tasks,
+                    title: "먼저 할 일".to_owned(),
+                    view: AssistantPresentationView::Checklist,
+                    item_ids: vec![task_id],
+                },
+                AssistantPresentationSection {
+                    kind: AssistantPresentationSectionKind::Schedule,
+                    title: "예정된 일정".to_owned(),
+                    view: AssistantPresentationView::Timeline,
+                    item_ids: vec![schedule_id],
+                },
+            ],
+            focus_item_id: Some(task_id),
+        };
+
+        assert!(presentation.validate().is_ok());
+    }
+
+    #[test]
+    fn assistant_presentation_rejects_a_section_with_the_wrong_item_type() {
+        let task_id = Uuid::now_v7();
+        let presentation = AssistantPresentation {
+            kind: AssistantPresentationKind::Schedule,
+            title: "오늘 일정".to_owned(),
+            items: vec![AssistantPresentationItem::Task {
+                id: task_id,
+                project_id: None,
+                project_title: None,
+                title: "회의록 정리".to_owned(),
+                priority: 2,
+                due_at: None,
+            }],
+            layout: AssistantPresentationLayout::Split,
+            sections: vec![AssistantPresentationSection {
+                kind: AssistantPresentationSectionKind::Schedule,
+                title: "예정된 일정".to_owned(),
+                view: AssistantPresentationView::Timeline,
+                item_ids: vec![task_id],
+            }],
+            focus_item_id: Some(task_id),
+        };
+
+        assert!(matches!(
+            presentation.validate(),
             Err(StorageError::InvalidConfiguration)
         ));
     }

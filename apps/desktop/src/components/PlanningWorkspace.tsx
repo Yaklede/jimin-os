@@ -1,5 +1,5 @@
 import { CalendarDays, CheckCircle2, Circle } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 
 import { type HomeSnapshot } from "../api/home";
 import { type ScheduleEntry, type Task } from "../api/planning";
@@ -15,6 +15,7 @@ type PlanningWorkspaceProps = {
   snapshot: HomeSnapshot | undefined;
   loading: boolean;
   error: string | undefined;
+  highlightedScheduleId?: string;
   onCompleteTask(task: Task): Promise<void>;
 };
 
@@ -22,11 +23,21 @@ export function PlanningWorkspace({
   snapshot,
   loading,
   error,
+  highlightedScheduleId,
   onCompleteTask,
 }: PlanningWorkspaceProps) {
   const [completingTaskId, setCompletingTaskId] = useState<string>();
+  const highlightedScheduleRef = useRef<HTMLLIElement | null>(null);
   const skeletonVisible = useDelayedSkeleton(loading);
   const showingSkeleton = loading || skeletonVisible;
+
+  useEffect(() => {
+    if (!highlightedScheduleId) return;
+    const element = highlightedScheduleRef.current;
+    if (!element) return;
+    element.scrollIntoView({ block: "center", behavior: "smooth" });
+    element.focus({ preventScroll: true });
+  }, [highlightedScheduleId, snapshot?.schedule]);
 
   async function complete(task: Task) {
     if (completingTaskId) return;
@@ -74,7 +85,16 @@ export function PlanningWorkspace({
           ) : snapshot?.schedule.length ? (
             <ol className="planning-timeline">
               {snapshot.schedule.map((entry) => (
-                <ScheduleRow entry={entry} key={entry.id} />
+                <ScheduleRow
+                  entry={entry}
+                  highlighted={entry.id === highlightedScheduleId}
+                  elementRef={
+                    entry.id === highlightedScheduleId
+                      ? highlightedScheduleRef
+                      : undefined
+                  }
+                  key={entry.id}
+                />
               ))}
             </ol>
           ) : (
@@ -208,9 +228,21 @@ function PlanningTaskSkeleton({
   );
 }
 
-function ScheduleRow({ entry }: { entry: ScheduleEntry }) {
+function ScheduleRow({
+  entry,
+  highlighted,
+  elementRef,
+}: {
+  entry: ScheduleEntry;
+  highlighted: boolean;
+  elementRef?: RefObject<HTMLLIElement | null>;
+}) {
   return (
-    <li>
+    <li
+      ref={elementRef}
+      data-highlighted={highlighted}
+      tabIndex={highlighted ? -1 : undefined}
+    >
       <time dateTime={entry.startsAt}>{formatTime(entry.startsAt)}</time>
       <span aria-hidden="true" />
       <div>

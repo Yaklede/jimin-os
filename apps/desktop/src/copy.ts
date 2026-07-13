@@ -90,6 +90,13 @@ export const copy = {
     resultEyebrow: "요청 결과",
     backToBriefing: "오늘 화면",
     continueRequest: "자세히 물어보기",
+    resultSectionsLabel: "결과 항목",
+    resultDetailsLabel: "선택한 내용",
+    resultCount: (count: number) => `${count}개`,
+    taskPriority: (priority: number) =>
+      priority >= 3 ? "가장 먼저" : priority === 2 ? "우선 처리" : "일반",
+    projectTaskCount: (count: number) => `열린 일감 ${count}개`,
+    projectNextActionLabel: "다음 행동",
     openTaskAction: "일감 보기",
     openProjectAction: "프로젝트에서 보기",
     openScheduleAction: "일정에서 보기",

@@ -26,9 +26,11 @@ use jimin_storage::{
     agent::{
         AgentAuthentication, AgentAuthenticationState, AgentJob, AgentJobState,
         AgentModelCatalogEntry, AgentModelSettings, AgentReasoningEffort, AssistantPresentation,
-        AssistantPresentationItem, AssistantPresentationKind, Conversation, ConversationMessage,
-        ConversationMessageRole, ConversationMessageStatus, ConversationStatus, NewAgentTurn,
-        NewConversation, PendingAgentAction, PendingAgentActionDecision, QueuedAgentTurn,
+        AssistantPresentationItem, AssistantPresentationKind, AssistantPresentationLayout,
+        AssistantPresentationSection, AssistantPresentationSectionKind, AssistantPresentationView,
+        Conversation, ConversationMessage, ConversationMessageRole, ConversationMessageStatus,
+        ConversationStatus, NewAgentTurn, NewConversation, PendingAgentAction,
+        PendingAgentActionDecision, QueuedAgentTurn,
     },
     auth::{Device, DeviceStatus, Profile},
     calendar::{CalendarAccount, CalendarAccountStatus, CreateCalendarOAuthAuthorization},
@@ -437,6 +439,18 @@ pub struct AssistantPresentationResponse {
     kind: String,
     title: String,
     items: Vec<AssistantPresentationItemResponse>,
+    layout: String,
+    sections: Vec<AssistantPresentationSectionResponse>,
+    focus_item_id: Option<uuid::Uuid>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantPresentationSectionResponse {
+    kind: String,
+    title: String,
+    view: String,
+    item_ids: Vec<uuid::Uuid>,
 }
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
@@ -829,6 +843,7 @@ pub(crate) fn error_response(
         QueuedAgentTurnResponse,
         ConversationMessageResponse,
         AssistantPresentationResponse,
+        AssistantPresentationSectionResponse,
         AssistantPresentationItemResponse,
         ConversationMessageListResponse,
         AgentJobResponse,
@@ -3290,6 +3305,7 @@ fn assistant_presentation_response(
             AssistantPresentationKind::Tasks => "tasks",
             AssistantPresentationKind::Schedule => "schedule",
             AssistantPresentationKind::Projects => "projects",
+            AssistantPresentationKind::Composite => "composite",
         }
         .to_owned(),
         title: presentation.title,
@@ -3344,6 +3360,40 @@ fn assistant_presentation_response(
                 },
             })
             .collect(),
+        layout: match presentation.layout {
+            AssistantPresentationLayout::Stack => "stack",
+            AssistantPresentationLayout::Split => "split",
+            AssistantPresentationLayout::Focus => "focus",
+        }
+        .to_owned(),
+        sections: presentation
+            .sections
+            .into_iter()
+            .map(assistant_presentation_section_response)
+            .collect(),
+        focus_item_id: presentation.focus_item_id,
+    }
+}
+
+fn assistant_presentation_section_response(
+    section: AssistantPresentationSection,
+) -> AssistantPresentationSectionResponse {
+    AssistantPresentationSectionResponse {
+        kind: match section.kind {
+            AssistantPresentationSectionKind::Tasks => "tasks",
+            AssistantPresentationSectionKind::Schedule => "schedule",
+            AssistantPresentationSectionKind::Projects => "projects",
+        }
+        .to_owned(),
+        title: section.title,
+        view: match section.view {
+            AssistantPresentationView::List => "list",
+            AssistantPresentationView::Checklist => "checklist",
+            AssistantPresentationView::Timeline => "timeline",
+            AssistantPresentationView::Cards => "cards",
+        }
+        .to_owned(),
+        item_ids: section.item_ids,
     }
 }
 
