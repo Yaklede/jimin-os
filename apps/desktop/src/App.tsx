@@ -238,14 +238,22 @@ export default function App() {
   }, [apiBaseUrl, tokens, withAuthenticatedSession]);
 
   const saveAgentModelSettings = useCallback(
-    async (modelId: string | null): Promise<boolean> => {
+    async (
+      modelId: string | null,
+      reasoningEffort: string | null,
+    ): Promise<boolean> => {
       if (!tokens) return false;
       setAgentModelsSaving(true);
       setAgentModelsError(undefined);
       try {
         setAgentModelSettings(
           await withAuthenticatedSession((accessToken) =>
-            updateAgentModelSettings(apiBaseUrl, accessToken, modelId),
+            updateAgentModelSettings(
+              apiBaseUrl,
+              accessToken,
+              modelId,
+              reasoningEffort,
+            ),
           ),
         );
         return true;

@@ -49,6 +49,14 @@ pub struct ProcessingModel {
     pub display_name: String,
     pub description: String,
     pub is_default: bool,
+    pub default_reasoning_effort: String,
+    pub supported_reasoning_efforts: Vec<ProcessingReasoningEffort>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessingReasoningEffort {
+    pub id: String,
+    pub description: String,
 }
 
 /// Device-code details that are safe to present to the personal app. The
@@ -390,6 +398,28 @@ where
         &mut self,
         thread_id: &str,
         prompt: &str,
+        on_delta: F,
+    ) -> Result<CompletedTurn>
+    where
+        F: FnMut(&str),
+    {
+        self.run_turn_with_response_streaming_with_options(thread_id, prompt, None, None, on_delta)
+            .await
+    }
+
+    /// Runs a conversation turn with model and reasoning overrides that apply
+    /// to this and subsequent turns in the Codex thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for protocol failures, failed turns, or a final
+    /// answer exceeding the bounded private-response payload.
+    pub async fn run_turn_with_response_streaming_with_options<F>(
+        &mut self,
+        thread_id: &str,
+        prompt: &str,
+        model: Option<&str>,
+        reasoning_effort: Option<&str>,
         mut on_delta: F,
     ) -> Result<CompletedTurn>
     where
@@ -410,7 +440,9 @@ where
                         "type": "text",
                         "text": prompt,
                         "text_elements": []
-                    }]
+                    }],
+                    "model": model,
+                    "effort": reasoning_effort
                 }),
             )
             .await?;
@@ -719,6 +751,15 @@ struct ModelListItem {
     display_name: String,
     description: String,
     is_default: bool,
+    default_reasoning_effort: String,
+    supported_reasoning_efforts: Vec<ModelReasoningEffortItem>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelReasoningEffortItem {
+    reasoning_effort: String,
+    description: String,
 }
 
 impl From<ModelListItem> for ProcessingModel {
@@ -728,6 +769,15 @@ impl From<ModelListItem> for ProcessingModel {
             display_name: model.display_name,
             description: model.description,
             is_default: model.is_default,
+            default_reasoning_effort: model.default_reasoning_effort,
+            supported_reasoning_efforts: model
+                .supported_reasoning_efforts
+                .into_iter()
+                .map(|effort| ProcessingReasoningEffort {
+                    id: effort.reasoning_effort,
+                    description: effort.description,
+                })
+                .collect(),
         }
     }
 }
@@ -912,7 +962,7 @@ mod tests {
             assert_eq!(first["params"]["cursor"], Value::Null);
             assert_eq!(first["params"]["includeHidden"], false);
             server_writer
-                .write_all(b"{\"id\":2,\"result\":{\"data\":[{\"id\":\"provider-default\",\"displayName\":\"Provider Default\",\"description\":\"Default model\",\"isDefault\":true}],\"nextCursor\":\"page-2\"}}\n")
+                .write_all(b"{\"id\":2,\"result\":{\"data\":[{\"id\":\"provider-default\",\"displayName\":\"Provider Default\",\"description\":\"Default model\",\"isDefault\":true,\"defaultReasoningEffort\":\"medium\",\"supportedReasoningEfforts\":[{\"reasoningEffort\":\"low\",\"description\":\"Fast\"},{\"reasoningEffort\":\"medium\",\"description\":\"Balanced\"}]}],\"nextCursor\":\"page-2\"}}\n")
                 .await
                 .expect("first model page");
 
@@ -920,7 +970,7 @@ mod tests {
             assert_eq!(second["method"], "model/list");
             assert_eq!(second["params"]["cursor"], "page-2");
             server_writer
-                .write_all(b"{\"id\":3,\"result\":{\"data\":[{\"id\":\"provider-fast\",\"displayName\":\"Provider Fast\",\"description\":\"Fast model\",\"isDefault\":false}],\"nextCursor\":null}}\n")
+                .write_all(b"{\"id\":3,\"result\":{\"data\":[{\"id\":\"provider-fast\",\"displayName\":\"Provider Fast\",\"description\":\"Fast model\",\"isDefault\":false,\"defaultReasoningEffort\":\"low\",\"supportedReasoningEfforts\":[{\"reasoningEffort\":\"low\",\"description\":\"Fast\"}]}],\"nextCursor\":null}}\n")
                 .await
                 .expect("second model page");
         });
@@ -934,6 +984,8 @@ mod tests {
         assert_eq!(models[0].id, "provider-default");
         assert!(models[0].is_default);
         assert_eq!(models[1].display_name, "Provider Fast");
+        assert_eq!(models[0].default_reasoning_effort, "medium");
+        assert_eq!(models[0].supported_reasoning_efforts.len(), 2);
         server_task.await.expect("server task");
     }
 
@@ -1071,6 +1123,8 @@ mod tests {
                 .expect("thread response");
             let turn_request = read_json_line(&mut server_reader).await;
             assert_eq!(turn_request["method"], "turn/start");
+            assert_eq!(turn_request["params"]["model"], "gpt-fixture");
+            assert_eq!(turn_request["params"]["effort"], "high");
             assert_eq!(
                 turn_request["params"]["input"][0]["text_elements"],
                 json!([])
@@ -1108,9 +1162,15 @@ mod tests {
             .expect("thread");
         let mut received_deltas = Vec::new();
         let completed = client
-            .run_turn_with_response_streaming(&thread_id, "Summarize a generic fixture.", |delta| {
-                received_deltas.push(delta.to_owned());
-            })
+            .run_turn_with_response_streaming_with_options(
+                &thread_id,
+                "Summarize a generic fixture.",
+                Some("gpt-fixture"),
+                Some("high"),
+                |delta| {
+                    received_deltas.push(delta.to_owned());
+                },
+            )
             .await
             .expect("turn");
         let summary = completed.summary;

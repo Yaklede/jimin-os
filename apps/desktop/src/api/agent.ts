@@ -66,11 +66,19 @@ export interface AgentModel {
   displayName: string;
   description: string;
   isDefault: boolean;
+  defaultReasoningEffort: string;
+  supportedReasoningEfforts: AgentReasoningEffort[];
+}
+
+export interface AgentReasoningEffort {
+  id: string;
+  description: string;
 }
 
 export interface AgentModelSettings {
   items: AgentModel[];
   selectedModelId: string | null;
+  selectedReasoningEffort: string | null;
 }
 
 interface ListResponse<T> {
@@ -158,11 +166,12 @@ export async function updateAgentModelSettings(
   baseUrl: string,
   access: string,
   modelId: string | null,
+  reasoningEffort: string | null,
 ): Promise<AgentModelSettings> {
   const response = await fetch(`${normalizeBaseUrl(baseUrl)}/v1/agent/models`, {
     method: "PUT",
     headers: { ...authHeaders(access), "Content-Type": "application/json" },
-    body: JSON.stringify({ modelId }),
+    body: JSON.stringify({ modelId, reasoningEffort }),
   });
   const body = await readJson(response);
   if (!response.ok || !isAgentModelSettings(body)) {
@@ -429,7 +438,9 @@ function isAgentModelSettings(value: unknown): value is AgentModelSettings {
     Array.isArray(value.items) &&
     value.items.every(isAgentModel) &&
     (value.selectedModelId === null ||
-      typeof value.selectedModelId === "string")
+      typeof value.selectedModelId === "string") &&
+    (value.selectedReasoningEffort === null ||
+      typeof value.selectedReasoningEffort === "string")
   );
 }
 
@@ -439,7 +450,18 @@ function isAgentModel(value: unknown): value is AgentModel {
     typeof value.id === "string" &&
     typeof value.displayName === "string" &&
     typeof value.description === "string" &&
-    typeof value.isDefault === "boolean"
+    typeof value.isDefault === "boolean" &&
+    typeof value.defaultReasoningEffort === "string" &&
+    Array.isArray(value.supportedReasoningEfforts) &&
+    value.supportedReasoningEfforts.every(isAgentReasoningEffort)
+  );
+}
+
+function isAgentReasoningEffort(value: unknown): value is AgentReasoningEffort {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.description === "string"
   );
 }
 

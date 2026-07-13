@@ -5,8 +5,8 @@ use jimin_domain::{ClientPlatform, DeviceRegistration, EmailAddress, GoogleSubje
 use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness,
     agent::{
-        AgentJobState, AgentModelCatalogEntry, ConversationMessageRole, NewAgentTurn,
-        NewConversation, PendingAgentAction, PendingAgentActionDecision,
+        AgentJobState, AgentModelCatalogEntry, AgentReasoningEffort, ConversationMessageRole,
+        NewAgentTurn, NewConversation, PendingAgentAction, PendingAgentActionDecision,
     },
     auth::{
         ConsumeDevicePairing, CreateDevicePairing, PairingConsumption, ProvisionLogin,
@@ -71,12 +71,28 @@ async fn agent_model_catalog_and_user_selection_round_trip() {
             display_name: "Provider Default".to_owned(),
             description: "Default fixture model".to_owned(),
             is_default: true,
+            default_reasoning_effort: "medium".to_owned(),
+            supported_reasoning_efforts: vec![
+                AgentReasoningEffort {
+                    id: "low".to_owned(),
+                    description: "Fast".to_owned(),
+                },
+                AgentReasoningEffort {
+                    id: "medium".to_owned(),
+                    description: "Balanced".to_owned(),
+                },
+            ],
         },
         AgentModelCatalogEntry {
             id: "provider-fast".to_owned(),
             display_name: "Provider Fast".to_owned(),
             description: "Fast fixture model".to_owned(),
             is_default: false,
+            default_reasoning_effort: "low".to_owned(),
+            supported_reasoning_efforts: vec![AgentReasoningEffort {
+                id: "low".to_owned(),
+                description: "Fast".to_owned(),
+            }],
         },
     ];
     database
@@ -90,18 +106,29 @@ async fn agent_model_catalog_and_user_selection_round_trip() {
         .expect("model settings should load");
     assert_eq!(initial.models, models);
     assert_eq!(initial.selected_model_id, None);
+    assert_eq!(initial.selected_reasoning_effort, None);
 
     let selected = database
-        .set_agent_model_for_user(user_id, Some("provider-fast"))
+        .set_agent_model_for_user(user_id, Some("provider-fast"), Some("low"))
         .await
         .expect("available model should be selectable");
     assert_eq!(selected.selected_model_id.as_deref(), Some("provider-fast"));
+    assert_eq!(selected.selected_reasoning_effort.as_deref(), Some("low"));
 
     let automatic = database
-        .set_agent_model_for_user(user_id, None)
+        .set_agent_model_for_user(user_id, None, Some("medium"))
         .await
         .expect("runtime default should be restorable");
     assert_eq!(automatic.selected_model_id, None);
+    assert_eq!(
+        automatic.selected_reasoning_effort.as_deref(),
+        Some("medium")
+    );
+    let defaults = database
+        .set_agent_model_for_user(user_id, None, None)
+        .await
+        .expect("automatic reasoning should be restorable");
+    assert_eq!(defaults.selected_reasoning_effort, None);
     database.close().await;
 }
 

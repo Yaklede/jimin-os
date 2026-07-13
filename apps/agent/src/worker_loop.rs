@@ -3,7 +3,7 @@ use std::{fmt::Write as _, path::Path, time::Duration};
 use jimin_codex_client::{AppServerClient, Error as CodexError};
 use jimin_storage::{
     Database, StorageError,
-    agent::{AgentModelCatalogEntry, ClaimedAgentJob},
+    agent::{AgentModelCatalogEntry, AgentReasoningEffort, ClaimedAgentJob},
     gmail::GmailMessage,
     planning::{ScheduleEntry, ScheduleSource, Task},
 };
@@ -123,6 +123,15 @@ where
             display_name: model.display_name,
             description: model.description,
             is_default: model.is_default,
+            default_reasoning_effort: model.default_reasoning_effort,
+            supported_reasoning_efforts: model
+                .supported_reasoning_efforts
+                .into_iter()
+                .map(|effort| AgentReasoningEffort {
+                    id: effort.id,
+                    description: effort.description,
+                })
+                .collect(),
         })
         .collect::<Vec<_>>();
     database.replace_agent_model_catalog(&catalog).await?;
@@ -174,9 +183,15 @@ where
 
     let assistant_message_id = Uuid::now_v7();
     let (delta_sender, mut delta_receiver) = mpsc::unbounded_channel();
-    let turn = client.run_turn_with_response_streaming(&thread_id, &prompt, move |delta| {
-        let _ = delta_sender.send(delta.to_owned());
-    });
+    let turn = client.run_turn_with_response_streaming_with_options(
+        &thread_id,
+        &prompt,
+        job.processing_model_id.as_deref(),
+        job.processing_reasoning_effort.as_deref(),
+        move |delta| {
+            let _ = delta_sender.send(delta.to_owned());
+        },
+    );
     tokio::pin!(turn);
 
     let completed = loop {

@@ -25,9 +25,10 @@ use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness, StorageError,
     agent::{
         AgentAuthentication, AgentAuthenticationState, AgentJob, AgentJobState,
-        AgentModelCatalogEntry, AgentModelSettings, Conversation, ConversationMessage,
-        ConversationMessageRole, ConversationMessageStatus, ConversationStatus, NewAgentTurn,
-        NewConversation, PendingAgentAction, PendingAgentActionDecision, QueuedAgentTurn,
+        AgentModelCatalogEntry, AgentModelSettings, AgentReasoningEffort, Conversation,
+        ConversationMessage, ConversationMessageRole, ConversationMessageStatus,
+        ConversationStatus, NewAgentTurn, NewConversation, PendingAgentAction,
+        PendingAgentActionDecision, QueuedAgentTurn,
     },
     auth::{Device, DeviceStatus, Profile},
     calendar::{CalendarAccount, CalendarAccountStatus, CreateCalendarOAuthAuthorization},
@@ -478,6 +479,15 @@ pub struct AgentModelResponse {
     display_name: String,
     description: String,
     is_default: bool,
+    default_reasoning_effort: String,
+    supported_reasoning_efforts: Vec<AgentReasoningEffortResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentReasoningEffortResponse {
+    id: String,
+    description: String,
 }
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
@@ -485,6 +495,7 @@ pub struct AgentModelResponse {
 pub struct AgentModelSettingsResponse {
     items: Vec<AgentModelResponse>,
     selected_model_id: Option<String>,
+    selected_reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
@@ -625,6 +636,7 @@ struct ResolveAgentActionRequest {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct UpdateAgentModelRequest {
     model_id: Option<String>,
+    reasoning_effort: Option<String>,
 }
 
 #[derive(serde::Deserialize, ToSchema)]
@@ -751,6 +763,7 @@ pub(crate) fn error_response(
         PendingAgentActionResponse,
         AgentAuthenticationResponse,
         AgentModelResponse,
+        AgentReasoningEffortResponse,
         AgentModelSettingsResponse,
         CreateConversationRequest,
         CreateProjectRequest,
@@ -2169,7 +2182,11 @@ async fn update_agent_model_settings(
         return unavailable_response(request_id);
     };
     match agent
-        .set_agent_model_for_user(principal.identity().user_id(), request.model_id.as_deref())
+        .set_agent_model_for_user(
+            principal.identity().user_id(),
+            request.model_id.as_deref(),
+            request.reasoning_effort.as_deref(),
+        )
         .await
     {
         Ok(settings) => no_store_json(agent_model_settings_response(settings)),
@@ -3121,6 +3138,7 @@ fn agent_model_settings_response(settings: AgentModelSettings) -> AgentModelSett
             .map(agent_model_response)
             .collect(),
         selected_model_id: settings.selected_model_id,
+        selected_reasoning_effort: settings.selected_reasoning_effort,
     }
 }
 
@@ -3130,6 +3148,19 @@ fn agent_model_response(model: AgentModelCatalogEntry) -> AgentModelResponse {
         display_name: model.display_name,
         description: model.description,
         is_default: model.is_default,
+        default_reasoning_effort: model.default_reasoning_effort,
+        supported_reasoning_efforts: model
+            .supported_reasoning_efforts
+            .into_iter()
+            .map(agent_reasoning_effort_response)
+            .collect(),
+    }
+}
+
+fn agent_reasoning_effort_response(effort: AgentReasoningEffort) -> AgentReasoningEffortResponse {
+    AgentReasoningEffortResponse {
+        id: effort.id,
+        description: effort.description,
     }
 }
 

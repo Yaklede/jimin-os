@@ -1795,7 +1795,7 @@ svg {
   gap: 4px;
 }
 
-.settings-model-field__heading label {
+.settings-model-field__heading strong {
   color: var(--text-strong);
   font-size: 16px;
   font-weight: 600;
@@ -1810,9 +1810,22 @@ svg {
 
 .settings-model-field__control {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
   gap: 8px;
-  max-width: 680px;
+  max-width: 840px;
+}
+
+.settings-model-field__option {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.settings-model-field__option label {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .settings-model-field__control select {

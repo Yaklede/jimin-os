@@ -22,7 +22,10 @@ type SettingsWorkspaceProps = {
   modelsError: string | undefined;
   onStartAuthentication(): Promise<void>;
   onReloadModels(): Promise<void>;
-  onSaveModel(modelId: string | null): Promise<boolean>;
+  onSaveModel(
+    modelId: string | null,
+    reasoningEffort: string | null,
+  ): Promise<boolean>;
 };
 
 export function SettingsWorkspace({
@@ -37,11 +40,15 @@ export function SettingsWorkspace({
   onSaveModel,
 }: SettingsWorkspaceProps) {
   const savedModelId = modelSettings?.selectedModelId ?? "";
+  const savedReasoningEffort = modelSettings?.selectedReasoningEffort ?? "";
   const [draftModelId, setDraftModelId] = useState(savedModelId);
+  const [draftReasoningEffort, setDraftReasoningEffort] =
+    useState(savedReasoningEffort);
   const [modelSaved, setModelSaved] = useState(false);
   useEffect(() => {
     setDraftModelId(savedModelId);
-  }, [savedModelId]);
+    setDraftReasoningEffort(savedReasoningEffort);
+  }, [savedModelId, savedReasoningEffort]);
 
   const state = authentication?.state ?? "requested";
   const ready = state === "ready";
@@ -57,12 +64,19 @@ export function SettingsWorkspace({
           ? copy.settings.chatgptPreparing
           : copy.settings.chatgptNeedsLogin;
   const defaultModel = modelSettings?.items.find((model) => model.isDefault);
+  const draftModel =
+    modelSettings?.items.find((model) => model.id === draftModelId) ??
+    defaultModel;
   const waitingForModels = modelsLoading || (!modelSettings && !modelsError);
-  const modelChanged = draftModelId !== savedModelId;
+  const settingsChanged =
+    draftModelId !== savedModelId ||
+    draftReasoningEffort !== savedReasoningEffort;
 
   async function saveModel() {
     setModelSaved(false);
-    if (await onSaveModel(draftModelId || null)) setModelSaved(true);
+    if (await onSaveModel(draftModelId || null, draftReasoningEffort || null)) {
+      setModelSaved(true);
+    }
   }
 
   return (
@@ -75,36 +89,85 @@ export function SettingsWorkspace({
       <section className="settings-list" aria-label={copy.settings.title}>
         <div className="settings-model-field">
           <div className="settings-model-field__heading">
-            <label htmlFor="processing-model">{copy.settings.modelTitle}</label>
+            <strong>{copy.settings.modelTitle}</strong>
             <p id="processing-model-description">
               {copy.settings.modelDescription}
             </p>
           </div>
           <div className="settings-model-field__control">
-            <select
-              id="processing-model"
-              className="focus-visible-control"
-              value={draftModelId}
-              aria-describedby="processing-model-description processing-model-feedback"
-              disabled={waitingForModels || modelsSaving}
-              onChange={(event) => {
-                setDraftModelId(event.target.value);
-                setModelSaved(false);
-              }}
-            >
-              <option value="">
-                {copy.settings.modelAutomatic(defaultModel?.displayName)}
-              </option>
-              {modelSettings?.items.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.displayName}
+            <div className="settings-model-field__option">
+              <label htmlFor="processing-model">
+                {copy.settings.modelFieldLabel}
+              </label>
+              <select
+                id="processing-model"
+                className="focus-visible-control"
+                value={draftModelId}
+                aria-describedby="processing-model-description processing-model-feedback"
+                disabled={waitingForModels || modelsSaving}
+                onChange={(event) => {
+                  const nextModelId = event.target.value;
+                  const nextModel =
+                    modelSettings?.items.find(
+                      (model) => model.id === nextModelId,
+                    ) ?? defaultModel;
+                  setDraftModelId(nextModelId);
+                  if (
+                    draftReasoningEffort &&
+                    !nextModel?.supportedReasoningEfforts.some(
+                      (effort) => effort.id === draftReasoningEffort,
+                    )
+                  ) {
+                    setDraftReasoningEffort("");
+                  }
+                  setModelSaved(false);
+                }}
+              >
+                <option value="">
+                  {copy.settings.modelAutomatic(defaultModel?.displayName)}
                 </option>
-              ))}
-            </select>
+                {modelSettings?.items.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.displayName}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="settings-model-field__option">
+              <label htmlFor="reasoning-effort">
+                {copy.settings.effortTitle}
+              </label>
+              <select
+                id="reasoning-effort"
+                className="focus-visible-control"
+                value={draftReasoningEffort}
+                aria-describedby="processing-model-description processing-model-feedback"
+                disabled={
+                  waitingForModels ||
+                  modelsSaving ||
+                  !draftModel?.supportedReasoningEfforts.length
+                }
+                onChange={(event) => {
+                  setDraftReasoningEffort(event.target.value);
+                  setModelSaved(false);
+                }}
+              >
+                <option value="">
+                  {copy.settings.effortAutomatic(
+                    draftModel?.defaultReasoningEffort,
+                  )}
+                </option>
+                {draftModel?.supportedReasoningEfforts.map((effort) => (
+                  <option key={effort.id} value={effort.id}>
+                    {copy.settings.effortLabel(effort.id)}
+                  </option>
+                ))}
+              </select>
+            </div>
             <button
               className="primary-button focus-visible-control"
               type="button"
-              disabled={waitingForModels || modelsSaving || !modelChanged}
+              disabled={waitingForModels || modelsSaving || !settingsChanged}
               onClick={() => void saveModel()}
             >
               {modelsSaving ? (
@@ -147,6 +210,14 @@ export function SettingsWorkspace({
                   modelSettings?.items.find(
                     (model) => model.id === savedModelId,
                   )?.displayName ?? defaultModel?.displayName,
+                  copy.settings.effortLabel(
+                    modelSettings?.selectedReasoningEffort ??
+                      (
+                        modelSettings?.items.find(
+                          (model) => model.id === savedModelId,
+                        ) ?? defaultModel
+                      )?.defaultReasoningEffort,
+                  ),
                 )}
               </span>
             )}

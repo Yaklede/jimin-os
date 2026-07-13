@@ -2,6 +2,25 @@ import { projectCopy } from "./copy/projects";
 
 const settingsTab = "설정";
 
+function reasoningEffortLabel(effort?: string): string {
+  switch (effort) {
+    case "low":
+      return "빠르게";
+    case "medium":
+      return "균형 있게";
+    case "high":
+      return "깊게";
+    case "xhigh":
+      return "매우 깊게";
+    case "max":
+      return "최대한 깊게";
+    case "ultra":
+      return "최대한 깊게 · 작업 위임";
+    default:
+      return effort ?? "권장 깊이";
+  }
+}
+
 export const copy = {
   productName: "Jimin OS",
   scope: "개인 서버",
@@ -177,22 +196,29 @@ export const copy = {
   settings: {
     title: settingsTab,
     description: "지민이 사용할 처리 모델과 연결 상태를 관리해요.",
-    modelTitle: "처리 모델",
+    modelTitle: "처리 설정",
+    modelFieldLabel: "모델",
     modelDescription:
-      "대화와 요청에 사용할 모델을 선택해요. 다음 요청부터 적용돼요.",
+      "대화와 요청에 사용할 모델과 생각 깊이를 선택해요. 다음 요청부터 적용돼요.",
     modelAutomatic: (name?: string) =>
       name ? `자동 선택 (${name})` : "자동 선택 (권장)",
-    modelCurrent: (name?: string) =>
-      name ? `현재 ${name} 모델을 사용해요.` : "현재 권장 모델을 사용해요.",
+    modelCurrent: (name?: string, effort?: string) =>
+      name
+        ? `현재 ${name} 모델 · 생각 깊이 ${effort ?? "권장 깊이"}`
+        : "현재 권장 모델과 생각 깊이를 사용해요.",
+    effortTitle: "생각 깊이",
+    effortLabel: reasoningEffortLabel,
+    effortAutomatic: (effort?: string) =>
+      `자동 선택 (${reasoningEffortLabel(effort)})`,
     modelLoading: "사용할 수 있는 모델을 불러오고 있어요.",
     modelEmpty:
       "아직 사용할 수 있는 모델이 없어요. 잠시 후 다시 확인해 주세요.",
-    modelSave: "모델 저장하기",
+    modelSave: "설정 저장하기",
     modelSaving: "저장하는 중",
-    modelSaved: "처리 모델을 저장했어요.",
+    modelSaved: "처리 설정을 저장했어요.",
     modelReload: "다시 불러오기",
     modelLoadFailed: "모델을 불러오지 못했어요. 다시 시도해 주세요.",
-    modelSaveFailed: "모델을 저장하지 못했어요. 다시 시도해 주세요.",
+    modelSaveFailed: "처리 설정을 저장하지 못했어요. 다시 시도해 주세요.",
     chatgptTitle: "ChatGPT 연결",
     chatgptReady: "연결되어 있어요",
     chatgptNeedsLogin: "연결이 필요해요",

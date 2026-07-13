@@ -1,7 +1,10 @@
 //! Durable, server-owned agent conversation queues. The runtime claims these
 //! jobs later; API requests never connect to Codex directly.
 
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -16,6 +19,9 @@ const MAX_AUTH_USER_CODE_CHARS: usize = 256;
 const MAX_MODEL_ID_CHARS: usize = 200;
 const MAX_MODEL_NAME_CHARS: usize = 200;
 const MAX_MODEL_DESCRIPTION_CHARS: usize = 2_000;
+const MAX_REASONING_EFFORT_ID_CHARS: usize = 80;
+const MAX_REASONING_EFFORT_DESCRIPTION_CHARS: usize = 1_000;
+const MAX_REASONING_EFFORT_COUNT: usize = 16;
 const MAX_MODEL_COUNT: usize = 128;
 const MIN_CLAIM_LEASE: Duration = Duration::from_secs(5);
 const MAX_CLAIM_LEASE: Duration = Duration::from_mins(5);
@@ -204,6 +210,13 @@ pub struct ClaimedAgentJob {
     pub input_content: String,
     pub codex_thread_id: Option<String>,
     pub processing_model_id: Option<String>,
+    pub processing_reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentReasoningEffort {
+    pub id: String,
+    pub description: String,
 }
 
 /// A validated model picker entry reported by the managed Codex runtime.
@@ -213,6 +226,8 @@ pub struct AgentModelCatalogEntry {
     pub display_name: String,
     pub description: String,
     pub is_default: bool,
+    pub default_reasoning_effort: String,
+    pub supported_reasoning_efforts: Vec<AgentReasoningEffort>,
 }
 
 /// The available model choices and the user's optional pinned selection.
@@ -220,6 +235,7 @@ pub struct AgentModelCatalogEntry {
 pub struct AgentModelSettings {
     pub models: Vec<AgentModelCatalogEntry>,
     pub selected_model_id: Option<String>,
+    pub selected_reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,6 +363,7 @@ struct ClaimedJobRow {
     input_content: String,
     codex_thread_id: Option<String>,
     processing_model_id: Option<String>,
+    processing_reasoning_effort: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -355,6 +372,20 @@ struct AgentModelRow {
     display_name: String,
     description: String,
     is_default: bool,
+    default_reasoning_effort: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct AgentReasoningEffortRow {
+    model_id: String,
+    effort: String,
+    description: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct AgentPreferenceRow {
+    model_id: Option<String>,
+    reasoning_effort: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -443,6 +474,7 @@ impl From<ClaimedJobRow> for ClaimedAgentJob {
             input_content: row.input_content,
             codex_thread_id: row.codex_thread_id,
             processing_model_id: row.processing_model_id,
+            processing_reasoning_effort: row.processing_reasoning_effort,
         }
     }
 }
@@ -454,6 +486,8 @@ impl From<AgentModelRow> for AgentModelCatalogEntry {
             display_name: row.display_name,
             description: row.description,
             is_default: row.is_default,
+            default_reasoning_effort: row.default_reasoning_effort,
+            supported_reasoning_efforts: Vec::new(),
         }
     }
 }
@@ -565,24 +599,7 @@ impl Database {
         &self,
         models: &[AgentModelCatalogEntry],
     ) -> Result<(), StorageError> {
-        if models.is_empty() || models.len() > MAX_MODEL_COUNT {
-            return Err(StorageError::InvalidConfiguration);
-        }
-        let mut ids = HashSet::with_capacity(models.len());
-        let mut default_count = 0usize;
-        for model in models {
-            if !valid_text(&model.id, MAX_MODEL_ID_CHARS, false)
-                || !valid_text(&model.display_name, MAX_MODEL_NAME_CHARS, false)
-                || !valid_text(&model.description, MAX_MODEL_DESCRIPTION_CHARS, true)
-                || !ids.insert(model.id.as_str())
-            {
-                return Err(StorageError::InvalidConfiguration);
-            }
-            default_count += usize::from(model.is_default);
-        }
-        if default_count != 1 {
-            return Err(StorageError::InvalidConfiguration);
-        }
+        validate_agent_model_catalog(models)?;
 
         let mut transaction = self
             .pool()
@@ -593,27 +610,49 @@ impl Database {
             .execute(&mut *transaction)
             .await
             .map_err(|error| classify(&error))?;
+        sqlx::query("DELETE FROM agent_model_reasoning_efforts")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| classify(&error))?;
         for model in models {
             sqlx::query(
                 "\
                 INSERT INTO agent_models (
-                    id, display_name, description, is_default, available, synced_at
+                    id, display_name, description, is_default, available, synced_at,
+                    default_reasoning_effort
                 )
-                VALUES ($1, $2, $3, $4, TRUE, NOW())
+                VALUES ($1, $2, $3, $4, TRUE, NOW(), $5)
                 ON CONFLICT (id) DO UPDATE
                 SET display_name = EXCLUDED.display_name,
                     description = EXCLUDED.description,
                     is_default = EXCLUDED.is_default,
                     available = TRUE,
-                    synced_at = NOW()",
+                    synced_at = NOW(),
+                    default_reasoning_effort = EXCLUDED.default_reasoning_effort",
             )
             .bind(&model.id)
             .bind(&model.display_name)
             .bind(&model.description)
             .bind(model.is_default)
+            .bind(&model.default_reasoning_effort)
             .execute(&mut *transaction)
             .await
             .map_err(|error| classify(&error))?;
+            for (position, effort) in model.supported_reasoning_efforts.iter().enumerate() {
+                sqlx::query(
+                    "\
+                    INSERT INTO agent_model_reasoning_efforts (
+                        model_id, effort, description, position
+                    ) VALUES ($1, $2, $3, $4)",
+                )
+                .bind(&model.id)
+                .bind(&effort.id)
+                .bind(&effort.description)
+                .bind(i16::try_from(position).map_err(|_| StorageError::InvalidConfiguration)?)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| classify(&error))?;
+            }
         }
         transaction
             .commit()
@@ -636,11 +675,11 @@ impl Database {
         if !is_v7(user_id) {
             return Err(StorageError::InvalidConfiguration);
         }
-        let models = sqlx::query_as::<_, AgentModelRow>(
+        let mut models = sqlx::query_as::<_, AgentModelRow>(
             "\
-            SELECT id, display_name, description, is_default
+            SELECT id, display_name, description, is_default, default_reasoning_effort
             FROM agent_models
-            WHERE available = TRUE
+            WHERE available = TRUE AND default_reasoning_effort IS NOT NULL
             ORDER BY is_default DESC, display_name ASC, id ASC",
         )
         .fetch_all(self.pool())
@@ -648,22 +687,62 @@ impl Database {
         .map_err(|error| classify(&error))?
         .into_iter()
         .map(AgentModelCatalogEntry::from)
-        .collect();
-        let selected_model_id = sqlx::query_scalar::<_, String>(
+        .collect::<Vec<_>>();
+        let effort_rows = sqlx::query_as::<_, AgentReasoningEffortRow>(
             "\
-            SELECT preference.model_id
-            FROM agent_preferences AS preference
-            INNER JOIN agent_models AS model
-                ON model.id = preference.model_id AND model.available = TRUE
-            WHERE preference.user_id = $1",
+            SELECT effort.model_id, effort.effort, effort.description
+            FROM agent_model_reasoning_efforts AS effort
+            INNER JOIN agent_models AS model ON model.id = effort.model_id
+            WHERE model.available = TRUE
+            ORDER BY effort.model_id, effort.position",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(|error| classify(&error))?;
+        let mut efforts_by_model = HashMap::<String, Vec<AgentReasoningEffort>>::new();
+        for row in effort_rows {
+            efforts_by_model
+                .entry(row.model_id)
+                .or_default()
+                .push(AgentReasoningEffort {
+                    id: row.effort,
+                    description: row.description,
+                });
+        }
+        for model in &mut models {
+            model.supported_reasoning_efforts =
+                efforts_by_model.remove(&model.id).unwrap_or_default();
+        }
+        let preference = sqlx::query_as::<_, AgentPreferenceRow>(
+            "SELECT model_id, reasoning_effort FROM agent_preferences WHERE user_id = $1",
         )
         .bind(user_id)
         .fetch_optional(self.pool())
         .await
         .map_err(|error| classify(&error))?;
+        let selected_model_id = preference
+            .as_ref()
+            .and_then(|preference| preference.model_id.as_ref())
+            .filter(|model_id| models.iter().any(|model| &model.id == *model_id))
+            .cloned();
+        let effective_model = selected_model_id
+            .as_ref()
+            .and_then(|model_id| models.iter().find(|model| &model.id == model_id))
+            .or_else(|| models.iter().find(|model| model.is_default));
+        let selected_reasoning_effort = preference
+            .and_then(|preference| preference.reasoning_effort)
+            .filter(|selected| {
+                effective_model.is_some_and(|model| {
+                    model
+                        .supported_reasoning_efforts
+                        .iter()
+                        .any(|effort| effort.id == *selected)
+                })
+            });
         Ok(AgentModelSettings {
             models,
             selected_model_id,
+            selected_reasoning_effort,
         })
     }
 
@@ -678,8 +757,12 @@ impl Database {
         &self,
         user_id: Uuid,
         model_id: Option<&str>,
+        reasoning_effort: Option<&str>,
     ) -> Result<AgentModelSettings, StorageError> {
-        if !is_v7(user_id) || model_id.is_some_and(|id| !valid_text(id, MAX_MODEL_ID_CHARS, false))
+        if !is_v7(user_id)
+            || model_id.is_some_and(|id| !valid_text(id, MAX_MODEL_ID_CHARS, false))
+            || reasoning_effort
+                .is_some_and(|effort| !valid_text(effort, MAX_REASONING_EFFORT_ID_CHARS, false))
         {
             return Err(StorageError::InvalidConfiguration);
         }
@@ -688,32 +771,61 @@ impl Database {
             .begin()
             .await
             .map_err(|error| classify(&error))?;
-        if let Some(model_id) = model_id {
-            let available = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM agent_models WHERE id = $1 AND available = TRUE)",
+        let effective_model_id = sqlx::query_scalar::<_, String>(
+            "\
+            SELECT id
+            FROM agent_models
+            WHERE available = TRUE
+              AND (($1::TEXT IS NOT NULL AND id = $1) OR ($1::TEXT IS NULL AND is_default = TRUE))
+            ORDER BY is_default DESC
+            LIMIT 1",
+        )
+        .bind(model_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        let Some(effective_model_id) = effective_model_id else {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| classify(&error))?;
+            return Err(StorageError::InvalidConfiguration);
+        };
+        if let Some(reasoning_effort) = reasoning_effort {
+            let supported = sqlx::query_scalar::<_, bool>(
+                "\
+                SELECT EXISTS(
+                    SELECT 1 FROM agent_model_reasoning_efforts
+                    WHERE model_id = $1 AND effort = $2
+                )",
             )
-            .bind(model_id)
+            .bind(&effective_model_id)
+            .bind(reasoning_effort)
             .fetch_one(&mut *transaction)
             .await
             .map_err(|error| classify(&error))?;
-            if !available {
+            if !supported {
                 transaction
                     .rollback()
                     .await
                     .map_err(|error| classify(&error))?;
                 return Err(StorageError::InvalidConfiguration);
             }
+        }
+        if model_id.is_some() || reasoning_effort.is_some() {
             let version = sqlx::query_scalar::<_, i64>(
                 "\
-                INSERT INTO agent_preferences (user_id, model_id)
-                VALUES ($1, $2)
+                INSERT INTO agent_preferences (user_id, model_id, reasoning_effort)
+                VALUES ($1, $2, $3)
                 ON CONFLICT (user_id) DO UPDATE
                 SET model_id = EXCLUDED.model_id,
+                    reasoning_effort = EXCLUDED.reasoning_effort,
                     version = agent_preferences.version + 1
                 RETURNING version",
             )
             .bind(user_id)
             .bind(model_id)
+            .bind(reasoning_effort)
             .fetch_one(&mut *transaction)
             .await
             .map_err(|error| classify(&error))?;
@@ -1560,13 +1672,19 @@ impl Database {
                    job.input_message_id,
                    input.content AS input_content,
                    conversation.codex_thread_id,
-                   model.id AS processing_model_id
+                   selected_model.id AS processing_model_id,
+                   selected_effort.effort AS processing_reasoning_effort
             FROM claimed AS job
             INNER JOIN messages AS input ON input.id = job.input_message_id
             INNER JOIN conversations AS conversation ON conversation.id = job.conversation_id
             LEFT JOIN agent_preferences AS preference ON preference.user_id = job.user_id
-            LEFT JOIN agent_models AS model
-                ON model.id = preference.model_id AND model.available = TRUE",
+            LEFT JOIN agent_models AS selected_model
+                ON selected_model.id = preference.model_id AND selected_model.available = TRUE
+            LEFT JOIN agent_models AS default_model
+                ON default_model.is_default = TRUE AND default_model.available = TRUE
+            LEFT JOIN agent_model_reasoning_efforts AS selected_effort
+                ON selected_effort.model_id = COALESCE(selected_model.id, default_model.id)
+               AND selected_effort.effort = preference.reasoning_effort",
         )
         .bind(runner_id)
         .bind(lease_millis)
@@ -2101,6 +2219,51 @@ fn pending_action_from_fields(
 
 fn is_v7(value: Uuid) -> bool {
     value.get_version_num() == 7
+}
+
+fn validate_agent_model_catalog(models: &[AgentModelCatalogEntry]) -> Result<(), StorageError> {
+    if models.is_empty() || models.len() > MAX_MODEL_COUNT {
+        return Err(StorageError::InvalidConfiguration);
+    }
+    let mut ids = HashSet::with_capacity(models.len());
+    let mut default_count = 0usize;
+    for model in models {
+        let mut effort_ids = HashSet::with_capacity(model.supported_reasoning_efforts.len());
+        if !valid_text(&model.id, MAX_MODEL_ID_CHARS, false)
+            || !valid_text(&model.display_name, MAX_MODEL_NAME_CHARS, false)
+            || !valid_text(&model.description, MAX_MODEL_DESCRIPTION_CHARS, true)
+            || !valid_text(
+                &model.default_reasoning_effort,
+                MAX_REASONING_EFFORT_ID_CHARS,
+                false,
+            )
+            || model.supported_reasoning_efforts.is_empty()
+            || model.supported_reasoning_efforts.len() > MAX_REASONING_EFFORT_COUNT
+            || !ids.insert(model.id.as_str())
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        for effort in &model.supported_reasoning_efforts {
+            if !valid_text(&effort.id, MAX_REASONING_EFFORT_ID_CHARS, false)
+                || !valid_text(
+                    &effort.description,
+                    MAX_REASONING_EFFORT_DESCRIPTION_CHARS,
+                    true,
+                )
+                || !effort_ids.insert(effort.id.as_str())
+            {
+                return Err(StorageError::InvalidConfiguration);
+            }
+        }
+        if !effort_ids.contains(model.default_reasoning_effort.as_str()) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        default_count += usize::from(model.is_default);
+    }
+    if default_count != 1 {
+        return Err(StorageError::InvalidConfiguration);
+    }
+    Ok(())
 }
 
 fn valid_text(value: &str, maximum: usize, allow_empty: bool) -> bool {
