@@ -84,6 +84,7 @@ export interface AgentJob {
 export interface PendingAgentAction {
   kind: "create_task" | "create_schedule";
   title: string;
+  dueAt: string | null;
   startsAt: string | null;
   endsAt: string | null;
 }
@@ -503,6 +504,7 @@ function isPendingAgentAction(value: unknown): value is PendingAgentAction {
     isRecord(value) &&
     (value.kind === "create_task" || value.kind === "create_schedule") &&
     typeof value.title === "string" &&
+    (value.dueAt === null || typeof value.dueAt === "string") &&
     (value.startsAt === null || typeof value.startsAt === "string") &&
     (value.endsAt === null || typeof value.endsAt === "string")
   );

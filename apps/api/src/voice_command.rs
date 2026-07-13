@@ -19,6 +19,7 @@ pub(crate) enum VoiceCommand {
     ListTasks,
     CreateTask {
         title: String,
+        due_at: Option<OffsetDateTime>,
     },
     NeedsScheduleDetails,
     NeedsTaskDetails,
@@ -85,9 +86,15 @@ pub(crate) fn interpret(
 
     if let Some(task_marker) = task_reference_marker(text) {
         if has_create_verb(text) {
+            let due_at = match relative_day_for(text) {
+                Some(day) => {
+                    Some(task_due_at(reference_at, day).ok_or(VoiceCommandError::InvalidInput)?)
+                }
+                None => None,
+            };
             return Ok(
                 extract_task_title(text).map_or(VoiceCommand::NeedsTaskDetails, |title| {
-                    VoiceCommand::CreateTask { title }
+                    VoiceCommand::CreateTask { title, due_at }
                 }),
             );
         }
@@ -154,11 +161,16 @@ fn relative_day_for(text: &str) -> Option<RelativeDay> {
         Some(RelativeDay::DayAfterTomorrow)
     } else if text.contains("내일") {
         Some(RelativeDay::Tomorrow)
-    } else if text.contains("오늘") {
+    } else if text.contains("오늘") || text.contains("금일") {
         Some(RelativeDay::Today)
     } else {
         None
     }
+}
+
+fn task_due_at(reference_at: OffsetDateTime, day: RelativeDay) -> Option<OffsetDateTime> {
+    let (_, day_end) = day_bounds(reference_at, day)?;
+    Some(day_end - Duration::seconds(1))
 }
 
 fn day_bounds(
@@ -436,7 +448,8 @@ mod tests {
         assert_eq!(
             command,
             VoiceCommand::CreateTask {
-                title: "장보기".to_owned()
+                title: "장보기".to_owned(),
+                due_at: None,
             }
         );
     }
@@ -449,7 +462,8 @@ mod tests {
         assert_eq!(
             command,
             VoiceCommand::CreateTask {
-                title: "장보기".to_owned()
+                title: "장보기".to_owned(),
+                due_at: None,
             }
         );
     }
@@ -462,7 +476,8 @@ mod tests {
         assert_eq!(
             command,
             VoiceCommand::CreateTask {
-                title: "장보기".to_owned()
+                title: "장보기".to_owned(),
+                due_at: None,
             }
         );
     }
@@ -475,7 +490,8 @@ mod tests {
         assert_eq!(
             command,
             VoiceCommand::CreateTask {
-                title: "장보기".to_owned()
+                title: "장보기".to_owned(),
+                due_at: None,
             }
         );
     }
@@ -496,7 +512,8 @@ mod tests {
         assert_eq!(
             command,
             VoiceCommand::CreateTask {
-                title: "장보기".to_owned()
+                title: "장보기".to_owned(),
+                due_at: None,
             }
         );
     }
@@ -510,12 +527,37 @@ mod tests {
         )
         .expect("voice command should parse");
 
-        assert_eq!(
-            command,
-            VoiceCommand::CreateTask {
-                title: "비스켓링크 내용정리 회의록 정리".to_owned()
-            }
-        );
+        let VoiceCommand::CreateTask {
+            title,
+            due_at: Some(due_at),
+        } = command
+        else {
+            panic!("dated task should be created");
+        };
+        assert_eq!(title, "비스켓링크 내용정리 회의록 정리");
+        assert_eq!(due_at.date(), reference_at().date());
+    }
+
+    #[test]
+    fn creates_a_tomorrow_task_with_the_relative_due_date() {
+        let command = interpret(
+            "내일 할 일에 인생이란 추가해줘",
+            reference_at(),
+            "Asia/Seoul",
+        )
+        .expect("voice command should parse");
+
+        let VoiceCommand::CreateTask {
+            title,
+            due_at: Some(due_at),
+        } = command
+        else {
+            panic!("tomorrow task should be dated");
+        };
+        assert_eq!(title, "인생이란");
+        assert_eq!(due_at.date(), reference_at().date().next_day().unwrap());
+        assert_eq!(due_at.hour(), 23);
+        assert_eq!(due_at.minute(), 59);
     }
 
     #[test]

@@ -73,6 +73,7 @@ pub struct NewAgentTurn {
 pub enum PendingAgentAction {
     CreateTask {
         title: String,
+        due_at: Option<OffsetDateTime>,
     },
     CreateSchedule {
         title: String,
@@ -85,7 +86,7 @@ pub enum PendingAgentAction {
 impl PendingAgentAction {
     fn validate(&self) -> Result<(), StorageError> {
         match self {
-            Self::CreateTask { title } => {
+            Self::CreateTask { title, .. } => {
                 if valid_text(title, MAX_TITLE_CHARS, false) {
                     Ok(())
                 } else {
@@ -119,25 +120,32 @@ impl PendingAgentAction {
 
     fn title(&self) -> &str {
         match self {
-            Self::CreateTask { title } | Self::CreateSchedule { title, .. } => title,
+            Self::CreateTask { title, .. } | Self::CreateSchedule { title, .. } => title,
         }
     }
 
-    fn schedule_values(&self) -> (Option<OffsetDateTime>, Option<OffsetDateTime>, Option<&str>) {
+    fn persistence_values(
+        &self,
+    ) -> (
+        Option<OffsetDateTime>,
+        Option<OffsetDateTime>,
+        Option<OffsetDateTime>,
+        Option<&str>,
+    ) {
         match self {
-            Self::CreateTask { .. } => (None, None, None),
+            Self::CreateTask { due_at, .. } => (*due_at, None, None, None),
             Self::CreateSchedule {
                 starts_at,
                 ends_at,
                 time_zone,
                 ..
-            } => (Some(*starts_at), Some(*ends_at), Some(time_zone)),
+            } => (None, Some(*starts_at), Some(*ends_at), Some(time_zone)),
         }
     }
 
     fn completion_message(&self) -> String {
         match self {
-            Self::CreateTask { title } => format!("{title} 할 일을 추가했어요."),
+            Self::CreateTask { title, .. } => format!("{title} 할 일을 추가했어요."),
             Self::CreateSchedule {
                 title, starts_at, ..
             } => format!(
@@ -150,7 +158,7 @@ impl PendingAgentAction {
 
     fn decline_message(&self) -> String {
         match self {
-            Self::CreateTask { title } => format!("{title} 할 일 추가를 취소했어요."),
+            Self::CreateTask { title, .. } => format!("{title} 할 일 추가를 취소했어요."),
             Self::CreateSchedule { title, .. } => format!("{title} 일정 등록을 취소했어요."),
         }
     }
@@ -616,6 +624,7 @@ struct AgentJobReadRow {
     version: i64,
     pending_action_type: Option<String>,
     pending_action_title: Option<String>,
+    pending_action_due_at: Option<OffsetDateTime>,
     pending_action_starts_at: Option<OffsetDateTime>,
     pending_action_ends_at: Option<OffsetDateTime>,
     pending_action_time_zone: Option<String>,
@@ -627,6 +636,7 @@ struct PendingActionJobRow {
     state: String,
     pending_action_type: Option<String>,
     pending_action_title: Option<String>,
+    pending_action_due_at: Option<OffsetDateTime>,
     pending_action_starts_at: Option<OffsetDateTime>,
     pending_action_ends_at: Option<OffsetDateTime>,
     pending_action_time_zone: Option<String>,
@@ -745,6 +755,7 @@ impl TryFrom<AgentJobReadRow> for AgentJob {
         let pending_action = pending_action_from_fields(
             row.pending_action_type.as_deref(),
             row.pending_action_title,
+            row.pending_action_due_at,
             row.pending_action_starts_at,
             row.pending_action_ends_at,
             row.pending_action_time_zone,
@@ -1477,6 +1488,7 @@ impl Database {
             "\
             SELECT id, conversation_id, state, created_at, finished_at, version,
                    pending_action_type, pending_action_title,
+                   pending_action_due_at,
                    pending_action_starts_at, pending_action_ends_at,
                    pending_action_time_zone
             FROM agent_jobs
@@ -1505,6 +1517,7 @@ impl Database {
             "\
             SELECT id, conversation_id, state, created_at, finished_at, version,
                    pending_action_type, pending_action_title,
+                   pending_action_due_at,
                    pending_action_starts_at, pending_action_ends_at,
                    pending_action_time_zone
             FROM agent_jobs
@@ -1603,28 +1616,36 @@ impl Database {
             return Err(StorageError::PersistenceUnavailable);
         }
 
-        let (action_type, action_title, action_starts_at, action_ends_at, action_time_zone) =
-            pending_action.map_or((None, None, None, None, None), |action| {
-                let (starts_at, ends_at, time_zone) = action.schedule_values();
-                (
-                    Some(action.action_type()),
-                    Some(action.title()),
-                    starts_at,
-                    ends_at,
-                    time_zone,
-                )
-            });
+        let (
+            action_type,
+            action_title,
+            action_due_at,
+            action_starts_at,
+            action_ends_at,
+            action_time_zone,
+        ) = pending_action.map_or((None, None, None, None, None, None), |action| {
+            let (due_at, starts_at, ends_at, time_zone) = action.persistence_values();
+            (
+                Some(action.action_type()),
+                Some(action.title()),
+                due_at,
+                starts_at,
+                ends_at,
+                time_zone,
+            )
+        });
         let row = sqlx::query_as::<_, JobRow>(
             "\
             INSERT INTO agent_jobs (
                 id, user_id, conversation_id, input_message_id, state,
                 pending_action_type, pending_action_title,
+                pending_action_due_at,
                 pending_action_starts_at, pending_action_ends_at,
                 pending_action_time_zone
             ) VALUES (
                 $1, $2, $3, $4,
                 CASE WHEN $5::text IS NULL THEN 'queued' ELSE 'waiting_approval' END,
-                $5, $6, $7, $8, $9
+                $5, $6, $7, $8, $9, $10
             )
             RETURNING id, input_message_id, conversation_id, state, version",
         )
@@ -1634,6 +1655,7 @@ impl Database {
         .bind(turn.message_id)
         .bind(action_type)
         .bind(action_title)
+        .bind(action_due_at)
         .bind(action_starts_at)
         .bind(action_ends_at)
         .bind(action_time_zone)
@@ -1705,6 +1727,7 @@ impl Database {
             "\
             SELECT conversation_id, state,
                    pending_action_type, pending_action_title,
+                   pending_action_due_at,
                    pending_action_starts_at, pending_action_ends_at,
                    pending_action_time_zone
             FROM agent_jobs
@@ -1733,6 +1756,7 @@ impl Database {
         let action = pending_action_from_fields(
             row.pending_action_type.as_deref(),
             row.pending_action_title,
+            row.pending_action_due_at,
             row.pending_action_starts_at,
             row.pending_action_ends_at,
             row.pending_action_time_zone,
@@ -1757,6 +1781,7 @@ impl Database {
                 phase = NULL,
                 pending_action_type = NULL,
                 pending_action_title = NULL,
+                pending_action_due_at = NULL,
                 pending_action_starts_at = NULL,
                 pending_action_ends_at = NULL,
                 pending_action_time_zone = NULL,
@@ -2288,17 +2313,18 @@ async fn persist_approved_agent_action(
     action: &PendingAgentAction,
 ) -> Result<(), StorageError> {
     match action {
-        PendingAgentAction::CreateTask { title } => {
+        PendingAgentAction::CreateTask { title, due_at } => {
             let id = Uuid::now_v7();
             let version = sqlx::query_scalar::<_, i64>(
                 "\
                 INSERT INTO tasks (id, user_id, title, notes, status, priority, due_at)
-                VALUES ($1, $2, $3, NULL, 'open', 1, NULL)
+                VALUES ($1, $2, $3, NULL, 'open', 1, $4)
                 RETURNING version",
             )
             .bind(id)
             .bind(user_id)
             .bind(title.trim())
+            .bind(due_at)
             .fetch_one(&mut **transaction)
             .await
             .map_err(|error| classify(&error))?;
@@ -2404,18 +2430,26 @@ fn parse_agent_authentication_state(value: &str) -> Result<AgentAuthenticationSt
 fn pending_action_from_fields(
     action_type: Option<&str>,
     title: Option<String>,
+    due_at: Option<OffsetDateTime>,
     starts_at: Option<OffsetDateTime>,
     ends_at: Option<OffsetDateTime>,
     time_zone: Option<String>,
 ) -> Result<Option<PendingAgentAction>, StorageError> {
-    match (action_type, title, starts_at, ends_at, time_zone) {
-        (None, None, None, None, None) => Ok(None),
-        (Some("create_task"), Some(title), None, None, None) => {
-            let action = PendingAgentAction::CreateTask { title };
+    match (action_type, title, due_at, starts_at, ends_at, time_zone) {
+        (None, None, None, None, None, None) => Ok(None),
+        (Some("create_task"), Some(title), due_at, None, None, None) => {
+            let action = PendingAgentAction::CreateTask { title, due_at };
             action.validate()?;
             Ok(Some(action))
         }
-        (Some("create_schedule"), Some(title), Some(starts_at), Some(ends_at), Some(time_zone)) => {
+        (
+            Some("create_schedule"),
+            Some(title),
+            None,
+            Some(starts_at),
+            Some(ends_at),
+            Some(time_zone),
+        ) => {
             let action = PendingAgentAction::CreateSchedule {
                 title,
                 starts_at,

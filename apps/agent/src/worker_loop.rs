@@ -16,7 +16,10 @@ use jimin_storage::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
-use time::{Duration as TimeDuration, OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{
+    Duration as TimeDuration, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset,
+    format_description::well_known::Rfc3339,
+};
 use tokio::{
     io::{AsyncBufRead, AsyncWrite},
     sync::mpsc,
@@ -38,6 +41,7 @@ struct TurnContext {
     prompt: String,
     schedule: Vec<ScheduleEntry>,
     tasks: Vec<Task>,
+    daily_tasks: Vec<Task>,
     projects: Vec<Project>,
     requires_daily_task_coverage: bool,
 }
@@ -371,6 +375,12 @@ async fn contextualized_turn_context(
         database.projects_for_user(job.user_id),
         database.recent_gmail_messages_for_user(job.user_id),
     )?;
+    let daily_task_cutoff = korea_day_end(now)?;
+    let daily_tasks = tasks
+        .iter()
+        .filter(|task| task.due_at.is_none_or(|due_at| due_at < daily_task_cutoff))
+        .cloned()
+        .collect::<Vec<_>>();
     let prompt = render_contextualized_turn(
         &job.input_content,
         &schedule,
@@ -378,11 +388,13 @@ async fn contextualized_turn_context(
         &projects,
         &inbox,
         now,
+        daily_task_cutoff,
     );
     Ok(TurnContext {
         prompt,
         schedule,
         tasks,
+        daily_tasks,
         projects,
         requires_daily_task_coverage: is_daily_overview_request(&job.input_content),
     })
@@ -395,6 +407,7 @@ fn render_contextualized_turn(
     projects: &[Project],
     inbox: &[GmailMessage],
     now: OffsetDateTime,
+    daily_task_cutoff: OffsetDateTime,
 ) -> String {
     let mut prompt = String::from(
         "You are Jimin's private AI assistant. Answer in Korean unless the user asks otherwise. \
@@ -402,9 +415,10 @@ fn render_contextualized_turn(
          Interpret the user's intent semantically. Never select records by simple word overlap. \
          Build an interactive result by selecting at most three useful sections from tasks, schedule, and projects. \
          Use only exact entity IDs from server context and never invent an ID. For broad requests such as today's work, \
-         include every relevant record across the useful sections. In Jimin OS, open_tasks is exactly the user's current \
-         '오늘 할 일' queue even when a task has no due date. A broad Korean request about 오늘 일정, 오늘 할 일, or \
-         오늘 계획 is a daily briefing and must cover both schedule and open_tasks unless the user explicitly says only. \
+         include every relevant record across the useful sections. open_tasks contains all open work, including future work. \
+         For a broad Korean request about 오늘 일정, 오늘 할 일, or 오늘 계획, treat it as a daily briefing and cover \
+         today's schedule plus tasks with no due date or a due date before daily_task_cutoff. Exclude future-dated tasks \
+         unless the user asks for them, and respect an explicit request for only schedule or only tasks. \
          Use no sections for general conversation. \
          Choose stack for one simple group, split when list-to-detail exploration helps, and focus when one record is primary. \
          Tasks support list or checklist, schedule supports list or timeline, and projects support list or cards. \
@@ -412,7 +426,10 @@ fn render_contextualized_turn(
          the server-validated selection as an interactive surface. \
          Do not claim that an external action was completed unless the conversation contains a confirmed result.\n\n",
     );
-    let _ = writeln!(prompt, "<server_context current_time=\"{now}\">");
+    let _ = writeln!(
+        prompt,
+        "<server_context current_time=\"{now}\" daily_task_cutoff=\"{daily_task_cutoff}\">"
+    );
     prompt.push_str("<schedule>\n");
     if schedule.is_empty() {
         prompt.push_str("(no schedule entries in the next 14 days)\n");
@@ -615,14 +632,14 @@ fn validated_assistant_response(
     }
 
     let mut validated = validated_presentation_sections(structured.presentation.sections, context)?;
-    let daily_task_coverage_added = ensure_daily_task_coverage(&mut validated, context);
+    let daily_task_coverage_reconciled = ensure_daily_task_coverage(&mut validated, context);
     let ValidatedPresentationSections {
         items,
         sections,
         seen_items,
     } = validated;
-    if daily_task_coverage_added {
-        answer = corrected_daily_answer(&answer, context.tasks.len());
+    if daily_task_coverage_reconciled {
+        answer = corrected_daily_answer(&answer, context.daily_tasks.len());
     }
     let kind = match sections.as_slice() {
         [] => AssistantPresentationKind::Summary,
@@ -664,8 +681,39 @@ fn ensure_daily_task_coverage(
     validated: &mut ValidatedPresentationSections,
     context: &TurnContext,
 ) -> bool {
-    if !context.requires_daily_task_coverage || context.tasks.is_empty() {
+    if !context.requires_daily_task_coverage {
         return false;
+    }
+    let daily_task_ids = context
+        .daily_tasks
+        .iter()
+        .map(|task| task.id)
+        .collect::<HashSet<_>>();
+    let before_section_count = validated.sections.len();
+    let before_item_count = validated.items.len();
+    for section in &mut validated.sections {
+        if section.kind == AssistantPresentationSectionKind::Tasks {
+            section.item_ids.retain(|id| daily_task_ids.contains(id));
+        }
+    }
+    validated.sections.retain(|section| {
+        section.kind != AssistantPresentationSectionKind::Tasks || !section.item_ids.is_empty()
+    });
+    validated.items.retain(|item| match item {
+        AssistantPresentationItem::Task { id, .. } => daily_task_ids.contains(id),
+        AssistantPresentationItem::Schedule { .. } | AssistantPresentationItem::Project { .. } => {
+            true
+        }
+    });
+    validated.seen_items = validated
+        .items
+        .iter()
+        .map(presentation_item_id)
+        .collect::<HashSet<_>>();
+    let mut changed = before_section_count != validated.sections.len()
+        || before_item_count != validated.items.len();
+    if context.daily_tasks.is_empty() {
+        return changed;
     }
     let existing_task_section = validated
         .sections
@@ -683,8 +731,8 @@ fn ensure_daily_task_coverage(
         });
         validated.sections.len() - 1
     });
-    let mut changed = validated.sections[task_section_index].item_ids.is_empty();
-    for task in context.tasks.iter().take(CONTEXT_TASK_LIMIT) {
+    changed |= validated.sections[task_section_index].item_ids.is_empty();
+    for task in context.daily_tasks.iter().take(CONTEXT_TASK_LIMIT) {
         if validated.items.len() >= MAX_PRESENTATION_ITEMS {
             break;
         }
@@ -703,10 +751,10 @@ fn ensure_daily_task_coverage(
 
 fn corrected_daily_answer(answer: &str, task_count: usize) -> String {
     let task_fact = if task_count <= CONTEXT_TASK_LIMIT {
-        format!("현재 열린 할 일은 {task_count}개 있어요.")
+        format!("오늘 확인할 할 일은 {task_count}개 있어요.")
     } else {
         format!(
-            "현재 열린 할 일은 {task_count}개이고, 우선순위가 높은 {CONTEXT_TASK_LIMIT}개를 보여드려요."
+            "오늘 확인할 할 일은 {task_count}개이고, 우선순위가 높은 {CONTEXT_TASK_LIMIT}개를 보여드려요."
         )
     };
     let corrected = format!("{}\n\n{task_fact}", answer.trim());
@@ -715,6 +763,24 @@ fn corrected_daily_answer(answer: &str, task_count: usize) -> String {
     } else {
         task_fact
     }
+}
+
+fn presentation_item_id(item: &AssistantPresentationItem) -> Uuid {
+    match item {
+        AssistantPresentationItem::Task { id, .. }
+        | AssistantPresentationItem::Schedule { id, .. }
+        | AssistantPresentationItem::Project { id, .. } => *id,
+    }
+}
+
+fn korea_day_end(now: OffsetDateTime) -> Result<OffsetDateTime, StorageError> {
+    let offset = UtcOffset::from_hms(9, 0, 0).map_err(|_| StorageError::InvalidConfiguration)?;
+    let tomorrow = now
+        .to_offset(offset)
+        .date()
+        .checked_add(TimeDuration::days(1))
+        .ok_or(StorageError::InvalidConfiguration)?;
+    Ok(PrimitiveDateTime::new(tomorrow, Time::MIDNIGHT).assume_offset(offset))
 }
 
 fn validated_presentation_sections(
@@ -1026,8 +1092,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        StructuredAnswerStream, TurnContext, is_daily_overview_request, render_contextualized_turn,
-        requires_process_restart, validated_assistant_response,
+        StructuredAnswerStream, TurnContext, is_daily_overview_request, korea_day_end,
+        render_contextualized_turn, requires_process_restart, validated_assistant_response,
     };
 
     #[test]
@@ -1095,6 +1161,7 @@ mod tests {
             &[project],
             &[inbox],
             now,
+            korea_day_end(now).expect("Korea day boundary"),
         );
 
         assert!(prompt.contains("read-only personal data"));
@@ -1137,6 +1204,7 @@ mod tests {
             prompt: String::new(),
             schedule: Vec::new(),
             tasks: vec![task.clone()],
+            daily_tasks: vec![task.clone()],
             projects: Vec::new(),
             requires_daily_task_coverage: false,
         };
@@ -1191,6 +1259,7 @@ mod tests {
             prompt: String::new(),
             schedule: vec![schedule.clone()],
             tasks: vec![task.clone()],
+            daily_tasks: vec![task.clone()],
             projects: Vec::new(),
             requires_daily_task_coverage: false,
         };
@@ -1257,6 +1326,7 @@ mod tests {
             prompt: String::new(),
             schedule: Vec::new(),
             tasks: vec![task.clone()],
+            daily_tasks: vec![task.clone()],
             projects: Vec::new(),
             requires_daily_task_coverage: true,
         };
@@ -1274,10 +1344,67 @@ mod tests {
         let (answer, presentation) =
             validated_assistant_response(&response, &context).expect("daily result");
 
-        assert!(answer.contains("현재 열린 할 일은 1개 있어요."));
+        assert!(answer.contains("오늘 확인할 할 일은 1개 있어요."));
         assert_eq!(presentation.items.len(), 1);
         assert_eq!(presentation.sections.len(), 1);
         assert_eq!(presentation.sections[0].item_ids, vec![task.id]);
+        assert_eq!(presentation.focus_item_id, None);
+    }
+
+    #[test]
+    fn daily_overview_excludes_future_dated_tasks_from_verified_results() {
+        let now = OffsetDateTime::now_utc();
+        let today = Task {
+            id: Uuid::now_v7(),
+            project_id: None,
+            title: "오늘 검토".to_owned(),
+            notes: None,
+            status: TaskStatus::Open,
+            priority: 2,
+            due_at: None,
+            completed_at: None,
+            version: 1,
+        };
+        let tomorrow = Task {
+            id: Uuid::now_v7(),
+            project_id: None,
+            title: "내일 검토".to_owned(),
+            notes: None,
+            status: TaskStatus::Open,
+            priority: 2,
+            due_at: Some(now + Duration::days(1)),
+            completed_at: None,
+            version: 1,
+        };
+        let context = TurnContext {
+            prompt: String::new(),
+            schedule: Vec::new(),
+            tasks: vec![today.clone(), tomorrow.clone()],
+            daily_tasks: vec![today.clone()],
+            projects: Vec::new(),
+            requires_daily_task_coverage: true,
+        };
+        let response = serde_json::json!({
+            "answer": "열린 할 일을 정리했어요.",
+            "presentation": {
+                "title": "오늘 할 일",
+                "layout": "stack",
+                "focusEntityId": tomorrow.id,
+                "sections": [{
+                    "kind": "tasks",
+                    "title": "할 일",
+                    "view": "checklist",
+                    "entityIds": [today.id, tomorrow.id]
+                }]
+            }
+        })
+        .to_string();
+
+        let (_, presentation) =
+            validated_assistant_response(&response, &context).expect("daily result");
+
+        assert_eq!(presentation.sections[0].item_ids, vec![today.id]);
+        assert_eq!(presentation.items.len(), 1);
         assert_eq!(presentation.focus_item_id, None);
     }
 }

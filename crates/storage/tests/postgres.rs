@@ -425,6 +425,20 @@ async fn manual_schedule_and_tasks_are_scoped_and_emit_current_state() {
             .expect("open task query should succeed"),
         vec![task.clone()]
     );
+    assert!(
+        database
+            .home_tasks_for_user(provisioned.profile.id, now + TimeDuration::hours(12))
+            .await
+            .expect("daily home task query should succeed")
+            .is_empty()
+    );
+    assert_eq!(
+        database
+            .home_tasks_for_user(provisioned.profile.id, now + TimeDuration::days(2))
+            .await
+            .expect("later home task query should succeed"),
+        vec![task.clone()]
+    );
     let completed = database
         .complete_task(provisioned.profile.id, task.id, task.version)
         .await
@@ -804,6 +818,9 @@ async fn approved_conversation_action_creates_one_task_and_finalizes_the_job() {
         })
         .await
         .expect("conversation should persist");
+    let due_at = (OffsetDateTime::now_utc() + TimeDuration::days(1))
+        .replace_nanosecond(0)
+        .expect("whole-second due date");
     let queued = database
         .enqueue_agent_action_turn(
             &NewAgentTurn {
@@ -812,10 +829,11 @@ async fn approved_conversation_action_creates_one_task_and_finalizes_the_job() {
                 client_message_id: Uuid::now_v7(),
                 user_id: provisioned.profile.id,
                 conversation_id,
-                content: "할 일에 장보기 추가해 줘".to_owned(),
+                content: "내일 할 일에 장보기 추가해 줘".to_owned(),
             },
             PendingAgentAction::CreateTask {
                 title: "장보기".to_owned(),
+                due_at: Some(due_at),
             },
         )
         .await
@@ -835,7 +853,8 @@ async fn approved_conversation_action_creates_one_task_and_finalizes_the_job() {
         .expect("owner should read job");
     assert!(matches!(
         pending.pending_action,
-        Some(PendingAgentAction::CreateTask { ref title }) if title == "장보기"
+        Some(PendingAgentAction::CreateTask { ref title, due_at: Some(stored_due_at) })
+            if title == "장보기" && stored_due_at == due_at
     ));
     assert!(
         database
@@ -861,7 +880,11 @@ async fn approved_conversation_action_creates_one_task_and_finalizes_the_job() {
         .open_tasks_for_user(provisioned.profile.id)
         .await
         .expect("task should be visible");
-    assert!(tasks.iter().any(|task| task.title == "장보기"));
+    assert!(
+        tasks
+            .iter()
+            .any(|task| task.title == "장보기" && task.due_at == Some(due_at))
+    );
     let completed = database
         .agent_job_for_user(provisioned.profile.id, queued.job_id)
         .await

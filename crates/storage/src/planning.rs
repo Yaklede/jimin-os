@@ -421,6 +421,35 @@ impl Database {
         rows.into_iter().map(Task::try_from).collect()
     }
 
+    /// Lists the open tasks that belong on the daily home before the supplied
+    /// exclusive local-day boundary. Undated tasks remain in the active daily
+    /// queue, while explicitly future-dated tasks stay out of today's view.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified persistence error when storage is unavailable.
+    pub async fn home_tasks_for_user(
+        &self,
+        user_id: Uuid,
+        before: OffsetDateTime,
+    ) -> Result<Vec<Task>, StorageError> {
+        let rows = sqlx::query_as::<_, TaskRow>(
+            "\
+            SELECT id, project_id, title, notes, status, priority, due_at, completed_at, version
+            FROM tasks
+            WHERE user_id = $1
+              AND status = 'open'
+              AND (due_at IS NULL OR due_at < $2)
+            ORDER BY priority DESC, due_at NULLS LAST, created_at ASC, id ASC",
+        )
+        .bind(user_id)
+        .bind(before)
+        .fetch_all(self.pool())
+        .await
+        .map_err(classify)?;
+        rows.into_iter().map(Task::try_from).collect()
+    }
+
     /// Lists open tasks for one project owned by the current user.
     ///
     /// # Errors

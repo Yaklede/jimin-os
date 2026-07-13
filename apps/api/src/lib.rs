@@ -510,6 +510,7 @@ pub struct AgentJobResponse {
 pub struct PendingAgentActionResponse {
     kind: String,
     title: String,
+    due_at: Option<String>,
     starts_at: Option<String>,
     ends_at: Option<String>,
 }
@@ -1229,7 +1230,7 @@ async fn get_home_snapshot(
     let user_id = principal.identity().user_id();
     let (schedule, tasks) = match tokio::try_join!(
         planning.schedule_entries_in_range(user_id, from, to),
-        planning.open_tasks_for_user(user_id),
+        planning.home_tasks_for_user(user_id, to),
     ) {
         Ok(values) => values,
         Err(error) => return storage_error_response(&error, request_id),
@@ -1705,8 +1706,8 @@ async fn handle_voice_command(
             .await
         }
         VoiceCommand::ListTasks => list_voice_tasks(planning, user_id, request_id).await,
-        VoiceCommand::CreateTask { title } => {
-            create_voice_task(planning, user_id, title, request_id).await
+        VoiceCommand::CreateTask { title, due_at } => {
+            create_voice_task(planning, user_id, title, due_at, request_id).await
         }
         VoiceCommand::NeedsScheduleDetails => Json(VoiceCommandResponse {
             kind: VoiceCommandKind::NeedsDetails,
@@ -1826,6 +1827,7 @@ async fn create_voice_task(
     planning: &Database,
     user_id: uuid::Uuid,
     title: String,
+    due_at: Option<OffsetDateTime>,
     request_id: RequestId,
 ) -> Response {
     match planning
@@ -1836,7 +1838,7 @@ async fn create_voice_task(
             title: title.clone(),
             notes: None,
             priority: 1,
-            due_at: None,
+            due_at,
         })
         .await
     {
@@ -2287,7 +2289,9 @@ fn pending_action_from_conversation_text(text: &str) -> Option<PendingAgentActio
     let korea_offset = time::UtcOffset::from_hms(9, 0, 0).ok()?;
     let reference_at = OffsetDateTime::now_utc().to_offset(korea_offset);
     match voice_command::interpret(text, reference_at, "Asia/Seoul").ok()? {
-        VoiceCommand::CreateTask { title } => Some(PendingAgentAction::CreateTask { title }),
+        VoiceCommand::CreateTask { title, due_at } => {
+            Some(PendingAgentAction::CreateTask { title, due_at })
+        }
         VoiceCommand::CreateSchedule {
             title,
             starts_at,
@@ -3420,9 +3424,12 @@ fn pending_agent_action_response(
     action: &PendingAgentAction,
 ) -> Result<PendingAgentActionResponse, ()> {
     match action {
-        PendingAgentAction::CreateTask { title } => Ok(PendingAgentActionResponse {
+        PendingAgentAction::CreateTask { title, due_at } => Ok(PendingAgentActionResponse {
             kind: "create_task".to_owned(),
             title: title.clone(),
+            due_at: due_at
+                .map(|value| value.format(&Rfc3339).map_err(|_| ()))
+                .transpose()?,
             starts_at: None,
             ends_at: None,
         }),
@@ -3434,6 +3441,7 @@ fn pending_agent_action_response(
         } => Ok(PendingAgentActionResponse {
             kind: "create_schedule".to_owned(),
             title: title.clone(),
+            due_at: None,
             starts_at: Some(starts_at.format(&Rfc3339).map_err(|_| ())?),
             ends_at: Some(ends_at.format(&Rfc3339).map_err(|_| ())?),
         }),
@@ -4044,14 +4052,15 @@ mod tests {
 
     #[test]
     fn conversation_work_item_request_uses_the_immediate_task_action() {
-        assert_eq!(
+        assert!(matches!(
             pending_action_from_conversation_text(
                 "금일 비스켓링크 내용정리 회의록 정리해야한다고 일감추가",
             ),
             Some(PendingAgentAction::CreateTask {
-                title: "비스켓링크 내용정리 회의록 정리".to_owned(),
-            }),
-        );
+                ref title,
+                due_at: Some(_),
+            }) if title == "비스켓링크 내용정리 회의록 정리"
+        ));
     }
 
     #[test]
