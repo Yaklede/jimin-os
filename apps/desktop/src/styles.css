@@ -197,6 +197,24 @@ svg {
   min-height: 100dvh;
 }
 
+.os-shell[data-destination="chat"] {
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.os-shell[data-destination="chat"] .os-workspace {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.os-shell[data-destination="chat"] .os-content {
+  min-height: 0;
+  overflow: hidden;
+}
+
 .os-sidebar {
   display: flex;
   flex-direction: column;
@@ -2740,16 +2758,20 @@ svg {
 }
 
 .assistant-page--conversation {
-  height: calc(100dvh - 108px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
   min-height: 0;
 }
 
 .assistant-inline-alert {
+  grid-row: 1;
   margin-bottom: 12px;
 }
 
 .assistant-workbench {
   display: grid;
+  grid-row: 2;
   grid-template-columns: 212px minmax(0, 1fr);
   height: 100%;
   min-height: 0;
@@ -2768,6 +2790,10 @@ svg {
 }
 
 .assistant-history {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
   padding: 16px 10px;
   border-right: 1px solid var(--border);
 }
@@ -2816,8 +2842,14 @@ svg {
 
 .assistant-history__list {
   display: grid;
+  align-content: start;
+  min-height: 0;
   gap: 4px;
   margin-top: 14px;
+  padding-right: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .assistant-history__row {
@@ -2861,8 +2893,8 @@ svg {
 }
 
 .assistant-conversation {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   height: 100%;
   min-height: 0;
   min-width: 0;
@@ -2871,6 +2903,7 @@ svg {
 
 .assistant-mobile-identity {
   display: none;
+  grid-row: 1;
 }
 
 .assistant-mobile-identity__new {
@@ -2879,6 +2912,7 @@ svg {
 
 .assistant-welcome-panel,
 .assistant-thread-panel {
+  grid-row: 2;
   min-width: 0;
 }
 
@@ -3033,6 +3067,8 @@ svg {
   background: var(--surface-subtle);
   color: var(--text);
   font-size: 15px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
@@ -3214,6 +3250,7 @@ svg {
 
 .assistant-request-field {
   display: grid;
+  grid-row: 3;
   flex: 0 0 auto;
   gap: 8px;
   margin-top: 12px;
@@ -3230,7 +3267,9 @@ svg {
 
 .assistant-request-field textarea {
   width: 100%;
+  height: 60px;
   min-height: 60px;
+  max-height: 160px;
   resize: vertical;
   border: 0;
   outline: 0;
@@ -3280,6 +3319,7 @@ svg {
 
 .assistant-auth-gate {
   display: grid;
+  grid-row: 3;
   gap: 14px;
   max-width: 560px;
   margin: 24px auto;
