@@ -5,9 +5,10 @@ use jimin_domain::{ClientPlatform, DeviceRegistration, EmailAddress, GoogleSubje
 use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness,
     agent::{
-        AgentJobState, AgentModelCatalogEntry, AgentReasoningEffort, AssistantPresentation,
-        AssistantPresentationKind, AssistantPresentationLayout, ConversationMessageRole,
-        NewAgentTurn, NewConversation, PendingAgentAction, PendingAgentActionDecision,
+        AgentActionCommand, AgentJobState, AgentModelCatalogEntry, AgentReasoningEffort,
+        AssistantPresentation, AssistantPresentationKind, AssistantPresentationLayout,
+        ConversationMessageRole, NewAgentTurn, NewConversation, PendingAgentAction,
+        PendingAgentActionDecision,
     },
     auth::{
         ConsumeDevicePairing, CreateDevicePairing, PairingConsumption, ProvisionLogin,
@@ -903,6 +904,133 @@ async fn approved_conversation_action_creates_one_task_and_finalizes_the_job() {
             .any(|message| message.content == "장보기 할 일을 추가했어요.")
     );
 
+    database.close().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The integration test verifies one complete structured action transaction and its audit trail."
+)]
+async fn structured_agent_action_and_completion_message_commit_together() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        1,
+        Duration::from_secs(2),
+    )
+    .expect("test database URL should be valid");
+    database
+        .migrate()
+        .await
+        .expect("agent action execution migration should succeed");
+    let provisioned = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let conversation_id = Uuid::now_v7();
+    database
+        .create_conversation(&NewConversation {
+            id: conversation_id,
+            user_id: provisioned.profile.id,
+            title: Some("AI 실행".to_owned()),
+        })
+        .await
+        .expect("conversation should persist");
+    let queued = database
+        .enqueue_agent_turn(&NewAgentTurn {
+            job_id: Uuid::now_v7(),
+            message_id: Uuid::now_v7(),
+            client_message_id: Uuid::now_v7(),
+            user_id: provisioned.profile.id,
+            conversation_id,
+            content: "내일 할 일에 일어나기를 추가해 줘".to_owned(),
+        })
+        .await
+        .expect("turn should queue");
+    let runner_id = "structured-action-agent";
+    let claim = database
+        .claim_next_agent_job(runner_id, Duration::from_secs(30))
+        .await
+        .expect("claim query should succeed")
+        .expect("queued job should be claimed");
+    assert!(
+        database
+            .start_agent_job(
+                claim.id,
+                runner_id,
+                "thread-structured-action",
+                Duration::from_secs(30),
+            )
+            .await
+            .expect("job should start")
+    );
+    let task_id = Uuid::now_v7();
+    let due_at = (OffsetDateTime::now_utc() + TimeDuration::days(1))
+        .replace_nanosecond(0)
+        .expect("whole-second due date");
+    assert!(
+        database
+            .complete_agent_job_with_action(
+                claim.id,
+                runner_id,
+                Uuid::now_v7(),
+                "일어나기 할 일을 추가했어요.",
+                Some(&AssistantPresentation {
+                    kind: AssistantPresentationKind::Summary,
+                    title: "할 일을 추가했어요".to_owned(),
+                    items: Vec::new(),
+                    layout: AssistantPresentationLayout::Stack,
+                    sections: Vec::new(),
+                    focus_item_id: None,
+                }),
+                &AgentActionCommand::CreateTask {
+                    id: task_id,
+                    project_id: None,
+                    title: "일어나기".to_owned(),
+                    notes: None,
+                    priority: 1,
+                    due_at: Some(due_at),
+                },
+            )
+            .await
+            .expect("action and result should commit")
+    );
+
+    let tasks = database
+        .open_tasks_for_user(provisioned.profile.id)
+        .await
+        .expect("created task should load");
+    assert!(tasks.iter().any(|task| {
+        task.id == task_id && task.title == "일어나기" && task.due_at == Some(due_at)
+    }));
+    let messages = database
+        .conversation_messages_for_user(provisioned.profile.id, conversation_id)
+        .await
+        .expect("messages should load")
+        .expect("owner should read messages");
+    assert_eq!(
+        messages.last().map(|message| message.content.as_str()),
+        Some("일어나기 할 일을 추가했어요.")
+    );
+
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("test database should be reachable");
+    let audit: (Option<String>, Option<Uuid>, bool) = sqlx::query_as(
+        "SELECT executed_action_type, executed_entity_id, executed_at IS NOT NULL FROM agent_jobs WHERE id = $1",
+    )
+    .bind(queued.job_id)
+    .fetch_one(&pool)
+    .await
+    .expect("action audit should load");
+    assert_eq!(audit.0.as_deref(), Some("create_task"));
+    assert_eq!(audit.1, Some(task_id));
+    assert!(audit.2);
+
+    pool.close().await;
     database.close().await;
 }
 

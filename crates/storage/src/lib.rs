@@ -11,7 +11,7 @@ pub mod gmail;
 pub mod planning;
 pub mod work;
 
-pub const EXPECTED_SCHEMA_VERSION: i64 = 15;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 16;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 

@@ -2250,65 +2250,15 @@ async fn create_agent_turn(
     }
 }
 
-/// Executes narrow, deterministic personal planning instructions immediately.
-/// General conversation still queues a managed Codex turn; only a fully parsed
-/// local task or dated schedule bypasses the approval state.
+/// Queues every conversational request for semantic interpretation by the
+/// managed assistant. Planning mutations are selected through its structured
+/// action contract and committed atomically by the worker, rather than by a
+/// separate text-matching shortcut at the HTTP boundary.
 async fn enqueue_conversation_turn(
     agent: &Database,
     turn: &NewAgentTurn,
 ) -> Result<QueuedAgentTurn, StorageError> {
-    let Some(action) = pending_action_from_conversation_text(&turn.content) else {
-        return agent.enqueue_agent_turn(turn).await;
-    };
-    let queued = agent.enqueue_agent_action_turn(turn, action).await?;
-    if queued.state != AgentJobState::WaitingApproval
-        || !agent
-            .resolve_agent_action(
-                turn.user_id,
-                queued.job_id,
-                PendingAgentActionDecision::Approve,
-            )
-            .await?
-    {
-        return Err(StorageError::PersistenceUnavailable);
-    }
-    let job = agent
-        .agent_job_for_user(turn.user_id, queued.job_id)
-        .await?
-        .ok_or(StorageError::PersistenceUnavailable)?;
-    Ok(QueuedAgentTurn {
-        job_id: queued.job_id,
-        message_id: queued.message_id,
-        conversation_id: queued.conversation_id,
-        state: job.state,
-        version: job.version,
-    })
-}
-
-fn pending_action_from_conversation_text(text: &str) -> Option<PendingAgentAction> {
-    let korea_offset = time::UtcOffset::from_hms(9, 0, 0).ok()?;
-    let reference_at = OffsetDateTime::now_utc().to_offset(korea_offset);
-    match voice_command::interpret(text, reference_at, "Asia/Seoul").ok()? {
-        VoiceCommand::CreateTask { title, due_at } => {
-            Some(PendingAgentAction::CreateTask { title, due_at })
-        }
-        VoiceCommand::CreateSchedule {
-            title,
-            starts_at,
-            ends_at,
-            ..
-        } => Some(PendingAgentAction::CreateSchedule {
-            title,
-            starts_at,
-            ends_at,
-            time_zone: "Asia/Seoul".to_owned(),
-        }),
-        VoiceCommand::ListSchedule { .. }
-        | VoiceCommand::ListTasks
-        | VoiceCommand::NeedsScheduleDetails
-        | VoiceCommand::NeedsTaskDetails
-        | VoiceCommand::ContinueConversation => None,
-    }
+    agent.enqueue_agent_turn(turn).await
 }
 
 #[utoipa::path(
@@ -4048,46 +3998,6 @@ mod tests {
             .expect("handler should respond");
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[test]
-    fn conversation_work_item_request_uses_the_immediate_task_action() {
-        assert!(matches!(
-            pending_action_from_conversation_text(
-                "금일 비스켓링크 내용정리 회의록 정리해야한다고 일감추가",
-            ),
-            Some(PendingAgentAction::CreateTask {
-                ref title,
-                due_at: Some(_),
-            }) if title == "비스켓링크 내용정리 회의록 정리"
-        ));
-    }
-
-    #[test]
-    fn conversation_short_task_request_uses_the_immediate_task_action() {
-        assert!(matches!(
-            pending_action_from_conversation_text("내일 일에 일어나기 추가해주"),
-            Some(PendingAgentAction::CreateTask {
-                ref title,
-                due_at: Some(_),
-            }) if title == "일어나기"
-        ));
-    }
-
-    #[test]
-    fn conversation_schedule_request_uses_the_immediate_schedule_action() {
-        assert!(matches!(
-            pending_action_from_conversation_text("오늘 일정에 잠자기 추가해줘 오후 11시에"),
-            Some(PendingAgentAction::CreateSchedule {
-                ref title,
-                starts_at,
-                ends_at,
-                ref time_zone,
-            }) if title == "잠자기"
-                && starts_at.hour() == 23
-                && ends_at - starts_at == time::Duration::hours(1)
-                && time_zone == "Asia/Seoul"
-        ));
     }
 
     #[test]

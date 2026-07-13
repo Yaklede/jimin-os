@@ -4,14 +4,14 @@ use jimin_codex_client::{AppServerClient, Error as CodexError};
 use jimin_storage::{
     Database, StorageError,
     agent::{
-        AgentModelCatalogEntry, AgentReasoningEffort, AssistantPresentation,
+        AgentActionCommand, AgentModelCatalogEntry, AgentReasoningEffort, AssistantPresentation,
         AssistantPresentationItem, AssistantPresentationKind, AssistantPresentationLayout,
         AssistantPresentationSection, AssistantPresentationSectionKind, AssistantPresentationView,
         ClaimedAgentJob,
     },
     gmail::GmailMessage,
-    planning::{ScheduleEntry, ScheduleSource, Task},
-    work::{Project, ProjectStatus},
+    planning::{ScheduleEntry, ScheduleSource, Task, TaskStatus},
+    work::{Project, ProjectStatus, Workspace, WorkspaceScope},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -42,6 +42,7 @@ struct TurnContext {
     schedule: Vec<ScheduleEntry>,
     tasks: Vec<Task>,
     daily_tasks: Vec<Task>,
+    workspaces: Vec<Workspace>,
     projects: Vec<Project>,
     requires_daily_task_coverage: bool,
 }
@@ -51,6 +52,44 @@ struct TurnContext {
 struct StructuredAssistantTurn {
     answer: String,
     presentation: StructuredPresentation,
+    #[serde(default)]
+    action: StructuredAssistantAction,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+struct StructuredAssistantAction {
+    kind: StructuredAssistantActionKind,
+    entity_id: String,
+    workspace_id: String,
+    project_id: String,
+    title: String,
+    notes: String,
+    priority: i16,
+    due_at: String,
+    starts_at: String,
+    ends_at: String,
+    time_zone: String,
+    status: String,
+    risk_level: i16,
+    objective: String,
+    next_action: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StructuredAssistantActionKind {
+    #[default]
+    None,
+    CreateTask,
+    UpdateTask,
+    CompleteTask,
+    CancelTask,
+    CreateSchedule,
+    UpdateSchedule,
+    CancelSchedule,
+    CreateProject,
+    UpdateProject,
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,6 +292,7 @@ where
     }
 }
 
+#[allow(clippy::too_many_lines)] // The turn lifecycle keeps streaming, validation, atomic action completion, and provider failure handling in one flow.
 async fn execute_job<R, W>(
     client: &mut AppServerClient<R, W>,
     database: &Database,
@@ -328,7 +368,7 @@ where
 
     match completed {
         Ok(completed) => {
-            let Ok((answer, presentation)) =
+            let Ok((mut answer, mut presentation, action)) =
                 validated_assistant_response(&completed.response, &context)
             else {
                 fail_claim(
@@ -340,16 +380,42 @@ where
                 .await?;
                 return Ok(());
             };
-            if !database
-                .complete_agent_job(
-                    job.id,
-                    runner_id,
-                    assistant_message_id,
-                    &answer,
-                    Some(&presentation),
-                )
-                .await?
-            {
+            let completion = if let Some(action) = action.as_ref() {
+                let Ok(result) = agent_action_result(action, &context) else {
+                    fail_claim(database, &job, runner_id, "agent_invalid_action_result").await?;
+                    return Ok(());
+                };
+                (answer, presentation) = result;
+                database
+                    .complete_agent_job_with_action(
+                        job.id,
+                        runner_id,
+                        assistant_message_id,
+                        &answer,
+                        Some(&presentation),
+                        action,
+                    )
+                    .await
+            } else {
+                database
+                    .complete_agent_job(
+                        job.id,
+                        runner_id,
+                        assistant_message_id,
+                        &answer,
+                        Some(&presentation),
+                    )
+                    .await
+            };
+            let completed = match completion {
+                Ok(completed) => completed,
+                Err(StorageError::IdentityConflict) => {
+                    fail_claim(database, &job, runner_id, "agent_action_conflict").await?;
+                    return Ok(());
+                }
+                Err(error) => return Err(WorkerError::Storage(error)),
+            };
+            if !completed {
                 return Err(WorkerError::LostLease);
             }
         }
@@ -365,13 +431,14 @@ async fn contextualized_turn_context(
     job: &ClaimedAgentJob,
 ) -> Result<TurnContext, StorageError> {
     let now = OffsetDateTime::now_utc();
-    let (schedule, tasks, projects, inbox) = tokio::try_join!(
+    let (schedule, tasks, workspaces, projects, inbox) = tokio::try_join!(
         database.schedule_entries_in_range(
             job.user_id,
             now - TimeDuration::days(1),
             now + TimeDuration::days(14),
         ),
         database.open_tasks_for_user(job.user_id),
+        database.workspaces_for_user(job.user_id),
         database.projects_for_user(job.user_id),
         database.recent_gmail_messages_for_user(job.user_id),
     )?;
@@ -385,6 +452,7 @@ async fn contextualized_turn_context(
         &job.input_content,
         &schedule,
         &tasks,
+        &workspaces,
         &projects,
         &inbox,
         now,
@@ -395,15 +463,18 @@ async fn contextualized_turn_context(
         schedule,
         tasks,
         daily_tasks,
+        workspaces,
         projects,
         requires_daily_task_coverage: is_daily_overview_request(&job.input_content),
     })
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // The prompt builder names every bounded authenticated context collection explicitly.
 fn render_contextualized_turn(
     input: &str,
     schedule: &[ScheduleEntry],
     tasks: &[Task],
+    workspaces: &[Workspace],
     projects: &[Project],
     inbox: &[GmailMessage],
     now: OffsetDateTime,
@@ -424,7 +495,13 @@ fn render_contextualized_turn(
          Tasks support list or checklist, schedule supports list or timeline, and projects support list or cards. \
          focusEntityId must be one selected entity ID or an empty string. Keep answers concise because the client renders \
          the server-validated selection as an interactive surface. \
-         Do not claim that an external action was completed unless the conversation contains a confirmed result.\n\n",
+         Do not claim that an external action was completed unless the conversation contains a confirmed result. \
+         You may select exactly one local planning action in the action object. Use kind none for questions or ambiguous requests. \
+         For updates, copy every replacement field from server context and change only what the user requested. \
+         Use exact existing entity, workspace, and project IDs; the server creates IDs for new records. \
+         Use RFC3339 timestamps with the current +09:00 offset. An empty optional string means no value. \
+         Never modify a Google Calendar entry; ask the user to change it in Google Calendar. \
+         If the action kind is not none, answer only that the request is being processed; the server writes the final completion message after commit.\n\n",
     );
     let _ = writeln!(
         prompt,
@@ -441,8 +518,14 @@ fn render_contextualized_turn(
             };
             let _ = writeln!(
                 prompt,
-                "- [id {} | {source}] {} | {} to {} ({})",
-                entry.id, entry.title, entry.starts_at, entry.ends_at, entry.time_zone
+                "- [id {} | {source} | version {}] {} | {} to {} ({}) | notes: {}",
+                entry.id,
+                entry.version,
+                entry.title,
+                entry.starts_at,
+                entry.ends_at,
+                entry.time_zone,
+                entry.notes.as_deref().unwrap_or("none")
             );
         }
     }
@@ -456,16 +539,34 @@ fn render_contextualized_turn(
                 .map_or_else(|| "no due date".to_owned(), |date| date.to_string());
             let _ = writeln!(
                 prompt,
-                "- [id {} | project {} | priority {} | due {due}] {}",
+                "- [id {} | project {} | priority {} | due {due} | version {}] {} | notes: {}",
                 task.id,
                 task.project_id
                     .map_or_else(|| "none".to_owned(), |id| id.to_string()),
                 task.priority,
-                task.title
+                task.version,
+                task.title,
+                task.notes.as_deref().unwrap_or("none")
             );
         }
     }
-    prompt.push_str("</open_tasks>\n<projects>\n");
+    prompt.push_str("</open_tasks>\n<workspaces>\n");
+    if workspaces.is_empty() {
+        prompt.push_str("(no workspaces)\n");
+    } else {
+        for workspace in workspaces {
+            let scope = match workspace.scope {
+                WorkspaceScope::Personal => "personal",
+                WorkspaceScope::Company => "company",
+            };
+            let _ = writeln!(
+                prompt,
+                "- [id {} | {scope} | version {}] {}",
+                workspace.id, workspace.version, workspace.name
+            );
+        }
+    }
+    prompt.push_str("</workspaces>\n<projects>\n");
     if projects.is_empty() {
         prompt.push_str("(no projects)\n");
     } else {
@@ -478,12 +579,17 @@ fn render_contextualized_turn(
             let next_action = project.next_action.as_deref().unwrap_or("no next action");
             let _ = writeln!(
                 prompt,
-                "- [id {} | workspace {} | {status} | risk {} | open tasks {}] {} | next: {next_action}",
+                "- [id {} | workspace {} | {status} | risk {} | open tasks {} | version {} | due {}] {} | objective: {} | next: {next_action}",
                 project.id,
                 project.workspace_id,
                 project.risk_level,
                 project.open_task_count,
+                project.version,
+                project
+                    .due_at
+                    .map_or_else(|| "none".to_owned(), |value| value.to_string()),
                 project.title,
+                project.objective.as_deref().unwrap_or("none"),
             );
         }
     }
@@ -553,6 +659,7 @@ fn is_daily_overview_request(input: &str) -> bool {
     mentions_today && mentions_daily_work && !explicitly_schedule_only
 }
 
+#[allow(clippy::too_many_lines)] // The provider schema is intentionally declared in one auditable JSON contract.
 fn assistant_output_schema() -> Value {
     json!({
         "type": "object",
@@ -601,9 +708,61 @@ fn assistant_output_schema() -> Value {
                 },
                 "required": ["title", "layout", "focusEntityId", "sections"],
                 "additionalProperties": false
+            },
+            "action": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": [
+                            "none",
+                            "create_task",
+                            "update_task",
+                            "complete_task",
+                            "cancel_task",
+                            "create_schedule",
+                            "update_schedule",
+                            "cancel_schedule",
+                            "create_project",
+                            "update_project"
+                        ]
+                    },
+                    "entityId": { "type": "string" },
+                    "workspaceId": { "type": "string" },
+                    "projectId": { "type": "string" },
+                    "title": { "type": "string" },
+                    "notes": { "type": "string" },
+                    "priority": { "type": "integer" },
+                    "dueAt": { "type": "string" },
+                    "startsAt": { "type": "string" },
+                    "endsAt": { "type": "string" },
+                    "timeZone": { "type": "string" },
+                    "status": { "type": "string" },
+                    "riskLevel": { "type": "integer" },
+                    "objective": { "type": "string" },
+                    "nextAction": { "type": "string" }
+                },
+                "required": [
+                    "kind",
+                    "entityId",
+                    "workspaceId",
+                    "projectId",
+                    "title",
+                    "notes",
+                    "priority",
+                    "dueAt",
+                    "startsAt",
+                    "endsAt",
+                    "timeZone",
+                    "status",
+                    "riskLevel",
+                    "objective",
+                    "nextAction"
+                ],
+                "additionalProperties": false
             }
         },
-        "required": ["answer", "presentation"],
+        "required": ["answer", "presentation", "action"],
         "additionalProperties": false
     })
 }
@@ -611,7 +770,7 @@ fn assistant_output_schema() -> Value {
 fn validated_assistant_response(
     response: &str,
     context: &TurnContext,
-) -> Result<(String, AssistantPresentation), ()> {
+) -> Result<(String, AssistantPresentation, Option<AgentActionCommand>), ()> {
     let structured: StructuredAssistantTurn = serde_json::from_str(response).map_err(|_| ())?;
     let mut answer = structured.answer.trim().to_owned();
     let title = structured.presentation.title.trim().to_owned();
@@ -674,7 +833,441 @@ fn validated_assistant_response(
         focus_item_id,
     };
     presentation.validate().map_err(|_| ())?;
+    let action = validated_agent_action(&structured.action, context)?;
+    Ok((answer, presentation, action))
+}
+
+#[allow(clippy::too_many_lines)] // Each model-selected action is exhaustively mapped to a server-owned command in one reviewable boundary.
+fn validated_agent_action(
+    action: &StructuredAssistantAction,
+    context: &TurnContext,
+) -> Result<Option<AgentActionCommand>, ()> {
+    let parse_existing_id = |value: &str| value.parse::<Uuid>().map_err(|_| ());
+    let parse_optional_id = |value: &str| {
+        let value = value.trim();
+        if value.is_empty() {
+            Ok(None)
+        } else {
+            value.parse::<Uuid>().map(Some).map_err(|_| ())
+        }
+    };
+    let parse_timestamp =
+        |value: &str| OffsetDateTime::parse(value.trim(), &Rfc3339).map_err(|_| ());
+    let parse_optional_timestamp = |value: &str| {
+        let value = value.trim();
+        if value.is_empty() {
+            Ok(None)
+        } else {
+            OffsetDateTime::parse(value, &Rfc3339)
+                .map(Some)
+                .map_err(|_| ())
+        }
+    };
+
+    let command = match action.kind {
+        StructuredAssistantActionKind::None => return Ok(None),
+        StructuredAssistantActionKind::CreateTask => {
+            let project_id = parse_optional_id(&action.project_id)?;
+            if project_id.is_some_and(|id| !context.projects.iter().any(|project| project.id == id))
+            {
+                return Err(());
+            }
+            AgentActionCommand::CreateTask {
+                id: Uuid::now_v7(),
+                project_id,
+                title: required_action_text(&action.title, 200)?,
+                notes: optional_action_text(&action.notes, 10_000)?,
+                priority: validated_level(action.priority)?,
+                due_at: parse_optional_timestamp(&action.due_at)?,
+            }
+        }
+        StructuredAssistantActionKind::UpdateTask => {
+            let id = parse_existing_id(&action.entity_id)?;
+            let task = context.tasks.iter().find(|task| task.id == id).ok_or(())?;
+            let project_id = parse_optional_id(&action.project_id)?;
+            if project_id.is_some_and(|id| !context.projects.iter().any(|project| project.id == id))
+            {
+                return Err(());
+            }
+            AgentActionCommand::UpdateTask {
+                id,
+                project_id,
+                title: required_action_text(&action.title, 200)?,
+                notes: optional_action_text(&action.notes, 10_000)?,
+                priority: validated_level(action.priority)?,
+                due_at: parse_optional_timestamp(&action.due_at)?,
+                expected_version: task.version,
+            }
+        }
+        StructuredAssistantActionKind::CompleteTask | StructuredAssistantActionKind::CancelTask => {
+            let id = parse_existing_id(&action.entity_id)?;
+            let task = context.tasks.iter().find(|task| task.id == id).ok_or(())?;
+            AgentActionCommand::SetTaskStatus {
+                id,
+                status: if action.kind == StructuredAssistantActionKind::CompleteTask {
+                    TaskStatus::Completed
+                } else {
+                    TaskStatus::Cancelled
+                },
+                expected_version: task.version,
+            }
+        }
+        StructuredAssistantActionKind::CreateSchedule => {
+            let starts_at = parse_timestamp(&action.starts_at)?;
+            let ends_at = parse_timestamp(&action.ends_at)?;
+            if ends_at <= starts_at {
+                return Err(());
+            }
+            AgentActionCommand::CreateSchedule {
+                id: Uuid::now_v7(),
+                title: required_action_text(&action.title, 200)?,
+                notes: optional_action_text(&action.notes, 10_000)?,
+                starts_at,
+                ends_at,
+                time_zone: required_action_text(&action.time_zone, 80)?,
+            }
+        }
+        StructuredAssistantActionKind::UpdateSchedule => {
+            let id = parse_existing_id(&action.entity_id)?;
+            let entry = context
+                .schedule
+                .iter()
+                .find(|entry| entry.id == id && entry.source == ScheduleSource::Manual)
+                .ok_or(())?;
+            let starts_at = parse_timestamp(&action.starts_at)?;
+            let ends_at = parse_timestamp(&action.ends_at)?;
+            if ends_at <= starts_at {
+                return Err(());
+            }
+            AgentActionCommand::UpdateSchedule {
+                id,
+                title: required_action_text(&action.title, 200)?,
+                notes: optional_action_text(&action.notes, 10_000)?,
+                starts_at,
+                ends_at,
+                time_zone: required_action_text(&action.time_zone, 80)?,
+                expected_version: entry.version,
+            }
+        }
+        StructuredAssistantActionKind::CancelSchedule => {
+            let id = parse_existing_id(&action.entity_id)?;
+            let entry = context
+                .schedule
+                .iter()
+                .find(|entry| entry.id == id && entry.source == ScheduleSource::Manual)
+                .ok_or(())?;
+            AgentActionCommand::CancelSchedule {
+                id,
+                expected_version: entry.version,
+            }
+        }
+        StructuredAssistantActionKind::CreateProject => {
+            let workspace_id = parse_existing_id(&action.workspace_id)?;
+            if !context
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.id == workspace_id)
+            {
+                return Err(());
+            }
+            AgentActionCommand::CreateProject {
+                id: Uuid::now_v7(),
+                workspace_id,
+                title: required_action_text(&action.title, 200)?,
+                objective: optional_action_text(&action.objective, 10_000)?,
+                risk_level: validated_level(action.risk_level)?,
+                next_action: optional_action_text(&action.next_action, 500)?,
+                due_at: parse_optional_timestamp(&action.due_at)?,
+            }
+        }
+        StructuredAssistantActionKind::UpdateProject => {
+            let id = parse_existing_id(&action.entity_id)?;
+            let project = context
+                .projects
+                .iter()
+                .find(|project| project.id == id)
+                .ok_or(())?;
+            AgentActionCommand::UpdateProject {
+                id,
+                title: required_action_text(&action.title, 200)?,
+                objective: optional_action_text(&action.objective, 10_000)?,
+                status: match action.status.trim() {
+                    "active" => ProjectStatus::Active,
+                    "paused" => ProjectStatus::Paused,
+                    "completed" => ProjectStatus::Completed,
+                    _ => return Err(()),
+                },
+                risk_level: validated_level(action.risk_level)?,
+                next_action: optional_action_text(&action.next_action, 500)?,
+                due_at: parse_optional_timestamp(&action.due_at)?,
+                expected_version: project.version,
+            }
+        }
+    };
+    Ok(Some(command))
+}
+
+fn required_action_text(value: &str, maximum: usize) -> Result<String, ()> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().count() > maximum || value.chars().any(char::is_control) {
+        Err(())
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
+fn optional_action_text(value: &str, maximum: usize) -> Result<Option<String>, ()> {
+    let value = value.trim();
+    if value.is_empty() {
+        Ok(None)
+    } else if value.chars().count() > maximum || value.chars().any(char::is_control) {
+        Err(())
+    } else {
+        Ok(Some(value.to_owned()))
+    }
+}
+
+fn validated_level(value: i16) -> Result<i16, ()> {
+    (0..=3).contains(&value).then_some(value).ok_or(())
+}
+
+#[allow(clippy::too_many_lines)] // Each persisted action owns a deterministic completion message and focused presentation in the same exhaustive map.
+fn agent_action_result(
+    action: &AgentActionCommand,
+    context: &TurnContext,
+) -> Result<(String, AssistantPresentation), ()> {
+    let (answer, title, section_title, kind, section_kind, view, item) = match action {
+        AgentActionCommand::CreateTask {
+            id,
+            project_id,
+            title,
+            priority,
+            due_at,
+            ..
+        } => (
+            format!("{title} 할 일을 추가했어요."),
+            "할 일을 추가했어요",
+            "추가한 할 일",
+            AssistantPresentationKind::Tasks,
+            AssistantPresentationSectionKind::Tasks,
+            AssistantPresentationView::Checklist,
+            task_action_presentation_item(
+                *id,
+                *project_id,
+                title,
+                *priority,
+                *due_at,
+                &context.projects,
+            ),
+        ),
+        AgentActionCommand::UpdateTask {
+            id,
+            project_id,
+            title,
+            priority,
+            due_at,
+            ..
+        } => (
+            format!("{title} 할 일을 수정했어요."),
+            "할 일을 수정했어요",
+            "수정한 할 일",
+            AssistantPresentationKind::Tasks,
+            AssistantPresentationSectionKind::Tasks,
+            AssistantPresentationView::Checklist,
+            task_action_presentation_item(
+                *id,
+                *project_id,
+                title,
+                *priority,
+                *due_at,
+                &context.projects,
+            ),
+        ),
+        AgentActionCommand::SetTaskStatus { id, status, .. } => {
+            let task = context.tasks.iter().find(|task| task.id == *id).ok_or(())?;
+            let (verb, title, section_title) = match status {
+                TaskStatus::Completed => ("완료했어요", "할 일을 완료했어요", "완료한 할 일"),
+                TaskStatus::Cancelled => ("취소했어요", "할 일을 취소했어요", "취소한 할 일"),
+                TaskStatus::Open => return Err(()),
+            };
+            (
+                format!("{} 할 일을 {verb}.", task.title),
+                title,
+                section_title,
+                AssistantPresentationKind::Tasks,
+                AssistantPresentationSectionKind::Tasks,
+                AssistantPresentationView::Checklist,
+                task_presentation_item(task, &context.projects),
+            )
+        }
+        AgentActionCommand::CreateSchedule {
+            id,
+            title,
+            starts_at,
+            ends_at,
+            time_zone,
+            ..
+        } => (
+            format!("{title} 일정을 추가했어요."),
+            "일정을 추가했어요",
+            "추가한 일정",
+            AssistantPresentationKind::Schedule,
+            AssistantPresentationSectionKind::Schedule,
+            AssistantPresentationView::Timeline,
+            schedule_action_presentation_item(*id, title, *starts_at, *ends_at, time_zone)?,
+        ),
+        AgentActionCommand::UpdateSchedule {
+            id,
+            title,
+            starts_at,
+            ends_at,
+            time_zone,
+            ..
+        } => (
+            format!("{title} 일정을 수정했어요."),
+            "일정을 수정했어요",
+            "수정한 일정",
+            AssistantPresentationKind::Schedule,
+            AssistantPresentationSectionKind::Schedule,
+            AssistantPresentationView::Timeline,
+            schedule_action_presentation_item(*id, title, *starts_at, *ends_at, time_zone)?,
+        ),
+        AgentActionCommand::CancelSchedule { id, .. } => {
+            let entry = context
+                .schedule
+                .iter()
+                .find(|entry| entry.id == *id)
+                .ok_or(())?;
+            (
+                format!("{} 일정을 취소했어요.", entry.title),
+                "일정을 취소했어요",
+                "취소한 일정",
+                AssistantPresentationKind::Schedule,
+                AssistantPresentationSectionKind::Schedule,
+                AssistantPresentationView::Timeline,
+                schedule_presentation_item(entry)?,
+            )
+        }
+        AgentActionCommand::CreateProject {
+            id,
+            workspace_id,
+            title,
+            objective,
+            risk_level,
+            next_action,
+            ..
+        } => (
+            format!("{title} 프로젝트를 추가했어요."),
+            "프로젝트를 추가했어요",
+            "추가한 프로젝트",
+            AssistantPresentationKind::Projects,
+            AssistantPresentationSectionKind::Projects,
+            AssistantPresentationView::Cards,
+            AssistantPresentationItem::Project {
+                id: *id,
+                workspace_id: *workspace_id,
+                title: title.clone(),
+                objective: objective
+                    .as_deref()
+                    .map(|value| truncate_chars(value, MAX_PRESENTATION_DETAIL_CHARS)),
+                next_action: next_action
+                    .as_deref()
+                    .map(|value| truncate_chars(value, MAX_PRESENTATION_DETAIL_CHARS)),
+                risk_level: *risk_level,
+                open_task_count: 0,
+            },
+        ),
+        AgentActionCommand::UpdateProject {
+            id,
+            title,
+            objective,
+            risk_level,
+            next_action,
+            ..
+        } => {
+            let project = context
+                .projects
+                .iter()
+                .find(|project| project.id == *id)
+                .ok_or(())?;
+            (
+                format!("{title} 프로젝트를 수정했어요."),
+                "프로젝트를 수정했어요",
+                "수정한 프로젝트",
+                AssistantPresentationKind::Projects,
+                AssistantPresentationSectionKind::Projects,
+                AssistantPresentationView::Cards,
+                AssistantPresentationItem::Project {
+                    id: *id,
+                    workspace_id: project.workspace_id,
+                    title: title.clone(),
+                    objective: objective
+                        .as_deref()
+                        .map(|value| truncate_chars(value, MAX_PRESENTATION_DETAIL_CHARS)),
+                    next_action: next_action
+                        .as_deref()
+                        .map(|value| truncate_chars(value, MAX_PRESENTATION_DETAIL_CHARS)),
+                    risk_level: *risk_level,
+                    open_task_count: project.open_task_count,
+                },
+            )
+        }
+    };
+    let item_id = presentation_item_id(&item);
+    let presentation = AssistantPresentation {
+        kind,
+        title: title.to_owned(),
+        items: vec![item],
+        layout: AssistantPresentationLayout::Focus,
+        sections: vec![AssistantPresentationSection {
+            kind: section_kind,
+            title: section_title.to_owned(),
+            view,
+            item_ids: vec![item_id],
+        }],
+        focus_item_id: Some(item_id),
+    };
+    presentation.validate().map_err(|_| ())?;
     Ok((answer, presentation))
+}
+
+fn task_action_presentation_item(
+    id: Uuid,
+    project_id: Option<Uuid>,
+    title: &str,
+    priority: i16,
+    due_at: Option<OffsetDateTime>,
+    projects: &[Project],
+) -> AssistantPresentationItem {
+    AssistantPresentationItem::Task {
+        id,
+        project_id,
+        project_title: project_id.and_then(|project_id| {
+            projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .map(|project| project.title.clone())
+        }),
+        title: title.to_owned(),
+        priority,
+        due_at: due_at.and_then(format_timestamp),
+    }
+}
+
+fn schedule_action_presentation_item(
+    id: Uuid,
+    title: &str,
+    starts_at: OffsetDateTime,
+    ends_at: OffsetDateTime,
+    time_zone: &str,
+) -> Result<AssistantPresentationItem, ()> {
+    Ok(AssistantPresentationItem::Schedule {
+        id,
+        title: title.to_owned(),
+        starts_at: starts_at.format(&Rfc3339).map_err(|_| ())?,
+        ends_at: ends_at.format(&Rfc3339).map_err(|_| ())?,
+        time_zone: time_zone.to_owned(),
+    })
 }
 
 fn ensure_daily_task_coverage(
@@ -1086,14 +1679,15 @@ mod tests {
     use jimin_storage::{
         gmail::GmailMessage,
         planning::{ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus},
-        work::{Project, ProjectStatus},
+        work::{Project, ProjectStatus, Workspace, WorkspaceScope},
     };
     use time::{Duration, OffsetDateTime};
     use uuid::Uuid;
 
     use super::{
-        StructuredAnswerStream, TurnContext, is_daily_overview_request, korea_day_end,
-        render_contextualized_turn, requires_process_restart, validated_assistant_response,
+        StructuredAnswerStream, StructuredAssistantAction, StructuredAssistantActionKind,
+        TurnContext, is_daily_overview_request, korea_day_end, render_contextualized_turn,
+        requires_process_restart, validated_agent_action, validated_assistant_response,
     };
 
     #[test]
@@ -1153,11 +1747,18 @@ mod tests {
             open_task_count: 1,
             version: 1,
         };
+        let workspace = Workspace {
+            id: project.workspace_id,
+            scope: WorkspaceScope::Personal,
+            name: "개인".to_owned(),
+            version: 1,
+        };
         let project_id = project.id;
         let prompt = render_contextualized_turn(
             "내일 일정 알려줘",
             &[schedule],
             &[task],
+            &[workspace],
             &[project],
             &[inbox],
             now,
@@ -1165,7 +1766,7 @@ mod tests {
         );
 
         assert!(prompt.contains("read-only personal data"));
-        assert!(prompt.contains("Google Calendar] 회의"));
+        assert!(prompt.contains("Google Calendar | version 1] 회의"));
         assert!(prompt.contains(&schedule_id.to_string()));
         assert!(prompt.contains("장보기"));
         assert!(prompt.contains(&task_id.to_string()));
@@ -1205,6 +1806,7 @@ mod tests {
             schedule: Vec::new(),
             tasks: vec![task.clone()],
             daily_tasks: vec![task.clone()],
+            workspaces: Vec::new(),
             projects: Vec::new(),
             requires_daily_task_coverage: false,
         };
@@ -1223,7 +1825,7 @@ mod tests {
             }
         })
         .to_string();
-        let (_, presentation) =
+        let (_, presentation, _) =
             validated_assistant_response(&response, &context).expect("valid response");
         assert_eq!(presentation.items.len(), 1);
         assert_eq!(presentation.sections.len(), 1);
@@ -1260,6 +1862,7 @@ mod tests {
             schedule: vec![schedule.clone()],
             tasks: vec![task.clone()],
             daily_tasks: vec![task.clone()],
+            workspaces: Vec::new(),
             projects: Vec::new(),
             requires_daily_task_coverage: false,
         };
@@ -1287,7 +1890,7 @@ mod tests {
         })
         .to_string();
 
-        let (_, presentation) =
+        let (_, presentation, _) =
             validated_assistant_response(&response, &context).expect("valid response");
         assert_eq!(
             presentation.kind,
@@ -1327,6 +1930,7 @@ mod tests {
             schedule: Vec::new(),
             tasks: vec![task.clone()],
             daily_tasks: vec![task.clone()],
+            workspaces: Vec::new(),
             projects: Vec::new(),
             requires_daily_task_coverage: true,
         };
@@ -1341,7 +1945,7 @@ mod tests {
         })
         .to_string();
 
-        let (answer, presentation) =
+        let (answer, presentation, _) =
             validated_assistant_response(&response, &context).expect("daily result");
 
         assert!(answer.contains("오늘 확인할 할 일은 1개 있어요."));
@@ -1381,6 +1985,7 @@ mod tests {
             schedule: Vec::new(),
             tasks: vec![today.clone(), tomorrow.clone()],
             daily_tasks: vec![today.clone()],
+            workspaces: Vec::new(),
             projects: Vec::new(),
             requires_daily_task_coverage: true,
         };
@@ -1400,11 +2005,109 @@ mod tests {
         })
         .to_string();
 
-        let (_, presentation) =
+        let (_, presentation, _) =
             validated_assistant_response(&response, &context).expect("daily result");
 
         assert_eq!(presentation.sections[0].item_ids, vec![today.id]);
         assert_eq!(presentation.items.len(), 1);
         assert_eq!(presentation.focus_item_id, None);
+    }
+
+    #[test]
+    fn structured_create_task_action_preserves_the_requested_due_date() {
+        let due_at = OffsetDateTime::parse(
+            "2026-07-15T09:00:00+09:00",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("timestamp");
+        let context = TurnContext {
+            prompt: String::new(),
+            schedule: Vec::new(),
+            tasks: Vec::new(),
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            requires_daily_task_coverage: false,
+        };
+        let action = StructuredAssistantAction {
+            kind: StructuredAssistantActionKind::CreateTask,
+            title: "일어나기".to_owned(),
+            priority: 1,
+            due_at: "2026-07-15T09:00:00+09:00".to_owned(),
+            ..StructuredAssistantAction::default()
+        };
+
+        let command = validated_agent_action(&action, &context)
+            .expect("valid action")
+            .expect("action command");
+        assert!(matches!(
+            command,
+            jimin_storage::agent::AgentActionCommand::CreateTask {
+                ref title,
+                due_at: Some(actual_due_at),
+                ..
+            } if title == "일어나기" && actual_due_at == due_at
+        ));
+    }
+
+    #[test]
+    fn structured_task_status_action_uses_the_authenticated_version() {
+        let task = Task {
+            id: Uuid::now_v7(),
+            project_id: None,
+            title: "회의록 정리".to_owned(),
+            notes: None,
+            status: TaskStatus::Open,
+            priority: 2,
+            due_at: None,
+            completed_at: None,
+            version: 7,
+        };
+        let context = TurnContext {
+            prompt: String::new(),
+            schedule: Vec::new(),
+            tasks: vec![task.clone()],
+            daily_tasks: vec![task.clone()],
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            requires_daily_task_coverage: false,
+        };
+        let action = StructuredAssistantAction {
+            kind: StructuredAssistantActionKind::CompleteTask,
+            entity_id: task.id.to_string(),
+            ..StructuredAssistantAction::default()
+        };
+
+        let command = validated_agent_action(&action, &context)
+            .expect("valid action")
+            .expect("action command");
+        assert!(matches!(
+            command,
+            jimin_storage::agent::AgentActionCommand::SetTaskStatus {
+                id,
+                status: TaskStatus::Completed,
+                expected_version: 7,
+            } if id == task.id
+        ));
+    }
+
+    #[test]
+    fn structured_action_rejects_an_entity_outside_authenticated_context() {
+        let context = TurnContext {
+            prompt: String::new(),
+            schedule: Vec::new(),
+            tasks: Vec::new(),
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            requires_daily_task_coverage: false,
+        };
+        let action = StructuredAssistantAction {
+            kind: StructuredAssistantActionKind::CancelTask,
+            entity_id: Uuid::now_v7().to_string(),
+            ..StructuredAssistantAction::default()
+        };
+
+        assert!(validated_agent_action(&action, &context).is_err());
     }
 }

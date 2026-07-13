@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::{Database, StorageError, auth::append_change};
+use crate::{
+    Database, StorageError, auth::append_change, planning::TaskStatus, work::ProjectStatus,
+};
 
 const MAX_CONTENT_CHARS: usize = 24_000;
 const MAX_TITLE_CHARS: usize = 200;
@@ -81,6 +83,271 @@ pub enum PendingAgentAction {
         ends_at: OffsetDateTime,
         time_zone: String,
     },
+}
+
+/// One server-validated planning mutation selected by the managed assistant.
+///
+/// The worker supplies complete replacement values for updates from the
+/// authenticated context. Storage validates ownership and optimistic versions
+/// again, then commits the mutation with the final assistant message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentActionCommand {
+    CreateTask {
+        id: Uuid,
+        project_id: Option<Uuid>,
+        title: String,
+        notes: Option<String>,
+        priority: i16,
+        due_at: Option<OffsetDateTime>,
+    },
+    UpdateTask {
+        id: Uuid,
+        project_id: Option<Uuid>,
+        title: String,
+        notes: Option<String>,
+        priority: i16,
+        due_at: Option<OffsetDateTime>,
+        expected_version: i64,
+    },
+    SetTaskStatus {
+        id: Uuid,
+        status: TaskStatus,
+        expected_version: i64,
+    },
+    CreateSchedule {
+        id: Uuid,
+        title: String,
+        notes: Option<String>,
+        starts_at: OffsetDateTime,
+        ends_at: OffsetDateTime,
+        time_zone: String,
+    },
+    UpdateSchedule {
+        id: Uuid,
+        title: String,
+        notes: Option<String>,
+        starts_at: OffsetDateTime,
+        ends_at: OffsetDateTime,
+        time_zone: String,
+        expected_version: i64,
+    },
+    CancelSchedule {
+        id: Uuid,
+        expected_version: i64,
+    },
+    CreateProject {
+        id: Uuid,
+        workspace_id: Uuid,
+        title: String,
+        objective: Option<String>,
+        risk_level: i16,
+        next_action: Option<String>,
+        due_at: Option<OffsetDateTime>,
+    },
+    UpdateProject {
+        id: Uuid,
+        title: String,
+        objective: Option<String>,
+        status: ProjectStatus,
+        risk_level: i16,
+        next_action: Option<String>,
+        due_at: Option<OffsetDateTime>,
+        expected_version: i64,
+    },
+}
+
+impl AgentActionCommand {
+    #[allow(clippy::too_many_lines)] // Keep every action variant's storage boundary validation explicit and adjacent.
+    fn validate(&self) -> Result<(), StorageError> {
+        let valid_optional = |value: Option<&String>, maximum| {
+            value.is_none_or(|value| valid_text(value, maximum, true))
+        };
+        match self {
+            Self::CreateTask {
+                id,
+                project_id,
+                title,
+                notes,
+                priority,
+                ..
+            } => {
+                if is_v7(*id)
+                    && project_id.is_none_or(is_v7)
+                    && valid_text(title, MAX_TITLE_CHARS, false)
+                    && valid_optional(notes.as_ref(), 10_000)
+                    && (0..=3).contains(priority)
+                {
+                    Ok(())
+                } else {
+                    Err(StorageError::InvalidConfiguration)
+                }
+            }
+            Self::UpdateTask {
+                id,
+                project_id,
+                title,
+                notes,
+                priority,
+                expected_version,
+                ..
+            } => {
+                if is_v7(*id)
+                    && project_id.is_none_or(is_v7)
+                    && valid_text(title, MAX_TITLE_CHARS, false)
+                    && valid_optional(notes.as_ref(), 10_000)
+                    && (0..=3).contains(priority)
+                    && *expected_version > 0
+                {
+                    Ok(())
+                } else {
+                    Err(StorageError::InvalidConfiguration)
+                }
+            }
+            Self::SetTaskStatus {
+                id,
+                status,
+                expected_version,
+            } => {
+                if is_v7(*id)
+                    && matches!(status, TaskStatus::Completed | TaskStatus::Cancelled)
+                    && *expected_version > 0
+                {
+                    Ok(())
+                } else {
+                    Err(StorageError::InvalidConfiguration)
+                }
+            }
+            Self::CreateSchedule {
+                id,
+                title,
+                notes,
+                starts_at,
+                ends_at,
+                time_zone,
+            } => {
+                if is_v7(*id)
+                    && valid_text(title, MAX_TITLE_CHARS, false)
+                    && valid_optional(notes.as_ref(), 10_000)
+                    && valid_time_zone(time_zone)
+                    && ends_at > starts_at
+                {
+                    Ok(())
+                } else {
+                    Err(StorageError::InvalidConfiguration)
+                }
+            }
+            Self::UpdateSchedule {
+                id,
+                title,
+                notes,
+                starts_at,
+                ends_at,
+                time_zone,
+                expected_version,
+            } => {
+                if is_v7(*id)
+                    && valid_text(title, MAX_TITLE_CHARS, false)
+                    && valid_optional(notes.as_ref(), 10_000)
+                    && valid_time_zone(time_zone)
+                    && ends_at > starts_at
+                    && *expected_version > 0
+                {
+                    Ok(())
+                } else {
+                    Err(StorageError::InvalidConfiguration)
+                }
+            }
+            Self::CancelSchedule {
+                id,
+                expected_version,
+            } => {
+                if is_v7(*id) && *expected_version > 0 {
+                    Ok(())
+                } else {
+                    Err(StorageError::InvalidConfiguration)
+                }
+            }
+            Self::CreateProject {
+                id,
+                workspace_id,
+                title,
+                objective,
+                risk_level,
+                next_action,
+                ..
+            } => {
+                if is_v7(*id)
+                    && is_v7(*workspace_id)
+                    && valid_text(title, MAX_TITLE_CHARS, false)
+                    && valid_optional(objective.as_ref(), 10_000)
+                    && valid_optional(next_action.as_ref(), 500)
+                    && (0..=3).contains(risk_level)
+                {
+                    Ok(())
+                } else {
+                    Err(StorageError::InvalidConfiguration)
+                }
+            }
+            Self::UpdateProject {
+                id,
+                title,
+                objective,
+                risk_level,
+                next_action,
+                expected_version,
+                ..
+            } => {
+                if is_v7(*id)
+                    && valid_text(title, MAX_TITLE_CHARS, false)
+                    && valid_optional(objective.as_ref(), 10_000)
+                    && valid_optional(next_action.as_ref(), 500)
+                    && (0..=3).contains(risk_level)
+                    && *expected_version > 0
+                {
+                    Ok(())
+                } else {
+                    Err(StorageError::InvalidConfiguration)
+                }
+            }
+        }
+    }
+
+    const fn action_type(&self) -> &'static str {
+        match self {
+            Self::CreateTask { .. } => "create_task",
+            Self::UpdateTask { .. }
+            | Self::SetTaskStatus {
+                status: TaskStatus::Open,
+                ..
+            } => "update_task",
+            Self::SetTaskStatus {
+                status: TaskStatus::Completed,
+                ..
+            } => "complete_task",
+            Self::SetTaskStatus {
+                status: TaskStatus::Cancelled,
+                ..
+            } => "cancel_task",
+            Self::CreateSchedule { .. } => "create_schedule",
+            Self::UpdateSchedule { .. } => "update_schedule",
+            Self::CancelSchedule { .. } => "cancel_schedule",
+            Self::CreateProject { .. } => "create_project",
+            Self::UpdateProject { .. } => "update_project",
+        }
+    }
+
+    const fn entity_id(&self) -> Uuid {
+        match self {
+            Self::CreateTask { id, .. }
+            | Self::UpdateTask { id, .. }
+            | Self::SetTaskStatus { id, .. }
+            | Self::CreateSchedule { id, .. }
+            | Self::UpdateSchedule { id, .. }
+            | Self::CancelSchedule { id, .. }
+            | Self::CreateProject { id, .. }
+            | Self::UpdateProject { id, .. } => *id,
+        }
+    }
 }
 
 impl PendingAgentAction {
@@ -2060,6 +2327,57 @@ impl Database {
         content: &str,
         presentation: Option<&AssistantPresentation>,
     ) -> Result<bool, StorageError> {
+        self.complete_agent_job_inner(
+            job_id,
+            runner_id,
+            assistant_message_id,
+            content,
+            presentation,
+            None,
+        )
+        .await
+    }
+
+    /// Atomically commits one validated planning mutation with the final
+    /// assistant response. A stale entity version or foreign entity rolls the
+    /// whole transaction back, so the client never sees a success message for
+    /// a change that did not happen.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::IdentityConflict`] for a stale or inaccessible
+    /// target and classified persistence errors for unavailable storage.
+    pub async fn complete_agent_job_with_action(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+        assistant_message_id: Uuid,
+        content: &str,
+        presentation: Option<&AssistantPresentation>,
+        action: &AgentActionCommand,
+    ) -> Result<bool, StorageError> {
+        action.validate()?;
+        self.complete_agent_job_inner(
+            job_id,
+            runner_id,
+            assistant_message_id,
+            content,
+            presentation,
+            Some(action),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_lines)] // One transaction intentionally owns action, job, message, conversation, and sync writes.
+    async fn complete_agent_job_inner(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+        assistant_message_id: Uuid,
+        content: &str,
+        presentation: Option<&AssistantPresentation>,
+        action: Option<&AgentActionCommand>,
+    ) -> Result<bool, StorageError> {
         if !is_v7(job_id)
             || !is_v7(assistant_message_id)
             || !valid_runner_id(runner_id)
@@ -2086,12 +2404,17 @@ impl Database {
                 phase = NULL,
                 claim_owner = NULL,
                 claim_expires_at = NULL,
+                executed_action_type = $3,
+                executed_entity_id = $4,
+                executed_at = CASE WHEN $3::text IS NULL THEN NULL ELSE NOW() END,
                 finished_at = NOW()
             WHERE id = $1 AND claim_owner = $2 AND state = 'running'
             RETURNING user_id, conversation_id, version",
         )
         .bind(job_id)
         .bind(runner_id)
+        .bind(action.map(AgentActionCommand::action_type))
+        .bind(action.map(AgentActionCommand::entity_id))
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|error| classify(&error))?;
@@ -2102,6 +2425,9 @@ impl Database {
                 .map_err(|error| classify(&error))?;
             return Ok(false);
         };
+        if let Some(action) = action {
+            persist_agent_action(&mut transaction, user_id, action).await?;
+        }
         let message_version = sqlx::query_scalar::<_, i64>(
             "\
             INSERT INTO messages (
@@ -2305,6 +2631,265 @@ impl Database {
             .map_err(|error| classify(&error))?;
         Ok(true)
     }
+}
+
+#[allow(clippy::too_many_lines)] // The exhaustive match keeps each atomic SQL mutation visibly tied to its action contract.
+async fn persist_agent_action(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    action: &AgentActionCommand,
+) -> Result<(), StorageError> {
+    let (entity_type, entity_id, version) = match action {
+        AgentActionCommand::CreateTask {
+            id,
+            project_id,
+            title,
+            notes,
+            priority,
+            due_at,
+        } => {
+            let version = sqlx::query_scalar::<_, i64>(
+                "\
+                INSERT INTO tasks (
+                    id, user_id, project_id, title, notes, status, priority, due_at
+                )
+                SELECT $1, $2, $3, $4, $5, 'open', $6, $7
+                WHERE $3::uuid IS NULL OR EXISTS (
+                    SELECT 1 FROM projects WHERE id = $3 AND user_id = $2
+                )
+                RETURNING version",
+            )
+            .bind(id)
+            .bind(user_id)
+            .bind(project_id)
+            .bind(title.trim())
+            .bind(trim_optional_text(notes.as_deref()))
+            .bind(priority)
+            .bind(due_at)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|error| classify(&error))?
+            .ok_or(StorageError::IdentityConflict)?;
+            ("task", *id, version)
+        }
+        AgentActionCommand::UpdateTask {
+            id,
+            project_id,
+            title,
+            notes,
+            priority,
+            due_at,
+            expected_version,
+        } => {
+            let version = sqlx::query_scalar::<_, i64>(
+                "\
+                UPDATE tasks
+                SET project_id = $3, title = $4, notes = $5, priority = $6, due_at = $7
+                WHERE id = $1 AND user_id = $2 AND status = 'open' AND version = $8
+                  AND ($3::uuid IS NULL OR EXISTS (
+                      SELECT 1 FROM projects WHERE id = $3 AND user_id = $2
+                  ))
+                RETURNING version",
+            )
+            .bind(id)
+            .bind(user_id)
+            .bind(project_id)
+            .bind(title.trim())
+            .bind(trim_optional_text(notes.as_deref()))
+            .bind(priority)
+            .bind(due_at)
+            .bind(expected_version)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|error| classify(&error))?
+            .ok_or(StorageError::IdentityConflict)?;
+            ("task", *id, version)
+        }
+        AgentActionCommand::SetTaskStatus {
+            id,
+            status,
+            expected_version,
+        } => {
+            let status = match status {
+                TaskStatus::Completed => "completed",
+                TaskStatus::Cancelled => "cancelled",
+                TaskStatus::Open => return Err(StorageError::InvalidConfiguration),
+            };
+            let version = sqlx::query_scalar::<_, i64>(
+                "\
+                UPDATE tasks
+                SET status = $3,
+                    completed_at = CASE WHEN $3 = 'completed' THEN NOW() ELSE NULL END
+                WHERE id = $1 AND user_id = $2 AND status = 'open' AND version = $4
+                RETURNING version",
+            )
+            .bind(id)
+            .bind(user_id)
+            .bind(status)
+            .bind(expected_version)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|error| classify(&error))?
+            .ok_or(StorageError::IdentityConflict)?;
+            ("task", *id, version)
+        }
+        AgentActionCommand::CreateSchedule {
+            id,
+            title,
+            notes,
+            starts_at,
+            ends_at,
+            time_zone,
+        } => {
+            let version = sqlx::query_scalar::<_, i64>(
+                "\
+                INSERT INTO schedule_entries (
+                    id, user_id, title, notes, starts_at, ends_at, time_zone, source, status
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'manual', 'confirmed')
+                RETURNING version",
+            )
+            .bind(id)
+            .bind(user_id)
+            .bind(title.trim())
+            .bind(trim_optional_text(notes.as_deref()))
+            .bind(starts_at)
+            .bind(ends_at)
+            .bind(time_zone.trim())
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(|error| classify(&error))?;
+            ("schedule_entry", *id, version)
+        }
+        AgentActionCommand::UpdateSchedule {
+            id,
+            title,
+            notes,
+            starts_at,
+            ends_at,
+            time_zone,
+            expected_version,
+        } => {
+            let version = sqlx::query_scalar::<_, i64>(
+                "\
+                UPDATE schedule_entries
+                SET title = $3, notes = $4, starts_at = $5, ends_at = $6, time_zone = $7
+                WHERE id = $1 AND user_id = $2 AND source = 'manual'
+                  AND status = 'confirmed' AND version = $8
+                RETURNING version",
+            )
+            .bind(id)
+            .bind(user_id)
+            .bind(title.trim())
+            .bind(trim_optional_text(notes.as_deref()))
+            .bind(starts_at)
+            .bind(ends_at)
+            .bind(time_zone.trim())
+            .bind(expected_version)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|error| classify(&error))?
+            .ok_or(StorageError::IdentityConflict)?;
+            ("schedule_entry", *id, version)
+        }
+        AgentActionCommand::CancelSchedule {
+            id,
+            expected_version,
+        } => {
+            let version = sqlx::query_scalar::<_, i64>(
+                "\
+                UPDATE schedule_entries
+                SET status = 'cancelled'
+                WHERE id = $1 AND user_id = $2 AND source = 'manual'
+                  AND status = 'confirmed' AND version = $3
+                RETURNING version",
+            )
+            .bind(id)
+            .bind(user_id)
+            .bind(expected_version)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|error| classify(&error))?
+            .ok_or(StorageError::IdentityConflict)?;
+            ("schedule_entry", *id, version)
+        }
+        AgentActionCommand::CreateProject {
+            id,
+            workspace_id,
+            title,
+            objective,
+            risk_level,
+            next_action,
+            due_at,
+        } => {
+            let version = sqlx::query_scalar::<_, i64>(
+                "\
+                INSERT INTO projects (
+                    id, user_id, workspace_id, title, objective, status,
+                    risk_level, next_action, due_at
+                )
+                SELECT $1, $2, workspaces.id, $4, $5, 'active', $6, $7, $8
+                FROM workspaces
+                WHERE workspaces.id = $3 AND workspaces.user_id = $2
+                RETURNING version",
+            )
+            .bind(id)
+            .bind(user_id)
+            .bind(workspace_id)
+            .bind(title.trim())
+            .bind(trim_optional_text(objective.as_deref()))
+            .bind(risk_level)
+            .bind(trim_optional_text(next_action.as_deref()))
+            .bind(due_at)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|error| classify(&error))?
+            .ok_or(StorageError::IdentityConflict)?;
+            ("project", *id, version)
+        }
+        AgentActionCommand::UpdateProject {
+            id,
+            title,
+            objective,
+            status,
+            risk_level,
+            next_action,
+            due_at,
+            expected_version,
+        } => {
+            let status = match status {
+                ProjectStatus::Active => "active",
+                ProjectStatus::Paused => "paused",
+                ProjectStatus::Completed => "completed",
+            };
+            let version = sqlx::query_scalar::<_, i64>(
+                "\
+                UPDATE projects
+                SET title = $3, objective = $4, status = $5,
+                    risk_level = $6, next_action = $7, due_at = $8
+                WHERE id = $1 AND user_id = $2 AND version = $9
+                RETURNING version",
+            )
+            .bind(id)
+            .bind(user_id)
+            .bind(title.trim())
+            .bind(trim_optional_text(objective.as_deref()))
+            .bind(status)
+            .bind(risk_level)
+            .bind(trim_optional_text(next_action.as_deref()))
+            .bind(due_at)
+            .bind(expected_version)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|error| classify(&error))?
+            .ok_or(StorageError::IdentityConflict)?;
+            ("project", *id, version)
+        }
+    };
+    append_change(transaction, user_id, entity_type, entity_id, version).await
+}
+
+fn trim_optional_text(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 async fn persist_approved_agent_action(
