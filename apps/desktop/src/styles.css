@@ -451,6 +451,7 @@ svg {
 }
 
 .home-greeting,
+.home-command,
 .home-briefing,
 .home-page > .inline-alert {
   grid-column: 1 / -1;
@@ -507,6 +508,7 @@ svg {
 }
 
 .home-briefing,
+.home-command,
 .home-voice-callout,
 .home-next-schedule,
 .home-task-surface,
@@ -520,6 +522,108 @@ svg {
   border-radius: var(--radius-panel);
   background: var(--surface);
   box-shadow: var(--shadow-panel);
+}
+
+.home-command {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+}
+
+.home-command__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.home-command__heading h2,
+.home-command__heading p {
+  margin: 0;
+}
+
+.home-command__heading h2 {
+  color: var(--text-strong);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.home-command__heading p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.home-command__heading > span {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.home-command__form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 48px;
+  gap: 8px;
+}
+
+.home-command__form input {
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  padding: 11px 14px;
+  background: var(--surface);
+  color: var(--text-strong);
+  font-size: 16px;
+  outline: 0;
+}
+
+.home-command__form input:focus {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 2px var(--accent-tint);
+}
+
+.home-command__form .primary-button {
+  width: 48px;
+  min-width: 48px;
+  padding-inline: 0;
+}
+
+.home-command__result {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+
+.home-command__result strong,
+.home-command__result p {
+  margin: 0;
+}
+
+.home-command__result strong {
+  color: var(--text-strong);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.home-command__result p {
+  display: -webkit-box;
+  overflow: hidden;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
 
 .home-briefing {
@@ -1453,7 +1557,8 @@ svg {
   font-size: 14px;
 }
 
-.project-create-form label {
+.project-create-form label,
+.project-edit-form label {
   display: grid;
   gap: 8px;
   color: var(--text);
@@ -1464,6 +1569,9 @@ svg {
 .project-create-form input,
 .project-create-form textarea,
 .project-create-form select,
+.project-edit-form input,
+.project-edit-form textarea,
+.project-edit-form select,
 .project-task-form input {
   width: 100%;
   min-height: 44px;
@@ -1475,7 +1583,8 @@ svg {
   outline: 0;
 }
 
-.project-create-form textarea {
+.project-create-form textarea,
+.project-edit-form textarea {
   min-height: 96px;
   resize: vertical;
 }
@@ -1483,6 +1592,9 @@ svg {
 .project-create-form input:focus,
 .project-create-form textarea:focus,
 .project-create-form select:focus,
+.project-edit-form input:focus,
+.project-edit-form textarea:focus,
+.project-edit-form select:focus,
 .project-task-form input:focus {
   border-color: var(--focus);
   box-shadow: 0 0 0 2px var(--accent-tint);
@@ -1490,7 +1602,7 @@ svg {
 
 .project-create-form__split {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 180px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -1606,7 +1718,6 @@ svg {
   font-variant-numeric: tabular-nums;
 }
 
-.project-list__meta > span:first-child,
 .project-risk {
   display: inline-flex;
   align-items: center;
@@ -1616,7 +1727,6 @@ svg {
   font-weight: 500;
 }
 
-.project-list__meta > span[data-risk="3"],
 .project-risk[data-risk="3"] {
   color: var(--danger);
 }
@@ -1649,6 +1759,86 @@ svg {
 
 .project-detail__heading h2 {
   font-size: 20px;
+}
+
+.project-detail__heading-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.project-detail__heading-actions .secondary-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.project-detail__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  border-block: 1px solid var(--border);
+  padding-block: 12px;
+}
+
+.project-detail__meta > span {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.project-detail__meta strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.project-detail__meta svg {
+  width: 16px;
+  height: 16px;
+  color: var(--faint);
+}
+
+.project-edit-form {
+  display: grid;
+  gap: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: 16px;
+  background: var(--surface-subtle);
+}
+
+.project-edit-form__heading h3 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.project-edit-form__heading p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.project-edit-form__fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.project-edit-form__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.project-save-status {
+  margin: -8px 0 0;
+  color: var(--success);
+  font-size: 13px;
 }
 
 .project-next-action {
@@ -1777,6 +1967,37 @@ svg {
 .primary-button svg {
   width: 18px;
   height: 18px;
+}
+
+.secondary-button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  padding: 9px 14px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    color 160ms ease;
+}
+
+.secondary-button:hover {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  color: var(--text-strong);
+}
+
+.secondary-button svg {
+  width: 17px;
+  height: 17px;
 }
 
 .settings-list {
@@ -2830,6 +3051,23 @@ svg {
     gap: 16px;
   }
 
+  .home-command {
+    padding: 16px;
+  }
+
+  .home-command__heading > span {
+    display: none;
+  }
+
+  .home-command__result {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .home-command__result .secondary-button {
+    width: 100%;
+  }
+
   .projects-heading {
     align-items: flex-start;
     flex-direction: column;
@@ -2840,13 +3078,32 @@ svg {
   }
 
   .projects-layout,
-  .project-create-form__split {
+  .project-create-form__split,
+  .project-edit-form__fields {
     grid-template-columns: minmax(0, 1fr);
   }
 
   .project-create-form,
   .project-detail {
     padding: 16px;
+  }
+
+  .project-detail__heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .project-detail__heading-actions {
+    justify-content: space-between;
+  }
+
+  .project-detail__heading-actions .secondary-button {
+    min-width: 0;
+  }
+
+  .project-edit-form__actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .project-list__item {
@@ -3173,6 +3430,7 @@ svg {
 
   .assistant-starters {
     gap: 8px;
+    flex: 0 0 auto;
   }
 
   .assistant-starter-list {

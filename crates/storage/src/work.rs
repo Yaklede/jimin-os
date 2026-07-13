@@ -60,6 +60,21 @@ pub struct NewProject {
     pub due_at: Option<OffsetDateTime>,
 }
 
+/// A complete, version-checked replacement of the mutable project fields.
+/// Keeping the update complete prevents ambiguous partial-null semantics at
+/// the API boundary and makes concurrent edits visible to the client.
+pub struct ProjectUpdate {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub title: String,
+    pub objective: Option<String>,
+    pub status: ProjectStatus,
+    pub risk_level: i16,
+    pub next_action: Option<String>,
+    pub due_at: Option<OffsetDateTime>,
+    pub expected_version: i64,
+}
+
 impl NewProject {
     /// Validates a project before database access.
     ///
@@ -79,6 +94,34 @@ impl NewProject {
                 .as_deref()
                 .is_none_or(|value| valid_text(value, MAX_NEXT_ACTION_CHARS, true))
             || !(0..=3).contains(&self.risk_level)
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
+impl ProjectUpdate {
+    /// Validates all mutable project fields before database access.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed IDs,
+    /// text, risk, or optimistic version values.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        if !is_v7(self.id)
+            || !is_v7(self.user_id)
+            || !valid_text(&self.title, MAX_TITLE_CHARS, false)
+            || !self
+                .objective
+                .as_deref()
+                .is_none_or(|value| valid_text(value, MAX_OBJECTIVE_CHARS, true))
+            || !self
+                .next_action
+                .as_deref()
+                .is_none_or(|value| valid_text(value, MAX_NEXT_ACTION_CHARS, true))
+            || !(0..=3).contains(&self.risk_level)
+            || self.expected_version <= 0
         {
             return Err(StorageError::InvalidConfiguration);
         }
@@ -220,6 +263,64 @@ impl Database {
         Ok(project)
     }
 
+    /// Replaces the mutable fields of one owned project when its version still
+    /// matches. Missing, foreign, or concurrently changed records return
+    /// `Ok(None)` without revealing which condition occurred.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed input and
+    /// a classified persistence error for database failures.
+    pub async fn update_project(
+        &self,
+        update: &ProjectUpdate,
+    ) -> Result<Option<Project>, StorageError> {
+        update.validate()?;
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let row = sqlx::query_as::<_, ProjectRow>(
+            "\
+            UPDATE projects
+            SET title = $1,
+                objective = $2,
+                status = $3,
+                risk_level = $4,
+                next_action = $5,
+                due_at = $6
+            WHERE id = $7 AND user_id = $8 AND version = $9
+            RETURNING id, workspace_id, title, objective, status, risk_level, next_action, due_at,
+                (SELECT COUNT(*)::BIGINT FROM tasks
+                 WHERE tasks.project_id = projects.id AND tasks.status = 'open') AS open_task_count,
+                version",
+        )
+        .bind(update.title.trim())
+        .bind(trim_optional(update.objective.as_ref()))
+        .bind(project_status_name(update.status))
+        .bind(update.risk_level)
+        .bind(trim_optional(update.next_action.as_ref()))
+        .bind(update.due_at)
+        .bind(update.id)
+        .bind(update.user_id)
+        .bind(update.expected_version)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some(row) = row else {
+            transaction.commit().await.map_err(classify)?;
+            return Ok(None);
+        };
+        let project = Project::try_from(row)?;
+        append_change(
+            &mut transaction,
+            update.user_id,
+            "project",
+            project.id,
+            project.version,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        Ok(Some(project))
+    }
+
     /// Lists projects in one owned workspace with their open work-item count.
     ///
     /// # Errors
@@ -301,6 +402,14 @@ fn trim_optional(value: Option<&String>) -> Option<&str> {
     value
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
+}
+
+const fn project_status_name(status: ProjectStatus) -> &'static str {
+    match status {
+        ProjectStatus::Active => "active",
+        ProjectStatus::Paused => "paused",
+        ProjectStatus::Completed => "completed",
+    }
 }
 
 fn is_v7(value: Uuid) -> bool {

@@ -1,10 +1,12 @@
 import {
   BriefcaseBusiness,
+  CalendarDays,
   ChevronRight,
   Circle,
   CircleAlert,
   FolderKanban,
   ListTodo,
+  Pencil,
   Plus,
 } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
@@ -35,7 +37,19 @@ type ProjectsWorkspaceProps = {
     objective?: string;
     riskLevel: number;
     nextAction?: string;
+    dueAt?: string;
   }): Promise<void>;
+  onUpdateProject(
+    project: Project,
+    input: {
+      title: string;
+      objective?: string;
+      status: Project["status"];
+      riskLevel: number;
+      nextAction?: string;
+      dueAt?: string;
+    },
+  ): Promise<void>;
   onCreateTask(title: string): Promise<void>;
   onCompleteTask(task: Task): Promise<void>;
 };
@@ -52,6 +66,7 @@ export function ProjectsWorkspace({
   onSelectWorkspace,
   onSelectProject,
   onCreateProject,
+  onUpdateProject,
   onCreateTask,
   onCompleteTask,
 }: ProjectsWorkspaceProps) {
@@ -60,8 +75,11 @@ export function ProjectsWorkspace({
   const [objective, setObjective] = useState("");
   const [nextAction, setNextAction] = useState("");
   const [riskLevel, setRiskLevel] = useState("0");
+  const [dueDate, setDueDate] = useState("");
   const [taskTitle, setTaskTitle] = useState("");
   const [formError, setFormError] = useState<string>();
+  const [editingProjectId, setEditingProjectId] = useState<string>();
+  const [savedProjectId, setSavedProjectId] = useState<string>();
   const skeletonVisible = useDelayedSkeleton(loading);
   const showingSkeleton = loading || skeletonVisible;
 
@@ -71,6 +89,8 @@ export function ProjectsWorkspace({
 
   useEffect(() => {
     setTaskTitle("");
+    setEditingProjectId(undefined);
+    setSavedProjectId(undefined);
   }, [selectedProjectId]);
 
   async function submitProject(event: FormEvent<HTMLFormElement>) {
@@ -86,11 +106,13 @@ export function ProjectsWorkspace({
         objective: objective.trim() || undefined,
         riskLevel: Number(riskLevel),
         nextAction: nextAction.trim() || undefined,
+        dueAt: dateInputToIso(dueDate),
       });
       setTitle("");
       setObjective("");
       setNextAction("");
       setRiskLevel("0");
+      setDueDate("");
       setFormOpen(false);
     } catch {
       setFormError(copy.projects.projectSaveNotice);
@@ -196,18 +218,18 @@ export function ProjectsWorkspace({
               rows={3}
             />
           </label>
+          <label htmlFor="project-next-action">
+            <span>{copy.projects.nextActionLabel}</span>
+            <input
+              id="project-next-action"
+              value={nextAction}
+              onChange={(event) => setNextAction(event.target.value)}
+              disabled={saving}
+              maxLength={500}
+              placeholder={copy.projects.nextActionHint}
+            />
+          </label>
           <div className="project-create-form__split">
-            <label htmlFor="project-next-action">
-              <span>{copy.projects.nextActionLabel}</span>
-              <input
-                id="project-next-action"
-                value={nextAction}
-                onChange={(event) => setNextAction(event.target.value)}
-                disabled={saving}
-                maxLength={500}
-                placeholder={copy.projects.nextActionHint}
-              />
-            </label>
             <label htmlFor="project-risk-level">
               <span>{copy.projects.riskLabel}</span>
               <select
@@ -221,6 +243,16 @@ export function ProjectsWorkspace({
                 <option value="2">{copy.projects.riskLevels[2]}</option>
                 <option value="3">{copy.projects.riskLevels[3]}</option>
               </select>
+            </label>
+            <label htmlFor="project-due-date">
+              <span>{copy.projects.dueDateLabel}</span>
+              <input
+                id="project-due-date"
+                type="date"
+                value={dueDate}
+                onChange={(event) => setDueDate(event.target.value)}
+                disabled={saving}
+              />
             </label>
           </div>
           <div className="project-create-form__actions">
@@ -268,7 +300,11 @@ export function ProjectsWorkspace({
                       className="project-list__item focus-visible-control"
                       data-active={project.id === selectedProjectId}
                       type="button"
-                      onClick={() => onSelectProject(project.id)}
+                      onClick={() => {
+                        setEditingProjectId(undefined);
+                        setSavedProjectId(undefined);
+                        onSelectProject(project.id);
+                      }}
                     >
                       <span className="project-list__main">
                         <strong>{project.title}</strong>
@@ -280,11 +316,17 @@ export function ProjectsWorkspace({
                       </span>
                       <span className="project-list__meta">
                         {project.riskLevel > 0 && (
-                          <span data-risk={project.riskLevel}>
+                          <span
+                            className="project-risk"
+                            data-risk={project.riskLevel}
+                          >
                             <CircleAlert aria-hidden="true" />
                             {riskLabel(project.riskLevel)}
                           </span>
                         )}
+                        <span className="project-status">
+                          {statusLabel(project.status)}
+                        </span>
                         <span>
                           {copy.projects.openTaskCount(project.openTaskCount)}
                         </span>
@@ -313,28 +355,84 @@ export function ProjectsWorkspace({
             <>
               <div className="project-detail__heading">
                 <div>
-                  <p>{copy.projects.nextActionLabel}</p>
+                  <p>{copy.projects.projectDetailLabel}</p>
                   <h2 id="project-detail-title">{selectedProject.title}</h2>
                   <span>
                     {selectedProject.objective || copy.projects.objectiveEmpty}
                   </span>
                 </div>
-                {selectedProject.riskLevel > 0 && (
-                  <span
-                    className="project-risk"
-                    data-risk={selectedProject.riskLevel}
+                <div className="project-detail__heading-actions">
+                  {selectedProject.riskLevel > 0 && (
+                    <span
+                      className="project-risk"
+                      data-risk={selectedProject.riskLevel}
+                    >
+                      <CircleAlert aria-hidden="true" />
+                      {riskLabel(selectedProject.riskLevel)}
+                    </span>
+                  )}
+                  <button
+                    className="secondary-button focus-visible-control"
+                    type="button"
+                    disabled={saving}
+                    onClick={() => {
+                      setFormError(undefined);
+                      setSavedProjectId(undefined);
+                      setEditingProjectId(selectedProject.id);
+                    }}
                   >
-                    <CircleAlert aria-hidden="true" />
-                    {riskLabel(selectedProject.riskLevel)}
-                  </span>
-                )}
+                    <Pencil aria-hidden="true" />
+                    {copy.projects.editProject}
+                  </button>
+                </div>
               </div>
-              <div className="project-next-action">
-                <span>{copy.projects.nextActionLabel}</span>
-                <strong>
-                  {selectedProject.nextAction || copy.projects.noNextAction}
-                </strong>
+              <div
+                className="project-detail__meta"
+                aria-label={copy.projects.currentStateLabel}
+              >
+                <span>
+                  <strong>{copy.projects.statusLabel}</strong>
+                  {statusLabel(selectedProject.status)}
+                </span>
+                <span>
+                  <CalendarDays aria-hidden="true" />
+                  <strong>{copy.projects.dueDateLabel}</strong>
+                  {formatDueDate(selectedProject.dueAt)}
+                </span>
               </div>
+              {editingProjectId === selectedProject.id ? (
+                <ProjectEditForm
+                  key={`${selectedProject.id}:${selectedProject.version}`}
+                  project={selectedProject}
+                  saving={saving}
+                  onCancel={() => {
+                    setFormError(undefined);
+                    setEditingProjectId(undefined);
+                  }}
+                  onSave={async (input) => {
+                    setFormError(undefined);
+                    try {
+                      await onUpdateProject(selectedProject, input);
+                      setEditingProjectId(undefined);
+                      setSavedProjectId(selectedProject.id);
+                    } catch {
+                      setFormError(copy.projects.projectUpdateNotice);
+                    }
+                  }}
+                />
+              ) : (
+                <div className="project-next-action">
+                  <span>{copy.projects.nextActionLabel}</span>
+                  <strong>
+                    {selectedProject.nextAction || copy.projects.noNextAction}
+                  </strong>
+                </div>
+              )}
+              {savedProjectId === selectedProject.id && (
+                <p className="project-save-status" role="status">
+                  {copy.projects.projectUpdated}
+                </p>
+              )}
               <div className="project-detail__tasks">
                 <div className="projects-section-heading">
                   <div>
@@ -376,18 +474,27 @@ export function ProjectsWorkspace({
                     id="project-task-title"
                     value={taskTitle}
                     onChange={(event) => setTaskTitle(event.target.value)}
-                    disabled={saving}
+                    disabled={saving || selectedProject.status === "completed"}
                     maxLength={200}
                     placeholder={copy.projects.workItemHint}
                   />
                   <button
                     className="secondary-button focus-visible-control"
                     type="submit"
-                    disabled={saving || !taskTitle.trim()}
+                    disabled={
+                      saving ||
+                      selectedProject.status === "completed" ||
+                      !taskTitle.trim()
+                    }
                   >
                     {copy.actions.addWorkItem}
                   </button>
                 </form>
+                {selectedProject.status === "completed" && (
+                  <p className="project-detail__empty">
+                    {copy.projects.completedProjectNotice}
+                  </p>
+                )}
               </div>
             </>
           ) : (
@@ -399,6 +506,162 @@ export function ProjectsWorkspace({
         </section>
       </div>
     </section>
+  );
+}
+
+function ProjectEditForm({
+  project,
+  saving,
+  onCancel,
+  onSave,
+}: {
+  project: Project;
+  saving: boolean;
+  onCancel(): void;
+  onSave(input: {
+    title: string;
+    objective?: string;
+    status: Project["status"];
+    riskLevel: number;
+    nextAction?: string;
+    dueAt?: string;
+  }): Promise<void>;
+}) {
+  const [title, setTitle] = useState(project.title);
+  const [objective, setObjective] = useState(project.objective ?? "");
+  const [status, setStatus] = useState<Project["status"]>(project.status);
+  const [riskLevel, setRiskLevel] = useState(String(project.riskLevel));
+  const [nextAction, setNextAction] = useState(project.nextAction ?? "");
+  const [dueDate, setDueDate] = useState(isoToDateInput(project.dueAt));
+  const [error, setError] = useState<string>();
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!title.trim()) {
+      setError(copy.projects.titleRequired);
+      return;
+    }
+    setError(undefined);
+    await onSave({
+      title: title.trim(),
+      objective: objective.trim() || undefined,
+      status,
+      riskLevel: Number(riskLevel),
+      nextAction: nextAction.trim() || undefined,
+      dueAt: dateInputToIso(dueDate),
+    });
+  }
+
+  return (
+    <form
+      className="project-edit-form"
+      aria-labelledby="project-edit-title"
+      onSubmit={(event) => void submit(event)}
+    >
+      <div className="project-edit-form__heading">
+        <div>
+          <h3 id="project-edit-title">{copy.projects.editTitle}</h3>
+          <p>{copy.projects.editDescription}</p>
+        </div>
+      </div>
+      {error && (
+        <p className="inline-alert" role="alert">
+          {error}
+        </p>
+      )}
+      <label htmlFor="project-edit-name">
+        <span>{copy.projects.projectNameLabel}</span>
+        <input
+          id="project-edit-name"
+          value={title}
+          maxLength={200}
+          disabled={saving}
+          onChange={(event) => setTitle(event.target.value)}
+        />
+      </label>
+      <label htmlFor="project-edit-objective">
+        <span>{copy.projects.objectiveLabel}</span>
+        <textarea
+          id="project-edit-objective"
+          value={objective}
+          maxLength={10_000}
+          rows={3}
+          disabled={saving}
+          onChange={(event) => setObjective(event.target.value)}
+        />
+      </label>
+      <label htmlFor="project-edit-next-action">
+        <span>{copy.projects.nextActionLabel}</span>
+        <input
+          id="project-edit-next-action"
+          value={nextAction}
+          maxLength={500}
+          disabled={saving}
+          onChange={(event) => setNextAction(event.target.value)}
+        />
+      </label>
+      <div className="project-edit-form__fields">
+        <label htmlFor="project-edit-status">
+          <span>{copy.projects.statusLabel}</span>
+          <select
+            id="project-edit-status"
+            value={status}
+            disabled={saving}
+            onChange={(event) =>
+              setStatus(event.target.value as Project["status"])
+            }
+          >
+            <option value="active">{copy.projects.statuses.active}</option>
+            <option value="paused">{copy.projects.statuses.paused}</option>
+            <option value="completed">
+              {copy.projects.statuses.completed}
+            </option>
+          </select>
+        </label>
+        <label htmlFor="project-edit-risk">
+          <span>{copy.projects.riskLabel}</span>
+          <select
+            id="project-edit-risk"
+            value={riskLevel}
+            disabled={saving}
+            onChange={(event) => setRiskLevel(event.target.value)}
+          >
+            {copy.projects.riskLevels.map((label, level) => (
+              <option key={label} value={level}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label htmlFor="project-edit-due-date">
+          <span>{copy.projects.dueDateLabel}</span>
+          <input
+            id="project-edit-due-date"
+            type="date"
+            value={dueDate}
+            disabled={saving}
+            onChange={(event) => setDueDate(event.target.value)}
+          />
+        </label>
+      </div>
+      <div className="project-edit-form__actions">
+        <button
+          className="secondary-button focus-visible-control"
+          type="button"
+          disabled={saving}
+          onClick={onCancel}
+        >
+          {copy.projects.stopEditing}
+        </button>
+        <button
+          className="primary-button focus-visible-control"
+          type="submit"
+          disabled={saving}
+        >
+          {saving ? copy.actions.saving : copy.projects.saveChanges}
+        </button>
+      </div>
+    </form>
   );
 }
 
@@ -481,4 +744,31 @@ function ProjectDetailSkeleton({ visible }: { visible: boolean }) {
 
 function riskLabel(level: number): string {
   return copy.projects.riskLevels[level] || copy.projects.riskLevels[0];
+}
+
+function statusLabel(status: Project["status"]): string {
+  return copy.projects.statuses[status];
+}
+
+function dateInputToIso(value: string): string | undefined {
+  if (!value) return undefined;
+  const due = new Date(`${value}T23:59:59`);
+  return Number.isNaN(due.getTime()) ? undefined : due.toISOString();
+}
+
+function isoToDateInput(value: string | null): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatDueDate(value: string | null): string {
+  if (!value) return copy.projects.noDueDate;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return copy.projects.noDueDate;
+  return new Intl.DateTimeFormat("ko-KR", { dateStyle: "medium" }).format(date);
 }

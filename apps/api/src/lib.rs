@@ -35,7 +35,7 @@ use jimin_storage::{
     planning::{
         NewScheduleEntry, NewTask, ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus,
     },
-    work::{NewProject, Project, ProjectStatus, Workspace, WorkspaceScope},
+    work::{NewProject, Project, ProjectStatus, ProjectUpdate, Workspace, WorkspaceScope},
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -594,6 +594,18 @@ struct CreateProjectRequest {
 
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UpdateProjectRequest {
+    title: String,
+    objective: Option<String>,
+    status: String,
+    risk_level: i16,
+    next_action: Option<String>,
+    due_at: Option<String>,
+    expected_version: i64,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ProjectListQuery {
     workspace_id: uuid::Uuid,
 }
@@ -706,6 +718,7 @@ pub(crate) fn error_response(
         list_workspaces,
         list_projects,
         create_project,
+        update_project,
         list_open_tasks,
         create_task,
         complete_task,
@@ -767,6 +780,7 @@ pub(crate) fn error_response(
         AgentModelSettingsResponse,
         CreateConversationRequest,
         CreateProjectRequest,
+        UpdateProjectRequest,
         CreateAgentTurnRequest,
         ResolveAgentActionRequest,
         UpdateAgentModelRequest,
@@ -816,6 +830,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/home", get(get_home_snapshot))
         .route("/v1/workspaces", get(list_workspaces))
         .route("/v1/projects", get(list_projects).post(create_project))
+        .route(
+            "/v1/projects/{project_id}",
+            axum::routing::put(update_project),
+        )
         .route("/v1/tasks", get(list_open_tasks).post(create_task))
         .route(
             "/v1/tasks/{task_id}/complete",
@@ -1316,6 +1334,70 @@ async fn create_project(
             Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
             Err(()) => unavailable_response(request_id),
         },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/projects/{project_id}",
+    tag = "work",
+    params(("project_id" = String, Path)),
+    request_body = UpdateProjectRequest,
+    responses((status = 200, body = ProjectResponse), (status = 400), (status = 401), (status = 409), (status = 503))
+)]
+async fn update_project(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(project_id): Path<uuid::Uuid>,
+    Json(body): Json<UpdateProjectRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let due_at = match body.due_at {
+        Some(value) => match OffsetDateTime::parse(&value, &Rfc3339) {
+            Ok(value) => Some(value),
+            Err(_) => return invalid_request_response(request_id),
+        },
+        None => None,
+    };
+    let status = match body.status.as_str() {
+        "active" => ProjectStatus::Active,
+        "paused" => ProjectStatus::Paused,
+        "completed" => ProjectStatus::Completed,
+        _ => return invalid_request_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .update_project(&ProjectUpdate {
+            id: project_id,
+            user_id: principal.identity().user_id(),
+            title: body.title,
+            objective: body.objective,
+            status,
+            risk_level: body.risk_level,
+            next_action: body.next_action,
+            due_at,
+            expected_version: body.expected_version,
+        })
+        .await
+    {
+        Ok(Some(project)) => match project_response(project) {
+            Ok(response) => Json(response).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Ok(None) => error_response(
+            StatusCode::CONFLICT,
+            "project.version_conflict",
+            "프로젝트가 다른 곳에서 변경됐어요. 최신 상태를 확인해 주세요.",
+            request_id,
+            false,
+        ),
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -3502,6 +3584,7 @@ mod tests {
                 "/v1/home",
                 "/v1/me",
                 "/v1/projects",
+                "/v1/projects/{project_id}",
                 "/v1/schedule-entries",
                 "/v1/tasks",
                 "/v1/tasks/{task_id}/complete",
@@ -3560,7 +3643,7 @@ mod tests {
             .expect("handler should respond");
         assert_eq!(workspace_response.status(), StatusCode::UNAUTHORIZED);
 
-        let project_response = router(state)
+        let project_response = router(state.clone())
             .oneshot(
                 Request::builder()
                     .uri("/v1/projects?workspaceId=019f68cb-9400-7000-8000-000000000000")
@@ -3570,6 +3653,30 @@ mod tests {
             .await
             .expect("handler should respond");
         assert_eq!(project_response.status(), StatusCode::UNAUTHORIZED);
+
+        let project_update_response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/projects/019f68cb-9400-7000-8000-000000000001")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "title": "개인 운영체제",
+                            "objective": null,
+                            "status": "active",
+                            "riskLevel": 0,
+                            "nextAction": null,
+                            "dueAt": null,
+                            "expectedVersion": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+        assert_eq!(project_update_response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

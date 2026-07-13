@@ -5,13 +5,16 @@ import {
   Clock3,
   MessageCircleMore,
   Mic,
+  Send,
   Sparkles,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { FormEvent, useMemo, useState } from "react";
 
+import { type AgentJob, type ConversationMessage } from "../api/agent";
 import { type HomeSnapshot } from "../api/home";
 import { type ScheduleEntry, type Task } from "../api/planning";
 import { copy } from "../copy";
+import { createUuidV7 } from "../uuid";
 import {
   SkeletonBlock,
   SkeletonGroup,
@@ -22,7 +25,11 @@ type HomeWorkspaceProps = {
   snapshot: HomeSnapshot | undefined;
   loading: boolean;
   error: string | undefined;
+  assistantReady: boolean;
+  assistantJob: AgentJob | undefined;
+  assistantMessage: ConversationMessage | undefined;
   onOpenAssistant(): void;
+  onSendAssistant(text: string, clientMessageId: string): Promise<boolean>;
   onCompleteTask(task: Task): Promise<void>;
 };
 
@@ -30,7 +37,11 @@ export function HomeWorkspace({
   snapshot,
   loading,
   error,
+  assistantReady,
+  assistantJob,
+  assistantMessage,
   onOpenAssistant,
+  onSendAssistant,
   onCompleteTask,
 }: HomeWorkspaceProps) {
   const [completingTaskId, setCompletingTaskId] = useState<string>();
@@ -73,6 +84,14 @@ export function HomeWorkspace({
           {error}
         </p>
       )}
+
+      <HomeAssistantCommand
+        ready={assistantReady}
+        job={assistantJob}
+        message={assistantMessage}
+        onOpenAssistant={onOpenAssistant}
+        onSend={onSendAssistant}
+      />
 
       <button
         className="home-briefing focus-visible-control"
@@ -187,6 +206,116 @@ export function HomeWorkspace({
           )}
         </div>
       </section>
+    </section>
+  );
+}
+
+function HomeAssistantCommand({
+  ready,
+  job,
+  message,
+  onOpenAssistant,
+  onSend,
+}: {
+  ready: boolean;
+  job: AgentJob | undefined;
+  message: ConversationMessage | undefined;
+  onOpenAssistant(): void;
+  onSend(text: string, clientMessageId: string): Promise<boolean>;
+}) {
+  const [draft, setDraft] = useState("");
+  const [submitted, setSubmitted] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string>();
+  const active = Boolean(job && !isTerminalJob(job.state));
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const request = draft.trim();
+    if (!request || sending || active || !ready) return;
+    setSending(true);
+    setError(undefined);
+    const sent = await onSend(request, createUuidV7());
+    if (sent) {
+      setDraft("");
+      setSubmitted(true);
+    } else {
+      setError(copy.home.commandFailed);
+    }
+    setSending(false);
+  }
+
+  const status = submitted ? commandStatus(job, message) : undefined;
+
+  return (
+    <section className="home-command" aria-labelledby="home-command-title">
+      <div className="home-command__heading">
+        <div>
+          <h2 id="home-command-title">{copy.home.commandTitle}</h2>
+          <p>{copy.home.commandDescription}</p>
+        </div>
+        <span aria-hidden="true">
+          <Sparkles />
+        </span>
+      </div>
+      <form
+        className="home-command__form"
+        aria-busy={sending || active}
+        onSubmit={(event) => void submit(event)}
+      >
+        <label className="sr-only" htmlFor="home-assistant-command">
+          {copy.home.commandLabel}
+        </label>
+        <input
+          id="home-assistant-command"
+          value={draft}
+          maxLength={24_000}
+          placeholder={
+            ready
+              ? copy.home.commandInputPlaceholder
+              : copy.home.commandNeedsConnection
+          }
+          disabled={!ready || sending || active}
+          onChange={(event) => {
+            setDraft(event.target.value);
+            setError(undefined);
+          }}
+        />
+        <button
+          className="primary-button focus-visible-control"
+          type="submit"
+          disabled={!ready || sending || active || !draft.trim()}
+          aria-label={copy.home.commandSend}
+        >
+          {sending || active ? (
+            <span className="button-spinner" aria-hidden="true" />
+          ) : (
+            <Send aria-hidden="true" />
+          )}
+        </button>
+      </form>
+      {error && (
+        <p className="assistant-inline-alert" role="alert">
+          {error}
+        </p>
+      )}
+      {status && (
+        <div className="home-command__result" role="status" aria-live="polite">
+          <div>
+            <strong>{status.title}</strong>
+            <p>{status.description}</p>
+          </div>
+          {status.needsReview && (
+            <button
+              className="secondary-button focus-visible-control"
+              type="button"
+              onClick={onOpenAssistant}
+            >
+              {copy.home.commandReview}
+            </button>
+          )}
+        </div>
+      )}
     </section>
   );
 }
@@ -384,4 +513,41 @@ function dueLabel(value: string): string {
     month: "numeric",
     day: "numeric",
   }).format(new Date(value));
+}
+
+function isTerminalJob(state: AgentJob["state"]): boolean {
+  return ["completed", "failed", "cancelled", "declined"].includes(state);
+}
+
+function commandStatus(
+  job: AgentJob | undefined,
+  message: ConversationMessage | undefined,
+): { title: string; description: string; needsReview: boolean } | undefined {
+  if (!job) return undefined;
+  if (job.state === "waiting_approval") {
+    return {
+      title: copy.home.commandNeedsReview,
+      description: copy.home.commandNeedsReviewDescription,
+      needsReview: true,
+    };
+  }
+  if (["failed", "cancelled", "declined"].includes(job.state)) {
+    return {
+      title: copy.home.commandFailedTitle,
+      description: copy.home.commandFailed,
+      needsReview: true,
+    };
+  }
+  if (job.state === "completed") {
+    return {
+      title: copy.home.commandCompleted,
+      description: message?.content || copy.home.commandCompletedDescription,
+      needsReview: Boolean(message?.content),
+    };
+  }
+  return {
+    title: copy.home.commandProcessing,
+    description: copy.home.commandProcessingDescription,
+    needsReview: false,
+  };
 }

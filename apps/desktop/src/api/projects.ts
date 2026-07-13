@@ -64,14 +64,50 @@ export async function createProject(
     dueAt?: string;
   },
 ): Promise<Project> {
-  return request<Project>(baseUrl, access, "/v1/projects", {
-    workspaceId: input.workspaceId,
-    title: input.title,
-    objective: input.objective || null,
-    riskLevel: input.riskLevel,
-    nextAction: input.nextAction || null,
-    dueAt: input.dueAt || null,
-  });
+  return request<Project>(
+    baseUrl,
+    access,
+    "/v1/projects",
+    {
+      workspaceId: input.workspaceId,
+      title: input.title,
+      objective: input.objective || null,
+      riskLevel: input.riskLevel,
+      nextAction: input.nextAction || null,
+      dueAt: input.dueAt || null,
+    },
+    "POST",
+  );
+}
+
+export async function updateProject(
+  baseUrl: string,
+  access: string,
+  project: Project,
+  input: {
+    title: string;
+    objective?: string;
+    status: Project["status"];
+    riskLevel: number;
+    nextAction?: string;
+    dueAt?: string;
+  },
+): Promise<Project> {
+  return request<Project>(
+    baseUrl,
+    access,
+    `/v1/projects/${encodeURIComponent(project.id)}`,
+    {
+      title: input.title,
+      objective: input.objective || null,
+      status: input.status,
+      riskLevel: input.riskLevel,
+      nextAction: input.nextAction || null,
+      dueAt: input.dueAt || null,
+      expectedVersion: project.version,
+    },
+    "PUT",
+  );
 }
 
 async function requestList<T>(
@@ -99,9 +135,10 @@ async function request<T>(
   access: string,
   path: string,
   body: unknown,
+  method: "POST" | "PUT",
 ): Promise<T> {
   const response = await fetch(`${normalizeBaseUrl(baseUrl)}${path}`, {
-    method: "POST",
+    method,
     headers: {
       Accept: "application/json",
       Authorization: `Bearer ${access}`,

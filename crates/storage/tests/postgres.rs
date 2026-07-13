@@ -13,6 +13,7 @@ use jimin_storage::{
         RefreshRotation, RotateRefreshToken,
     },
     planning::{NewScheduleEntry, NewTask, TaskStatus},
+    work::{NewProject, ProjectStatus, ProjectUpdate, WorkspaceScope},
 };
 use secrecy::SecretString;
 use time::{Duration as TimeDuration, OffsetDateTime};
@@ -441,6 +442,83 @@ async fn manual_schedule_and_tasks_are_scoped_and_emit_current_state() {
             .complete_task(provisioned.profile.id, task.id, task.version)
             .await
             .expect("stale completion should not fail")
+            .is_none()
+    );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn project_update_is_scoped_versioned_and_emits_current_state() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database
+        .migrate()
+        .await
+        .expect("work migration should succeed");
+    let provisioned = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let personal = database
+        .workspaces_for_user(provisioned.profile.id)
+        .await
+        .expect("workspace query should succeed")
+        .into_iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Personal)
+        .expect("personal workspace should exist");
+    let created = database
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: provisioned.profile.id,
+            workspace_id: personal.id,
+            title: "개인 운영체제".to_owned(),
+            objective: Some("업무 맥락 정리".to_owned()),
+            risk_level: 0,
+            next_action: Some("프로젝트 수정 기능 만들기".to_owned()),
+            due_at: None,
+        })
+        .await
+        .expect("project should persist");
+    let due_at = OffsetDateTime::now_utc() + TimeDuration::days(7);
+    let updated = database
+        .update_project(&ProjectUpdate {
+            id: created.id,
+            user_id: provisioned.profile.id,
+            title: "개인 AI 비서".to_owned(),
+            objective: Some("업무 판단과 실행 연결".to_owned()),
+            status: ProjectStatus::Paused,
+            risk_level: 2,
+            next_action: Some("Webhook 계약 확정".to_owned()),
+            due_at: Some(due_at),
+            expected_version: created.version,
+        })
+        .await
+        .expect("project update should succeed")
+        .expect("matching project should update");
+    assert_eq!(updated.title, "개인 AI 비서");
+    assert_eq!(updated.status, ProjectStatus::Paused);
+    assert_eq!(updated.risk_level, 2);
+    assert_eq!(updated.due_at, Some(due_at));
+    assert!(updated.version > created.version);
+    assert!(
+        database
+            .update_project(&ProjectUpdate {
+                id: created.id,
+                user_id: provisioned.profile.id,
+                title: "오래된 수정".to_owned(),
+                objective: None,
+                status: ProjectStatus::Active,
+                risk_level: 0,
+                next_action: None,
+                due_at: None,
+                expected_version: created.version,
+            })
+            .await
+            .expect("stale project update should not fail")
             .is_none()
     );
     database.close().await;

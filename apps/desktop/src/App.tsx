@@ -14,6 +14,7 @@ import {
   fetchProjects,
   fetchProjectTasks,
   fetchWorkspaces,
+  updateProject,
   type Project,
   type Workspace,
 } from "./api/projects";
@@ -643,6 +644,7 @@ export default function App() {
     objective?: string;
     riskLevel: number;
     nextAction?: string;
+    dueAt?: string;
   }): Promise<void> {
     if (!selectedWorkspaceId) throw new Error("workspace unavailable");
     setProjectsSaving(true);
@@ -657,6 +659,37 @@ export default function App() {
       await loadProjectsForWorkspace(selectedWorkspaceId, project.id);
     } catch (error) {
       setProjectsError(copy.messages.projectSaveNotice);
+      throw error;
+    } finally {
+      setProjectsSaving(false);
+    }
+  }
+
+  async function updateWorkspaceProject(
+    project: Project,
+    input: {
+      title: string;
+      objective?: string;
+      status: Project["status"];
+      riskLevel: number;
+      nextAction?: string;
+      dueAt?: string;
+    },
+  ): Promise<void> {
+    setProjectsSaving(true);
+    setProjectsError(undefined);
+    try {
+      const updated = await withAuthenticatedSession((accessToken) =>
+        updateProject(apiBaseUrl, accessToken, project, input),
+      );
+      setProjects((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item)),
+      );
+    } catch (error) {
+      setProjectsError(copy.projects.projectUpdateNotice);
+      if (selectedWorkspaceId) {
+        void loadProjectsForWorkspace(selectedWorkspaceId, project.id);
+      }
       throw error;
     } finally {
       setProjectsSaving(false);
@@ -794,12 +827,13 @@ export default function App() {
   async function sendConversationRequest(
     text: string,
     clientMessageId: string,
+    startFresh = false,
   ): Promise<boolean> {
     if (!tokens || agentAuthentication?.state !== "ready") {
       setConversationError(copy.messages.authenticationRequired);
       return false;
     }
-    let conversationId = selectedConversationId;
+    let conversationId = startFresh ? undefined : selectedConversationId;
     setConversationError(undefined);
     try {
       if (!conversationId) {
@@ -895,6 +929,9 @@ export default function App() {
       homeSnapshot === undefined &&
       agentAuthentication === undefined &&
       conversations.length === 0);
+  const latestAssistantMessage = [...conversationMessages]
+    .reverse()
+    .find((message) => message.role === "assistant");
 
   return (
     <div
@@ -936,7 +973,17 @@ export default function App() {
               snapshot={homeSnapshot}
               loading={homeLoading || mode === "loading"}
               error={homeError ?? (mode === "error" ? message : undefined)}
+              assistantReady={agentAuthentication?.state === "ready"}
+              assistantJob={
+                selectedConversationId
+                  ? conversationJobs[selectedConversationId]
+                  : undefined
+              }
+              assistantMessage={latestAssistantMessage}
               onOpenAssistant={openNewAssistantRequest}
+              onSendAssistant={(text, clientMessageId) =>
+                sendConversationRequest(text, clientMessageId, true)
+              }
               onCompleteTask={completeHomeTask}
             />
           )}
@@ -961,6 +1008,7 @@ export default function App() {
               onSelectWorkspace={selectWorkspace}
               onSelectProject={setSelectedProjectId}
               onCreateProject={createWorkspaceProject}
+              onUpdateProject={updateWorkspaceProject}
               onCreateTask={createProjectTask}
               onCompleteTask={completeProjectTask}
             />

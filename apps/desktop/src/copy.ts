@@ -69,6 +69,24 @@ export const copy = {
   },
   home: {
     commandPlaceholder: "무엇이든 물어보거나 시켜보세요",
+    commandTitle: "바로 시키기",
+    commandDescription:
+      "일정 확인부터 일 추가까지 말하듯 적으면 바로 처리해요.",
+    commandLabel: "비서에게 바로 요청하기",
+    commandInputPlaceholder: "예: 내일 할 일에 계약서 검토 추가해 줘",
+    commandNeedsConnection: "ChatGPT를 연결하면 바로 요청할 수 있어요",
+    commandSend: "요청 보내기",
+    commandProcessing: "요청을 처리하고 있어요",
+    commandProcessingDescription:
+      "결과가 준비되면 이 화면에서 바로 알려드릴게요.",
+    commandNeedsReview: "확인이 필요한 작업이 있어요",
+    commandNeedsReviewDescription:
+      "실행할 내용을 확인한 뒤 계속 진행할 수 있어요.",
+    commandReview: "내용 확인하기",
+    commandCompleted: "요청한 일을 처리했어요",
+    commandCompletedDescription: "변경된 내용을 오늘 화면에 반영했어요.",
+    commandFailedTitle: "연결을 확인해 주세요",
+    commandFailed: "연결을 확인한 뒤 다시 요청해 주세요.",
     morningGreeting: "좋은 아침이에요!",
     afternoonGreeting: "좋은 오후예요",
     eveningGreeting: "오늘도 수고했어요",
