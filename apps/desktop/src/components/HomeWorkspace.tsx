@@ -1,18 +1,28 @@
 import {
+  ArrowLeft,
+  ArrowRight,
+  BriefcaseBusiness,
   CalendarDays,
   ChevronRight,
   Circle,
   Clock3,
+  FolderKanban,
+  ListTodo,
   MessageCircleMore,
   Mic,
   Send,
   Sparkles,
 } from "lucide-react";
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { type AgentJob, type ConversationMessage } from "../api/agent";
 import { type HomeSnapshot } from "../api/home";
 import { type ScheduleEntry, type Task } from "../api/planning";
+import { type Project } from "../api/projects";
+import {
+  deriveAssistantPresentation,
+  type AssistantPresentation,
+} from "../assistantPresentation";
 import { copy } from "../copy";
 import { createUuidV7 } from "../uuid";
 import {
@@ -28,9 +38,13 @@ type HomeWorkspaceProps = {
   assistantReady: boolean;
   assistantJob: AgentJob | undefined;
   assistantMessage: ConversationMessage | undefined;
+  projects: Project[];
   onOpenAssistant(): void;
   onSendAssistant(text: string, clientMessageId: string): Promise<boolean>;
   onCompleteTask(task: Task): Promise<void>;
+  onOpenTask(task: Task): void;
+  onOpenProject(project: Project): void;
+  onOpenSchedule(): void;
 };
 
 export function HomeWorkspace({
@@ -40,17 +54,32 @@ export function HomeWorkspace({
   assistantReady,
   assistantJob,
   assistantMessage,
+  projects,
   onOpenAssistant,
   onSendAssistant,
   onCompleteTask,
+  onOpenTask,
+  onOpenProject,
+  onOpenSchedule,
 }: HomeWorkspaceProps) {
   const [completingTaskId, setCompletingTaskId] = useState<string>();
+  const [assistantFocused, setAssistantFocused] = useState(false);
+  const [highlightedHomeTaskId, setHighlightedHomeTaskId] = useState<string>();
+  const highlightedHomeTaskRef = useRef<HTMLLIElement | null>(null);
   const greeting = useMemo(() => greetingForHour(new Date().getHours()), []);
   const skeletonVisible = useDelayedSkeleton(loading);
   const showingSkeleton = loading || skeletonVisible;
   const nextSchedule = snapshot?.schedule[0];
   const scheduleCount = snapshot?.schedule.length ?? 0;
   const taskCount = snapshot?.tasks.length ?? 0;
+
+  useEffect(() => {
+    if (!highlightedHomeTaskId || assistantFocused) return;
+    const element = highlightedHomeTaskRef.current;
+    if (!element) return;
+    element.scrollIntoView({ block: "center", behavior: "smooth" });
+    element.focus({ preventScroll: true });
+  }, [assistantFocused, highlightedHomeTaskId]);
 
   async function complete(task: Task) {
     if (completingTaskId) return;
@@ -89,123 +118,156 @@ export function HomeWorkspace({
         ready={assistantReady}
         job={assistantJob}
         message={assistantMessage}
+        snapshot={snapshot}
+        projects={projects}
+        focused={assistantFocused}
+        onFocusChange={setAssistantFocused}
         onOpenAssistant={onOpenAssistant}
         onSend={onSendAssistant}
+        onOpenTask={(task) => {
+          if (task.projectId) {
+            onOpenTask(task);
+            return;
+          }
+          setHighlightedHomeTaskId(task.id);
+          setAssistantFocused(false);
+        }}
+        onOpenProject={onOpenProject}
+        onOpenSchedule={onOpenSchedule}
       />
 
-      <button
-        className="home-briefing focus-visible-control"
-        type="button"
-        onClick={onOpenAssistant}
-        aria-label={copy.home.askAssistant}
-      >
-        {showingSkeleton ? (
-          <HomeBriefingSkeleton visible={skeletonVisible} />
-        ) : (
-          <>
-            <span className="home-briefing__symbol" aria-hidden="true">
-              <Sparkles />
+      {!assistantFocused && (
+        <>
+          <button
+            className="home-briefing focus-visible-control"
+            type="button"
+            onClick={onOpenAssistant}
+            aria-label={copy.home.askAssistant}
+          >
+            {showingSkeleton ? (
+              <HomeBriefingSkeleton visible={skeletonVisible} />
+            ) : (
+              <>
+                <span className="home-briefing__symbol" aria-hidden="true">
+                  <Sparkles />
+                </span>
+                <span className="home-briefing__copy">
+                  <strong>
+                    {briefingHeading(nextSchedule, scheduleCount)}
+                  </strong>
+                  <span>{briefingSummary(scheduleCount, taskCount)}</span>
+                </span>
+                <ChevronRight aria-hidden="true" />
+              </>
+            )}
+          </button>
+
+          <button
+            className="home-voice-callout focus-visible-control"
+            type="button"
+            onClick={onOpenAssistant}
+          >
+            <span className="home-voice-callout__icon" aria-hidden="true">
+              <Mic />
             </span>
-            <span className="home-briefing__copy">
-              <strong>{briefingHeading(nextSchedule, scheduleCount)}</strong>
-              <span>{briefingSummary(scheduleCount, taskCount)}</span>
+            <span>
+              <strong>{copy.home.askAssistant}</strong>
+              <span>{copy.home.description}</span>
             </span>
             <ChevronRight aria-hidden="true" />
-          </>
-        )}
-      </button>
+          </button>
 
-      <button
-        className="home-voice-callout focus-visible-control"
-        type="button"
-        onClick={onOpenAssistant}
-      >
-        <span className="home-voice-callout__icon" aria-hidden="true">
-          <Mic />
-        </span>
-        <span>
-          <strong>{copy.home.askAssistant}</strong>
-          <span>{copy.home.description}</span>
-        </span>
-        <ChevronRight aria-hidden="true" />
-      </button>
-
-      <section
-        className="home-next-schedule"
-        aria-labelledby="next-schedule-title"
-      >
-        <div className="home-section-heading">
-          <h2 id="next-schedule-title">
-            {nextSchedule ? "다음 일정" : copy.home.scheduleTitle}
-          </h2>
-          {nextSchedule && (
-            <span>{relativeScheduleTime(nextSchedule.startsAt)}</span>
-          )}
-        </div>
-        {showingSkeleton ? (
-          <ScheduleSkeleton visible={skeletonVisible} />
-        ) : nextSchedule ? (
-          <ScheduleHighlight entry={nextSchedule} />
-        ) : (
-          <EmptySurface
-            title={copy.home.scheduleEmptyTitle}
-            description={copy.home.scheduleEmptyDescription}
-          />
-        )}
-      </section>
-
-      <section className="home-tasks" aria-labelledby="today-task-title">
-        <div className="home-section-heading">
-          <h2 id="today-task-title">{copy.home.taskTitle}</h2>
-          <span>
+          <section
+            className="home-next-schedule"
+            aria-labelledby="next-schedule-title"
+          >
+            <div className="home-section-heading">
+              <h2 id="next-schedule-title">
+                {nextSchedule ? "다음 일정" : copy.home.scheduleTitle}
+              </h2>
+              {nextSchedule && (
+                <span>{relativeScheduleTime(nextSchedule.startsAt)}</span>
+              )}
+            </div>
             {showingSkeleton ? (
-              <SkeletonGroup
-                className="skeleton-count"
-                label={copy.home.loadingShort}
-                visible={skeletonVisible}
-              >
-                <SkeletonBlock />
-              </SkeletonGroup>
+              <ScheduleSkeleton visible={skeletonVisible} />
+            ) : nextSchedule ? (
+              <ScheduleHighlight entry={nextSchedule} />
             ) : (
-              copy.home.taskCount(taskCount)
+              <EmptySurface
+                title={copy.home.scheduleEmptyTitle}
+                description={copy.home.scheduleEmptyDescription}
+              />
             )}
-          </span>
-        </div>
-        <div className="home-task-surface">
-          {showingSkeleton ? (
-            <TaskListSkeleton rows={4} visible={skeletonVisible} />
-          ) : snapshot?.tasks.length ? (
-            <ul className="home-task-list">
-              {snapshot.tasks.map((task) => (
-                <li key={task.id}>
-                  <button
-                    className="home-task-list__complete focus-visible-control"
-                    type="button"
-                    onClick={() => void complete(task)}
-                    disabled={Boolean(completingTaskId)}
-                    aria-label={copy.home.completeTask(task.title)}
+          </section>
+
+          <section className="home-tasks" aria-labelledby="today-task-title">
+            <div className="home-section-heading">
+              <h2 id="today-task-title">{copy.home.taskTitle}</h2>
+              <span>
+                {showingSkeleton ? (
+                  <SkeletonGroup
+                    className="skeleton-count"
+                    label={copy.home.loadingShort}
+                    visible={skeletonVisible}
                   >
-                    {completingTaskId === task.id ? (
-                      <span className="button-spinner" aria-hidden="true" />
-                    ) : (
-                      <Circle aria-hidden="true" />
-                    )}
-                  </button>
-                  <span>{task.title}</span>
-                  {task.dueAt && (
-                    <time dateTime={task.dueAt}>{dueLabel(task.dueAt)}</time>
-                  )}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <EmptySurface
-              title={copy.home.taskEmptyTitle}
-              description={copy.home.taskEmptyDescription}
-            />
-          )}
-        </div>
-      </section>
+                    <SkeletonBlock />
+                  </SkeletonGroup>
+                ) : (
+                  copy.home.taskCount(taskCount)
+                )}
+              </span>
+            </div>
+            <div className="home-task-surface">
+              {showingSkeleton ? (
+                <TaskListSkeleton rows={4} visible={skeletonVisible} />
+              ) : snapshot?.tasks.length ? (
+                <ul className="home-task-list">
+                  {snapshot.tasks.map((task) => (
+                    <li
+                      key={task.id}
+                      ref={
+                        highlightedHomeTaskId === task.id
+                          ? highlightedHomeTaskRef
+                          : undefined
+                      }
+                      data-highlighted={highlightedHomeTaskId === task.id}
+                      tabIndex={
+                        highlightedHomeTaskId === task.id ? -1 : undefined
+                      }
+                    >
+                      <button
+                        className="home-task-list__complete focus-visible-control"
+                        type="button"
+                        onClick={() => void complete(task)}
+                        disabled={Boolean(completingTaskId)}
+                        aria-label={copy.home.completeTask(task.title)}
+                      >
+                        {completingTaskId === task.id ? (
+                          <span className="button-spinner" aria-hidden="true" />
+                        ) : (
+                          <Circle aria-hidden="true" />
+                        )}
+                      </button>
+                      <span>{task.title}</span>
+                      {task.dueAt && (
+                        <time dateTime={task.dueAt}>
+                          {dueLabel(task.dueAt)}
+                        </time>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <EmptySurface
+                  title={copy.home.taskEmptyTitle}
+                  description={copy.home.taskEmptyDescription}
+                />
+              )}
+            </div>
+          </section>
+        </>
+      )}
     </section>
   );
 }
@@ -214,17 +276,32 @@ function HomeAssistantCommand({
   ready,
   job,
   message,
+  snapshot,
+  projects,
+  focused,
+  onFocusChange,
   onOpenAssistant,
   onSend,
+  onOpenTask,
+  onOpenProject,
+  onOpenSchedule,
 }: {
   ready: boolean;
   job: AgentJob | undefined;
   message: ConversationMessage | undefined;
+  snapshot: HomeSnapshot | undefined;
+  projects: Project[];
+  focused: boolean;
+  onFocusChange(focused: boolean): void;
   onOpenAssistant(): void;
   onSend(text: string, clientMessageId: string): Promise<boolean>;
+  onOpenTask(task: Task): void;
+  onOpenProject(project: Project): void;
+  onOpenSchedule(): void;
 }) {
   const [draft, setDraft] = useState("");
   const [submitted, setSubmitted] = useState(false);
+  const [lastRequest, setLastRequest] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
   const active = Boolean(job && !isTerminalJob(job.state));
@@ -239,13 +316,24 @@ function HomeAssistantCommand({
     if (sent) {
       setDraft("");
       setSubmitted(true);
+      setLastRequest(request);
+      onFocusChange(true);
     } else {
       setError(copy.home.commandFailed);
     }
     setSending(false);
   }
 
-  const status = submitted ? commandStatus(job, message) : undefined;
+  const status = submitted && focused ? commandStatus(job, message) : undefined;
+  const presentation =
+    focused && submitted && job?.state === "completed" && message
+      ? deriveAssistantPresentation(
+          lastRequest,
+          message.content,
+          snapshot,
+          projects,
+        )
+      : undefined;
 
   return (
     <section className="home-command" aria-labelledby="home-command-title">
@@ -299,7 +387,17 @@ function HomeAssistantCommand({
           {error}
         </p>
       )}
-      {status && (
+      {presentation ? (
+        <AdaptiveAssistantResult
+          presentation={presentation}
+          projects={projects}
+          onOpenAssistant={onOpenAssistant}
+          onOpenTask={onOpenTask}
+          onOpenProject={onOpenProject}
+          onOpenSchedule={onOpenSchedule}
+          onReset={() => onFocusChange(false)}
+        />
+      ) : status ? (
         <div className="home-command__result" role="status" aria-live="polite">
           <div>
             <strong>{status.title}</strong>
@@ -315,8 +413,237 @@ function HomeAssistantCommand({
             </button>
           )}
         </div>
+      ) : null}
+    </section>
+  );
+}
+
+function AdaptiveAssistantResult({
+  presentation,
+  projects,
+  onOpenAssistant,
+  onOpenTask,
+  onOpenProject,
+  onOpenSchedule,
+  onReset,
+}: {
+  presentation: AssistantPresentation;
+  projects: Project[];
+  onOpenAssistant(): void;
+  onOpenTask(task: Task): void;
+  onOpenProject(project: Project): void;
+  onOpenSchedule(): void;
+  onReset(): void;
+}) {
+  return (
+    <section
+      className="assistant-result"
+      aria-labelledby="assistant-result-title"
+    >
+      <header className="assistant-result__header">
+        <div>
+          <p>{copy.home.resultEyebrow}</p>
+          <h3 id="assistant-result-title">{presentation.title}</h3>
+        </div>
+        <button
+          className="text-button focus-visible-control"
+          type="button"
+          onClick={onReset}
+        >
+          <ArrowLeft aria-hidden="true" />
+          {copy.home.backToBriefing}
+        </button>
+      </header>
+      <p className="assistant-result__summary" aria-live="polite">
+        {presentation.summary}
+      </p>
+
+      {presentation.kind === "tasks" && (
+        <AssistantTaskResult
+          presentation={presentation}
+          projects={projects}
+          onOpenTask={onOpenTask}
+        />
+      )}
+      {presentation.kind === "schedule" && (
+        <AssistantScheduleResult
+          presentation={presentation}
+          onOpenSchedule={onOpenSchedule}
+        />
+      )}
+      {presentation.kind === "projects" && (
+        <AssistantProjectResult
+          presentation={presentation}
+          onOpenProject={onOpenProject}
+        />
+      )}
+      {presentation.kind === "summary" && (
+        <button
+          className="secondary-button assistant-result__follow-up focus-visible-control"
+          type="button"
+          onClick={onOpenAssistant}
+        >
+          {copy.home.continueRequest}
+          <ArrowRight aria-hidden="true" />
+        </button>
       )}
     </section>
+  );
+}
+
+function AssistantTaskResult({
+  presentation,
+  projects,
+  onOpenTask,
+}: {
+  presentation: Extract<AssistantPresentation, { kind: "tasks" }>;
+  projects: Project[];
+  onOpenTask(task: Task): void;
+}) {
+  if (!presentation.items.length) {
+    return (
+      <ResultEmpty
+        icon={<ListTodo aria-hidden="true" />}
+        description={copy.home.noMatchingTasks}
+      />
+    );
+  }
+  return (
+    <ul className="assistant-result-list assistant-result-list--tasks">
+      {presentation.items.map((task) => {
+        const project = projects.find((item) => item.id === task.projectId);
+        return (
+          <li
+            key={task.id}
+            data-highlighted={task.id === presentation.highlightedTaskId}
+          >
+            <button
+              className="assistant-result-row focus-visible-control"
+              type="button"
+              onClick={() => onOpenTask(task)}
+            >
+              <span className="assistant-result-row__icon" aria-hidden="true">
+                <ListTodo />
+              </span>
+              <span className="assistant-result-row__main">
+                <strong>{task.title}</strong>
+                <span>{project?.title || copy.home.unassignedTask}</span>
+              </span>
+              <span className="assistant-result-row__meta">
+                {task.dueAt && (
+                  <time dateTime={task.dueAt}>{dueLabel(task.dueAt)}</time>
+                )}
+                <span>{copy.home.openTaskAction}</span>
+                <ChevronRight aria-hidden="true" />
+              </span>
+            </button>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function AssistantScheduleResult({
+  presentation,
+  onOpenSchedule,
+}: {
+  presentation: Extract<AssistantPresentation, { kind: "schedule" }>;
+  onOpenSchedule(): void;
+}) {
+  if (!presentation.items.length) {
+    return (
+      <ResultEmpty
+        icon={<CalendarDays aria-hidden="true" />}
+        description={copy.home.noScheduleResult}
+      />
+    );
+  }
+  return (
+    <ul className="assistant-result-list">
+      {presentation.items.map((entry) => (
+        <li key={entry.id}>
+          <button
+            className="assistant-result-row focus-visible-control"
+            type="button"
+            onClick={onOpenSchedule}
+          >
+            <span className="assistant-result-row__icon" aria-hidden="true">
+              <CalendarDays />
+            </span>
+            <span className="assistant-result-row__main">
+              <strong>{entry.title}</strong>
+              <span>{scheduleDetail(entry)}</span>
+            </span>
+            <span className="assistant-result-row__meta">
+              <span>{copy.home.openScheduleAction}</span>
+              <ChevronRight aria-hidden="true" />
+            </span>
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function AssistantProjectResult({
+  presentation,
+  onOpenProject,
+}: {
+  presentation: Extract<AssistantPresentation, { kind: "projects" }>;
+  onOpenProject(project: Project): void;
+}) {
+  if (!presentation.items.length) {
+    return (
+      <ResultEmpty
+        icon={<FolderKanban aria-hidden="true" />}
+        description={copy.home.noMatchingProjects}
+      />
+    );
+  }
+  return (
+    <ul className="assistant-result-list">
+      {presentation.items.map((project) => (
+        <li key={project.id}>
+          <button
+            className="assistant-result-row focus-visible-control"
+            type="button"
+            onClick={() => onOpenProject(project)}
+          >
+            <span className="assistant-result-row__icon" aria-hidden="true">
+              <BriefcaseBusiness />
+            </span>
+            <span className="assistant-result-row__main">
+              <strong>{project.title}</strong>
+              <span>
+                {project.nextAction ||
+                  project.objective ||
+                  copy.projects.noNextAction}
+              </span>
+            </span>
+            <span className="assistant-result-row__meta">
+              <span>{copy.home.openProjectAction}</span>
+              <ChevronRight aria-hidden="true" />
+            </span>
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function ResultEmpty({
+  icon,
+  description,
+}: {
+  icon: React.ReactNode;
+  description: string;
+}) {
+  return (
+    <div className="assistant-result__empty">
+      {icon}
+      <p>{description}</p>
+    </div>
   );
 }
 

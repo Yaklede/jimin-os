@@ -87,6 +87,20 @@ export const copy = {
     commandCompletedDescription: "변경된 내용을 오늘 화면에 반영했어요.",
     commandFailedTitle: "연결을 확인해 주세요",
     commandFailed: "연결을 확인한 뒤 다시 요청해 주세요.",
+    resultEyebrow: "요청 결과",
+    backToBriefing: "오늘 화면",
+    continueRequest: "자세히 물어보기",
+    openTaskAction: "일감 보기",
+    openProjectAction: "프로젝트에서 보기",
+    openScheduleAction: "일정에서 보기",
+    unassignedTask: "프로젝트에 연결되지 않은 일감",
+    noMatchingTasks:
+      "요청과 일치하는 열린 일감이 없어요. 다른 표현으로 다시 요청해 주세요.",
+    noMatchingProjects:
+      "요청과 일치하는 프로젝트가 없어요. 프로젝트 이름을 확인해 주세요.",
+    noScheduleResult: "오늘 등록된 일정이 없어요.",
+    taskDestinationNotice:
+      "연결된 프로젝트를 열지 못했어요. 새로고침해 주세요.",
     morningGreeting: "좋은 아침이에요!",
     afternoonGreeting: "좋은 오후예요",
     eveningGreeting: "오늘도 수고했어요",

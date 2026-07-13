@@ -86,6 +86,8 @@ export default function App() {
   const [projectTasks, setProjectTasks] = useState<Task[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>();
   const [selectedProjectId, setSelectedProjectId] = useState<string>();
+  const [highlightedProjectTaskId, setHighlightedProjectTaskId] =
+    useState<string>();
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [projectsSaving, setProjectsSaving] = useState(false);
   const [projectsError, setProjectsError] = useState<string>();
@@ -409,6 +411,7 @@ export default function App() {
       setProjectTasks([]);
       setSelectedWorkspaceId(undefined);
       setSelectedProjectId(undefined);
+      setHighlightedProjectTaskId(undefined);
       setProjectsError(undefined);
       setConversationMessages([]);
       setSelectedConversationId(undefined);
@@ -635,9 +638,57 @@ export default function App() {
 
   function selectWorkspace(workspaceId: string) {
     if (workspaceId === selectedWorkspaceId) return;
+    setHighlightedProjectTaskId(undefined);
     setSelectedWorkspaceId(workspaceId);
     setSelectedProjectId(undefined);
     setProjectTasks([]);
+  }
+
+  function selectProject(projectId: string) {
+    setHighlightedProjectTaskId(undefined);
+    setSelectedProjectId(projectId);
+  }
+
+  function openProjectFromAssistant(project: Project) {
+    setHighlightedProjectTaskId(undefined);
+    setSelectedWorkspaceId(project.workspaceId);
+    setSelectedProjectId(project.id);
+    setDestination("projects");
+  }
+
+  async function openTaskFromAssistant(task: Task): Promise<void> {
+    if (!task.projectId) return;
+    const currentProject = projects.find(
+      (project) => project.id === task.projectId,
+    );
+    if (currentProject) {
+      setHighlightedProjectTaskId(task.id);
+      setSelectedProjectId(currentProject.id);
+      setDestination("projects");
+      return;
+    }
+
+    for (const workspace of workspaces) {
+      try {
+        const workspaceProjects = await withAuthenticatedSession(
+          (accessToken) => fetchProjects(apiBaseUrl, accessToken, workspace.id),
+        );
+        const project = workspaceProjects.find(
+          (item) => item.id === task.projectId,
+        );
+        if (!project) continue;
+        setProjects(workspaceProjects);
+        setSelectedWorkspaceId(workspace.id);
+        setSelectedProjectId(project.id);
+        setHighlightedProjectTaskId(task.id);
+        setDestination("projects");
+        return;
+      } catch {
+        // Keep searching the remaining personal workspaces.
+      }
+    }
+
+    setHomeError(copy.home.taskDestinationNotice);
   }
 
   async function createWorkspaceProject(input: {
@@ -1026,11 +1077,15 @@ export default function App() {
                   : undefined
               }
               assistantMessage={latestAssistantMessage}
+              projects={projects}
               onOpenAssistant={openNewAssistantRequest}
               onSendAssistant={(text, clientMessageId) =>
                 sendConversationRequest(text, clientMessageId, true)
               }
               onCompleteTask={completeHomeTask}
+              onOpenTask={(task) => void openTaskFromAssistant(task)}
+              onOpenProject={openProjectFromAssistant}
+              onOpenSchedule={() => setDestination("calendar")}
             />
           )}
           {destination === "calendar" && (
@@ -1048,11 +1103,12 @@ export default function App() {
               tasks={projectTasks}
               selectedWorkspaceId={selectedWorkspaceId}
               selectedProjectId={selectedProjectId}
+              highlightedTaskId={highlightedProjectTaskId}
               loading={projectsLoading || mode === "loading"}
               saving={projectsSaving}
               error={projectsError}
               onSelectWorkspace={selectWorkspace}
-              onSelectProject={setSelectedProjectId}
+              onSelectProject={selectProject}
               onCreateProject={createWorkspaceProject}
               onUpdateProject={updateWorkspaceProject}
               onCreateTask={createProjectTask}

@@ -11,7 +11,7 @@ import {
   Pencil,
   Plus,
 } from "lucide-react";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 
 import { type Project, type Workspace } from "../api/projects";
 import { type Task } from "../api/planning";
@@ -29,6 +29,7 @@ type ProjectsWorkspaceProps = {
   tasks: Task[];
   selectedWorkspaceId: string | undefined;
   selectedProjectId: string | undefined;
+  highlightedTaskId: string | undefined;
   loading: boolean;
   saving: boolean;
   error: string | undefined;
@@ -72,6 +73,7 @@ export function ProjectsWorkspace({
   tasks,
   selectedWorkspaceId,
   selectedProjectId,
+  highlightedTaskId,
   loading,
   saving,
   error,
@@ -94,6 +96,7 @@ export function ProjectsWorkspace({
   const [editingProjectId, setEditingProjectId] = useState<string>();
   const [savedProjectId, setSavedProjectId] = useState<string>();
   const [editingTaskId, setEditingTaskId] = useState<string>();
+  const highlightedTaskRef = useRef<HTMLLIElement | null>(null);
   const skeletonVisible = useDelayedSkeleton(loading);
   const showingSkeleton = loading || skeletonVisible;
 
@@ -109,6 +112,14 @@ export function ProjectsWorkspace({
     setSavedProjectId(undefined);
     setEditingTaskId(undefined);
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (!highlightedTaskId) return;
+    const element = highlightedTaskRef.current;
+    if (!element) return;
+    element.scrollIntoView({ block: "center", behavior: "smooth" });
+    element.focus({ preventScroll: true });
+  }, [highlightedTaskId, tasks]);
 
   async function submitProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -461,7 +472,18 @@ export function ProjectsWorkspace({
                 {openTasks.length ? (
                   <ul className="project-task-list">
                     {openTasks.map((task) => (
-                      <li key={task.id}>
+                      <li
+                        key={task.id}
+                        ref={
+                          highlightedTaskId === task.id
+                            ? highlightedTaskRef
+                            : undefined
+                        }
+                        data-highlighted={highlightedTaskId === task.id}
+                        tabIndex={
+                          highlightedTaskId === task.id ? -1 : undefined
+                        }
+                      >
                         <button
                           className="project-task-list__complete focus-visible-control"
                           type="button"
