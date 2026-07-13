@@ -3,6 +3,7 @@ import {
   ChevronRight,
   Circle,
   Clock3,
+  ListTodo,
   MessageCircleMore,
   Mic,
   Send,
@@ -56,21 +57,35 @@ export function HomeWorkspace({
   const [completingTaskId, setCompletingTaskId] = useState<string>();
   const [assistantFocused, setAssistantFocused] = useState(false);
   const [highlightedHomeTaskId, setHighlightedHomeTaskId] = useState<string>();
+  const [overviewFocusTarget, setOverviewFocusTarget] = useState<
+    "schedule" | "tasks"
+  >();
   const highlightedHomeTaskRef = useRef<HTMLLIElement | null>(null);
+  const scheduleSectionRef = useRef<HTMLElement | null>(null);
+  const taskSectionRef = useRef<HTMLElement | null>(null);
   const greeting = useMemo(() => greetingForHour(new Date().getHours()), []);
   const skeletonVisible = useDelayedSkeleton(loading);
   const showingSkeleton = loading || skeletonVisible;
   const nextSchedule = snapshot?.schedule[0];
   const scheduleCount = snapshot?.schedule.length ?? 0;
   const taskCount = snapshot?.tasks.length ?? 0;
+  const assistantState = homeAssistantState(
+    assistantFocused,
+    assistantJob,
+    assistantMessage,
+  );
 
   useEffect(() => {
-    if (!highlightedHomeTaskId || assistantFocused) return;
-    const element = highlightedHomeTaskRef.current;
+    if (!overviewFocusTarget || assistantFocused) return;
+    const element =
+      overviewFocusTarget === "tasks"
+        ? (highlightedHomeTaskRef.current ?? taskSectionRef.current)
+        : scheduleSectionRef.current;
     if (!element) return;
     element.scrollIntoView({ block: "center", behavior: "smooth" });
     element.focus({ preventScroll: true });
-  }, [assistantFocused, highlightedHomeTaskId]);
+    setOverviewFocusTarget(undefined);
+  }, [assistantFocused, overviewFocusTarget]);
 
   async function complete(task: Task) {
     if (completingTaskId) return;
@@ -83,7 +98,11 @@ export function HomeWorkspace({
   }
 
   return (
-    <section className="home-page" aria-busy={showingSkeleton}>
+    <section
+      className="home-page"
+      data-assistant-state={assistantState}
+      aria-busy={showingSkeleton}
+    >
       <header className="home-greeting">
         <div>
           <h1>{greeting}</h1>
@@ -105,6 +124,58 @@ export function HomeWorkspace({
         </p>
       )}
 
+      {assistantFocused && (
+        <nav
+          className="home-context-strip"
+          aria-labelledby="home-context-strip-title"
+        >
+          <div className="home-context-strip__heading">
+            <Sparkles aria-hidden="true" />
+            <div>
+              <strong id="home-context-strip-title">
+                {copy.home.verifiedContextLabel}
+              </strong>
+              <span aria-live="polite">
+                {copy.home.verifiedContextSummary(taskCount, scheduleCount)}
+              </span>
+            </div>
+          </div>
+          <div className="home-context-strip__actions">
+            <button
+              className="focus-visible-control"
+              type="button"
+              aria-label={copy.home.openTaskContext(taskCount)}
+              onClick={() => {
+                setHighlightedHomeTaskId(snapshot?.tasks[0]?.id);
+                setOverviewFocusTarget("tasks");
+                setAssistantFocused(false);
+              }}
+            >
+              <ListTodo aria-hidden="true" />
+              <span>{copy.home.taskTitle}</span>
+              <strong>{taskCount}</strong>
+            </button>
+            <button
+              className="focus-visible-control"
+              type="button"
+              aria-label={copy.home.openScheduleContext(scheduleCount)}
+              onClick={() => {
+                if (nextSchedule) {
+                  onOpenSchedule(nextSchedule);
+                  return;
+                }
+                setOverviewFocusTarget("schedule");
+                setAssistantFocused(false);
+              }}
+            >
+              <CalendarDays aria-hidden="true" />
+              <span>{copy.home.scheduleTitle}</span>
+              <strong>{scheduleCount}</strong>
+            </button>
+          </div>
+        </nav>
+      )}
+
       <HomeAssistantCommand
         ready={assistantReady}
         job={assistantJob}
@@ -119,6 +190,7 @@ export function HomeWorkspace({
             return;
           }
           setHighlightedHomeTaskId(task.id);
+          setOverviewFocusTarget("tasks");
           setAssistantFocused(false);
         }}
         onOpenProject={onOpenProject}
@@ -169,6 +241,8 @@ export function HomeWorkspace({
           <section
             className="home-next-schedule"
             aria-labelledby="next-schedule-title"
+            ref={scheduleSectionRef}
+            tabIndex={-1}
           >
             <div className="home-section-heading">
               <h2 id="next-schedule-title">
@@ -190,7 +264,12 @@ export function HomeWorkspace({
             )}
           </section>
 
-          <section className="home-tasks" aria-labelledby="today-task-title">
+          <section
+            className="home-tasks"
+            aria-labelledby="today-task-title"
+            ref={taskSectionRef}
+            tabIndex={-1}
+          >
             <div className="home-section-heading">
               <h2 id="today-task-title">{copy.home.taskTitle}</h2>
               <span>
@@ -313,9 +392,20 @@ function HomeAssistantCommand({
     focused && submitted && job?.state === "completed" && message
       ? presentationForMessage(message)
       : undefined;
+  const stage = presentation
+    ? "result"
+    : active || sending
+      ? "working"
+      : status
+        ? "attention"
+        : "idle";
 
   return (
-    <section className="home-command" aria-labelledby="home-command-title">
+    <section
+      className="home-command"
+      data-stage={stage}
+      aria-labelledby="home-command-title"
+    >
       <div className="home-command__heading">
         <div>
           <h2 id="home-command-title">{copy.home.commandTitle}</h2>
@@ -553,6 +643,25 @@ function greetingForHour(hour: number): string {
   if (hour < 12) return copy.home.morningGreeting;
   if (hour < 18) return copy.home.afternoonGreeting;
   return copy.home.eveningGreeting;
+}
+
+function homeAssistantState(
+  focused: boolean,
+  job: AgentJob | undefined,
+  message: ConversationMessage | undefined,
+): "overview" | "working" | "result" | "attention" {
+  if (!focused) return "overview";
+  if (job?.state === "completed" && message?.status === "completed") {
+    return "result";
+  }
+  if (
+    job?.state === "failed" ||
+    job?.state === "cancelled" ||
+    job?.state === "declined"
+  ) {
+    return "attention";
+  }
+  return "working";
 }
 
 function briefingHeading(

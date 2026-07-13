@@ -8,7 +8,7 @@ import {
   FolderKanban,
   ListTodo,
 } from "lucide-react";
-import { useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 
 import { type ScheduleEntry, type Task } from "../api/planning";
 import { type Project } from "../api/projects";
@@ -35,6 +35,7 @@ export function AssistantInteractiveCanvas({
   onOpenSchedule,
   onReset,
 }: AssistantInteractiveCanvasProps) {
+  const canvasRef = useRef<HTMLElement | null>(null);
   const initialSection = sectionForItem(
     presentation.sections,
     presentation.focusItemId,
@@ -50,6 +51,10 @@ export function AssistantInteractiveCanvas({
   const selectedItem =
     activeSection?.items.find((item) => item.id === selectedItemId) ??
     activeSection?.items[0];
+
+  useEffect(() => {
+    canvasRef.current?.focus({ preventScroll: true });
+  }, []);
 
   function selectSection(section: AssistantPresentationSection) {
     setActiveKind(section.kind);
@@ -86,8 +91,10 @@ export function AssistantInteractiveCanvas({
 
   return (
     <section
+      ref={canvasRef}
       className="assistant-canvas"
       aria-labelledby="assistant-canvas-title"
+      tabIndex={-1}
     >
       <header className="assistant-canvas__header">
         <div>

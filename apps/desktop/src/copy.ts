@@ -93,6 +93,11 @@ export const copy = {
     resultSectionsLabel: "결과 항목",
     resultDetailsLabel: "선택한 내용",
     resultCount: (count: number) => `${count}개`,
+    verifiedContextLabel: "오늘 확인한 정보",
+    verifiedContextSummary: (taskCount: number, scheduleCount: number) =>
+      `할 일 ${taskCount}개, 일정 ${scheduleCount}개를 확인했어요.`,
+    openTaskContext: (count: number) => `할 일 ${count}개 확인하기`,
+    openScheduleContext: (count: number) => `일정 ${count}개 확인하기`,
     taskPriority: (priority: number) =>
       priority >= 3 ? "가장 먼저" : priority === 2 ? "우선 처리" : "일반",
     projectTaskCount: (count: number) => `열린 일감 ${count}개`,

@@ -39,6 +39,7 @@ struct TurnContext {
     schedule: Vec<ScheduleEntry>,
     tasks: Vec<Task>,
     projects: Vec<Project>,
+    requires_daily_task_coverage: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -383,6 +384,7 @@ async fn contextualized_turn_context(
         schedule,
         tasks,
         projects,
+        requires_daily_task_coverage: is_daily_overview_request(&job.input_content),
     })
 }
 
@@ -400,7 +402,10 @@ fn render_contextualized_turn(
          Interpret the user's intent semantically. Never select records by simple word overlap. \
          Build an interactive result by selecting at most three useful sections from tasks, schedule, and projects. \
          Use only exact entity IDs from server context and never invent an ID. For broad requests such as today's work, \
-         include every relevant record across the useful sections. Use no sections for general conversation. \
+         include every relevant record across the useful sections. In Jimin OS, open_tasks is exactly the user's current \
+         '오늘 할 일' queue even when a task has no due date. A broad Korean request about 오늘 일정, 오늘 할 일, or \
+         오늘 계획 is a daily briefing and must cover both schedule and open_tasks unless the user explicitly says only. \
+         Use no sections for general conversation. \
          Choose stack for one simple group, split when list-to-detail exploration helps, and focus when one record is primary. \
          Tasks support list or checklist, schedule supports list or timeline, and projects support list or cards. \
          focusEntityId must be one selected entity ID or an empty string. Keep answers concise because the client renders \
@@ -501,6 +506,36 @@ fn append_bounded(target: &mut String, value: &str, maximum_bytes: usize) {
     target.push('…');
 }
 
+fn is_daily_overview_request(input: &str) -> bool {
+    let normalized = input
+        .to_lowercase()
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .collect::<String>();
+    let mentions_today =
+        normalized.contains("오늘") || normalized.contains("금일") || normalized.contains("today");
+    let mentions_daily_work = [
+        "일정",
+        "할일",
+        "일감",
+        "해야할일",
+        "계획",
+        "뭐해",
+        "뭐하지",
+        "task",
+        "todo",
+        "schedule",
+        "plan",
+    ]
+    .iter()
+    .any(|term| normalized.contains(term));
+    let explicitly_schedule_only = normalized.contains("일정만")
+        || normalized.contains("캘린더만")
+        || normalized.contains("scheduleonly")
+        || normalized.contains("calendaronly");
+    mentions_today && mentions_daily_work && !explicitly_schedule_only
+}
+
 fn assistant_output_schema() -> Value {
     json!({
         "type": "object",
@@ -561,7 +596,7 @@ fn validated_assistant_response(
     context: &TurnContext,
 ) -> Result<(String, AssistantPresentation), ()> {
     let structured: StructuredAssistantTurn = serde_json::from_str(response).map_err(|_| ())?;
-    let answer = structured.answer.trim().to_owned();
+    let mut answer = structured.answer.trim().to_owned();
     let title = structured.presentation.title.trim().to_owned();
     if answer.is_empty()
         || answer.chars().count() > 24_000
@@ -579,11 +614,16 @@ fn validated_assistant_response(
         return Err(());
     }
 
+    let mut validated = validated_presentation_sections(structured.presentation.sections, context)?;
+    let daily_task_coverage_added = ensure_daily_task_coverage(&mut validated, context);
     let ValidatedPresentationSections {
         items,
         sections,
         seen_items,
-    } = validated_presentation_sections(structured.presentation.sections, context)?;
+    } = validated;
+    if daily_task_coverage_added {
+        answer = corrected_daily_answer(&answer, context.tasks.len());
+    }
     let kind = match sections.as_slice() {
         [] => AssistantPresentationKind::Summary,
         [section] => match section.kind {
@@ -618,6 +658,63 @@ fn validated_assistant_response(
     };
     presentation.validate().map_err(|_| ())?;
     Ok((answer, presentation))
+}
+
+fn ensure_daily_task_coverage(
+    validated: &mut ValidatedPresentationSections,
+    context: &TurnContext,
+) -> bool {
+    if !context.requires_daily_task_coverage || context.tasks.is_empty() {
+        return false;
+    }
+    let existing_task_section = validated
+        .sections
+        .iter()
+        .position(|section| section.kind == AssistantPresentationSectionKind::Tasks);
+    if existing_task_section.is_none() && validated.items.len() >= MAX_PRESENTATION_ITEMS {
+        return false;
+    }
+    let task_section_index = existing_task_section.unwrap_or_else(|| {
+        validated.sections.push(AssistantPresentationSection {
+            kind: AssistantPresentationSectionKind::Tasks,
+            title: "오늘 할 일".to_owned(),
+            view: AssistantPresentationView::Checklist,
+            item_ids: Vec::new(),
+        });
+        validated.sections.len() - 1
+    });
+    let mut changed = validated.sections[task_section_index].item_ids.is_empty();
+    for task in context.tasks.iter().take(CONTEXT_TASK_LIMIT) {
+        if validated.items.len() >= MAX_PRESENTATION_ITEMS {
+            break;
+        }
+        if validated.seen_items.insert(task.id) {
+            validated.sections[task_section_index]
+                .item_ids
+                .push(task.id);
+            validated
+                .items
+                .push(task_presentation_item(task, &context.projects));
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn corrected_daily_answer(answer: &str, task_count: usize) -> String {
+    let task_fact = if task_count <= CONTEXT_TASK_LIMIT {
+        format!("현재 열린 할 일은 {task_count}개 있어요.")
+    } else {
+        format!(
+            "현재 열린 할 일은 {task_count}개이고, 우선순위가 높은 {CONTEXT_TASK_LIMIT}개를 보여드려요."
+        )
+    };
+    let corrected = format!("{}\n\n{task_fact}", answer.trim());
+    if corrected.chars().count() <= 24_000 {
+        corrected
+    } else {
+        task_fact
+    }
 }
 
 fn validated_presentation_sections(
@@ -929,8 +1026,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        StructuredAnswerStream, TurnContext, render_contextualized_turn, requires_process_restart,
-        validated_assistant_response,
+        StructuredAnswerStream, TurnContext, is_daily_overview_request, render_contextualized_turn,
+        requires_process_restart, validated_assistant_response,
     };
 
     #[test]
@@ -1041,6 +1138,7 @@ mod tests {
             schedule: Vec::new(),
             tasks: vec![task.clone()],
             projects: Vec::new(),
+            requires_daily_task_coverage: false,
         };
         let response = serde_json::json!({
             "answer": "열린 일감을 정리했어요.",
@@ -1094,6 +1192,7 @@ mod tests {
             schedule: vec![schedule.clone()],
             tasks: vec![task.clone()],
             projects: Vec::new(),
+            requires_daily_task_coverage: false,
         };
         let response = serde_json::json!({
             "answer": "오늘 업무와 일정을 함께 정리했어요.",
@@ -1128,5 +1227,57 @@ mod tests {
         assert_eq!(presentation.sections.len(), 2);
         assert_eq!(presentation.items.len(), 2);
         assert_eq!(presentation.focus_item_id, Some(task.id));
+    }
+
+    #[test]
+    fn daily_overview_recognizes_broad_daily_briefing_phrases() {
+        assert!(is_daily_overview_request("오늘 할 일 뭐야?"));
+        assert!(is_daily_overview_request("오늘 일정 뭐임"));
+        assert!(is_daily_overview_request("What is my plan today?"));
+        assert!(!is_daily_overview_request("내일 일정 알려줘"));
+        assert!(!is_daily_overview_request("오늘 기분이 어때?"));
+        assert!(!is_daily_overview_request("오늘 날씨 뭐임"));
+        assert!(!is_daily_overview_request("오늘 일정만 알려줘"));
+    }
+
+    #[test]
+    fn daily_overview_repairs_a_missing_verified_task_section() {
+        let task = Task {
+            id: Uuid::now_v7(),
+            project_id: None,
+            title: "회의록 정리".to_owned(),
+            notes: None,
+            status: TaskStatus::Open,
+            priority: 2,
+            due_at: None,
+            completed_at: None,
+            version: 1,
+        };
+        let context = TurnContext {
+            prompt: String::new(),
+            schedule: Vec::new(),
+            tasks: vec![task.clone()],
+            projects: Vec::new(),
+            requires_daily_task_coverage: true,
+        };
+        let response = serde_json::json!({
+            "answer": "오늘 예정된 일정은 없습니다.",
+            "presentation": {
+                "title": "오늘 정리",
+                "layout": "stack",
+                "focusEntityId": "",
+                "sections": []
+            }
+        })
+        .to_string();
+
+        let (answer, presentation) =
+            validated_assistant_response(&response, &context).expect("daily result");
+
+        assert!(answer.contains("현재 열린 할 일은 1개 있어요."));
+        assert_eq!(presentation.items.len(), 1);
+        assert_eq!(presentation.sections.len(), 1);
+        assert_eq!(presentation.sections[0].item_ids, vec![task.id]);
+        assert_eq!(presentation.focus_item_id, None);
     }
 }
