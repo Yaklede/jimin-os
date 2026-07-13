@@ -4064,6 +4064,33 @@ mod tests {
     }
 
     #[test]
+    fn conversation_short_task_request_uses_the_immediate_task_action() {
+        assert!(matches!(
+            pending_action_from_conversation_text("내일 일에 일어나기 추가해주"),
+            Some(PendingAgentAction::CreateTask {
+                ref title,
+                due_at: Some(_),
+            }) if title == "일어나기"
+        ));
+    }
+
+    #[test]
+    fn conversation_schedule_request_uses_the_immediate_schedule_action() {
+        assert!(matches!(
+            pending_action_from_conversation_text("오늘 일정에 잠자기 추가해줘 오후 11시에"),
+            Some(PendingAgentAction::CreateSchedule {
+                ref title,
+                starts_at,
+                ends_at,
+                ref time_zone,
+            }) if title == "잠자기"
+                && starts_at.hour() == 23
+                && ends_at - starts_at == time::Duration::hours(1)
+                && time_zone == "Asia/Seoul"
+        ));
+    }
+
+    #[test]
     fn missing_agent_authentication_maps_to_a_login_request_without_code() {
         let response = agent_authentication_response(None);
         assert_eq!(response.state, "needs_login");

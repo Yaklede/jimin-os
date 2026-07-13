@@ -140,18 +140,40 @@ fn valid_input(value: &str, maximum_chars: usize) -> bool {
 }
 
 fn task_reference_marker(text: &str) -> Option<&'static str> {
-    ["할 일", "할일", "일감", "일을", "업무를"]
-        .iter()
-        .find(|marker| text.contains(**marker))
-        .copied()
+    let explicit = [
+        "할 일",
+        "할일",
+        "일감",
+        "일을",
+        "업무를",
+        "업무",
+        "작업을",
+        "작업",
+    ]
+    .iter()
+    .find(|marker| text.contains(**marker))
+    .copied();
+    explicit.or_else(|| {
+        ["일에", "일로"]
+            .iter()
+            .find(|marker| contains_standalone_phrase(text, marker))
+            .copied()
+    })
+}
+
+fn contains_standalone_phrase(text: &str, phrase: &str) -> bool {
+    text == phrase
+        || text.starts_with(&format!("{phrase} "))
+        || text.ends_with(&format!(" {phrase}"))
+        || text.contains(&format!(" {phrase} "))
 }
 
 fn is_explicit_task_reference(marker: &str) -> bool {
-    matches!(marker, "할 일" | "할일" | "일감")
+    matches!(marker, "할 일" | "할일" | "일감" | "업무" | "작업")
 }
 
 fn has_create_verb(text: &str) -> bool {
-    ["등록", "추가", "넣어", "잡아"]
+    ["등록", "추가", "넣어", "잡아", "생성"]
         .iter()
         .any(|verb| text.contains(verb))
 }
@@ -274,20 +296,34 @@ fn clock_at(day_start: OffsetDateTime, clock: Clock) -> Option<OffsetDateTime> {
 }
 
 fn extract_schedule_title(text: &str) -> Option<String> {
-    let (before_schedule, _) = text.split_once("일정")?;
-    let words = before_schedule
+    let words = text
         .split_whitespace()
-        .filter(|word| !matches!(*word, "오늘" | "내일" | "모레" | "오전" | "오후"))
+        .map(normalize_command_word)
+        .filter(|word| !word.is_empty())
+        .filter(|word| !is_relative_day_word(word))
+        .filter(|word| !matches!(*word, "오전" | "오후" | "부터" | "까지"))
+        .filter(|word| !word.starts_with("일정"))
         .filter(|word| !is_time_word(word))
+        .filter(|word| !is_create_action_word(word))
         .collect::<Vec<_>>();
-    clean_title(&words.join(" "))
+    clean_title(trim_object_particle(&words.join(" ")))
 }
 
 fn extract_task_title(text: &str) -> Option<String> {
     let marker = task_reference_marker(text)?;
     let (before, after) = text.split_once(marker)?;
-    let after = clean_action_tail(trim_task_reference_particle(after)).trim();
-    clean_title(after).or_else(|| clean_task_title_before_marker(before))
+    clean_task_title_after_marker(after).or_else(|| clean_task_title_before_marker(before))
+}
+
+fn clean_task_title_after_marker(value: &str) -> Option<String> {
+    let words = trim_task_reference_particle(value)
+        .split_whitespace()
+        .map(normalize_command_word)
+        .filter(|word| !word.is_empty())
+        .filter(|word| !is_relative_day_word(word))
+        .filter(|word| !is_create_action_word(word))
+        .collect::<Vec<_>>();
+    clean_title(trim_object_particle(&words.join(" ")))
 }
 
 fn clean_task_title_before_marker(value: &str) -> Option<String> {
@@ -317,11 +353,65 @@ fn trim_task_intent_suffix(value: &str) -> &str {
 
 fn trim_task_reference_particle(value: &str) -> &str {
     let value = value.trim_start();
-    ["에 ", "이 ", "가 ", "을 ", "를 ", "은 ", "는 "]
-        .iter()
-        .find_map(|particle| value.strip_prefix(particle))
-        .unwrap_or(value)
-        .trim_start()
+    [
+        "에 ", "로 ", "으로 ", "에서 ", "이 ", "가 ", "을 ", "를 ", "은 ", "는 ",
+    ]
+    .iter()
+    .find_map(|particle| value.strip_prefix(particle))
+    .unwrap_or(value)
+    .trim_start()
+}
+
+fn normalize_command_word(value: &str) -> &str {
+    value.trim_matches(|character| {
+        matches!(
+            character,
+            ',' | '.' | '?' | '!' | '`' | '\'' | '"' | '(' | ')' | '[' | ']'
+        )
+    })
+}
+
+fn is_relative_day_word(value: &str) -> bool {
+    matches!(value, "오늘" | "금일" | "내일" | "모레")
+}
+
+fn is_create_action_word(value: &str) -> bool {
+    const ACTION_WORDS: [&str; 33] = [
+        "등록",
+        "등록해",
+        "등록해줘",
+        "등록해주",
+        "등록해주세요",
+        "등록해줘요",
+        "등록해주라",
+        "추가",
+        "추가해",
+        "추가해줘",
+        "추가해주",
+        "추가해주세요",
+        "추가해줘요",
+        "추가해주라",
+        "넣어",
+        "넣어줘",
+        "넣어주",
+        "넣어주세요",
+        "넣어줘요",
+        "넣어주라",
+        "잡아",
+        "잡아줘",
+        "잡아주",
+        "잡아주세요",
+        "잡아줘요",
+        "잡아주라",
+        "생성",
+        "생성해줘",
+        "줘",
+        "주",
+        "주세요",
+        "줘요",
+        "주라",
+    ];
+    ACTION_WORDS.contains(&value)
 }
 
 fn is_time_word(value: &str) -> bool {
@@ -330,38 +420,6 @@ fn is_time_word(value: &str) -> bool {
     };
     let hour = &value[..marker];
     !hour.is_empty() && hour.chars().all(|character| character.is_ascii_digit())
-}
-
-fn clean_action_tail(value: &str) -> &str {
-    const ACTIONS: [&str; 22] = [
-        "일정을 등록해줘",
-        "일정 추가해줘",
-        "일정을 넣어줘",
-        "일정을 잡아줘",
-        "일정을 등록해 줘",
-        "일정 추가해 줘",
-        "일정을 넣어 줘",
-        "일정을 잡아 줘",
-        "등록해줘",
-        "추가해줘",
-        "넣어줘",
-        "잡아줘",
-        "등록해 줘",
-        "추가해 줘",
-        "넣어 줘",
-        "잡아 줘",
-        "등록",
-        "추가",
-        "등록해",
-        "추가해",
-        "넣어",
-        "잡아",
-    ];
-    let value = value.trim();
-    ACTIONS
-        .iter()
-        .find_map(|action| value.strip_suffix(action))
-        .unwrap_or(value)
 }
 
 fn trim_object_particle(value: &str) -> &str {
@@ -429,6 +487,30 @@ mod tests {
         assert_eq!(label, "내일");
         assert_eq!(title, "치과");
         assert_eq!(starts_at.hour(), 15);
+        assert_eq!(ends_at - starts_at, time::Duration::hours(1));
+    }
+
+    #[test]
+    fn creates_a_schedule_when_the_title_follows_the_schedule_phrase() {
+        let command = interpret(
+            "오늘 일정에 잠자기 추가해줘 오후 11시에",
+            reference_at(),
+            "Asia/Seoul",
+        )
+        .expect("voice command should parse");
+
+        let VoiceCommand::CreateSchedule {
+            label,
+            title,
+            starts_at,
+            ends_at,
+        } = command
+        else {
+            panic!("a complete schedule request should create a schedule");
+        };
+        assert_eq!(label, "오늘");
+        assert_eq!(title, "잠자기");
+        assert_eq!(starts_at.hour(), 23);
         assert_eq!(ends_at - starts_at, time::Duration::hours(1));
     }
 
@@ -558,6 +640,22 @@ mod tests {
         assert_eq!(due_at.date(), reference_at().date().next_day().unwrap());
         assert_eq!(due_at.hour(), 23);
         assert_eq!(due_at.minute(), 59);
+    }
+
+    #[test]
+    fn creates_a_tomorrow_task_from_short_natural_wording() {
+        let command = interpret("내일 일에 일어나기 추가해주", reference_at(), "Asia/Seoul")
+            .expect("voice command should parse");
+
+        let VoiceCommand::CreateTask {
+            title,
+            due_at: Some(due_at),
+        } = command
+        else {
+            panic!("tomorrow task should be created");
+        };
+        assert_eq!(title, "일어나기");
+        assert_eq!(due_at.date(), reference_at().date().next_day().unwrap());
     }
 
     #[test]
