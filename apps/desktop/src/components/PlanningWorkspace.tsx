@@ -1,8 +1,17 @@
-import { CalendarDays, CheckCircle2, Circle } from "lucide-react";
+import {
+  CalendarDays,
+  CheckCircle2,
+  Circle,
+  History,
+  RotateCcw,
+} from "lucide-react";
 import { useEffect, useRef, useState, type RefObject } from "react";
 
-import { type HomeSnapshot } from "../api/home";
-import { type ScheduleEntry, type Task } from "../api/planning";
+import {
+  type PlanningSnapshot,
+  type ScheduleEntry,
+  type Task,
+} from "../api/planning";
 import { copy } from "../copy";
 import {
   SkeletonBlock,
@@ -12,11 +21,12 @@ import {
 import { EmptySurface } from "./HomeWorkspace";
 
 type PlanningWorkspaceProps = {
-  snapshot: HomeSnapshot | undefined;
+  snapshot: PlanningSnapshot | undefined;
   loading: boolean;
   error: string | undefined;
   highlightedScheduleId?: string;
   onCompleteTask(task: Task): Promise<void>;
+  onRestoreTask(task: Task): Promise<void>;
 };
 
 export function PlanningWorkspace({
@@ -25,8 +35,12 @@ export function PlanningWorkspace({
   error,
   highlightedScheduleId,
   onCompleteTask,
+  onRestoreTask,
 }: PlanningWorkspaceProps) {
-  const [completingTaskId, setCompletingTaskId] = useState<string>();
+  const [pendingTask, setPendingTask] = useState<{
+    id: string;
+    action: "complete" | "restore";
+  }>();
   const highlightedScheduleRef = useRef<HTMLLIElement | null>(null);
   const skeletonVisible = useDelayedSkeleton(loading);
   const showingSkeleton = loading || skeletonVisible;
@@ -40,12 +54,22 @@ export function PlanningWorkspace({
   }, [highlightedScheduleId, snapshot?.schedule]);
 
   async function complete(task: Task) {
-    if (completingTaskId) return;
-    setCompletingTaskId(task.id);
+    if (pendingTask) return;
+    setPendingTask({ id: task.id, action: "complete" });
     try {
       await onCompleteTask(task);
     } finally {
-      setCompletingTaskId(undefined);
+      setPendingTask(undefined);
+    }
+  }
+
+  async function restore(task: Task) {
+    if (pendingTask) return;
+    setPendingTask({ id: task.id, action: "restore" });
+    try {
+      await onRestoreTask(task);
+    } finally {
+      setPendingTask(undefined);
     }
   }
 
@@ -131,10 +155,11 @@ export function PlanningWorkspace({
                     className="planning-task-list__complete focus-visible-control"
                     type="button"
                     onClick={() => void complete(task)}
-                    disabled={Boolean(completingTaskId)}
+                    disabled={Boolean(pendingTask)}
                     aria-label={copy.home.completeTask(task.title)}
                   >
-                    {completingTaskId === task.id ? (
+                    {pendingTask?.id === task.id &&
+                    pendingTask.action === "complete" ? (
                       <span className="button-spinner" aria-hidden="true" />
                     ) : (
                       <Circle aria-hidden="true" />
@@ -154,6 +179,67 @@ export function PlanningWorkspace({
             <EmptySurface
               title={copy.home.taskEmptyTitle}
               description={copy.tasks.empty}
+            />
+          )}
+        </div>
+      </section>
+
+      <section
+        className="planning-completed"
+        aria-labelledby="planning-completed-title"
+      >
+        <div className="planning-section-heading">
+          <div>
+            <History aria-hidden="true" />
+            <h2 id="planning-completed-title">{copy.tasks.completedTitle}</h2>
+          </div>
+          <span>
+            {showingSkeleton ? (
+              <CountSkeleton visible={skeletonVisible} />
+            ) : (
+              copy.home.taskCount(snapshot?.completedTasks.length ?? 0)
+            )}
+          </span>
+        </div>
+        <div className="planning-surface">
+          {showingSkeleton ? (
+            <PlanningTaskSkeleton rows={2} visible={skeletonVisible} />
+          ) : snapshot?.completedTasks.length ? (
+            <ul className="planning-task-list planning-task-list--completed">
+              {snapshot.completedTasks.map((task) => (
+                <li key={task.id}>
+                  <button
+                    className="planning-task-list__restore focus-visible-control"
+                    type="button"
+                    onClick={() => void restore(task)}
+                    disabled={Boolean(pendingTask)}
+                    aria-label={copy.tasks.restoreTask(task.title)}
+                  >
+                    {pendingTask?.id === task.id &&
+                    pendingTask.action === "restore" ? (
+                      <span className="button-spinner" aria-hidden="true" />
+                    ) : (
+                      <RotateCcw aria-hidden="true" />
+                    )}
+                  </button>
+                  <div>
+                    <strong>{task.title}</strong>
+                    {task.notes && <p>{task.notes}</p>}
+                  </div>
+                  {task.completedAt && (
+                    <time dateTime={task.completedAt}>
+                      {copy.tasks.completedAt(
+                        completedAtLabel(task.completedAt),
+                      )}
+                    </time>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <EmptySurface
+              title={copy.tasks.completedEmptyTitle}
+              description={copy.tasks.completedEmptyDescription}
             />
           )}
         </div>
@@ -304,5 +390,14 @@ function dueLabel(value: string) {
   return new Intl.DateTimeFormat("ko-KR", {
     month: "numeric",
     day: "numeric",
+  }).format(new Date(value));
+}
+
+function completedAtLabel(value: string) {
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
   }).format(new Date(value));
 }

@@ -4,6 +4,7 @@ import {
   PlanningRequestError,
   bootstrapTrustedNetworkSession,
   clientPlatformForUserAgent,
+  fetchPlanning,
   refreshDeviceSession,
   updateTask,
 } from "./planning";
@@ -123,6 +124,56 @@ describe("device session client", () => {
 });
 
 describe("task client", () => {
+  it("loads open and completed tasks as separate planning collections", async () => {
+    const completedTask = {
+      id: "019f68cb-9400-7000-8000-000000000012",
+      projectId: null,
+      title: "배포 완료",
+      notes: null,
+      status: "completed",
+      priority: 2,
+      dueAt: null,
+      completedAt: "2026-07-14T01:00:00Z",
+      version: 2,
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response('{"items":[],"nextCursor":null}', {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response('{"items":[],"nextCursor":null}', {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ items: [completedTask], nextCursor: null }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("window", { location: { origin: "https://desktop.local" } });
+
+    await expect(
+      fetchPlanning(
+        "https://jimin-os.example/",
+        "access",
+        new Date("2026-07-14T00:00:00Z"),
+        new Date("2026-07-15T00:00:00Z"),
+      ),
+    ).resolves.toEqual({
+      schedule: [],
+      tasks: [],
+      completedTasks: [completedTask],
+    });
+    expect(String(fetchMock.mock.calls[2]?.[0])).toContain("status=completed");
+  });
+
   it("sends a version-checked task update", async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(

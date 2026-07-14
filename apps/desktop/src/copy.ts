@@ -210,6 +210,11 @@ export const copy = {
     title: "열린 할 일",
     description: "완료하지 않은 일을 우선순위대로 보여줘요.",
     empty: "열린 할 일이 없어요. 다음에 할 일을 추가해 보세요.",
+    completedTitle: "완료한 일",
+    completedEmptyTitle: "아직 완료한 일이 없어요",
+    completedEmptyDescription: "완료한 일은 이곳에서 다시 확인할 수 있어요.",
+    restoreTask: (title: string) => `${title} 다시 진행하기`,
+    completedAt: (label: string) => `${label} 완료`,
   },
   projects: projectCopy,
   memory: {
@@ -364,6 +369,8 @@ export const copy = {
     taskCompleted: "할 일을 완료했어요.",
     taskCompletionNotice:
       "할 일을 완료하지 못했어요. 현재 상태를 다시 불러온 뒤 시도해 주세요.",
+    taskRestoreNotice:
+      "할 일을 다시 진행 상태로 바꾸지 못했어요. 새로고침한 뒤 다시 시도해 주세요.",
     taskChanged:
       "할 일이 다른 기기에서 변경됐어요. 새로고침 후 다시 확인해 주세요.",
     scheduleAdded: "일정을 추가했어요.",

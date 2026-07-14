@@ -8,6 +8,7 @@ import {
   refreshDeviceSession,
   updateTask,
   fetchPlanning,
+  type PlanningSnapshot,
   type ScheduleEntry,
   type SessionTokens,
   type Task,
@@ -84,7 +85,7 @@ export default function App() {
   const [homeLoading, setHomeLoading] = useState(false);
   const [homeError, setHomeError] = useState<string | undefined>();
   const [planningSnapshot, setPlanningSnapshot] = useState<
-    HomeSnapshot | undefined
+    PlanningSnapshot | undefined
   >();
   const [planningLoading, setPlanningLoading] = useState(false);
   const [planningError, setPlanningError] = useState<string | undefined>();
@@ -619,6 +620,16 @@ export default function App() {
               if (streamedJob && isTerminalAgentJob(streamedJob.state)) {
                 void refreshConversations();
                 void loadHomeSnapshot();
+                void loadPlanningSnapshot();
+                if (selectedWorkspaceId) {
+                  void loadProjectsForWorkspace(
+                    selectedWorkspaceId,
+                    selectedProjectId,
+                  );
+                }
+                if (selectedProjectId) {
+                  void loadProjectTasks(selectedProjectId);
+                }
                 void synchronizeAssistantDestinations(snapshot.messages);
               }
             },
@@ -643,8 +654,13 @@ export default function App() {
     apiBaseUrl,
     loadConversationMessages,
     loadHomeSnapshot,
+    loadPlanningSnapshot,
+    loadProjectTasks,
+    loadProjectsForWorkspace,
     refreshConversations,
     selectedConversationId,
+    selectedProjectId,
+    selectedWorkspaceId,
     synchronizeAssistantDestinations,
     tokens,
     withAuthenticatedSession,
@@ -687,7 +703,7 @@ export default function App() {
     if (!tokens) return;
     setHomeError(undefined);
     try {
-      await withAuthenticatedSession((accessToken) =>
+      const completed = await withAuthenticatedSession((accessToken) =>
         completeTask(apiBaseUrl, accessToken, task),
       );
       setHomeSnapshot((current) =>
@@ -703,12 +719,82 @@ export default function App() {
           ? {
               ...current,
               tasks: current.tasks.filter((item) => item.id !== task.id),
+              completedTasks: [
+                completed,
+                ...current.completedTasks.filter(
+                  (item) => item.id !== completed.id,
+                ),
+              ],
             }
           : current,
       );
+      setProjectTasks((current) =>
+        current.map((item) => (item.id === completed.id ? completed : item)),
+      );
+      if (task.projectId) {
+        setProjects((current) =>
+          current.map((project) =>
+            project.id === task.projectId
+              ? {
+                  ...project,
+                  openTaskCount: Math.max(0, project.openTaskCount - 1),
+                }
+              : project,
+          ),
+        );
+      }
     } catch {
       setHomeError(copy.messages.taskCompletionNotice);
+      setPlanningError(copy.messages.taskCompletionNotice);
       void loadHomeSnapshot();
+      void loadPlanningSnapshot();
+    }
+  }
+
+  async function restorePlanningTask(task: Task): Promise<void> {
+    if (!tokens) return;
+    setPlanningError(undefined);
+    try {
+      const restored = await withAuthenticatedSession((accessToken) =>
+        updateTask(apiBaseUrl, accessToken, task, {
+          title: task.title,
+          notes: task.notes ?? undefined,
+          status: "open",
+          priority: task.priority,
+          dueAt: task.dueAt ?? undefined,
+        }),
+      );
+      setPlanningSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              tasks: [
+                restored,
+                ...current.tasks.filter((item) => item.id !== restored.id),
+              ],
+              completedTasks: current.completedTasks.filter(
+                (item) => item.id !== restored.id,
+              ),
+            }
+          : current,
+      );
+      setProjectTasks((current) =>
+        current.map((item) => (item.id === restored.id ? restored : item)),
+      );
+      if (task.projectId) {
+        setProjects((current) =>
+          current.map((project) =>
+            project.id === task.projectId
+              ? { ...project, openTaskCount: project.openTaskCount + 1 }
+              : project,
+          ),
+        );
+      }
+      void loadHomeSnapshot();
+    } catch {
+      setPlanningError(copy.messages.taskRestoreNotice);
+      void loadPlanningSnapshot();
+      if (selectedProjectId) void loadProjectTasks(selectedProjectId);
     }
   }
 
@@ -905,6 +991,20 @@ export default function App() {
       setProjectTasks((current) =>
         current.map((item) => (item.id === completed.id ? completed : item)),
       );
+      setPlanningSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              tasks: current.tasks.filter((item) => item.id !== completed.id),
+              completedTasks: [
+                completed,
+                ...current.completedTasks.filter(
+                  (item) => item.id !== completed.id,
+                ),
+              ],
+            }
+          : current,
+      );
       if (task.projectId) {
         setProjects((current) =>
           current.map((project) =>
@@ -962,6 +1062,7 @@ export default function App() {
         );
       }
       void loadHomeSnapshot();
+      void loadPlanningSnapshot();
     } catch {
       setProjectsError(copy.messages.projectTaskSaveNotice);
       if (selectedProjectId) void loadProjectTasks(selectedProjectId);
@@ -1240,6 +1341,7 @@ export default function App() {
               error={planningError ?? (mode === "error" ? message : undefined)}
               highlightedScheduleId={highlightedScheduleId}
               onCompleteTask={completeHomeTask}
+              onRestoreTask={restorePlanningTask}
             />
           )}
           {destination === "projects" && (

@@ -27,6 +27,12 @@ export interface Task {
   version: number;
 }
 
+export interface PlanningSnapshot {
+  schedule: ScheduleEntry[];
+  tasks: Task[];
+  completedTasks: Task[];
+}
+
 interface DeviceSessionResponse extends SessionTokens {
   user: unknown;
   device: unknown;
@@ -123,7 +129,7 @@ export async function fetchPlanning(
   access: string,
   from: Date,
   to: Date,
-): Promise<{ schedule: ScheduleEntry[]; tasks: Task[] }> {
+): Promise<PlanningSnapshot> {
   const headers = {
     Accept: "application/json",
     Authorization: `Bearer ${access}`,
@@ -135,23 +141,36 @@ export async function fetchPlanning(
   );
   scheduleUrl.searchParams.set("from", from.toISOString());
   scheduleUrl.searchParams.set("to", to.toISOString());
-  const [scheduleResponse, taskResponse] = await Promise.all([
-    fetch(scheduleUrl.toString(), { headers }),
-    fetch(`${base}/v1/tasks`, { headers }),
-  ]);
-  const [scheduleBody, taskBody] = await Promise.all([
+  const completedTaskUrl = new URL(`${base}/v1/tasks`, window.location.origin);
+  completedTaskUrl.searchParams.set("status", "completed");
+  const [scheduleResponse, taskResponse, completedTaskResponse] =
+    await Promise.all([
+      fetch(scheduleUrl.toString(), { headers }),
+      fetch(`${base}/v1/tasks`, { headers }),
+      fetch(completedTaskUrl.toString(), { headers }),
+    ]);
+  const [scheduleBody, taskBody, completedTaskBody] = await Promise.all([
     readJson(scheduleResponse),
     readJson(taskResponse),
+    readJson(completedTaskResponse),
   ]);
   if (!scheduleResponse.ok) throw errorFromStatus(scheduleResponse.status);
   if (!taskResponse.ok) throw errorFromStatus(taskResponse.status);
+  if (!completedTaskResponse.ok) {
+    throw errorFromStatus(completedTaskResponse.status);
+  }
   if (
     !isListResponse<ScheduleEntry>(scheduleBody) ||
-    !isListResponse<Task>(taskBody)
+    !isListResponse<Task>(taskBody) ||
+    !isListResponse<Task>(completedTaskBody)
   ) {
     throw new PlanningRequestError("unavailable");
   }
-  return { schedule: scheduleBody.items, tasks: taskBody.items };
+  return {
+    schedule: scheduleBody.items,
+    tasks: taskBody.items,
+    completedTasks: completedTaskBody.items,
+  };
 }
 
 export async function createTask(
