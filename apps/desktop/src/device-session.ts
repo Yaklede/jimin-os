@@ -5,6 +5,17 @@ import { createUuidV7, isUuidV7 } from "./uuid";
 
 const previewSessionKey = "jimin-os-dev-session";
 const previewInstallationKey = "jimin-os-dev-installation";
+const useNativeSecureStore = shouldUseNativeSecureStore(
+  isTauri(),
+  import.meta.env.VITE_LOCAL_PHONE_TEST,
+);
+
+export function shouldUseNativeSecureStore(
+  tauriRuntime: boolean,
+  localTestMode: string | undefined,
+): boolean {
+  return tauriRuntime && localTestMode !== "1";
+}
 
 export interface StoredDeviceSession {
   tokens: SessionTokens;
@@ -13,7 +24,7 @@ export interface StoredDeviceSession {
 export async function readDeviceSession(): Promise<
   StoredDeviceSession | undefined
 > {
-  const raw = isTauri()
+  const raw = useNativeSecureStore
     ? await invoke<string | undefined>("read_device_session")
     : (sessionStorage.getItem(previewSessionKey) ?? undefined);
 
@@ -30,7 +41,7 @@ export async function saveDeviceSession(
   session: StoredDeviceSession,
 ): Promise<void> {
   const value = JSON.stringify(session);
-  if (isTauri()) {
+  if (useNativeSecureStore) {
     await invoke("save_device_session", { value });
     return;
   }
@@ -38,7 +49,7 @@ export async function saveDeviceSession(
 }
 
 export async function clearDeviceSession(): Promise<void> {
-  if (isTauri()) {
+  if (useNativeSecureStore) {
     await invoke("clear_device_session");
     return;
   }
@@ -46,7 +57,7 @@ export async function clearDeviceSession(): Promise<void> {
 }
 
 export async function readOrCreateInstallationId(): Promise<string> {
-  const value = isTauri()
+  const value = useNativeSecureStore
     ? await invoke<string>("read_or_create_installation_id")
     : readOrCreatePreviewInstallationId();
   if (!isUuidV7(value)) {
