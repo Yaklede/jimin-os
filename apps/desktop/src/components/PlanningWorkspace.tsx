@@ -186,6 +186,8 @@ export function PlanningWorkspace({
           >
             <ChevronRight aria-hidden="true" />
           </button>
+        </div>
+        <div className="planning-toolbar__actions">
           <button
             className="text-button focus-visible-control"
             type="button"
@@ -194,26 +196,26 @@ export function PlanningWorkspace({
           >
             {copy.schedule.goToday}
           </button>
+          {calendarConnection?.status === "active" && (
+            <div className="planning-sync-state">
+              <Cloud aria-hidden="true" />
+              <span>
+                {calendarSyncLabel(calendarConnection.lastSuccessfulSyncAt)}
+              </span>
+              {onSyncCalendar && (
+                <button
+                  className="icon-button focus-visible-control"
+                  type="button"
+                  onClick={() => void onSyncCalendar()}
+                  disabled={loading}
+                  aria-label={copy.schedule.syncNow}
+                >
+                  <RefreshCw aria-hidden="true" />
+                </button>
+              )}
+            </div>
+          )}
         </div>
-        {calendarConnection?.status === "active" && (
-          <div className="planning-sync-state">
-            <Cloud aria-hidden="true" />
-            <span>
-              {calendarSyncLabel(calendarConnection.lastSuccessfulSyncAt)}
-            </span>
-            {onSyncCalendar && (
-              <button
-                className="icon-button focus-visible-control"
-                type="button"
-                onClick={() => void onSyncCalendar()}
-                disabled={loading}
-                aria-label={copy.schedule.syncNow}
-              >
-                <RefreshCw aria-hidden="true" />
-              </button>
-            )}
-          </div>
-        )}
       </section>
 
       <section

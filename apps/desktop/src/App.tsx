@@ -481,7 +481,7 @@ export default function App() {
           const next = preferredProjectId ?? current;
           return items.some((project) => project.id === next)
             ? next
-            : items[0]?.id;
+            : undefined;
         });
         return true;
       } catch {
@@ -1843,6 +1843,13 @@ export default function App() {
               error={projectsError}
               onSelectWorkspace={selectWorkspace}
               onSelectProject={selectProject}
+              onClearProject={() => {
+                setHighlightedProjectTaskId(undefined);
+                setSelectedProjectId(undefined);
+                setProjectTasks([]);
+                setProjectWebhooks([]);
+                setWebhookDeliveries([]);
+              }}
               onCreateProject={createWorkspaceProject}
               onUpdateProject={updateWorkspaceProject}
               onCreateTask={createProjectTask}

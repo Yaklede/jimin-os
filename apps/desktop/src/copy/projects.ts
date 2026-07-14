@@ -25,6 +25,7 @@ export const projectCopy = {
     completed: "완료",
   },
   listTitle: "프로젝트 목록",
+  backToList: "프로젝트 목록으로",
   projectCount: (count: number) => `${count}개`,
   openTaskCount: (count: number) => `열린 일 ${count}개`,
   noNextAction: "다음 행동을 정해 보세요.",

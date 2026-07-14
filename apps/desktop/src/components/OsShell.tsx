@@ -156,7 +156,11 @@ export function OsShell({
             </span>
           )}
         </div>
-        <main className="os-content">{children}</main>
+        <main className="os-content">
+          <div className="os-content__view" key={destination}>
+            {children}
+          </div>
+        </main>
       </section>
 
       {rail && <aside className="os-rail">{rail}</aside>}

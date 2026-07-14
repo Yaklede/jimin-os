@@ -1,4 +1,5 @@
 import {
+  ArrowLeft,
   BriefcaseBusiness,
   CalendarDays,
   ChevronRight,
@@ -44,6 +45,7 @@ type ProjectsWorkspaceProps = {
   error: string | undefined;
   onSelectWorkspace(workspaceId: string): void;
   onSelectProject(projectId: string): void;
+  onClearProject(): void;
   onCreateProject(input: {
     title: string;
     objective?: string;
@@ -98,6 +100,7 @@ export function ProjectsWorkspace({
   error,
   onSelectWorkspace,
   onSelectProject,
+  onClearProject,
   onCreateProject,
   onUpdateProject,
   onCreateTask,
@@ -118,6 +121,8 @@ export function ProjectsWorkspace({
   const [editingProjectId, setEditingProjectId] = useState<string>();
   const [savedProjectId, setSavedProjectId] = useState<string>();
   const [editingTaskId, setEditingTaskId] = useState<string>();
+  const [restoreListFocus, setRestoreListFocus] = useState(false);
+  const projectListHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const highlightedTaskRef = useRef<HTMLLIElement | null>(null);
   const skeletonVisible = useDelayedSkeleton(loading);
   const showingSkeleton = loading || skeletonVisible;
@@ -134,6 +139,12 @@ export function ProjectsWorkspace({
     setSavedProjectId(undefined);
     setEditingTaskId(undefined);
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (selectedProjectId || !restoreListFocus) return;
+    projectListHeadingRef.current?.focus();
+    setRestoreListFocus(false);
+  }, [restoreListFocus, selectedProjectId]);
 
   useEffect(() => {
     if (!highlightedTaskId) return;
@@ -325,7 +336,10 @@ export function ProjectsWorkspace({
         </form>
       )}
 
-      <div className="projects-layout">
+      <div
+        className="projects-layout"
+        data-project-selected={Boolean(selectedProject)}
+      >
         <section
           className="projects-list"
           aria-labelledby="projects-list-title"
@@ -333,7 +347,13 @@ export function ProjectsWorkspace({
           <div className="projects-section-heading">
             <div>
               <FolderKanban aria-hidden="true" />
-              <h2 id="projects-list-title">{copy.projects.listTitle}</h2>
+              <h2
+                id="projects-list-title"
+                ref={projectListHeadingRef}
+                tabIndex={-1}
+              >
+                {copy.projects.listTitle}
+              </h2>
             </div>
             {!showingSkeleton && (
               <span>{copy.projects.projectCount(projects.length)}</span>
@@ -358,25 +378,8 @@ export function ProjectsWorkspace({
                     >
                       <span className="project-list__main">
                         <strong>{project.title}</strong>
-                        <span>
-                          {project.nextAction ||
-                            project.objective ||
-                            copy.projects.noNextAction}
-                        </span>
                       </span>
                       <span className="project-list__meta">
-                        {project.riskLevel > 0 && (
-                          <span
-                            className="project-risk"
-                            data-risk={project.riskLevel}
-                          >
-                            <CircleAlert aria-hidden="true" />
-                            {riskLabel(project.riskLevel)}
-                          </span>
-                        )}
-                        <span className="project-status">
-                          {statusLabel(project.status)}
-                        </span>
                         <span>
                           {copy.projects.openTaskCount(project.openTaskCount)}
                         </span>
@@ -400,89 +403,105 @@ export function ProjectsWorkspace({
           aria-labelledby="project-detail-title"
         >
           {showingSkeleton ? (
-            <ProjectDetailSkeleton visible={skeletonVisible} />
+            <div className="project-detail__panel">
+              <ProjectDetailSkeleton visible={skeletonVisible} />
+            </div>
           ) : selectedProject ? (
             <>
-              <div className="project-detail__heading">
-                <div>
-                  <p>{copy.projects.projectDetailLabel}</p>
-                  <h2 id="project-detail-title">{selectedProject.title}</h2>
+              <button
+                className="project-detail__back focus-visible-control"
+                type="button"
+                onClick={() => {
+                  setRestoreListFocus(true);
+                  onClearProject();
+                }}
+              >
+                <ArrowLeft aria-hidden="true" />
+                {copy.projects.backToList}
+              </button>
+              <section className="project-detail__panel project-detail__overview">
+                <div className="project-detail__heading">
+                  <div>
+                    <p>{copy.projects.projectDetailLabel}</p>
+                    <h2 id="project-detail-title">{selectedProject.title}</h2>
+                    <span>
+                      {selectedProject.objective ||
+                        copy.projects.objectiveEmpty}
+                    </span>
+                  </div>
+                  <div className="project-detail__heading-actions">
+                    {selectedProject.riskLevel > 0 && (
+                      <span
+                        className="project-risk"
+                        data-risk={selectedProject.riskLevel}
+                      >
+                        <CircleAlert aria-hidden="true" />
+                        {riskLabel(selectedProject.riskLevel)}
+                      </span>
+                    )}
+                    <button
+                      className="secondary-button focus-visible-control"
+                      type="button"
+                      disabled={saving}
+                      onClick={() => {
+                        setFormError(undefined);
+                        setSavedProjectId(undefined);
+                        setEditingProjectId(selectedProject.id);
+                      }}
+                    >
+                      <Pencil aria-hidden="true" />
+                      {copy.projects.editProject}
+                    </button>
+                  </div>
+                </div>
+                <div
+                  className="project-detail__meta"
+                  aria-label={copy.projects.currentStateLabel}
+                >
                   <span>
-                    {selectedProject.objective || copy.projects.objectiveEmpty}
+                    <strong>{copy.projects.statusLabel}</strong>
+                    {statusLabel(selectedProject.status)}
+                  </span>
+                  <span>
+                    <CalendarDays aria-hidden="true" />
+                    <strong>{copy.projects.dueDateLabel}</strong>
+                    {formatDueDate(selectedProject.dueAt)}
                   </span>
                 </div>
-                <div className="project-detail__heading-actions">
-                  {selectedProject.riskLevel > 0 && (
-                    <span
-                      className="project-risk"
-                      data-risk={selectedProject.riskLevel}
-                    >
-                      <CircleAlert aria-hidden="true" />
-                      {riskLabel(selectedProject.riskLevel)}
-                    </span>
-                  )}
-                  <button
-                    className="secondary-button focus-visible-control"
-                    type="button"
-                    disabled={saving}
-                    onClick={() => {
+                {editingProjectId === selectedProject.id ? (
+                  <ProjectEditForm
+                    key={`${selectedProject.id}:${selectedProject.version}`}
+                    project={selectedProject}
+                    saving={saving}
+                    onCancel={() => {
                       setFormError(undefined);
-                      setSavedProjectId(undefined);
-                      setEditingProjectId(selectedProject.id);
-                    }}
-                  >
-                    <Pencil aria-hidden="true" />
-                    {copy.projects.editProject}
-                  </button>
-                </div>
-              </div>
-              <div
-                className="project-detail__meta"
-                aria-label={copy.projects.currentStateLabel}
-              >
-                <span>
-                  <strong>{copy.projects.statusLabel}</strong>
-                  {statusLabel(selectedProject.status)}
-                </span>
-                <span>
-                  <CalendarDays aria-hidden="true" />
-                  <strong>{copy.projects.dueDateLabel}</strong>
-                  {formatDueDate(selectedProject.dueAt)}
-                </span>
-              </div>
-              {editingProjectId === selectedProject.id ? (
-                <ProjectEditForm
-                  key={`${selectedProject.id}:${selectedProject.version}`}
-                  project={selectedProject}
-                  saving={saving}
-                  onCancel={() => {
-                    setFormError(undefined);
-                    setEditingProjectId(undefined);
-                  }}
-                  onSave={async (input) => {
-                    setFormError(undefined);
-                    try {
-                      await onUpdateProject(selectedProject, input);
                       setEditingProjectId(undefined);
-                      setSavedProjectId(selectedProject.id);
-                    } catch {
-                      setFormError(copy.projects.projectUpdateNotice);
-                    }
-                  }}
-                />
-              ) : (
-                <div className="project-next-action">
-                  <span>{copy.projects.nextActionLabel}</span>
-                  <strong>
-                    {selectedProject.nextAction || copy.projects.noNextAction}
-                  </strong>
-                </div>
-              )}
-              {savedProjectId === selectedProject.id && (
-                <p className="project-save-status" role="status">
-                  {copy.projects.projectUpdated}
-                </p>
-              )}
+                    }}
+                    onSave={async (input) => {
+                      setFormError(undefined);
+                      try {
+                        await onUpdateProject(selectedProject, input);
+                        setEditingProjectId(undefined);
+                        setSavedProjectId(selectedProject.id);
+                      } catch {
+                        setFormError(copy.projects.projectUpdateNotice);
+                      }
+                    }}
+                  />
+                ) : (
+                  <div className="project-next-action">
+                    <span>{copy.projects.nextActionLabel}</span>
+                    <strong>
+                      {selectedProject.nextAction || copy.projects.noNextAction}
+                    </strong>
+                  </div>
+                )}
+                {savedProjectId === selectedProject.id && (
+                  <p className="project-save-status" role="status">
+                    {copy.projects.projectUpdated}
+                  </p>
+                )}
+              </section>
               <ProjectWebhookPanel
                 projectId={selectedProject.id}
                 webhooks={webhooks}
@@ -661,10 +680,12 @@ export function ProjectsWorkspace({
               </div>
             </>
           ) : (
-            <EmptySurface
-              title={copy.projects.selectTitle}
-              description={copy.projects.selectDescription}
-            />
+            <div className="project-detail__panel project-detail__selection">
+              <EmptySurface
+                title={copy.projects.selectTitle}
+                description={copy.projects.selectDescription}
+              />
+            </div>
           )}
         </section>
       </div>
