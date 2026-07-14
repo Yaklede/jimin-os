@@ -296,6 +296,7 @@ export function HomeWorkspace({
             ) : nextSchedule ? (
               <ScheduleHighlight
                 entry={nextSchedule}
+                onOpen={() => void onOpenSchedule(nextSchedule)}
                 onEdit={
                   nextSchedule.source === "manual"
                     ? () => onEditSchedule(nextSchedule)
@@ -363,15 +364,23 @@ export function HomeWorkspace({
                           <Circle aria-hidden="true" />
                         )}
                       </button>
-                      <span>{task.title}</span>
-                      {task.dueAt && (
-                        <time
-                          dateTime={task.dueAt}
-                          data-due-state={taskDueState(task)}
-                        >
-                          {taskDueLabel(task)}
-                        </time>
-                      )}
+                      <button
+                        className="home-task-list__open focus-visible-control"
+                        type="button"
+                        onClick={() => void onOpenPlanningTask(task)}
+                        disabled={Boolean(completingTaskId)}
+                        aria-label={copy.home.openTaskInSchedule(task.title)}
+                      >
+                        <span>{task.title}</span>
+                        {task.dueAt && (
+                          <time
+                            dateTime={task.dueAt}
+                            data-due-state={taskDueState(task)}
+                          >
+                            {taskDueLabel(task)}
+                          </time>
+                        )}
+                      </button>
                       <button
                         className="home-task-list__edit focus-visible-control"
                         type="button"
@@ -791,20 +800,29 @@ function TaskListSkeleton({
 
 function ScheduleHighlight({
   entry,
+  onOpen,
   onEdit,
 }: {
   entry: ScheduleEntry;
+  onOpen: () => void;
   onEdit?: () => void;
 }) {
   return (
     <div className="schedule-highlight">
-      <span className="schedule-highlight__icon" aria-hidden="true">
-        <CalendarDays />
-      </span>
-      <div>
-        <strong>{entry.title}</strong>
-        <p>{scheduleDetail(entry)}</p>
-      </div>
+      <button
+        className="schedule-highlight__open focus-visible-control"
+        type="button"
+        onClick={onOpen}
+        aria-label={copy.home.openScheduleInSchedule(entry.title)}
+      >
+        <span className="schedule-highlight__icon" aria-hidden="true">
+          <CalendarDays />
+        </span>
+        <span className="schedule-highlight__copy">
+          <strong>{entry.title}</strong>
+          <span>{scheduleDetail(entry)}</span>
+        </span>
+      </button>
       {onEdit ? (
         <button
           className="schedule-highlight__edit focus-visible-control"

@@ -1,6 +1,13 @@
 import { Server, Sparkles } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import {
+  fetchGoogleCalendarConnection,
+  startGoogleCalendarAuthorization,
+  synchronizeGoogleCalendar,
+  type GoogleCalendarConnection,
+} from "./api/calendar";
 import {
   bootstrapTrustedNetworkSession,
   completeTask,
@@ -73,6 +80,7 @@ import {
   retryUnauthorizedRequest,
 } from "./session-retry";
 import { createUuidV7 } from "./uuid";
+import { currentPlanningRange } from "./planningRange";
 
 type AppMode =
   "configuration" | "server-unreachable" | "loading" | "ready" | "error";
@@ -144,6 +152,16 @@ export default function App() {
   const [agentModelsLoading, setAgentModelsLoading] = useState(false);
   const [agentModelsSaving, setAgentModelsSaving] = useState(false);
   const [agentModelsError, setAgentModelsError] = useState<string>();
+  const [calendarConnection, setCalendarConnection] = useState<
+    GoogleCalendarConnection | undefined
+  >();
+  const [calendarLoading, setCalendarLoading] = useState(false);
+  const [calendarAction, setCalendarAction] = useState<
+    "authorizing" | "syncing" | undefined
+  >();
+  const [calendarAuthorizationExpiresAt, setCalendarAuthorizationExpiresAt] =
+    useState<string>();
+  const [calendarError, setCalendarError] = useState<string>();
   const pendingConversationId = useRef<string | undefined>(undefined);
   const activeSessionRef = useRef<SessionTokens | undefined>(undefined);
   const refreshInFlightRef = useRef<Promise<SessionTokens> | undefined>(
@@ -320,6 +338,80 @@ export default function App() {
     [apiBaseUrl, tokens, withAuthenticatedSession],
   );
 
+  const loadGoogleCalendarConnection = useCallback(async (): Promise<
+    GoogleCalendarConnection | undefined
+  > => {
+    if (!tokens) return undefined;
+    setCalendarLoading(true);
+    setCalendarError(undefined);
+    try {
+      const connection = await withAuthenticatedSession((accessToken) =>
+        fetchGoogleCalendarConnection(apiBaseUrl, accessToken),
+      );
+      setCalendarConnection(connection);
+      if (connection.status === "active") {
+        setCalendarAuthorizationExpiresAt(undefined);
+      }
+      return connection;
+    } catch {
+      setCalendarError(copy.settings.calendarLoadFailed);
+      return undefined;
+    } finally {
+      setCalendarLoading(false);
+    }
+  }, [apiBaseUrl, tokens, withAuthenticatedSession]);
+
+  const beginGoogleCalendarConnection = useCallback(async (): Promise<void> => {
+    if (!tokens || calendarAction) return;
+    setCalendarAction("authorizing");
+    setCalendarError(undefined);
+    try {
+      const authorization = await withAuthenticatedSession((accessToken) =>
+        startGoogleCalendarAuthorization(apiBaseUrl, accessToken),
+      );
+      await openExternalUrl(authorization.authorizationUrl);
+      setCalendarAuthorizationExpiresAt(authorization.expiresAt);
+    } catch {
+      setCalendarError(
+        calendarConnection?.available === false
+          ? copy.settings.calendarConfigurationMissing
+          : copy.settings.calendarConnectFailed,
+      );
+    } finally {
+      setCalendarAction(undefined);
+    }
+  }, [
+    apiBaseUrl,
+    calendarAction,
+    calendarConnection?.available,
+    tokens,
+    withAuthenticatedSession,
+  ]);
+
+  const syncGoogleCalendar = useCallback(async (): Promise<void> => {
+    if (!tokens || calendarAction) return;
+    setCalendarAction("syncing");
+    setCalendarError(undefined);
+    try {
+      const connection = await withAuthenticatedSession((accessToken) =>
+        synchronizeGoogleCalendar(apiBaseUrl, accessToken),
+      );
+      setCalendarConnection(connection);
+      await Promise.all([loadHomeSnapshot(), loadPlanningSnapshot()]);
+    } catch {
+      setCalendarError(copy.settings.calendarSyncFailed);
+    } finally {
+      setCalendarAction(undefined);
+    }
+  }, [
+    apiBaseUrl,
+    calendarAction,
+    loadHomeSnapshot,
+    loadPlanningSnapshot,
+    tokens,
+    withAuthenticatedSession,
+  ]);
+
   const loadWorkspaces = useCallback(async () => {
     if (!tokens) return;
     setProjectsLoading(true);
@@ -435,6 +527,7 @@ export default function App() {
           fetchAgentAuthentication(apiBaseUrl, accessToken),
         ),
         loadHomeSnapshot(),
+        loadGoogleCalendarConnection(),
       ]);
       setConversations(nextConversations);
       setAgentAuthentication(authentication);
@@ -447,7 +540,13 @@ export default function App() {
       setMode("error");
       setMessage(copy.messages.conversationLoadNotice);
     }
-  }, [loadHomeSnapshot, sessionLoaded, tokens, withAuthenticatedSession]);
+  }, [
+    loadGoogleCalendarConnection,
+    loadHomeSnapshot,
+    sessionLoaded,
+    tokens,
+    withAuthenticatedSession,
+  ]);
 
   async function discardSession() {
     try {
@@ -478,6 +577,10 @@ export default function App() {
       setAgentAuthentication(undefined);
       setAgentModelSettings(undefined);
       setAgentModelsError(undefined);
+      setCalendarConnection(undefined);
+      setCalendarError(undefined);
+      setCalendarAuthorizationExpiresAt(undefined);
+      setCalendarAction(undefined);
       pendingConversationId.current = undefined;
       await bootstrapTrustedNetworkDevice();
     }
@@ -525,6 +628,49 @@ export default function App() {
   useEffect(() => {
     void loadAgentModelSettings();
   }, [loadAgentModelSettings]);
+
+  useEffect(() => {
+    if (!tokens || !calendarAuthorizationExpiresAt) return;
+    let current = true;
+    const expiresAt = new Date(calendarAuthorizationExpiresAt).getTime();
+    const poll = async () => {
+      if (!Number.isFinite(expiresAt) || Date.now() >= expiresAt) {
+        if (current) {
+          setCalendarAuthorizationExpiresAt(undefined);
+          setCalendarError(copy.settings.calendarAuthorizationExpired);
+        }
+        return;
+      }
+      try {
+        const connection = await withAuthenticatedSession((accessToken) =>
+          fetchGoogleCalendarConnection(apiBaseUrl, accessToken),
+        );
+        if (!current) return;
+        setCalendarConnection(connection);
+        if (connection.status === "active") {
+          setCalendarAuthorizationExpiresAt(undefined);
+          setCalendarError(undefined);
+          void loadHomeSnapshot();
+          void loadPlanningSnapshot();
+        }
+      } catch {
+        if (current) setCalendarError(copy.settings.calendarLoadFailed);
+      }
+    };
+    void poll();
+    const interval = window.setInterval(() => void poll(), 2_000);
+    return () => {
+      current = false;
+      window.clearInterval(interval);
+    };
+  }, [
+    apiBaseUrl,
+    calendarAuthorizationExpiresAt,
+    loadHomeSnapshot,
+    loadPlanningSnapshot,
+    tokens,
+    withAuthenticatedSession,
+  ]);
 
   useEffect(() => {
     void loadWorkspaces();
@@ -994,8 +1140,11 @@ export default function App() {
   ): Promise<void> {
     const snapshot = await loadPlanningSnapshot(entry.startsAt);
     if (!snapshot?.schedule.some((item) => item.id === entry.id)) {
-      throw new Error("schedule destination unavailable");
+      setHomeError(copy.home.scheduleDestinationNotice);
+      setPlanningError(copy.home.scheduleDestinationNotice);
+      return;
     }
+    setHighlightedPlanningTaskId(undefined);
     setHighlightedScheduleId(entry.id);
     setDestination("calendar");
   }
@@ -1004,6 +1153,7 @@ export default function App() {
     const snapshot = await loadPlanningSnapshot();
     if (!snapshot?.tasks.some((item) => item.id === task.id)) {
       setHomeError(copy.home.taskDestinationNotice);
+      setPlanningError(copy.home.taskDestinationNotice);
       return;
     }
     setHighlightedScheduleId(undefined);
@@ -1545,9 +1695,19 @@ export default function App() {
               modelsLoading={agentModelsLoading}
               modelsSaving={agentModelsSaving}
               modelsError={agentModelsError}
+              calendarConnection={calendarConnection}
+              calendarLoading={calendarLoading}
+              calendarAction={calendarAction}
+              calendarAuthorizationPending={Boolean(
+                calendarAuthorizationExpiresAt,
+              )}
+              calendarError={calendarError}
               onStartAuthentication={beginAgentAuthentication}
               onReloadModels={loadAgentModelSettings}
               onSaveModel={saveAgentModelSettings}
+              onStartCalendarConnection={beginGoogleCalendarConnection}
+              onReloadCalendarConnection={loadGoogleCalendarConnection}
+              onSyncCalendar={syncGoogleCalendar}
             />
           )}
           {destination === "chat" && (
@@ -1674,27 +1834,13 @@ function currentLocalDayRange(now = new Date()): [Date, Date] {
   return [from, to];
 }
 
-function currentPlanningRange(
-  targetStartsAt?: string,
-  now = new Date(),
-): [Date, Date] {
-  const from = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const defaultTo = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate() + 90,
-  );
-  if (!targetStartsAt) return [from, defaultTo];
-  const target = new Date(targetStartsAt);
-  if (Number.isNaN(target.getTime()) || target < defaultTo) {
-    return [from, defaultTo];
+async function openExternalUrl(url: string): Promise<void> {
+  try {
+    await openUrl(url);
+  } catch {
+    const opened = window.open(url, "_blank", "noopener,noreferrer");
+    if (!opened) throw new Error("external navigation unavailable");
   }
-  const to = new Date(
-    target.getFullYear(),
-    target.getMonth(),
-    target.getDate() + 1,
-  );
-  return [from, to];
 }
 
 function isTerminalAgentJob(state: AgentJob["state"]) {

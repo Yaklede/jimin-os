@@ -1,9 +1,11 @@
 import {
+  CalendarDays,
   CheckCircle2,
   ChevronRight,
   CircleAlert,
   Link2,
   LoaderCircle,
+  RefreshCw,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -11,6 +13,7 @@ import {
   type AgentAuthentication,
   type AgentModelSettings,
 } from "../api/agent";
+import { type GoogleCalendarConnection } from "../api/calendar";
 import { copy } from "../copy";
 
 type SettingsWorkspaceProps = {
@@ -20,12 +23,20 @@ type SettingsWorkspaceProps = {
   modelsLoading: boolean;
   modelsSaving: boolean;
   modelsError: string | undefined;
+  calendarConnection: GoogleCalendarConnection | undefined;
+  calendarLoading: boolean;
+  calendarAction: "authorizing" | "syncing" | undefined;
+  calendarAuthorizationPending: boolean;
+  calendarError: string | undefined;
   onStartAuthentication(): Promise<void>;
   onReloadModels(): Promise<void>;
   onSaveModel(
     modelId: string | null,
     reasoningEffort: string | null,
   ): Promise<boolean>;
+  onStartCalendarConnection(): Promise<void>;
+  onReloadCalendarConnection(): Promise<GoogleCalendarConnection | undefined>;
+  onSyncCalendar(): Promise<void>;
 };
 
 export function SettingsWorkspace({
@@ -35,9 +46,17 @@ export function SettingsWorkspace({
   modelsLoading,
   modelsSaving,
   modelsError,
+  calendarConnection,
+  calendarLoading,
+  calendarAction,
+  calendarAuthorizationPending,
+  calendarError,
   onStartAuthentication,
   onReloadModels,
   onSaveModel,
+  onStartCalendarConnection,
+  onReloadCalendarConnection,
+  onSyncCalendar,
 }: SettingsWorkspaceProps) {
   const savedModelId = modelSettings?.selectedModelId ?? "";
   const savedReasoningEffort = modelSettings?.selectedReasoningEffort ?? "";
@@ -71,6 +90,18 @@ export function SettingsWorkspace({
   const settingsChanged =
     draftModelId !== savedModelId ||
     draftReasoningEffort !== savedReasoningEffort;
+  const calendarReady = calendarConnection?.status === "active";
+  const calendarUnavailable = calendarConnection?.available === false;
+  const calendarNeedsAttention =
+    calendarConnection?.status === "reauth_required" ||
+    calendarConnection?.status === "revoked" ||
+    calendarConnection?.status === "error";
+  const calendarBusy = calendarLoading || Boolean(calendarAction);
+  const calendarDetail = calendarConnectionDetail(
+    calendarConnection,
+    calendarLoading,
+    calendarAuthorizationPending,
+  );
 
   async function saveModel() {
     setModelSaved(false);
@@ -223,6 +254,10 @@ export function SettingsWorkspace({
             )}
           </div>
         </div>
+        <div className="settings-list__section-heading">
+          <strong>{copy.settings.connectionsTitle}</strong>
+          <p>{copy.settings.connectionsDescription}</p>
+        </div>
         <div className="settings-row">
           <span className="settings-row__icon" aria-hidden="true">
             {ready ? (
@@ -257,7 +292,136 @@ export function SettingsWorkspace({
             </button>
           )}
         </div>
+        <div
+          className="settings-row"
+          data-state={
+            calendarUnavailable ? "unavailable" : calendarConnection?.status
+          }
+        >
+          <span className="settings-row__icon" aria-hidden="true">
+            {calendarBusy ? (
+              <LoaderCircle className="spin" />
+            ) : calendarReady ? (
+              <CheckCircle2 />
+            ) : calendarUnavailable || calendarNeedsAttention ? (
+              <CircleAlert />
+            ) : (
+              <CalendarDays />
+            )}
+          </span>
+          <div className="settings-row__copy">
+            <strong>{copy.settings.calendarTitle}</strong>
+            <p>{calendarDetail}</p>
+            {calendarError && (
+              <p className="settings-row__error" role="alert">
+                {calendarError}
+              </p>
+            )}
+          </div>
+          <div className="settings-row__actions">
+            {calendarUnavailable ? (
+              <span className="settings-row__state settings-row__state--warning">
+                {copy.settings.calendarConfigurationRequired}
+              </span>
+            ) : !calendarConnection ? (
+              <button
+                className="text-button focus-visible-control"
+                type="button"
+                disabled={calendarLoading}
+                onClick={() => void onReloadCalendarConnection()}
+              >
+                {calendarLoading ? (
+                  <LoaderCircle className="spin" aria-hidden="true" />
+                ) : (
+                  <RefreshCw aria-hidden="true" />
+                )}
+                {calendarLoading
+                  ? copy.settings.calendarChecking
+                  : copy.settings.calendarRetry}
+              </button>
+            ) : calendarReady ? (
+              <button
+                className="text-button focus-visible-control"
+                type="button"
+                disabled={calendarBusy}
+                onClick={() => void onSyncCalendar()}
+              >
+                {calendarAction === "syncing" ? (
+                  <LoaderCircle className="spin" aria-hidden="true" />
+                ) : (
+                  <RefreshCw aria-hidden="true" />
+                )}
+                {calendarAction === "syncing"
+                  ? copy.settings.calendarSyncing
+                  : copy.settings.calendarSync}
+              </button>
+            ) : calendarAuthorizationPending ? (
+              <button
+                className="text-button focus-visible-control"
+                type="button"
+                disabled={calendarBusy}
+                onClick={() => void onReloadCalendarConnection()}
+              >
+                {calendarLoading ? (
+                  <LoaderCircle className="spin" aria-hidden="true" />
+                ) : null}
+                {calendarLoading
+                  ? copy.settings.calendarChecking
+                  : copy.settings.calendarCheckConnection}
+              </button>
+            ) : (
+              <button
+                className="text-button focus-visible-control"
+                type="button"
+                disabled={calendarBusy}
+                onClick={() => void onStartCalendarConnection()}
+              >
+                {calendarAction === "authorizing" ? (
+                  <LoaderCircle className="spin" aria-hidden="true" />
+                ) : null}
+                {calendarAction === "authorizing"
+                  ? copy.settings.calendarOpening
+                  : calendarNeedsAttention
+                    ? copy.settings.calendarReconnect
+                    : copy.settings.calendarConnect}
+                {!calendarBusy && <ChevronRight aria-hidden="true" />}
+              </button>
+            )}
+          </div>
+        </div>
       </section>
     </section>
   );
+}
+
+function calendarConnectionDetail(
+  connection: GoogleCalendarConnection | undefined,
+  loading: boolean,
+  authorizationPending: boolean,
+): string {
+  if (!connection && loading) return copy.settings.calendarLoading;
+  if (!connection) return copy.settings.calendarLoadFailed;
+  if (!connection.available) return copy.settings.calendarConfigurationMissing;
+  if (authorizationPending && connection.status !== "active") {
+    return copy.settings.calendarAwaitingAuthorization;
+  }
+  if (connection.status === "active") {
+    return copy.settings.calendarConnected(
+      connection.email ?? undefined,
+      connection.lastSuccessfulSyncAt ?? undefined,
+    );
+  }
+  if (connection.status === "reauth_required") {
+    return copy.settings.calendarReauthRequired;
+  }
+  if (connection.status === "connecting") {
+    return copy.settings.calendarAwaitingAuthorization;
+  }
+  if (connection.status === "revoking") {
+    return copy.settings.calendarDisconnecting;
+  }
+  if (connection.status === "revoked" || connection.status === "error") {
+    return copy.settings.calendarNeedsReconnect;
+  }
+  return copy.settings.calendarNotConnected;
 }

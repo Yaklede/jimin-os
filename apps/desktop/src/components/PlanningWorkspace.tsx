@@ -1,4 +1,5 @@
 import {
+  CalendarClock,
   CalendarDays,
   CheckCircle2,
   Circle,
@@ -53,12 +54,25 @@ export function PlanningWorkspace({
   const highlightedTaskRef = useRef<HTMLLIElement | null>(null);
   const skeletonVisible = useDelayedSkeleton(loading);
   const showingSkeleton = loading || skeletonVisible;
+  const now = Date.now();
+  const upcomingSchedule =
+    snapshot?.schedule.filter(
+      (entry) => new Date(entry.endsAt).getTime() >= now,
+    ) ?? [];
+  const pastSchedule = [
+    ...(snapshot?.schedule.filter(
+      (entry) => new Date(entry.endsAt).getTime() < now,
+    ) ?? []),
+  ].reverse();
 
   useEffect(() => {
     if (!highlightedScheduleId) return;
     const element = highlightedScheduleRef.current;
     if (!element) return;
-    element.scrollIntoView({ block: "center", behavior: "smooth" });
+    element.scrollIntoView({
+      block: "center",
+      behavior: preferredScrollBehavior(),
+    });
     element.focus({ preventScroll: true });
   }, [highlightedScheduleId, snapshot?.schedule]);
 
@@ -66,7 +80,10 @@ export function PlanningWorkspace({
     if (!highlightedTaskId) return;
     const element = highlightedTaskRef.current;
     if (!element) return;
-    element.scrollIntoView({ block: "center", behavior: "smooth" });
+    element.scrollIntoView({
+      block: "center",
+      behavior: preferredScrollBehavior(),
+    });
     element.focus({ preventScroll: true });
   }, [highlightedTaskId, snapshot?.tasks]);
 
@@ -116,16 +133,16 @@ export function PlanningWorkspace({
             {showingSkeleton ? (
               <CountSkeleton visible={skeletonVisible} />
             ) : (
-              copy.home.scheduleCount(snapshot?.schedule.length ?? 0)
+              copy.home.scheduleCount(upcomingSchedule.length)
             )}
           </span>
         </div>
         <div className="planning-surface">
           {showingSkeleton ? (
             <ScheduleTimelineSkeleton rows={3} visible={skeletonVisible} />
-          ) : snapshot?.schedule.length ? (
+          ) : upcomingSchedule.length ? (
             <ol className="planning-timeline">
-              {snapshot.schedule.map((entry) => (
+              {upcomingSchedule.map((entry) => (
                 <ScheduleRow
                   entry={entry}
                   highlighted={entry.id === highlightedScheduleId}
@@ -142,7 +159,7 @@ export function PlanningWorkspace({
           ) : (
             <EmptySurface
               title={copy.home.scheduleEmptyTitle}
-              description={copy.schedule.empty}
+              description={copy.schedule.upcomingEmpty}
             />
           )}
         </div>
@@ -221,6 +238,54 @@ export function PlanningWorkspace({
             <EmptySurface
               title={copy.home.taskEmptyTitle}
               description={copy.tasks.empty}
+            />
+          )}
+        </div>
+      </section>
+
+      <section
+        className="planning-history"
+        aria-labelledby="planning-history-title"
+      >
+        <div className="planning-section-heading">
+          <div>
+            <CalendarClock aria-hidden="true" />
+            <h2 id="planning-history-title">{copy.schedule.historyTitle}</h2>
+          </div>
+          <span>
+            {showingSkeleton ? (
+              <CountSkeleton visible={skeletonVisible} />
+            ) : (
+              copy.home.scheduleCount(pastSchedule.length)
+            )}
+          </span>
+        </div>
+        <p className="planning-section-description">
+          {copy.schedule.historyDescription}
+        </p>
+        <div className="planning-surface">
+          {showingSkeleton ? (
+            <ScheduleTimelineSkeleton rows={2} visible={skeletonVisible} />
+          ) : pastSchedule.length ? (
+            <ol className="planning-timeline planning-timeline--history">
+              {pastSchedule.map((entry) => (
+                <ScheduleRow
+                  entry={entry}
+                  highlighted={entry.id === highlightedScheduleId}
+                  elementRef={
+                    entry.id === highlightedScheduleId
+                      ? highlightedScheduleRef
+                      : undefined
+                  }
+                  onEdit={onEditSchedule}
+                  key={entry.id}
+                />
+              ))}
+            </ol>
+          ) : (
+            <EmptySurface
+              title={copy.schedule.historyTitle}
+              description={copy.schedule.historyEmpty}
             />
           )}
         </div>
@@ -470,4 +535,10 @@ function completedAtLabel(value: string) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function preferredScrollBehavior(): ScrollBehavior {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ? "auto"
+    : "smooth";
 }

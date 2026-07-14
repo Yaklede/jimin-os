@@ -21,6 +21,23 @@ function reasoningEffortLabel(effort?: string): string {
   }
 }
 
+function calendarConnectionSummary(
+  email?: string,
+  lastSuccessfulSyncAt?: string,
+): string {
+  const account = email
+    ? `${email} 계정의 일정을 사용해요.`
+    : "일정을 사용하고 있어요.";
+  if (!lastSuccessfulSyncAt) return account;
+  const syncedAt = new Intl.DateTimeFormat("ko-KR", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(lastSuccessfulSyncAt));
+  return `${account} ${syncedAt}에 마지막으로 가져왔어요.`;
+}
+
 export const copy = {
   productName: "Jimin OS",
   scope: "개인 서버",
@@ -141,7 +158,9 @@ export const copy = {
       "요청과 일치하는 프로젝트가 없어요. 프로젝트 이름을 확인해 주세요.",
     noScheduleResult: "오늘 등록된 일정이 없어요.",
     taskDestinationNotice:
-      "연결된 프로젝트를 열지 못했어요. 새로고침해 주세요.",
+      "일정 화면에서 할 일을 찾지 못했어요. 새로고침한 뒤 다시 시도해 주세요.",
+    scheduleDestinationNotice:
+      "일정 화면에서 해당 일정을 찾지 못했어요. 새로고침한 뒤 다시 시도해 주세요.",
     morningGreeting: "좋은 아침이에요!",
     afternoonGreeting: "좋은 오후예요",
     eveningGreeting: "오늘도 수고했어요",
@@ -190,6 +209,8 @@ export const copy = {
     dueToday: "오늘 마감",
     dueTomorrow: "내일 마감",
     editTask: (title: string) => `${title} 수정하기`,
+    openTaskInSchedule: (title: string) => `${title} 일정에서 보기`,
+    openScheduleInSchedule: (title: string) => `${title} 일정에서 보기`,
   },
   summary: {
     checkingTitle: "서버 상태를 확인하고 있어요",
@@ -220,9 +241,13 @@ export const copy = {
   },
   schedule: {
     title: "일정",
-    description: "앞으로 예정된 일정과 열린 할 일을 한곳에서 확인해요.",
+    description: "지난 일정과 앞으로의 일정, 열린 할 일을 한곳에서 확인해요.",
     upcomingTitle: "다가오는 일정",
-    empty: "앞으로 90일 안에 일정이 없어요. 필요한 시간을 먼저 잡아 보세요.",
+    upcomingEmpty:
+      "앞으로 90일 안에 일정이 없어요. 필요한 시간을 먼저 잡아 보세요.",
+    historyTitle: "지난 일정",
+    historyDescription: "최근 3개월 동안의 일정을 최신순으로 보여줘요.",
+    historyEmpty: "최근 3개월 동안 지난 일정이 없어요.",
     todayLabel: "오늘",
     tomorrowLabel: "내일",
     editSchedule: (title: string) => `${title} 일정 수정하기`,
@@ -313,12 +338,41 @@ export const copy = {
     modelReload: "다시 불러오기",
     modelLoadFailed: "모델을 불러오지 못했어요. 다시 시도해 주세요.",
     modelSaveFailed: "처리 설정을 저장하지 못했어요. 다시 시도해 주세요.",
+    connectionsTitle: "연결 서비스",
+    connectionsDescription:
+      "비서가 대화와 일정을 확인할 때 사용할 서비스를 관리해요.",
     chatgptTitle: "ChatGPT 연결",
     chatgptReady: "연결되어 있어요",
     chatgptNeedsLogin: "연결이 필요해요",
     chatgptPreparing: "연결을 준비하고 있어요",
     chatgptAwaiting: "ChatGPT에서 연결을 마쳐 주세요",
     chatgptFailed: "연결을 다시 확인해 주세요",
+    calendarTitle: "Google Calendar",
+    calendarLoading: "연결 상태를 확인하고 있어요.",
+    calendarNotConnected:
+      "연결하면 Google Calendar 일정을 함께 확인할 수 있어요.",
+    calendarConnected: calendarConnectionSummary,
+    calendarConfigurationMissing:
+      "개인 서버에 Google Calendar 연결 설정이 필요해요.",
+    calendarConfigurationRequired: "서버 준비 필요",
+    calendarAwaitingAuthorization:
+      "브라우저에서 Google Calendar 연결을 완료해 주세요.",
+    calendarReauthRequired: "Google Calendar 권한을 다시 확인해 주세요.",
+    calendarDisconnecting: "Google Calendar 연결을 정리하고 있어요.",
+    calendarNeedsReconnect: "연결을 다시 진행해 주세요.",
+    calendarConnect: "Google Calendar 연결하기",
+    calendarRetry: "다시 확인하기",
+    calendarReconnect: "다시 연결하기",
+    calendarOpening: "연결 화면 여는 중",
+    calendarCheckConnection: "연결 상태 확인하기",
+    calendarChecking: "확인하는 중",
+    calendarSync: "일정 새로 가져오기",
+    calendarSyncing: "일정 가져오는 중",
+    calendarLoadFailed: "연결 상태를 못 불러왔어요. 다시 확인해 주세요.",
+    calendarConnectFailed: "연결 화면을 못 열었어요. 다시 시도해 주세요.",
+    calendarSyncFailed: "일정을 못 가져왔어요. 잠시 후 다시 시도해 주세요.",
+    calendarAuthorizationExpired:
+      "연결 시간이 지났어요. Google Calendar 연결을 다시 시작해 주세요.",
   },
   conversations: {
     identity: "지민",
