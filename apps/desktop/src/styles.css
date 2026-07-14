@@ -1300,11 +1300,12 @@ svg {
 }
 
 .home-task-list li {
-  display: flex;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
-  min-height: 52px;
-  padding: 8px 14px;
+  column-gap: 8px;
+  min-height: 56px;
+  padding: 6px 14px;
 }
 
 .home-task-list li + li {
@@ -1333,6 +1334,12 @@ svg {
   color: var(--border-strong);
 }
 
+.home-task-list__complete {
+  width: 44px;
+  height: 44px;
+  margin-inline: -6px;
+}
+
 .home-task-list__complete:hover,
 .planning-task-list__complete:hover {
   color: var(--accent);
@@ -1344,17 +1351,30 @@ svg {
   height: 20px;
 }
 
+.home-task-list__complete svg {
+  width: 22px;
+  height: 22px;
+  transform: translateY(-1px);
+  transition:
+    color 160ms ease,
+    transform 160ms ease;
+}
+
+.home-task-list__complete:active:not(:disabled) svg {
+  transform: translateY(-1px) scale(0.92);
+}
+
 .home-task-list > li > span {
   min-width: 0;
   overflow: hidden;
   color: var(--text);
   font-size: 14px;
+  line-height: 20px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .home-task-list time {
-  margin-left: auto;
   color: var(--faint);
   font-size: 12px;
   white-space: nowrap;
