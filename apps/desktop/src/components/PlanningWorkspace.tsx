@@ -2,9 +2,13 @@ import {
   CalendarClock,
   CalendarDays,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Circle,
+  Cloud,
   History,
   Pencil,
+  RefreshCw,
   RotateCcw,
 } from "lucide-react";
 import { useEffect, useRef, useState, type RefObject } from "react";
@@ -14,7 +18,14 @@ import {
   type ScheduleEntry,
   type Task,
 } from "../api/planning";
+import { type GoogleCalendarConnection } from "../api/calendar";
 import { copy } from "../copy";
+import {
+  planningViewRange,
+  shiftPlanningViewRange,
+  type PlanningRangeMode,
+  type PlanningViewRange,
+} from "../planningRange";
 import { taskDueState } from "../planningDue";
 import {
   SkeletonBlock,
@@ -25,6 +36,8 @@ import { EmptySurface } from "./HomeWorkspace";
 
 type PlanningWorkspaceProps = {
   snapshot: PlanningSnapshot | undefined;
+  range: PlanningViewRange;
+  calendarConnection?: GoogleCalendarConnection;
   loading: boolean;
   error: string | undefined;
   highlightedScheduleId?: string;
@@ -33,10 +46,14 @@ type PlanningWorkspaceProps = {
   onRestoreTask(task: Task): Promise<void>;
   onEditTask(task: Task): void;
   onEditSchedule(entry: ScheduleEntry): void;
+  onRangeChange(range: PlanningViewRange): Promise<void>;
+  onSyncCalendar?(): Promise<void>;
 };
 
 export function PlanningWorkspace({
   snapshot,
+  range,
+  calendarConnection,
   loading,
   error,
   highlightedScheduleId,
@@ -45,6 +62,8 @@ export function PlanningWorkspace({
   onRestoreTask,
   onEditTask,
   onEditSchedule,
+  onRangeChange,
+  onSyncCalendar,
 }: PlanningWorkspaceProps) {
   const [pendingTask, setPendingTask] = useState<{
     id: string;
@@ -119,6 +138,83 @@ export function PlanningWorkspace({
           {error}
         </p>
       )}
+
+      <section
+        className="planning-toolbar"
+        aria-label={copy.schedule.rangeControls}
+      >
+        <div
+          className="planning-range-tabs"
+          role="group"
+          aria-label={copy.schedule.rangeMode}
+        >
+          {(["day", "week", "month"] as const).map((mode) => (
+            <button
+              className="focus-visible-control"
+              type="button"
+              data-active={range.mode === mode}
+              aria-pressed={range.mode === mode}
+              disabled={loading}
+              onClick={() =>
+                void onRangeChange(planningViewRange(mode, range.anchor))
+              }
+              key={mode}
+            >
+              {rangeModeLabel(mode)}
+            </button>
+          ))}
+        </div>
+        <div className="planning-range-navigation">
+          <button
+            className="icon-button focus-visible-control"
+            type="button"
+            onClick={() =>
+              void onRangeChange(shiftPlanningViewRange(range, -1))
+            }
+            disabled={loading}
+            aria-label={copy.schedule.previousRange}
+          >
+            <ChevronLeft aria-hidden="true" />
+          </button>
+          <strong aria-live="polite">{rangeLabel(range)}</strong>
+          <button
+            className="icon-button focus-visible-control"
+            type="button"
+            onClick={() => void onRangeChange(shiftPlanningViewRange(range, 1))}
+            disabled={loading}
+            aria-label={copy.schedule.nextRange}
+          >
+            <ChevronRight aria-hidden="true" />
+          </button>
+          <button
+            className="text-button focus-visible-control"
+            type="button"
+            onClick={() => void onRangeChange(planningViewRange(range.mode))}
+            disabled={loading}
+          >
+            {copy.schedule.goToday}
+          </button>
+        </div>
+        {calendarConnection?.status === "active" && (
+          <div className="planning-sync-state">
+            <Cloud aria-hidden="true" />
+            <span>
+              {calendarSyncLabel(calendarConnection.lastSuccessfulSyncAt)}
+            </span>
+            {onSyncCalendar && (
+              <button
+                className="icon-button focus-visible-control"
+                type="button"
+                onClick={() => void onSyncCalendar()}
+                disabled={loading}
+                aria-label={copy.schedule.syncNow}
+              >
+                <RefreshCw aria-hidden="true" />
+              </button>
+            )}
+          </div>
+        )}
+      </section>
 
       <section
         className="planning-schedule"
@@ -450,7 +546,7 @@ function ScheduleRow({
             `${formatTime(entry.startsAt)}–${formatTime(entry.endsAt)}`}
         </p>
       </div>
-      {entry.source === "manual" ? (
+      {entry.editable ? (
         <button
           className="planning-row-edit focus-visible-control"
           type="button"
@@ -463,9 +559,11 @@ function ScheduleRow({
       ) : (
         <span
           className="planning-row-source"
-          title={copy.schedule.connectedCalendarEdit}
+          title={copy.schedule.readOnlyCalendar}
         >
-          {copy.schedule.connectedCalendar}
+          {entry.source === "google_calendar"
+            ? copy.schedule.readOnlyCalendar
+            : copy.schedule.connectedCalendar}
         </span>
       )}
     </li>
@@ -535,6 +633,47 @@ function completedAtLabel(value: string) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function rangeModeLabel(mode: PlanningRangeMode): string {
+  if (mode === "day") return copy.schedule.dayRange;
+  if (mode === "week") return copy.schedule.weekRange;
+  return copy.schedule.monthRange;
+}
+
+function rangeLabel(range: PlanningViewRange): string {
+  if (range.mode === "day") {
+    return new Intl.DateTimeFormat("ko-KR", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      weekday: "short",
+    }).format(range.from);
+  }
+  if (range.mode === "month") {
+    return new Intl.DateTimeFormat("ko-KR", {
+      year: "numeric",
+      month: "long",
+    }).format(range.from);
+  }
+  const inclusiveEnd = new Date(range.to.getTime() - 1);
+  const short = new Intl.DateTimeFormat("ko-KR", {
+    month: "numeric",
+    day: "numeric",
+  });
+  return `${short.format(range.from)}–${short.format(inclusiveEnd)}`;
+}
+
+function calendarSyncLabel(value: string | null): string {
+  if (!value) return copy.schedule.syncWaiting;
+  return copy.schedule.lastSynced(
+    new Intl.DateTimeFormat("ko-KR", {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(new Date(value)),
+  );
 }
 
 function preferredScrollBehavior(): ScrollBehavior {

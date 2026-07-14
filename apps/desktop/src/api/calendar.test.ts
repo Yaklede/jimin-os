@@ -17,6 +17,7 @@ const connection = {
   email: "owner@example.com",
   grantedScopes: ["calendar.readonly"],
   lastSuccessfulSyncAt: "2026-07-14T05:00:00Z",
+  lastErrorCode: null,
   reauthRequired: false,
   version: 2,
 };

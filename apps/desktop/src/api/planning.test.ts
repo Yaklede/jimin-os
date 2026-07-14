@@ -4,6 +4,7 @@ import {
   PlanningRequestError,
   bootstrapTrustedNetworkSession,
   clientPlatformForUserAgent,
+  deleteScheduleEntry,
   fetchPlanning,
   refreshDeviceSession,
   updateScheduleEntry,
@@ -243,6 +244,7 @@ describe("schedule client", () => {
       timeZone: "Asia/Seoul",
       status: "confirmed" as const,
       source: "manual" as const,
+      editable: true,
       version: 3,
     };
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
@@ -277,5 +279,32 @@ describe("schedule client", () => {
       endsAt: "2026-07-14T09:00:00.000Z",
       expectedVersion: 2,
     });
+  });
+
+  it("sends a version-checked manual schedule deletion", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await deleteScheduleEntry("https://jimin-os.example/", "access", {
+      id: "019f68cb-9400-7000-8000-000000000020",
+      title: "치과 방문",
+      notes: null,
+      startsAt: "2026-07-14T08:00:00.000Z",
+      endsAt: "2026-07-14T09:00:00.000Z",
+      timeZone: "Asia/Seoul",
+      status: "confirmed",
+      source: "manual",
+      editable: true,
+      version: 3,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://jimin-os.example/v1/schedule-entries/019f68cb-9400-7000-8000-000000000020",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    const request = fetchMock.mock.calls[0]?.[1];
+    expect(JSON.parse(String(request?.body))).toEqual({ expectedVersion: 3 });
   });
 });

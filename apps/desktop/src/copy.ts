@@ -57,6 +57,9 @@ export const copy = {
     createProject: "프로젝트 만들기",
     cancel: "취소",
     saving: "저장하는 중",
+    deleting: "삭제하는 중",
+    deleteSchedule: "일정 삭제",
+    keepSchedule: "일정 유지",
     complete: "완료하기",
     startConversation: "새 요청",
     sendRequest: "보내기",
@@ -253,6 +256,18 @@ export const copy = {
     editSchedule: (title: string) => `${title} 일정 수정하기`,
     connectedCalendar: "연결된 캘린더",
     connectedCalendarEdit: "연결된 캘린더에서 수정해 주세요.",
+    readOnlyCalendar: "보기 전용 캘린더",
+    rangeControls: "일정 기간 탐색",
+    rangeMode: "표시 기간",
+    dayRange: "일",
+    weekRange: "주",
+    monthRange: "월",
+    previousRange: "이전 기간 보기",
+    nextRange: "다음 기간 보기",
+    goToday: "오늘",
+    syncNow: "Google Calendar 지금 동기화",
+    syncWaiting: "첫 동기화를 기다리고 있어요",
+    lastSynced: (label: string) => `${label} 동기화`,
   },
   tasks: {
     title: "열린 할 일",
@@ -445,6 +460,8 @@ export const copy = {
     titleRequired: "제목을 입력해 주세요.",
     scheduleTimeRequired: "시작 시간과 종료 시간을 모두 입력해 주세요.",
     scheduleTimeOrder: "종료 시간은 시작 시간보다 늦어야 해요.",
+    deleteScheduleTitle: "이 일정을 삭제할까요?",
+    deleteScheduleDescription: "삭제하면 일정 화면에서 더 이상 보이지 않아요.",
   },
   messages: {
     serverOffline: "VPN 연결과 개인 서버 상태를 확인한 뒤 다시 시도해 주세요.",
@@ -469,6 +486,8 @@ export const copy = {
     scheduleAdded: "일정을 추가했어요.",
     scheduleChanged:
       "일정을 저장하지 못했어요. 최신 상태를 확인한 뒤 다시 시도해 주세요.",
+    scheduleDeleteNotice:
+      "일정을 삭제하지 못했어요. 최신 상태를 확인한 뒤 다시 시도해 주세요.",
     taskSaveNotice:
       "할 일을 저장하지 못했어요. 최신 상태를 확인한 뒤 다시 시도해 주세요.",
     conversationLoadNotice:

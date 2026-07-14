@@ -12,6 +12,7 @@ import {
   bootstrapTrustedNetworkSession,
   completeTask,
   createTask,
+  deleteScheduleEntry,
   refreshDeviceSession,
   updateTask,
   updateScheduleEntry,
@@ -30,6 +31,16 @@ import {
   type Project,
   type Workspace,
 } from "./api/projects";
+import {
+  createProjectWebhook,
+  deleteProjectWebhook,
+  fetchProjectWebhooks,
+  fetchWebhookDeliveries,
+  testProjectWebhook,
+  type ProjectWebhook,
+  type ProjectWebhookEvent,
+  type WebhookDelivery,
+} from "./api/webhooks";
 import { type HomeSnapshot, fetchHomeSnapshot } from "./api/home";
 import { processVoiceCommand } from "./api/voice";
 import {
@@ -80,7 +91,7 @@ import {
   retryUnauthorizedRequest,
 } from "./session-retry";
 import { createUuidV7 } from "./uuid";
-import { currentPlanningRange } from "./planningRange";
+import { planningViewRange, type PlanningViewRange } from "./planningRange";
 
 type AppMode =
   "configuration" | "server-unreachable" | "loading" | "ready" | "error";
@@ -106,9 +117,16 @@ export default function App() {
   >();
   const [planningLoading, setPlanningLoading] = useState(false);
   const [planningError, setPlanningError] = useState<string | undefined>();
+  const [planningRange, setPlanningRange] = useState<PlanningViewRange>(() =>
+    planningViewRange("month"),
+  );
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectTasks, setProjectTasks] = useState<Task[]>([]);
+  const [projectWebhooks, setProjectWebhooks] = useState<ProjectWebhook[]>([]);
+  const [webhookDeliveries, setWebhookDeliveries] = useState<WebhookDelivery[]>(
+    [],
+  );
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>();
   const [selectedProjectId, setSelectedProjectId] = useState<string>();
   const [highlightedProjectTaskId, setHighlightedProjectTaskId] =
@@ -120,6 +138,7 @@ export default function App() {
     PlanningEditTarget | undefined
   >();
   const [projectsLoading, setProjectsLoading] = useState(false);
+  const [webhooksLoading, setWebhooksLoading] = useState(false);
   const [projectsSaving, setProjectsSaving] = useState(false);
   const [projectsError, setProjectsError] = useState<string>();
   const [selectedConversationId, setSelectedConversationId] = useState<
@@ -270,14 +289,22 @@ export default function App() {
   }, [apiBaseUrl, tokens, withAuthenticatedSession]);
 
   const loadPlanningSnapshot = useCallback(
-    async (targetStartsAt?: string) => {
+    async (targetStartsAt?: string, requestedRange?: PlanningViewRange) => {
       if (!tokens) return undefined;
       setPlanningLoading(true);
       setPlanningError(undefined);
       try {
-        const [from, to] = currentPlanningRange(targetStartsAt);
+        const targetDate = targetStartsAt
+          ? new Date(targetStartsAt)
+          : undefined;
+        const nextRange =
+          requestedRange ??
+          (targetDate && !Number.isNaN(targetDate.getTime())
+            ? planningViewRange("month", targetDate)
+            : planningRange);
+        if (nextRange !== planningRange) setPlanningRange(nextRange);
         const snapshot = await withAuthenticatedSession((accessToken) =>
-          fetchPlanning(apiBaseUrl, accessToken, from, to),
+          fetchPlanning(apiBaseUrl, accessToken, nextRange.from, nextRange.to),
         );
         setPlanningSnapshot(snapshot);
         return snapshot;
@@ -288,7 +315,14 @@ export default function App() {
         setPlanningLoading(false);
       }
     },
-    [apiBaseUrl, tokens, withAuthenticatedSession],
+    [apiBaseUrl, planningRange, tokens, withAuthenticatedSession],
+  );
+
+  const changePlanningRange = useCallback(
+    async (range: PlanningViewRange): Promise<void> => {
+      await loadPlanningSnapshot(undefined, range);
+    },
+    [loadPlanningSnapshot],
   );
 
   const loadAgentModelSettings = useCallback(async () => {
@@ -479,6 +513,33 @@ export default function App() {
         return undefined;
       } finally {
         setProjectsLoading(false);
+      }
+    },
+    [apiBaseUrl, tokens, withAuthenticatedSession],
+  );
+
+  const loadProjectWebhooks = useCallback(
+    async (projectId: string) => {
+      if (!tokens) return undefined;
+      setWebhooksLoading(true);
+      try {
+        const [webhooks, deliveries] = await withAuthenticatedSession(
+          (accessToken) =>
+            Promise.all([
+              fetchProjectWebhooks(apiBaseUrl, accessToken, projectId),
+              fetchWebhookDeliveries(apiBaseUrl, accessToken, projectId),
+            ]),
+        );
+        setProjectWebhooks(webhooks);
+        setWebhookDeliveries(deliveries);
+        return { webhooks, deliveries };
+      } catch {
+        setProjectWebhooks([]);
+        setWebhookDeliveries([]);
+        setProjectsError(copy.projects.webhookLoadProblem);
+        return undefined;
+      } finally {
+        setWebhooksLoading(false);
       }
     },
     [apiBaseUrl, tokens, withAuthenticatedSession],
@@ -685,10 +746,13 @@ export default function App() {
   useEffect(() => {
     if (selectedProjectId) {
       void loadProjectTasks(selectedProjectId);
+      void loadProjectWebhooks(selectedProjectId);
     } else {
       setProjectTasks([]);
+      setProjectWebhooks([]);
+      setWebhookDeliveries([]);
     }
-  }, [loadProjectTasks, selectedProjectId]);
+  }, [loadProjectTasks, loadProjectWebhooks, selectedProjectId]);
 
   useEffect(() => {
     if (
@@ -1029,7 +1093,7 @@ export default function App() {
       endsAt: string;
     },
   ): Promise<void> {
-    if (entry.source !== "manual") throw new Error("schedule is read only");
+    if (!entry.editable) throw new Error("schedule is read only");
     setPlanningError(undefined);
     const updated = await withAuthenticatedSession((accessToken) =>
       updateScheduleEntry(apiBaseUrl, accessToken, entry, input),
@@ -1048,6 +1112,23 @@ export default function App() {
       loadHomeSnapshot(),
       loadPlanningSnapshot(updated.startsAt),
     ]);
+  }
+
+  async function deletePlanningSchedule(entry: ScheduleEntry): Promise<void> {
+    if (!entry.editable) throw new Error("schedule is read only");
+    setPlanningError(undefined);
+    await withAuthenticatedSession((accessToken) =>
+      deleteScheduleEntry(apiBaseUrl, accessToken, entry),
+    );
+    setPlanningSnapshot((current) =>
+      current
+        ? {
+            ...current,
+            schedule: current.schedule.filter((item) => item.id !== entry.id),
+          }
+        : current,
+    );
+    await Promise.all([loadHomeSnapshot(), loadPlanningSnapshot()]);
   }
 
   function selectWorkspace(workspaceId: string) {
@@ -1334,6 +1415,84 @@ export default function App() {
       setProjectsError(copy.messages.projectTaskSaveNotice);
       if (selectedProjectId) void loadProjectTasks(selectedProjectId);
       throw new Error("task update failed");
+    } finally {
+      setProjectsSaving(false);
+    }
+  }
+
+  async function createWorkspaceWebhook(input: {
+    url: string;
+    events: ProjectWebhookEvent[];
+    authorization?: string;
+  }): Promise<void> {
+    if (!selectedProjectId) throw new Error("project unavailable");
+    setProjectsSaving(true);
+    setProjectsError(undefined);
+    try {
+      const webhook = await withAuthenticatedSession((accessToken) =>
+        createProjectWebhook(apiBaseUrl, accessToken, selectedProjectId, input),
+      );
+      setProjectWebhooks((current) => [...current, webhook]);
+    } catch (error) {
+      setProjectsError(copy.projects.webhookSaveProblem);
+      throw error;
+    } finally {
+      setProjectsSaving(false);
+    }
+  }
+
+  async function testWorkspaceWebhook(webhook: ProjectWebhook): Promise<void> {
+    setProjectsSaving(true);
+    setProjectsError(undefined);
+    try {
+      await withAuthenticatedSession((accessToken) =>
+        testProjectWebhook(apiBaseUrl, accessToken, webhook),
+      );
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const snapshot = await loadProjectWebhooks(webhook.projectId);
+        const latestTest = snapshot?.deliveries.find(
+          (delivery) =>
+            delivery.webhookId === webhook.id &&
+            delivery.eventType === "webhook.test",
+        );
+        if (
+          latestTest?.status === "delivered" ||
+          latestTest?.status === "failed"
+        ) {
+          break;
+        }
+        if (attempt < 7) {
+          await new Promise<void>((resolve) => {
+            const timeoutId = window.setTimeout(() => {
+              window.clearTimeout(timeoutId);
+              resolve();
+            }, 400);
+          });
+        }
+      }
+    } catch (error) {
+      setProjectsError(copy.projects.webhookTestProblem);
+      throw error;
+    } finally {
+      setProjectsSaving(false);
+    }
+  }
+
+  async function deleteWorkspaceWebhook(
+    webhook: ProjectWebhook,
+  ): Promise<void> {
+    setProjectsSaving(true);
+    setProjectsError(undefined);
+    try {
+      await withAuthenticatedSession((accessToken) =>
+        deleteProjectWebhook(apiBaseUrl, accessToken, webhook),
+      );
+      setProjectWebhooks((current) =>
+        current.filter((item) => item.id !== webhook.id),
+      );
+    } catch (error) {
+      setProjectsError(copy.projects.webhookDeleteProblem);
+      throw error;
     } finally {
       setProjectsSaving(false);
     }
@@ -1650,6 +1809,8 @@ export default function App() {
           {destination === "calendar" && (
             <PlanningWorkspace
               snapshot={planningSnapshot}
+              range={planningRange}
+              calendarConnection={calendarConnection}
               loading={planningLoading || mode === "loading"}
               error={planningError ?? (mode === "error" ? message : undefined)}
               highlightedScheduleId={highlightedScheduleId}
@@ -1662,6 +1823,8 @@ export default function App() {
               onEditSchedule={(entry) =>
                 setPlanningEditTarget({ kind: "schedule", item: entry })
               }
+              onRangeChange={changePlanningRange}
+              onSyncCalendar={syncGoogleCalendar}
             />
           )}
           {destination === "projects" && (
@@ -1669,10 +1832,13 @@ export default function App() {
               workspaces={workspaces}
               projects={projects}
               tasks={projectTasks}
+              webhooks={projectWebhooks}
+              webhookDeliveries={webhookDeliveries}
               selectedWorkspaceId={selectedWorkspaceId}
               selectedProjectId={selectedProjectId}
               highlightedTaskId={highlightedProjectTaskId}
               loading={projectsLoading || mode === "loading"}
+              webhookLoading={webhooksLoading}
               saving={projectsSaving}
               error={projectsError}
               onSelectWorkspace={selectWorkspace}
@@ -1682,6 +1848,9 @@ export default function App() {
               onCreateTask={createProjectTask}
               onCompleteTask={completeProjectTask}
               onUpdateTask={updateProjectTask}
+              onCreateWebhook={createWorkspaceWebhook}
+              onTestWebhook={testWorkspaceWebhook}
+              onDeleteWebhook={deleteWorkspaceWebhook}
             />
           )}
           {destination === "memory" && (
@@ -1747,6 +1916,7 @@ export default function App() {
             onClose={() => setPlanningEditTarget(undefined)}
             onSaveTask={savePlanningTask}
             onSaveSchedule={savePlanningSchedule}
+            onDeleteSchedule={deletePlanningSchedule}
           />
         </OsShell>
       )}

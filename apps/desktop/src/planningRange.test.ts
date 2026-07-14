@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { currentPlanningRange } from "./planningRange";
+import {
+  currentPlanningRange,
+  planningViewRange,
+  shiftPlanningViewRange,
+} from "./planningRange";
 
 const now = new Date(2026, 6, 14, 12, 0, 0);
 
@@ -26,5 +30,31 @@ describe("planning range", () => {
 
     expect(from).toEqual(new Date(2026, 3, 14));
     expect(to).toEqual(new Date(2027, 0, 6));
+  });
+});
+
+describe("planning view range", () => {
+  it("builds local day, Monday-based week, and month ranges", () => {
+    expect(planningViewRange("day", now)).toMatchObject({
+      from: new Date(2026, 6, 14),
+      to: new Date(2026, 6, 15),
+    });
+    expect(planningViewRange("week", now)).toMatchObject({
+      from: new Date(2026, 6, 13),
+      to: new Date(2026, 6, 20),
+    });
+    expect(planningViewRange("month", now)).toMatchObject({
+      from: new Date(2026, 6, 1),
+      to: new Date(2026, 7, 1),
+    });
+  });
+
+  it("moves a month range without limiting older history", () => {
+    const range = planningViewRange("month", now);
+    const previous = shiftPlanningViewRange(range, -1);
+    const older = shiftPlanningViewRange(previous, -1);
+
+    expect(previous.from).toEqual(new Date(2026, 5, 1));
+    expect(older.from).toEqual(new Date(2026, 4, 1));
   });
 });

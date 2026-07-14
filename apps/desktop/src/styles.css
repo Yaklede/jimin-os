@@ -2186,9 +2186,100 @@ svg {
 }
 
 .planning-page .page-heading,
-.planning-page .inline-alert {
+.planning-page .inline-alert,
+.planning-toolbar {
   grid-column: 1 / -1;
   margin-bottom: 0;
+}
+
+.planning-toolbar {
+  display: grid;
+  grid-template-columns: auto minmax(260px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  padding: 10px 12px;
+  background: var(--surface-subtle);
+}
+
+.planning-range-tabs,
+.planning-range-navigation,
+.planning-sync-state {
+  display: flex;
+  align-items: center;
+}
+
+.planning-range-tabs {
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: 3px;
+  background: var(--surface);
+}
+
+.planning-range-tabs button {
+  min-width: 44px;
+  min-height: 38px;
+  border: 0;
+  border-radius: calc(var(--radius-control) - 3px);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.planning-range-tabs button[data-active="true"] {
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.planning-range-navigation {
+  justify-content: center;
+  gap: 6px;
+}
+
+.planning-range-navigation strong {
+  min-width: 150px;
+  color: var(--text-strong);
+  font-size: 14px;
+  text-align: center;
+}
+
+.planning-sync-state {
+  justify-content: flex-end;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.planning-sync-state > svg {
+  width: 16px;
+  height: 16px;
+  color: var(--accent);
+}
+
+.planning-toolbar .icon-button {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--muted);
+}
+
+.planning-toolbar .icon-button:hover:not(:disabled) {
+  background: var(--surface);
+  color: var(--text-strong);
+}
+
+.planning-toolbar .icon-button svg {
+  width: 18px;
+  height: 18px;
 }
 
 .planning-history,
@@ -2510,9 +2601,74 @@ svg {
 
 .planning-editor__actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 8px;
   padding-top: 2px;
+}
+
+.planning-editor__action-spacer {
+  flex: 1;
+}
+
+.text-button--danger {
+  color: var(--danger);
+}
+
+.text-button--danger:hover {
+  background: var(--danger-tint);
+}
+
+.planning-editor__delete-confirmation {
+  display: grid;
+  gap: 14px;
+  border: 1px solid color-mix(in srgb, var(--danger) 32%, var(--border));
+  border-radius: var(--radius-control);
+  padding: 14px;
+  background: var(--danger-tint);
+}
+
+.planning-editor__delete-confirmation strong,
+.planning-editor__delete-confirmation p {
+  margin: 0;
+}
+
+.planning-editor__delete-confirmation p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.planning-editor__delete-confirmation > div:last-child {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.danger-button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-control);
+  padding: 0 16px;
+  background: var(--danger);
+  color: white;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.danger-button:hover:not(:disabled) {
+  filter: brightness(0.94);
+}
+
+.danger-button svg,
+.text-button--danger svg {
+  width: 17px;
+  height: 17px;
 }
 
 .planning-editor__actions .primary-button,
@@ -2954,6 +3110,250 @@ svg {
   color: var(--text-strong);
   font-size: 16px;
   font-weight: 600;
+}
+
+.project-webhooks {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 20px;
+}
+
+.project-webhooks__heading {
+  align-items: flex-start;
+  margin: 0;
+}
+
+.project-webhooks__heading > div {
+  align-items: flex-start;
+}
+
+.project-webhooks__heading h3,
+.project-webhook-history h4 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.project-webhooks__heading p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.project-webhooks__heading .secondary-button svg,
+.project-webhook-list__actions svg {
+  width: 16px;
+  height: 16px;
+}
+
+.project-webhook-form {
+  display: grid;
+  gap: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: 16px;
+  background: var(--surface-subtle);
+}
+
+.project-webhook-form > label,
+.project-webhook-form fieldset {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  margin: 0;
+  border: 0;
+  padding: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.project-webhook-form input[type="url"],
+.project-webhook-form input[type="password"] {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  padding: 10px 12px;
+  background: var(--surface);
+  color: var(--text-strong);
+  outline: 0;
+}
+
+.project-webhook-form input[type="url"]:focus,
+.project-webhook-form input[type="password"]:focus {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 2px var(--accent-tint);
+}
+
+.project-webhook-form small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.project-webhook-events {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 12px;
+}
+
+.project-webhook-events label {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 9px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.project-webhook-events input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.project-webhook-list,
+.project-webhook-history ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-webhook-list {
+  display: grid;
+  gap: 8px;
+}
+
+.project-webhook-list > li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: 14px;
+  background: var(--surface-subtle);
+}
+
+.project-webhook-list__main {
+  display: grid;
+  min-width: 0;
+  align-content: center;
+  gap: 4px;
+}
+
+.project-webhook-list__main strong,
+.project-webhook-list__main span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-webhook-list__main strong {
+  color: var(--text-strong);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.project-webhook-list__main span,
+.project-webhook-list__main small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.project-webhook-list__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.project-webhook-list__confirm {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 10px;
+  border-radius: var(--radius-control);
+  padding: 12px;
+  background: var(--danger-tint);
+}
+
+.project-webhook-list__confirm p {
+  margin: 0;
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.project-webhook-list__confirm > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.project-webhook-history {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
+.project-webhook-history > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.project-webhook-history > div svg {
+  width: 17px;
+  height: 17px;
+  color: var(--accent);
+}
+
+.project-webhook-history li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 10px;
+  min-height: 44px;
+  border-top: 1px solid var(--border);
+  padding: 8px 0;
+}
+
+.project-webhook-history li > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.project-webhook-history li > span[data-status="delivered"] {
+  color: var(--success);
+}
+
+.project-webhook-history li > span[data-status="failed"] {
+  color: var(--danger);
+}
+
+.project-webhook-history li > strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-webhook-history time,
+.project-webhook-history small {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.project-webhook-history small {
+  grid-column: 2 / -1;
 }
 
 .project-detail__tasks {
@@ -4534,6 +4934,38 @@ svg {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .project-webhooks__heading,
+  .project-webhook-list > li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .project-webhooks__heading {
+    display: grid;
+  }
+
+  .project-webhooks__heading .secondary-button,
+  .project-webhook-list__actions > button {
+    width: 100%;
+  }
+
+  .project-webhook-events {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .project-webhook-list__actions,
+  .project-webhook-list__confirm > div {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .project-webhook-history li {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .project-webhook-history time {
+    grid-column: 2;
+  }
+
   .project-task-form-skeleton {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -4652,6 +5084,33 @@ svg {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .planning-toolbar {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .planning-range-tabs {
+    justify-content: stretch;
+  }
+
+  .planning-range-tabs button {
+    flex: 1;
+  }
+
+  .planning-range-navigation {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr) 44px auto;
+  }
+
+  .planning-range-navigation strong {
+    min-width: 0;
+  }
+
+  .planning-sync-state {
+    justify-content: flex-start;
+    white-space: normal;
+  }
+
   .planning-completed {
     grid-column: auto;
   }
@@ -4725,6 +5184,20 @@ svg {
   }
 
   .planning-editor__actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .planning-editor__action-spacer {
+    display: none;
+  }
+
+  .planning-editor__actions .text-button--danger {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
+  .planning-editor__delete-confirmation > div:last-child {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

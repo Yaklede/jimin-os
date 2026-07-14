@@ -1,3 +1,5 @@
+const DELIVERY_NOT_SENT = "failed";
+
 export const projectCopy = {
   eyebrow: "업무 운영",
   title: "프로젝트",
@@ -71,4 +73,78 @@ export const projectCopy = {
   projectSaveNotice:
     "프로젝트를 저장하지 못했어요. 입력한 내용을 확인한 뒤 다시 시도해 주세요.",
   taskSaveNotice: "일을 추가하지 못했어요. 잠시 후 다시 시도해 주세요.",
+  webhookTitle: "연결된 웹훅",
+  webhookDescription: "프로젝트와 일의 변화를 외부 자동화로 보내요.",
+  webhookAdd: "웹훅 연결",
+  webhookUrlLabel: "받을 주소",
+  webhookUrlHint: "https://automation.example/hooks/project",
+  webhookEventsLabel: "보낼 변화",
+  webhookAuthorizationLabel: "인증 헤더 (선택)",
+  webhookAuthorizationHint: "예: Bearer …",
+  webhookAuthorizationDescription:
+    "서버에서 암호화해 보관하며 저장한 값은 다시 화면에 보여주지 않아요.",
+  webhookAuthenticationStored: "인증값을 안전하게 보관 중",
+  webhookSave: "웹훅 저장하기",
+  webhookRequired: "받을 주소와 하나 이상의 변화를 선택해 주세요.",
+  webhookSaved: "웹훅을 연결했어요.",
+  webhookSaveProblem:
+    "웹훅을 연결하지 못했어요. 주소와 선택 항목을 확인해 주세요.",
+  webhookLoading: "웹훅 연결을 확인하고 있어요.",
+  webhookLoadProblem:
+    "웹훅 연결과 전송 기록을 불러오지 못했어요. 다시 시도해 주세요.",
+  webhookEmpty: "아직 연결한 웹훅이 없어요.",
+  webhookTest: "시험 전송",
+  webhookTestQueued:
+    "시험 전송을 시작했어요. 아래 전송 기록에서 결과를 확인해 주세요.",
+  webhookTestProblem:
+    "시험 전송을 시작하지 못했어요. 연결 상태를 확인해 주세요.",
+  webhookDelete: "연결 해제",
+  webhookDeleteConfirm:
+    "이 주소로는 더 이상 프로젝트 변화를 보내지 않아요. 연결을 해제할까요?",
+  webhookKeep: "계속 연결하기",
+  webhookDeleteAction: "연결 해제하기",
+  webhookDeleted: "웹훅 연결을 해제했어요.",
+  webhookDeleteProblem:
+    "웹훅 연결을 해제하지 못했어요. 새로고침한 뒤 다시 시도해 주세요.",
+  webhookHistoryTitle: "최근 전송",
+  webhookEvent: (event: string) => {
+    switch (event) {
+      case "project.updated":
+        return "프로젝트 변경";
+      case "project.deleted":
+        return "프로젝트 삭제";
+      case "task.created":
+        return "일 추가";
+      case "task.updated":
+        return "일 변경";
+      case "task.completed":
+        return "일 완료";
+      case "task.restored":
+        return "일 복구";
+      case "task.deleted":
+        return "일 삭제";
+      case "webhook.test":
+        return "시험 전송";
+      default:
+        return "프로젝트 변화";
+    }
+  },
+  webhookDeliveryStatus: (status: string) => {
+    switch (status) {
+      case "delivered":
+        return "전송 완료";
+      case DELIVERY_NOT_SENT:
+        return "전송 실패 · 연결 확인";
+      case "retry_wait":
+        return "다시 시도 예정";
+      case "sending":
+        return "전송 중";
+      default:
+        return "전송 대기";
+    }
+  },
+  webhookDeliveryMeta: (attemptCount: number, responseCode?: number) =>
+    responseCode
+      ? `응답 ${responseCode} · ${attemptCount}회 시도`
+      : `${attemptCount}회 시도`,
 } as const;

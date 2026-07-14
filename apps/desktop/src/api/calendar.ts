@@ -15,6 +15,7 @@ export interface GoogleCalendarConnection {
   email: string | null;
   grantedScopes: string[];
   lastSuccessfulSyncAt: string | null;
+  lastErrorCode: string | null;
   reauthRequired: boolean;
   version: number | null;
 }
@@ -121,6 +122,7 @@ function isGoogleCalendarConnection(
     value.grantedScopes.every((scope) => typeof scope === "string") &&
     (typeof value.lastSuccessfulSyncAt === "string" ||
       value.lastSuccessfulSyncAt === null) &&
+    (typeof value.lastErrorCode === "string" || value.lastErrorCode === null) &&
     typeof value.reauthRequired === "boolean" &&
     (typeof value.version === "number" || value.version === null)
   );

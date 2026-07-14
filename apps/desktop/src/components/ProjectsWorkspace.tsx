@@ -15,6 +15,11 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 
 import { type Project, type Workspace } from "../api/projects";
 import { type Task } from "../api/planning";
+import {
+  type ProjectWebhook,
+  type ProjectWebhookEvent,
+  type WebhookDelivery,
+} from "../api/webhooks";
 import { copy } from "../copy";
 import {
   SkeletonBlock,
@@ -22,15 +27,19 @@ import {
   useDelayedSkeleton,
 } from "./ContentSkeleton";
 import { EmptySurface } from "./HomeWorkspace";
+import { ProjectWebhookPanel } from "./ProjectWebhookPanel";
 
 type ProjectsWorkspaceProps = {
   workspaces: Workspace[];
   projects: Project[];
   tasks: Task[];
+  webhooks: ProjectWebhook[];
+  webhookDeliveries: WebhookDelivery[];
   selectedWorkspaceId: string | undefined;
   selectedProjectId: string | undefined;
   highlightedTaskId: string | undefined;
   loading: boolean;
+  webhookLoading: boolean;
   saving: boolean;
   error: string | undefined;
   onSelectWorkspace(workspaceId: string): void;
@@ -65,16 +74,26 @@ type ProjectsWorkspaceProps = {
       dueAt?: string;
     },
   ): Promise<void>;
+  onCreateWebhook(input: {
+    url: string;
+    events: ProjectWebhookEvent[];
+    authorization?: string;
+  }): Promise<void>;
+  onTestWebhook(webhook: ProjectWebhook): Promise<void>;
+  onDeleteWebhook(webhook: ProjectWebhook): Promise<void>;
 };
 
 export function ProjectsWorkspace({
   workspaces,
   projects,
   tasks,
+  webhooks,
+  webhookDeliveries,
   selectedWorkspaceId,
   selectedProjectId,
   highlightedTaskId,
   loading,
+  webhookLoading,
   saving,
   error,
   onSelectWorkspace,
@@ -84,6 +103,9 @@ export function ProjectsWorkspace({
   onCreateTask,
   onCompleteTask,
   onUpdateTask,
+  onCreateWebhook,
+  onTestWebhook,
+  onDeleteWebhook,
 }: ProjectsWorkspaceProps) {
   const [formOpen, setFormOpen] = useState(false);
   const [title, setTitle] = useState("");
@@ -461,6 +483,16 @@ export function ProjectsWorkspace({
                   {copy.projects.projectUpdated}
                 </p>
               )}
+              <ProjectWebhookPanel
+                projectId={selectedProject.id}
+                webhooks={webhooks}
+                deliveries={webhookDeliveries}
+                loading={webhookLoading}
+                saving={saving}
+                onCreate={onCreateWebhook}
+                onTest={onTestWebhook}
+                onDelete={onDeleteWebhook}
+              />
               <div className="project-detail__tasks">
                 <div className="projects-section-heading">
                   <div>

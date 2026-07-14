@@ -1,6 +1,78 @@
 const HISTORY_MONTHS = 3;
 const FUTURE_DAYS = 90;
 
+export type PlanningRangeMode = "day" | "week" | "month";
+
+export interface PlanningViewRange {
+  mode: PlanningRangeMode;
+  anchor: Date;
+  from: Date;
+  to: Date;
+}
+
+export function planningViewRange(
+  mode: PlanningRangeMode,
+  anchor = new Date(),
+): PlanningViewRange {
+  const normalizedAnchor = startOfLocalDay(anchor);
+  if (mode === "day") {
+    return {
+      mode,
+      anchor: normalizedAnchor,
+      from: normalizedAnchor,
+      to: new Date(
+        normalizedAnchor.getFullYear(),
+        normalizedAnchor.getMonth(),
+        normalizedAnchor.getDate() + 1,
+      ),
+    };
+  }
+  if (mode === "week") {
+    const mondayOffset = (normalizedAnchor.getDay() + 6) % 7;
+    const from = new Date(
+      normalizedAnchor.getFullYear(),
+      normalizedAnchor.getMonth(),
+      normalizedAnchor.getDate() - mondayOffset,
+    );
+    return {
+      mode,
+      anchor: normalizedAnchor,
+      from,
+      to: new Date(from.getFullYear(), from.getMonth(), from.getDate() + 7),
+    };
+  }
+  return {
+    mode,
+    anchor: normalizedAnchor,
+    from: new Date(
+      normalizedAnchor.getFullYear(),
+      normalizedAnchor.getMonth(),
+      1,
+    ),
+    to: new Date(
+      normalizedAnchor.getFullYear(),
+      normalizedAnchor.getMonth() + 1,
+      1,
+    ),
+  };
+}
+
+export function shiftPlanningViewRange(
+  range: PlanningViewRange,
+  direction: -1 | 1,
+): PlanningViewRange {
+  const { anchor, mode } = range;
+  const nextAnchor =
+    mode === "month"
+      ? new Date(anchor.getFullYear(), anchor.getMonth() + direction, 1)
+      : new Date(
+          anchor.getFullYear(),
+          anchor.getMonth(),
+          anchor.getDate() + direction * (mode === "week" ? 7 : 1),
+        );
+  return planningViewRange(mode, nextAnchor);
+}
+
 export function currentPlanningRange(
   targetStartsAt?: string,
   now = new Date(),

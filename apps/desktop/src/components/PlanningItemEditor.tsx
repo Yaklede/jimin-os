@@ -1,4 +1,4 @@
-import { CalendarClock, ListTodo, X } from "lucide-react";
+import { CalendarClock, ListTodo, Trash2, X } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { type ScheduleEntry, type Task } from "../api/planning";
@@ -27,6 +27,7 @@ type PlanningItemEditorProps = {
   onClose(): void;
   onSaveTask(task: Task, input: TaskEditInput): Promise<void>;
   onSaveSchedule(entry: ScheduleEntry, input: ScheduleEditInput): Promise<void>;
+  onDeleteSchedule(entry: ScheduleEntry): Promise<void>;
 };
 
 export function PlanningItemEditor({
@@ -34,6 +35,7 @@ export function PlanningItemEditor({
   onClose,
   onSaveTask,
   onSaveSchedule,
+  onDeleteSchedule,
 }: PlanningItemEditorProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
@@ -45,6 +47,7 @@ export function PlanningItemEditor({
   const [startsAt, setStartsAt] = useState("");
   const [endsAt, setEndsAt] = useState("");
   const [saving, setSaving] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [error, setError] = useState<string>();
 
   useEffect(() => {
@@ -65,6 +68,7 @@ export function PlanningItemEditor({
       target.kind === "schedule" ? isoToLocalInput(target.item.endsAt) : "",
     );
     setSaving(false);
+    setConfirmingDelete(false);
     setError(undefined);
     const dialog = dialogRef.current;
     if (dialog && !dialog.open) {
@@ -150,6 +154,20 @@ export function PlanningItemEditor({
           : copy.messages.scheduleChanged,
       );
       setSaving(false);
+    }
+  }
+
+  async function deleteSchedule() {
+    if (saving || activeTarget.kind !== "schedule") return;
+    setSaving(true);
+    setError(undefined);
+    try {
+      await onDeleteSchedule(activeTarget.item);
+      dialogRef.current?.close();
+    } catch {
+      setError(copy.messages.scheduleDeleteNotice);
+      setSaving(false);
+      setConfirmingDelete(false);
     }
   }
 
@@ -287,26 +305,73 @@ export function PlanningItemEditor({
           </p>
         )}
 
-        <footer className="planning-editor__actions">
-          <button
-            className="secondary-button focus-visible-control"
-            type="button"
-            onClick={requestClose}
-            disabled={saving}
+        {confirmingDelete && activeTarget.kind === "schedule" ? (
+          <section
+            className="planning-editor__delete-confirmation"
+            role="alert"
           >
-            {copy.actions.cancel}
-          </button>
-          <button
-            className="primary-button focus-visible-control"
-            type="submit"
-            disabled={saving || !title.trim()}
-          >
-            {saving ? (
-              <span className="button-spinner" aria-hidden="true" />
-            ) : null}
-            {saving ? copy.actions.saving : copy.actions.saveChanges}
-          </button>
-        </footer>
+            <div>
+              <strong>{copy.forms.deleteScheduleTitle}</strong>
+              <p>{copy.forms.deleteScheduleDescription}</p>
+            </div>
+            <div>
+              <button
+                className="secondary-button focus-visible-control"
+                type="button"
+                onClick={() => setConfirmingDelete(false)}
+                disabled={saving}
+              >
+                {copy.actions.keepSchedule}
+              </button>
+              <button
+                className="danger-button focus-visible-control"
+                type="button"
+                onClick={() => void deleteSchedule()}
+                disabled={saving}
+              >
+                {saving ? (
+                  <span className="button-spinner" aria-hidden="true" />
+                ) : (
+                  <Trash2 aria-hidden="true" />
+                )}
+                {saving ? copy.actions.deleting : copy.actions.deleteSchedule}
+              </button>
+            </div>
+          </section>
+        ) : (
+          <footer className="planning-editor__actions">
+            {activeTarget.kind === "schedule" && (
+              <button
+                className="text-button text-button--danger focus-visible-control"
+                type="button"
+                onClick={() => setConfirmingDelete(true)}
+                disabled={saving}
+              >
+                <Trash2 aria-hidden="true" />
+                {copy.actions.deleteSchedule}
+              </button>
+            )}
+            <span className="planning-editor__action-spacer" />
+            <button
+              className="secondary-button focus-visible-control"
+              type="button"
+              onClick={requestClose}
+              disabled={saving}
+            >
+              {copy.actions.cancel}
+            </button>
+            <button
+              className="primary-button focus-visible-control"
+              type="submit"
+              disabled={saving || !title.trim()}
+            >
+              {saving ? (
+                <span className="button-spinner" aria-hidden="true" />
+              ) : null}
+              {saving ? copy.actions.saving : copy.actions.saveChanges}
+            </button>
+          </footer>
+        )}
       </form>
     </dialog>
   );

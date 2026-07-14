@@ -13,6 +13,7 @@ export interface ScheduleEntry {
   timeZone: string;
   status: "confirmed" | "cancelled";
   source: "manual" | "google_calendar";
+  editable: boolean;
   version: number;
 }
 
@@ -275,6 +276,26 @@ export async function updateScheduleEntry(
       expectedVersion: entry.version,
     },
   );
+}
+
+export async function deleteScheduleEntry(
+  baseUrl: string,
+  access: string,
+  entry: ScheduleEntry,
+): Promise<void> {
+  const response = await fetch(
+    `${normalizeBaseUrl(baseUrl)}/v1/schedule-entries/${entry.id}`,
+    {
+      method: "DELETE",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${access}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ expectedVersion: entry.version }),
+    },
+  );
+  if (!response.ok) throw errorFromStatus(response.status);
 }
 
 async function request<T>(
