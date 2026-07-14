@@ -10,7 +10,7 @@ use jimin_storage::{
         ClaimedAgentJob,
     },
     gmail::GmailMessage,
-    planning::{ScheduleEntry, ScheduleSource, Task, TaskStatus},
+    planning::{ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus},
     work::{Project, ProjectStatus, Workspace, WorkspaceScope},
 };
 use serde::Deserialize;
@@ -46,6 +46,7 @@ struct TurnContext {
     workspaces: Vec<Workspace>,
     projects: Vec<Project>,
     requires_daily_task_coverage: bool,
+    bulk_schedule_cancellation_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -453,6 +454,8 @@ async fn contextualized_turn_context(
         .filter(|task| task.due_at.is_none_or(|due_at| due_at < daily_task_cutoff))
         .cloned()
         .collect::<Vec<_>>();
+    let bulk_schedule_cancellation_ids =
+        requested_bulk_schedule_cancellation_ids(&job.input_content, &schedule, now);
     let prompt = render_contextualized_turn(
         &job.input_content,
         &schedule,
@@ -471,6 +474,7 @@ async fn contextualized_turn_context(
         workspaces,
         projects,
         requires_daily_task_coverage: is_daily_overview_request(&job.input_content),
+        bulk_schedule_cancellation_ids,
     })
 }
 
@@ -665,6 +669,69 @@ fn is_daily_overview_request(input: &str) -> bool {
     mentions_today && mentions_daily_work && !explicitly_schedule_only
 }
 
+fn requested_bulk_schedule_cancellation_ids(
+    input: &str,
+    schedule: &[ScheduleEntry],
+    now: OffsetDateTime,
+) -> Vec<Uuid> {
+    let normalized = input
+        .to_lowercase()
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .collect::<String>();
+    let mentions_schedule = ["일정", "스케줄", "캘린더", "schedule", "calendar"]
+        .iter()
+        .any(|term| normalized.contains(term));
+    let requests_cancellation = [
+        "삭제해",
+        "제거해",
+        "취소해",
+        "없애",
+        "지워",
+        "비워",
+        "delete",
+        "remove",
+        "cancel",
+        "clear",
+    ]
+    .iter()
+    .any(|term| normalized.contains(term));
+    let requests_every_item = ["모두", "전부", "전체", "일괄", "싹", "all", "every"]
+        .iter()
+        .any(|term| normalized.contains(term));
+    let mentions_today =
+        normalized.contains("오늘") || normalized.contains("금일") || normalized.contains("today");
+    let mentions_tomorrow = normalized.contains("내일") || normalized.contains("tomorrow");
+    if !mentions_schedule
+        || !requests_cancellation
+        || !requests_every_item
+        || mentions_today == mentions_tomorrow
+    {
+        return Vec::new();
+    }
+
+    let Ok(korea_offset) = UtcOffset::from_hms(9, 0, 0) else {
+        return Vec::new();
+    };
+    let mut target_date = now.to_offset(korea_offset).date();
+    if mentions_tomorrow {
+        let Some(tomorrow) = target_date.checked_add(TimeDuration::days(1)) else {
+            return Vec::new();
+        };
+        target_date = tomorrow;
+    }
+
+    schedule
+        .iter()
+        .filter(|entry| {
+            entry.source == ScheduleSource::Manual
+                && entry.status == ScheduleStatus::Confirmed
+                && entry.starts_at.to_offset(korea_offset).date() == target_date
+        })
+        .map(|entry| entry.id)
+        .collect()
+}
+
 #[allow(clippy::too_many_lines)] // The provider schema is intentionally declared in one auditable JSON contract.
 fn assistant_output_schema() -> Value {
     json!({
@@ -782,27 +849,7 @@ fn validated_assistant_response(
 ) -> Result<(String, AssistantPresentation, Vec<AgentActionCommand>), ()> {
     let structured: StructuredAssistantTurn = serde_json::from_str(response).map_err(|_| ())?;
     let mut answer = structured.answer.trim().to_owned();
-    if structured.actions.len() > MAX_AGENT_ACTIONS {
-        return Err(());
-    }
-    let mut actions = Vec::with_capacity(structured.actions.len().max(1));
-    for structured_action in &structured.actions {
-        let action = validated_agent_action(structured_action, context)?.ok_or(())?;
-        actions.push(action);
-    }
-    if structured.action.kind != StructuredAssistantActionKind::None {
-        if !actions.is_empty() {
-            return Err(());
-        }
-        actions.push(validated_agent_action(&structured.action, context)?.ok_or(())?);
-    }
-    let mut action_entity_ids = HashSet::with_capacity(actions.len());
-    if actions
-        .iter()
-        .any(|action| !action_entity_ids.insert(agent_action_entity_id(action)))
-    {
-        return Err(());
-    }
+    let actions = validated_agent_actions(&structured, context)?;
     if !actions.is_empty() {
         if answer.is_empty() || answer.chars().count() > 24_000 {
             return Err(());
@@ -881,6 +928,84 @@ fn validated_assistant_response(
     };
     presentation.validate().map_err(|_| ())?;
     Ok((answer, presentation, actions))
+}
+
+fn validated_agent_actions(
+    structured: &StructuredAssistantTurn,
+    context: &TurnContext,
+) -> Result<Vec<AgentActionCommand>, ()> {
+    if structured.actions.len() > MAX_AGENT_ACTIONS {
+        return Err(());
+    }
+    let mut actions = Vec::with_capacity(structured.actions.len().max(1));
+    for structured_action in &structured.actions {
+        let action = validated_agent_action(structured_action, context)?.ok_or(())?;
+        actions.push(action);
+    }
+    if structured.action.kind != StructuredAssistantActionKind::None {
+        if !actions.is_empty() {
+            return Err(());
+        }
+        actions.push(validated_agent_action(&structured.action, context)?.ok_or(())?);
+    }
+    reconcile_bulk_schedule_cancellations(&mut actions, context)?;
+    let mut action_entity_ids = HashSet::with_capacity(actions.len());
+    if actions
+        .iter()
+        .any(|action| !action_entity_ids.insert(agent_action_entity_id(action)))
+    {
+        return Err(());
+    }
+    Ok(actions)
+}
+
+fn reconcile_bulk_schedule_cancellations(
+    actions: &mut Vec<AgentActionCommand>,
+    context: &TurnContext,
+) -> Result<(), ()> {
+    if context.bulk_schedule_cancellation_ids.is_empty()
+        || !actions
+            .iter()
+            .any(|action| matches!(action, AgentActionCommand::CancelSchedule { .. }))
+    {
+        return Ok(());
+    }
+    if context.bulk_schedule_cancellation_ids.len() > MAX_AGENT_ACTIONS {
+        return Err(());
+    }
+
+    let required_ids = context
+        .bulk_schedule_cancellation_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    if actions.iter().any(|action| {
+        matches!(
+            action,
+            AgentActionCommand::CancelSchedule { id, .. } if !required_ids.contains(id)
+        )
+    }) {
+        return Err(());
+    }
+
+    for id in &context.bulk_schedule_cancellation_ids {
+        if actions
+            .iter()
+            .any(|action| agent_action_entity_id(action) == *id)
+        {
+            continue;
+        }
+        let entry = context
+            .schedule
+            .iter()
+            .find(|entry| entry.id == *id)
+            .ok_or(())?;
+        actions.push(AgentActionCommand::CancelSchedule {
+            id: *id,
+            expected_version: entry.version,
+        });
+    }
+    (actions.len() <= MAX_AGENT_ACTIONS).then_some(()).ok_or(())
 }
 
 #[allow(clippy::too_many_lines)] // Each model-selected action is exhaustively mapped to a server-owned command in one reviewable boundary.
@@ -1144,6 +1269,9 @@ fn agent_action_results(
     let all_created_schedules = actions
         .iter()
         .all(|action| matches!(action, AgentActionCommand::CreateSchedule { .. }));
+    let all_cancelled_schedules = actions
+        .iter()
+        .all(|action| matches!(action, AgentActionCommand::CancelSchedule { .. }));
     let all_created_projects = actions
         .iter()
         .all(|action| matches!(action, AgentActionCommand::CreateProject { .. }));
@@ -1179,6 +1307,14 @@ fn agent_action_results(
                 format!("일정 {count}개를 추가했어요"),
                 "처리한 할 일",
                 "추가한 일정",
+                "처리한 프로젝트",
+            )
+        } else if all_cancelled_schedules {
+            (
+                format!("일정 {count}개를 취소했어요."),
+                format!("일정 {count}개를 취소했어요"),
+                "처리한 할 일",
+                "취소한 일정",
                 "처리한 프로젝트",
             )
         } else if all_created_projects {
@@ -1966,8 +2102,8 @@ mod tests {
     use super::{
         StructuredAnswerStream, StructuredAssistantAction, StructuredAssistantActionKind,
         TurnContext, agent_action_results, is_daily_overview_request, korea_day_end,
-        render_contextualized_turn, requires_process_restart, validated_agent_action,
-        validated_assistant_response,
+        render_contextualized_turn, requested_bulk_schedule_cancellation_ids,
+        requires_process_restart, validated_agent_action, validated_assistant_response,
     };
 
     #[test]
@@ -2089,6 +2225,7 @@ mod tests {
             workspaces: Vec::new(),
             projects: Vec::new(),
             requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
         };
         let response = serde_json::json!({
             "answer": "열린 일감을 정리했어요.",
@@ -2145,6 +2282,7 @@ mod tests {
             workspaces: Vec::new(),
             projects: Vec::new(),
             requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
         };
         let response = serde_json::json!({
             "answer": "오늘 업무와 일정을 함께 정리했어요.",
@@ -2213,6 +2351,7 @@ mod tests {
             workspaces: Vec::new(),
             projects: Vec::new(),
             requires_daily_task_coverage: true,
+            bulk_schedule_cancellation_ids: Vec::new(),
         };
         let response = serde_json::json!({
             "answer": "오늘 예정된 일정은 없습니다.",
@@ -2268,6 +2407,7 @@ mod tests {
             workspaces: Vec::new(),
             projects: Vec::new(),
             requires_daily_task_coverage: true,
+            bulk_schedule_cancellation_ids: Vec::new(),
         };
         let response = serde_json::json!({
             "answer": "열린 할 일을 정리했어요.",
@@ -2308,6 +2448,7 @@ mod tests {
             workspaces: Vec::new(),
             projects: Vec::new(),
             requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
         };
         let action = StructuredAssistantAction {
             kind: StructuredAssistantActionKind::CreateTask,
@@ -2340,6 +2481,7 @@ mod tests {
             workspaces: Vec::new(),
             projects: Vec::new(),
             requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
         };
         let response = serde_json::json!({
             "answer": "요청을 처리 중입니다.",
@@ -2398,6 +2540,7 @@ mod tests {
             workspaces: Vec::new(),
             projects: Vec::new(),
             requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
         };
         let action = StructuredAssistantAction {
             kind: StructuredAssistantActionKind::CompleteTask,
@@ -2416,6 +2559,133 @@ mod tests {
                 expected_version: 7,
             } if id == task.id
         ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // The authenticated schedule fixture documents every excluded source/status/date beside the batch assertion.
+    fn bulk_schedule_cancellation_expands_to_every_manual_entry_on_the_requested_day() {
+        let parse_time = |value: &str| {
+            OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+                .expect("timestamp")
+        };
+        let now = parse_time("2026-07-14T12:00:00+09:00");
+        let first = ScheduleEntry {
+            id: Uuid::now_v7(),
+            title: "출근하기".to_owned(),
+            notes: None,
+            starts_at: parse_time("2026-07-15T07:00:00+09:00"),
+            ends_at: parse_time("2026-07-15T08:00:00+09:00"),
+            time_zone: "Asia/Seoul".to_owned(),
+            status: ScheduleStatus::Confirmed,
+            source: ScheduleSource::Manual,
+            version: 3,
+        };
+        let second = ScheduleEntry {
+            id: Uuid::now_v7(),
+            title: "확인하기".to_owned(),
+            starts_at: parse_time("2026-07-15T09:00:00+09:00"),
+            ends_at: parse_time("2026-07-15T09:30:00+09:00"),
+            version: 5,
+            ..first.clone()
+        };
+        let today = ScheduleEntry {
+            id: Uuid::now_v7(),
+            title: "오늘 일정".to_owned(),
+            starts_at: parse_time("2026-07-14T18:00:00+09:00"),
+            ends_at: parse_time("2026-07-14T19:00:00+09:00"),
+            ..first.clone()
+        };
+        let google = ScheduleEntry {
+            id: Uuid::now_v7(),
+            title: "외부 일정".to_owned(),
+            source: ScheduleSource::GoogleCalendar,
+            ..second.clone()
+        };
+        let cancelled = ScheduleEntry {
+            id: Uuid::now_v7(),
+            title: "이미 취소한 일정".to_owned(),
+            status: ScheduleStatus::Cancelled,
+            ..second.clone()
+        };
+        let schedule = vec![first.clone(), second.clone(), today, google, cancelled];
+        let requested_ids = requested_bulk_schedule_cancellation_ids(
+            "내일 일정 모두 제거해 달라고",
+            &schedule,
+            now,
+        );
+        assert_eq!(requested_ids, vec![first.id, second.id]);
+        assert!(
+            requested_bulk_schedule_cancellation_ids(
+                "내일 확인하기 일정만 제거해 줘",
+                &schedule,
+                now,
+            )
+            .is_empty()
+        );
+
+        let context = TurnContext {
+            prompt: String::new(),
+            schedule,
+            tasks: Vec::new(),
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: requested_ids,
+        };
+        let action = |entity_id: Uuid| {
+            serde_json::json!({
+                "kind": "cancel_schedule",
+                "entityId": entity_id,
+                "workspaceId": "",
+                "projectId": "",
+                "title": "",
+                "notes": "",
+                "priority": 0,
+                "dueAt": "",
+                "startsAt": "",
+                "endsAt": "",
+                "timeZone": "",
+                "status": "",
+                "riskLevel": 0,
+                "objective": "",
+                "nextAction": ""
+            })
+        };
+        let response = serde_json::json!({
+            "answer": "요청을 처리 중입니다.",
+            "presentation": {
+                "title": "",
+                "layout": "stack",
+                "focusEntityId": "",
+                "sections": []
+            },
+            "actions": [action(first.id)]
+        })
+        .to_string();
+
+        let (_, _, actions) =
+            validated_assistant_response(&response, &context).expect("bulk cancellation result");
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(
+            actions[0],
+            AgentActionCommand::CancelSchedule {
+                id,
+                expected_version: 3,
+            } if id == first.id
+        ));
+        assert!(matches!(
+            actions[1],
+            AgentActionCommand::CancelSchedule {
+                id,
+                expected_version: 5,
+            } if id == second.id
+        ));
+
+        let (answer, presentation) =
+            agent_action_results(&actions, &context).expect("bulk cancellation presentation");
+        assert_eq!(answer, "일정 2개를 취소했어요.");
+        assert_eq!(presentation.sections[0].item_ids, vec![first.id, second.id]);
     }
 
     #[test]
@@ -2445,6 +2715,7 @@ mod tests {
             workspaces: Vec::new(),
             projects: Vec::new(),
             requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
         };
         let action = |entity_id: Uuid| {
             serde_json::json!({
@@ -2515,6 +2786,7 @@ mod tests {
             workspaces: Vec::new(),
             projects: Vec::new(),
             requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
         };
         let action = StructuredAssistantAction {
             kind: StructuredAssistantActionKind::CancelTask,
