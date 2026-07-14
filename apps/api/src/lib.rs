@@ -52,7 +52,7 @@ use utoipa::{OpenApi, ToSchema};
 
 use crate::{
     calendar_oauth::{CalendarOAuthError, CalendarOAuthRuntime, storage_failure_code},
-    voice_command::{VoiceCommand, VoiceCommandError},
+    voice_command::{VoiceCommand, VoiceCommandError, VoiceTaskScope},
 };
 
 #[async_trait]
@@ -637,11 +637,31 @@ enum VoiceCommandDestination {
 }
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum VoiceCommandItemType {
+    Task,
+    Schedule,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct VoiceCommandItemResponse {
+    item_type: VoiceCommandItemType,
+    id: uuid::Uuid,
+    title: String,
+    due_at: Option<String>,
+    starts_at: Option<String>,
+    ends_at: Option<String>,
+    priority: Option<i16>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct VoiceCommandResponse {
     kind: VoiceCommandKind,
     message: String,
     destination: VoiceCommandDestination,
+    items: Vec<VoiceCommandItemResponse>,
 }
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
@@ -940,6 +960,8 @@ pub(crate) fn error_response(
         WebhookDeliveryListResponse,
         VoiceCommandKind,
         VoiceCommandDestination,
+        VoiceCommandItemType,
+        VoiceCommandItemResponse,
         VoiceCommandResponse,
         HomeSnapshotResponse,
         ConversationResponse,
@@ -2534,11 +2556,14 @@ async fn handle_voice_command(
             )
             .await
         }
-        VoiceCommand::ListTasks => list_voice_tasks(planning, user_id, request_id).await,
+        VoiceCommand::ListTasks { scope } => {
+            list_voice_tasks(planning, user_id, scope, request_id).await
+        }
         VoiceCommand::OrganizeTask => Json(VoiceCommandResponse {
             kind: VoiceCommandKind::ContinueConversation,
             message: "말씀하신 내용을 정리해 할 일로 추가할게요.".to_owned(),
             destination: VoiceCommandDestination::Conversation,
+            items: Vec::new(),
         })
         .into_response(),
         VoiceCommand::NeedsScheduleDetails => Json(VoiceCommandResponse {
@@ -2546,18 +2571,21 @@ async fn handle_voice_command(
             message: "일정 이름과 시간을 함께 말해 주세요. 예: 내일 오후 3시에 치과 일정 등록해 줘"
                 .to_owned(),
             destination: VoiceCommandDestination::Conversation,
+            items: Vec::new(),
         })
         .into_response(),
         VoiceCommand::NeedsTaskDetails => Json(VoiceCommandResponse {
             kind: VoiceCommandKind::NeedsDetails,
             message: "추가할 할 일을 함께 말해 주세요. 예: 할 일에 장보기 추가해 줘".to_owned(),
             destination: VoiceCommandDestination::Conversation,
+            items: Vec::new(),
         })
         .into_response(),
         VoiceCommand::ContinueConversation => Json(VoiceCommandResponse {
             kind: VoiceCommandKind::ContinueConversation,
             message: "일정이나 할 일 외의 요청은 대화에서 이어서 도와드릴게요.".to_owned(),
             destination: VoiceCommandDestination::Conversation,
+            items: Vec::new(),
         })
         .into_response(),
     }
@@ -2587,6 +2615,7 @@ async fn list_voice_schedule(
             kind: VoiceCommandKind::ScheduleListed,
             message: schedule_list_message(label, &entries),
             destination: VoiceCommandDestination::Calendar,
+            items: entries.iter().map(voice_schedule_item).collect(),
         })
         .into_response(),
         Err(error) => storage_error_response(&error, request_id),
@@ -2618,19 +2647,23 @@ async fn create_voice_schedule(
         })
         .await
     {
-        Ok(entry) => (
-            StatusCode::CREATED,
-            Json(VoiceCommandResponse {
-                kind: VoiceCommandKind::ScheduleCreated,
-                message: format!(
-                    "{label} {:02}:{:02}에 {title} 일정을 등록했어요.",
-                    entry.starts_at.hour(),
-                    entry.starts_at.minute(),
-                ),
-                destination: VoiceCommandDestination::Calendar,
-            }),
-        )
-            .into_response(),
+        Ok(entry) => {
+            let item = voice_schedule_item(&entry);
+            (
+                StatusCode::CREATED,
+                Json(VoiceCommandResponse {
+                    kind: VoiceCommandKind::ScheduleCreated,
+                    message: format!(
+                        "{label} {:02}:{:02}에 {title} 일정을 등록했어요.",
+                        entry.starts_at.hour(),
+                        entry.starts_at.minute(),
+                    ),
+                    destination: VoiceCommandDestination::Calendar,
+                    items: vec![item],
+                }),
+            )
+                .into_response()
+        }
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -2638,17 +2671,44 @@ async fn create_voice_schedule(
 async fn list_voice_tasks(
     planning: &Database,
     user_id: uuid::Uuid,
+    scope: VoiceTaskScope,
     request_id: RequestId,
 ) -> Response {
-    match planning.open_tasks_for_user(user_id).await {
+    let (label, destination, result) = match scope {
+        VoiceTaskScope::All => (
+            None,
+            VoiceCommandDestination::Home,
+            planning.open_tasks_for_user(user_id).await,
+        ),
+        VoiceTaskScope::Today { label, ends_at } => (
+            Some(label),
+            VoiceCommandDestination::Home,
+            planning.home_tasks_for_user(user_id, ends_at).await,
+        ),
+        VoiceTaskScope::Dated {
+            label,
+            starts_at,
+            ends_at,
+        } => (
+            Some(label),
+            VoiceCommandDestination::Calendar,
+            planning.open_tasks_for_user(user_id).await.map(|tasks| {
+                tasks
+                    .into_iter()
+                    .filter(|task| {
+                        task.due_at
+                            .is_some_and(|due_at| due_at >= starts_at && due_at < ends_at)
+                    })
+                    .collect()
+            }),
+        ),
+    };
+    match result {
         Ok(tasks) => Json(VoiceCommandResponse {
             kind: VoiceCommandKind::TasksListed,
-            message: if tasks.is_empty() {
-                "열린 할 일이 없어요.".to_owned()
-            } else {
-                format!("열린 할 일이 {}개 있어요.", tasks.len())
-            },
-            destination: VoiceCommandDestination::Home,
+            message: task_list_message(label, &tasks),
+            destination,
+            items: tasks.iter().map(voice_task_item).collect(),
         })
         .into_response(),
         Err(error) => storage_error_response(&error, request_id),
@@ -2658,12 +2718,46 @@ async fn list_voice_tasks(
 fn schedule_list_message(label: &str, entries: &[ScheduleEntry]) -> String {
     match entries {
         [] => format!("{label} 일정은 없어요."),
-        [entry] => format!("{label} 일정은 1개예요. {}", entry.title),
-        [first, ..] => format!(
-            "{label} 일정은 {}개예요. 첫 일정은 {}예요.",
-            entries.len(),
-            first.title
-        ),
+        [_] => format!("{label} 일정은 1개예요."),
+        _ => format!("{label} 일정은 {}개예요.", entries.len()),
+    }
+}
+
+fn task_list_message(label: Option<&str>, tasks: &[Task]) -> String {
+    let subject = label.map_or("열린 할 일", |value| match value {
+        "오늘" => "오늘 할 일",
+        "내일" => "내일 할 일",
+        "모레" => "모레 할 일",
+        _ => "할 일",
+    });
+    match tasks {
+        [] => format!("{subject}이 없어요."),
+        [_] => format!("{subject}은 1개예요."),
+        _ => format!("{subject}은 {}개예요.", tasks.len()),
+    }
+}
+
+fn voice_task_item(task: &Task) -> VoiceCommandItemResponse {
+    VoiceCommandItemResponse {
+        item_type: VoiceCommandItemType::Task,
+        id: task.id,
+        title: task.title.clone(),
+        due_at: task.due_at.and_then(|value| value.format(&Rfc3339).ok()),
+        starts_at: None,
+        ends_at: None,
+        priority: Some(task.priority),
+    }
+}
+
+fn voice_schedule_item(entry: &ScheduleEntry) -> VoiceCommandItemResponse {
+    VoiceCommandItemResponse {
+        item_type: VoiceCommandItemType::Schedule,
+        id: entry.id,
+        title: entry.title.clone(),
+        due_at: None,
+        starts_at: entry.starts_at.format(&Rfc3339).ok(),
+        ends_at: entry.ends_at.format(&Rfc3339).ok(),
+        priority: None,
     }
 }
 
@@ -4477,6 +4571,37 @@ mod tests {
         let available = calendar_connection_response(None, true);
         assert!(available.available);
         assert_eq!(available.status, "not_connected");
+    }
+
+    #[test]
+    fn voice_command_response_serializes_structured_result_items() {
+        let item_id =
+            Uuid::parse_str("019f68cb-9400-7000-8000-000000000000").expect("item ID should parse");
+        let response = VoiceCommandResponse {
+            kind: VoiceCommandKind::TasksListed,
+            message: "오늘 할 일은 1개예요.".to_owned(),
+            destination: VoiceCommandDestination::Home,
+            items: vec![VoiceCommandItemResponse {
+                item_type: VoiceCommandItemType::Task,
+                id: item_id,
+                title: "계약서 검토".to_owned(),
+                due_at: Some("2026-07-15T18:00:00+09:00".to_owned()),
+                starts_at: None,
+                ends_at: None,
+                priority: Some(2),
+            }],
+        };
+
+        let value = serde_json::to_value(response).expect("response should serialize");
+        assert_eq!(value["kind"], "tasks_listed");
+        assert_eq!(value["destination"], "home");
+        assert_eq!(value["items"][0]["itemType"], "task");
+        assert_eq!(value["items"][0]["id"], item_id.to_string());
+        assert_eq!(value["items"][0]["title"], "계약서 검토");
+        assert_eq!(value["items"][0]["dueAt"], "2026-07-15T18:00:00+09:00");
+        assert!(value["items"][0]["startsAt"].is_null());
+        assert!(value["items"][0]["endsAt"].is_null());
+        assert_eq!(value["items"][0]["priority"], 2);
     }
 
     #[async_trait]

@@ -1,4 +1,4 @@
-use time::{Duration, OffsetDateTime, PrimitiveDateTime, Time};
+use time::{Duration, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
 const MAX_COMMAND_CHARS: usize = 1_000;
 const MAX_TIME_ZONE_CHARS: usize = 80;
@@ -16,11 +16,27 @@ pub(crate) enum VoiceCommand {
         starts_at: OffsetDateTime,
         ends_at: OffsetDateTime,
     },
-    ListTasks,
+    ListTasks {
+        scope: VoiceTaskScope,
+    },
     OrganizeTask,
     NeedsScheduleDetails,
     NeedsTaskDetails,
     ContinueConversation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VoiceTaskScope {
+    All,
+    Today {
+        label: &'static str,
+        ends_at: OffsetDateTime,
+    },
+    Dated {
+        label: &'static str,
+        starts_at: OffsetDateTime,
+        ends_at: OffsetDateTime,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +44,7 @@ pub(crate) enum VoiceCommandError {
     InvalidInput,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RelativeDay {
     Today,
     Tomorrow,
@@ -80,6 +96,7 @@ pub(crate) fn interpret(
         return Err(VoiceCommandError::InvalidInput);
     }
     let text = text.trim();
+    let reference_at = reference_in_time_zone(reference_at, time_zone);
 
     if let Some(task_marker) = task_reference_marker(text) {
         if has_create_verb(text) {
@@ -90,7 +107,26 @@ pub(crate) fn interpret(
             );
         }
         if is_explicit_task_reference(task_marker) {
-            return Ok(VoiceCommand::ListTasks);
+            let scope = match relative_day_for(text) {
+                Some(day) => {
+                    let (starts_at, ends_at) =
+                        day_bounds(reference_at, day).ok_or(VoiceCommandError::InvalidInput)?;
+                    if day == RelativeDay::Today {
+                        VoiceTaskScope::Today {
+                            label: day.label(),
+                            ends_at,
+                        }
+                    } else {
+                        VoiceTaskScope::Dated {
+                            label: day.label(),
+                            starts_at,
+                            ends_at,
+                        }
+                    }
+                }
+                None => VoiceTaskScope::All,
+            };
+            return Ok(VoiceCommand::ListTasks { scope });
         }
     }
 
@@ -122,6 +158,15 @@ pub(crate) fn interpret(
     }
 
     Ok(VoiceCommand::ContinueConversation)
+}
+
+fn reference_in_time_zone(reference_at: OffsetDateTime, time_zone: &str) -> OffsetDateTime {
+    let offset = match time_zone {
+        "Asia/Seoul" => UtcOffset::from_hms(9, 0, 0).ok(),
+        "UTC" | "Etc/UTC" => Some(UtcOffset::UTC),
+        _ => None,
+    };
+    offset.map_or(reference_at, |value| reference_at.to_offset(value))
 }
 
 fn valid_input(value: &str, maximum_chars: usize) -> bool {
@@ -432,7 +477,7 @@ fn clean_title(value: &str) -> Option<String> {
 mod tests {
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-    use super::{VoiceCommand, interpret};
+    use super::{VoiceCommand, VoiceTaskScope, interpret};
 
     fn reference_at() -> OffsetDateTime {
         OffsetDateTime::parse("2026-07-12T09:00:00+09:00", &Rfc3339)
@@ -506,6 +551,73 @@ mod tests {
             .expect("voice command should parse");
 
         assert_eq!(command, VoiceCommand::NeedsScheduleDetails);
+    }
+
+    #[test]
+    fn scopes_today_task_questions_to_the_active_daily_queue() {
+        let command = interpret("오늘 할 일이 뭐야?", reference_at(), "Asia/Seoul")
+            .expect("voice command should parse");
+
+        let VoiceCommand::ListTasks {
+            scope: VoiceTaskScope::Today { label, ends_at },
+        } = command
+        else {
+            panic!("today task questions should use the daily queue");
+        };
+        assert_eq!(label, "오늘");
+        assert_eq!(ends_at.date().day(), 13);
+        assert_eq!(ends_at.hour(), 0);
+    }
+
+    #[test]
+    fn scopes_utc_client_references_to_the_users_seoul_day() {
+        let utc_reference =
+            OffsetDateTime::parse("2026-07-12T16:30:00Z", &Rfc3339).expect("UTC time should parse");
+        let command = interpret("오늘 할 일이 뭐야?", utc_reference, "Asia/Seoul")
+            .expect("voice command should parse");
+
+        let VoiceCommand::ListTasks {
+            scope: VoiceTaskScope::Today { ends_at, .. },
+        } = command
+        else {
+            panic!("today task questions should use the user's local day");
+        };
+        assert_eq!(ends_at.date().day(), 14);
+        assert_eq!(ends_at.offset().whole_hours(), 9);
+    }
+
+    #[test]
+    fn scopes_future_task_questions_to_the_requested_day() {
+        let command = interpret("내일 할 일 뭐야?", reference_at(), "Asia/Seoul")
+            .expect("voice command should parse");
+
+        let VoiceCommand::ListTasks {
+            scope:
+                VoiceTaskScope::Dated {
+                    label,
+                    starts_at,
+                    ends_at,
+                },
+        } = command
+        else {
+            panic!("future task questions should use the requested date");
+        };
+        assert_eq!(label, "내일");
+        assert_eq!(starts_at.date().day(), 13);
+        assert_eq!(ends_at.date().day(), 14);
+    }
+
+    #[test]
+    fn keeps_unscoped_task_questions_on_the_open_queue() {
+        let command = interpret("열린 할 일 뭐야?", reference_at(), "Asia/Seoul")
+            .expect("voice command should parse");
+
+        assert_eq!(
+            command,
+            VoiceCommand::ListTasks {
+                scope: VoiceTaskScope::All,
+            }
+        );
     }
 
     #[test]
