@@ -1645,12 +1645,11 @@ svg {
 
 .home-task-list__open > span {
   min-width: 0;
-  overflow: hidden;
   color: var(--text);
   font-size: 14px;
   line-height: 20px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .home-task-list time {
@@ -2208,6 +2207,7 @@ svg {
 .planning-toolbar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-areas: "range-tabs range-navigation actions";
   align-items: center;
   gap: 12px;
   border: 1px solid var(--border);
@@ -2225,6 +2225,7 @@ svg {
 }
 
 .planning-range-tabs {
+  grid-area: range-tabs;
   justify-self: start;
   gap: 2px;
   border: 1px solid var(--border);
@@ -2251,6 +2252,7 @@ svg {
 }
 
 .planning-range-navigation {
+  grid-area: range-navigation;
   justify-self: center;
   justify-content: center;
   gap: 6px;
@@ -2264,6 +2266,7 @@ svg {
 }
 
 .planning-toolbar__actions {
+  grid-area: actions;
   min-width: 0;
   justify-self: end;
   justify-content: flex-end;
@@ -2435,9 +2438,8 @@ svg {
 
 .planning-task-list strong {
   display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .planning-task-list__complete,
@@ -2801,6 +2803,10 @@ svg {
   border-radius: var(--radius-panel);
   background: var(--surface);
   box-shadow: var(--shadow-panel);
+}
+
+.projects-surface {
+  overflow: hidden;
 }
 
 .project-create-form {
@@ -3470,12 +3476,11 @@ svg {
 }
 
 .project-task-list__content strong {
-  overflow: hidden;
   color: var(--text-strong);
   font-size: 15px;
   font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .project-task-list__content span {
@@ -5216,6 +5221,10 @@ svg {
 
   .planning-toolbar {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "range-tabs"
+      "range-navigation"
+      "actions";
     align-items: stretch;
   }
 

@@ -19,6 +19,7 @@ import { type ScheduleEntry, type Task } from "../api/planning";
 import { type Project } from "../api/projects";
 import { presentationForMessage } from "../assistantPresentation";
 import { copy } from "../copy";
+import { upcomingHomeSchedules } from "../homeSchedule";
 import { createUuidV7 } from "../uuid";
 import {
   deadlineAttentionTasks,
@@ -83,14 +84,19 @@ export function HomeWorkspace({
   const [overviewFocusTarget, setOverviewFocusTarget] = useState<
     "schedule" | "tasks"
   >();
+  const [scheduleNow, setScheduleNow] = useState(() => new Date());
   const highlightedHomeTaskRef = useRef<HTMLLIElement | null>(null);
   const scheduleSectionRef = useRef<HTMLElement | null>(null);
   const taskSectionRef = useRef<HTMLElement | null>(null);
   const greeting = useMemo(() => greetingForHour(new Date().getHours()), []);
   const skeletonVisible = useDelayedSkeleton(loading);
   const showingSkeleton = loading || skeletonVisible;
-  const nextSchedule = snapshot?.schedule[0];
-  const scheduleCount = snapshot?.schedule.length ?? 0;
+  const upcomingSchedule = useMemo(
+    () => upcomingHomeSchedules(snapshot?.schedule ?? [], scheduleNow),
+    [scheduleNow, snapshot?.schedule],
+  );
+  const nextSchedule = upcomingSchedule[0];
+  const scheduleCount = upcomingSchedule.length;
   const taskCount = snapshot?.tasks.length ?? 0;
   const dueTasks = useMemo(
     () => deadlineAttentionTasks(snapshot?.dueTasks ?? []),
@@ -101,6 +107,27 @@ export function HomeWorkspace({
     assistantJob,
     assistantMessage,
   );
+
+  useEffect(() => {
+    setScheduleNow(new Date());
+  }, [snapshot?.schedule]);
+
+  useEffect(() => {
+    const nextEnd = upcomingSchedule.reduce<number | undefined>(
+      (nearest, entry) => {
+        const endsAt = new Date(entry.endsAt).getTime();
+        if (!Number.isFinite(endsAt)) return nearest;
+        return nearest === undefined ? endsAt : Math.min(nearest, endsAt);
+      },
+      undefined,
+    );
+    if (nextEnd === undefined) return;
+    const timeout = window.setTimeout(
+      () => setScheduleNow(new Date()),
+      Math.max(50, nextEnd - scheduleNow.getTime() + 50),
+    );
+    return () => window.clearTimeout(timeout);
+  }, [scheduleNow, upcomingSchedule]);
 
   useEffect(() => {
     if (!overviewFocusTarget || assistantFocused) return;

@@ -92,6 +92,7 @@ import {
 } from "./session-retry";
 import { createUuidV7 } from "./uuid";
 import { planningViewRange, type PlanningViewRange } from "./planningRange";
+import { localDayKey, millisecondsUntilNextLocalDay } from "./homeSchedule";
 
 type AppMode =
   "configuration" | "server-unreachable" | "loading" | "ready" | "error";
@@ -685,6 +686,43 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!tokens) return;
+    let active = true;
+    let observedDay = localDayKey();
+    let rolloverTimer: number | undefined;
+
+    const scheduleRollover = () => {
+      rolloverTimer = window.setTimeout(() => {
+        if (!active) return;
+        observedDay = localDayKey();
+        void loadHomeSnapshot();
+        scheduleRollover();
+      }, millisecondsUntilNextLocalDay());
+    };
+    const refreshAfterDayChange = () => {
+      const currentDay = localDayKey();
+      if (
+        document.visibilityState !== "visible" ||
+        currentDay === observedDay
+      ) {
+        return;
+      }
+      observedDay = currentDay;
+      void loadHomeSnapshot();
+    };
+
+    scheduleRollover();
+    document.addEventListener("visibilitychange", refreshAfterDayChange);
+    return () => {
+      active = false;
+      if (rolloverTimer !== undefined) {
+        window.clearTimeout(rolloverTimer);
+      }
+      document.removeEventListener("visibilitychange", refreshAfterDayChange);
+    };
+  }, [loadHomeSnapshot, tokens]);
 
   useEffect(() => {
     void loadAgentModelSettings();
