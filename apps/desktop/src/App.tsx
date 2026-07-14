@@ -1561,17 +1561,25 @@ export default function App() {
       const result = await withAuthenticatedSession((accessToken) =>
         processVoiceCommand(apiBaseUrl, accessToken, value),
       );
+      if (result.kind === "schedule_listed" || result.kind === "tasks_listed") {
+        await loadHomeSnapshot();
+        return {
+          kind: "query",
+          message: result.message,
+          destination: result.destination === "calendar" ? "calendar" : "home",
+          items: result.items,
+        };
+      }
       if (
-        result.kind === "schedule_listed" ||
         result.kind === "schedule_created" ||
-        result.kind === "tasks_listed" ||
         result.kind === "task_created"
       ) {
-        void loadHomeSnapshot();
+        await loadHomeSnapshot();
         return {
           kind: "handled",
           message: result.message,
           destination: result.destination === "calendar" ? "calendar" : "home",
+          items: result.items,
         };
       }
       if (result.kind === "needs_details") {

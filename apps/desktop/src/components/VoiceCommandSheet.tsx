@@ -1,4 +1,6 @@
 import {
+  CalendarDays,
+  Circle,
   CircleAlert,
   LoaderCircle,
   Mic,
@@ -13,6 +15,7 @@ import {
 } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
+import { type VoiceCommandResultItem } from "../api/voice";
 import { copy } from "../copy";
 
 type RecognitionState =
@@ -61,6 +64,13 @@ export type VoiceCommandOutcome =
       kind: "handled";
       message: string;
       destination: "home" | "calendar";
+      items: VoiceCommandResultItem[];
+    }
+  | {
+      kind: "query";
+      message: string;
+      destination: "home" | "calendar";
+      items: VoiceCommandResultItem[];
     }
   | {
       kind: "needs-details" | "conversation" | "failed";
@@ -82,6 +92,9 @@ export function VoiceCommandSheet({
   onOpenTextInput,
   onOpenDestination,
 }: VoiceCommandSheetProps) {
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
   const recognizerRef = useRef<SpeechRecognitionLike | undefined>(undefined);
   const usingNativeRecognitionRef = useRef(false);
   const completedRef = useRef(false);
@@ -97,6 +110,27 @@ export function VoiceCommandSheet({
   const [processingCommand, setProcessingCommand] = useState(false);
   const [dragOffset, setDragOffset] = useState(0);
   const [dragging, setDragging] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+
+    previousFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const focusFrame = window.requestAnimationFrame(() => {
+      closeButtonRef.current?.focus({ preventScroll: true });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.body.style.overflow = previousOverflow;
+      previousFocusRef.current?.focus({ preventScroll: true });
+      previousFocusRef.current = null;
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -239,20 +273,42 @@ export function VoiceCommandSheet({
   useEffect(() => {
     if (!open) return;
 
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key !== "Escape") return;
-      resetSheetPosition();
-      onClose();
+    function keepFocusInSheet(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        resetSheetPosition();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+
+      const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      );
+      if (!focusable?.length) {
+        event.preventDefault();
+        dialogRef.current?.focus({ preventScroll: true });
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     }
 
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
+    window.addEventListener("keydown", keepFocusInSheet);
+    return () => window.removeEventListener("keydown", keepFocusInSheet);
   }, [onClose, open]);
 
   if (!open) return null;
 
   const commandIsProcessing =
     processingCommand || (state === "heard" && !commandOutcome);
+  const requestText = transcript.trim();
 
   function retry() {
     processedTranscriptRef.current = undefined;
@@ -288,7 +344,12 @@ export function VoiceCommandSheet({
   }
 
   function openCommandDestination() {
-    if (commandOutcome?.kind !== "handled") return;
+    if (
+      commandOutcome?.kind !== "handled" &&
+      commandOutcome?.kind !== "query"
+    ) {
+      return;
+    }
     onOpenDestination(commandOutcome.destination);
   }
 
@@ -339,10 +400,12 @@ export function VoiceCommandSheet({
       }}
     >
       <section
+        ref={dialogRef}
         className="voice-sheet"
         aria-labelledby="voice-sheet-title"
         aria-modal="true"
         role="dialog"
+        tabIndex={-1}
         data-dragging={dragging}
         style={{ transform: `translateY(${dragOffset}px)` }}
       >
@@ -357,6 +420,7 @@ export function VoiceCommandSheet({
           <div className="voice-sheet__handle" />
         </div>
         <button
+          ref={closeButtonRef}
           className="voice-sheet__close focus-visible-control"
           type="button"
           aria-label={copy.voice.closeLabel}
@@ -376,20 +440,55 @@ export function VoiceCommandSheet({
             <Mic />
           )}
         </span>
-        <h2 id="voice-sheet-title">
+        <h2 id="voice-sheet-title" aria-live="polite">
           {commandOutcome
             ? titleForOutcome(commandOutcome)
             : commandIsProcessing
               ? copy.voice.processingCommandTitle
               : titleFor(state)}
         </h2>
-        <p className="voice-sheet__description" aria-live="polite">
+        <p className="voice-sheet__description">
           {commandOutcome
-            ? commandOutcome.message
+            ? descriptionForOutcome(commandOutcome)
             : commandIsProcessing
               ? copy.voice.processingCommandDescription
               : descriptionFor(state)}
         </p>
+
+        {requestText && state === "heard" && (
+          <div
+            className="voice-sheet__transcript"
+            role="group"
+            aria-label={copy.voice.requestLabel}
+          >
+            <span>{copy.voice.requestLabel}</span>
+            <p>{requestText}</p>
+          </div>
+        )}
+
+        {commandOutcome?.kind === "query" &&
+          commandOutcome.items.length > 0 && (
+            <section
+              className="voice-sheet__results"
+              aria-label={copy.voice.resultLabel}
+              aria-live="polite"
+              role="status"
+            >
+              <ul className="voice-sheet__results-list">
+                {commandOutcome.items.slice(0, 3).map((item) => (
+                  <VoiceResultItem
+                    key={`${item.itemType}-${item.id}`}
+                    item={item}
+                  />
+                ))}
+              </ul>
+              {commandOutcome.items.length > 3 && (
+                <p className="voice-sheet__remaining">
+                  {copy.voice.moreResults(commandOutcome.items.length - 3)}
+                </p>
+              )}
+            </section>
+          )}
 
         {isRecordingState(state) && (
           <>
@@ -421,22 +520,33 @@ export function VoiceCommandSheet({
               <LoaderCircle className="spin" aria-hidden="true" />
               {copy.voice.processingCommandAction}
             </button>
-          ) : commandOutcome?.kind === "handled" ? (
+          ) : commandOutcome?.kind === "handled" ||
+            (commandOutcome?.kind === "query" &&
+              commandOutcome.items.length > 0) ? (
+            <button
+              className="primary-button focus-visible-control"
+              type="button"
+              onClick={openCommandDestination}
+            >
+              <SendHorizontal aria-hidden="true" />
+              {destinationActionLabel(commandOutcome.destination)}
+            </button>
+          ) : commandOutcome?.kind === "query" ? (
             <>
               <button
                 className="primary-button focus-visible-control"
                 type="button"
-                onClick={openCommandDestination}
+                onClick={retry}
               >
-                <SendHorizontal aria-hidden="true" />
-                {destinationActionLabel(commandOutcome.destination)}
+                <Mic aria-hidden="true" />
+                {copy.voice.retry}
               </button>
               <button
                 className="voice-sheet__secondary focus-visible-control"
                 type="button"
-                onClick={closeSheet}
+                onClick={() => onOpenTextInput(requestText)}
               >
-                {copy.voice.close}
+                {copy.voice.useTextInput}
               </button>
             </>
           ) : commandOutcome ? (
@@ -500,13 +610,6 @@ export function VoiceCommandSheet({
             </>
           )}
         </div>
-        <button
-          className="voice-sheet__dismiss focus-visible-control"
-          type="button"
-          onClick={closeSheet}
-        >
-          {copy.voice.close}
-        </button>
       </section>
     </div>
   );
@@ -517,12 +620,48 @@ function destinationActionLabel(destination: "home" | "calendar"): string {
 }
 
 function titleForOutcome(outcome: VoiceCommandOutcome): string {
+  if (outcome.kind === "query") return outcome.message;
   if (outcome.kind === "handled") return copy.voice.commandHandledTitle;
   if (outcome.kind === "needs-details")
     return copy.voice.commandNeedsDetailsTitle;
   if (outcome.kind === "conversation")
     return copy.voice.commandConversationTitle;
   return copy.voice.commandFailedTitle;
+}
+
+function descriptionForOutcome(outcome: VoiceCommandOutcome): string {
+  if (outcome.kind !== "query") return outcome.message;
+  return outcome.items.length > 0
+    ? copy.voice.commandQueryDescription
+    : copy.voice.commandQueryEmptyDescription;
+}
+
+function VoiceResultItem({ item }: { item: VoiceCommandResultItem }) {
+  const metadata = voiceResultMetadata(item);
+  return (
+    <li className="voice-sheet__result-item">
+      <span aria-hidden="true">
+        {item.itemType === "schedule" ? <CalendarDays /> : <Circle />}
+      </span>
+      <div>
+        <strong>{item.title}</strong>
+        {metadata && <small>{metadata}</small>}
+      </div>
+    </li>
+  );
+}
+
+function voiceResultMetadata(item: VoiceCommandResultItem): string | undefined {
+  const value = item.itemType === "schedule" ? item.startsAt : item.dueAt;
+  if (!value) return undefined;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }
 
 function recognitionConstructor(): SpeechRecognitionConstructor | undefined {

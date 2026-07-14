@@ -8,6 +8,17 @@ export type VoiceCommandResult = {
     | "continue_conversation";
   message: string;
   destination: "home" | "calendar" | "conversation";
+  items: VoiceCommandResultItem[];
+};
+
+export type VoiceCommandResultItem = {
+  itemType: "task" | "schedule";
+  id: string;
+  title: string;
+  dueAt: string | null;
+  startsAt: string | null;
+  endsAt: string | null;
+  priority: number | null;
 };
 
 export class VoiceCommandRequestError extends Error {
@@ -36,7 +47,7 @@ export async function processVoiceCommand(
       },
       body: JSON.stringify({
         text,
-        referenceAt: new Date().toISOString(),
+        referenceAt: localReferenceAt(new Date()),
         timeZone:
           Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Seoul",
       }),
@@ -48,6 +59,18 @@ export async function processVoiceCommand(
     throw new VoiceCommandRequestError("unavailable");
   }
   return body;
+}
+
+function localReferenceAt(date: Date): string {
+  const offsetMinutes = -date.getTimezoneOffset();
+  const localTime = new Date(date.getTime() + offsetMinutes * 60_000)
+    .toISOString()
+    .slice(0, -1);
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const absoluteOffset = Math.abs(offsetMinutes);
+  const hours = String(Math.floor(absoluteOffset / 60)).padStart(2, "0");
+  const minutes = String(absoluteOffset % 60).padStart(2, "0");
+  return `${localTime}${sign}${hours}:${minutes}`;
 }
 
 function normalizeBaseUrl(value: string): string {
@@ -75,9 +98,26 @@ function isVoiceCommandResult(value: unknown): value is VoiceCommandResult {
   return (
     isVoiceCommandKind(value.kind) &&
     typeof value.message === "string" &&
+    Array.isArray(value.items) &&
+    value.items.every(isVoiceCommandResultItem) &&
     (value.destination === "home" ||
       value.destination === "calendar" ||
       value.destination === "conversation")
+  );
+}
+
+function isVoiceCommandResultItem(
+  value: unknown,
+): value is VoiceCommandResultItem {
+  if (!isRecord(value)) return false;
+  return (
+    (value.itemType === "task" || value.itemType === "schedule") &&
+    typeof value.id === "string" &&
+    typeof value.title === "string" &&
+    (value.dueAt === null || typeof value.dueAt === "string") &&
+    (value.startsAt === null || typeof value.startsAt === "string") &&
+    (value.endsAt === null || typeof value.endsAt === "string") &&
+    (value.priority === null || typeof value.priority === "number")
   );
 }
 
