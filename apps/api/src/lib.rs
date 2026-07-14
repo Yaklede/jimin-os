@@ -565,7 +565,6 @@ enum VoiceCommandKind {
     ScheduleListed,
     ScheduleCreated,
     TasksListed,
-    TaskCreated,
     NeedsDetails,
     ContinueConversation,
 }
@@ -1709,9 +1708,12 @@ async fn handle_voice_command(
             .await
         }
         VoiceCommand::ListTasks => list_voice_tasks(planning, user_id, request_id).await,
-        VoiceCommand::CreateTask { title, due_at } => {
-            create_voice_task(planning, user_id, title, due_at, request_id).await
-        }
+        VoiceCommand::OrganizeTask => Json(VoiceCommandResponse {
+            kind: VoiceCommandKind::ContinueConversation,
+            message: "말씀하신 내용을 정리해 할 일로 추가할게요.".to_owned(),
+            destination: VoiceCommandDestination::Conversation,
+        })
+        .into_response(),
         VoiceCommand::NeedsScheduleDetails => Json(VoiceCommandResponse {
             kind: VoiceCommandKind::NeedsDetails,
             message: "일정 이름과 시간을 함께 말해 주세요. 예: 내일 오후 3시에 치과 일정 등록해 줘"
@@ -1822,38 +1824,6 @@ async fn list_voice_tasks(
             destination: VoiceCommandDestination::Home,
         })
         .into_response(),
-        Err(error) => storage_error_response(&error, request_id),
-    }
-}
-
-async fn create_voice_task(
-    planning: &Database,
-    user_id: uuid::Uuid,
-    title: String,
-    due_at: Option<OffsetDateTime>,
-    request_id: RequestId,
-) -> Response {
-    match planning
-        .create_task(&NewTask {
-            id: uuid::Uuid::now_v7(),
-            user_id,
-            project_id: None,
-            title: title.clone(),
-            notes: None,
-            priority: 1,
-            due_at,
-        })
-        .await
-    {
-        Ok(_) => (
-            StatusCode::CREATED,
-            Json(VoiceCommandResponse {
-                kind: VoiceCommandKind::TaskCreated,
-                message: format!("{title} 할 일을 추가했어요."),
-                destination: VoiceCommandDestination::Home,
-            }),
-        )
-            .into_response(),
         Err(error) => storage_error_response(&error, request_id),
     }
 }

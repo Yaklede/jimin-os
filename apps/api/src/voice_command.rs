@@ -17,10 +17,7 @@ pub(crate) enum VoiceCommand {
         ends_at: OffsetDateTime,
     },
     ListTasks,
-    CreateTask {
-        title: String,
-        due_at: Option<OffsetDateTime>,
-    },
+    OrganizeTask,
     NeedsScheduleDetails,
     NeedsTaskDetails,
     ContinueConversation,
@@ -86,15 +83,9 @@ pub(crate) fn interpret(
 
     if let Some(task_marker) = task_reference_marker(text) {
         if has_create_verb(text) {
-            let due_at = match relative_day_for(text) {
-                Some(day) => {
-                    Some(task_due_at(reference_at, day).ok_or(VoiceCommandError::InvalidInput)?)
-                }
-                None => None,
-            };
             return Ok(
-                extract_task_title(text).map_or(VoiceCommand::NeedsTaskDetails, |title| {
-                    VoiceCommand::CreateTask { title, due_at }
+                extract_task_title(text).map_or(VoiceCommand::NeedsTaskDetails, |_| {
+                    VoiceCommand::OrganizeTask
                 }),
             );
         }
@@ -188,11 +179,6 @@ fn relative_day_for(text: &str) -> Option<RelativeDay> {
     } else {
         None
     }
-}
-
-fn task_due_at(reference_at: OffsetDateTime, day: RelativeDay) -> Option<OffsetDateTime> {
-    let (_, day_end) = day_bounds(reference_at, day)?;
-    Some(day_end - Duration::seconds(1))
 }
 
 fn day_bounds(
@@ -523,31 +509,19 @@ mod tests {
     }
 
     #[test]
-    fn creates_a_task_from_a_complete_request() {
+    fn routes_a_complete_task_request_to_the_assistant() {
         let command = interpret("할 일에 장보기 추가해줘", reference_at(), "Asia/Seoul")
             .expect("voice command should parse");
 
-        assert_eq!(
-            command,
-            VoiceCommand::CreateTask {
-                title: "장보기".to_owned(),
-                due_at: None,
-            }
-        );
+        assert_eq!(command, VoiceCommand::OrganizeTask);
     }
 
     #[test]
-    fn keeps_the_task_name_when_it_precedes_the_task_phrase() {
+    fn recognizes_a_task_name_before_the_task_phrase() {
         let command = interpret("장보기를 할 일에 추가해줘", reference_at(), "Asia/Seoul")
             .expect("voice command should parse");
 
-        assert_eq!(
-            command,
-            VoiceCommand::CreateTask {
-                title: "장보기".to_owned(),
-                due_at: None,
-            }
-        );
+        assert_eq!(command, VoiceCommand::OrganizeTask);
     }
 
     #[test]
@@ -555,13 +529,7 @@ mod tests {
         let command = interpret("할 일에 장보기 추가해 줘", reference_at(), "Asia/Seoul")
             .expect("voice command should parse");
 
-        assert_eq!(
-            command,
-            VoiceCommand::CreateTask {
-                title: "장보기".to_owned(),
-                due_at: None,
-            }
-        );
+        assert_eq!(command, VoiceCommand::OrganizeTask);
     }
 
     #[test]
@@ -569,13 +537,7 @@ mod tests {
         let command = interpret("할 일이 장보기 추가해 줘", reference_at(), "Asia/Seoul")
             .expect("voice command should parse");
 
-        assert_eq!(
-            command,
-            VoiceCommand::CreateTask {
-                title: "장보기".to_owned(),
-                due_at: None,
-            }
-        );
+        assert_eq!(command, VoiceCommand::OrganizeTask);
     }
 
     #[test]
@@ -587,21 +549,15 @@ mod tests {
     }
 
     #[test]
-    fn creates_a_task_when_natural_task_wording_includes_a_title() {
+    fn routes_natural_task_wording_to_the_assistant() {
         let command = interpret("장보기 일을 추가해줘", reference_at(), "Asia/Seoul")
             .expect("voice command should parse");
 
-        assert_eq!(
-            command,
-            VoiceCommand::CreateTask {
-                title: "장보기".to_owned(),
-                due_at: None,
-            }
-        );
+        assert_eq!(command, VoiceCommand::OrganizeTask);
     }
 
     #[test]
-    fn creates_a_task_from_a_natural_work_item_request() {
+    fn routes_a_complex_work_item_request_to_the_assistant() {
         let command = interpret(
             "금일 비스켓링크 내용정리 회의록 정리해야한다고 일감추가",
             reference_at(),
@@ -609,19 +565,11 @@ mod tests {
         )
         .expect("voice command should parse");
 
-        let VoiceCommand::CreateTask {
-            title,
-            due_at: Some(due_at),
-        } = command
-        else {
-            panic!("dated task should be created");
-        };
-        assert_eq!(title, "비스켓링크 내용정리 회의록 정리");
-        assert_eq!(due_at.date(), reference_at().date());
+        assert_eq!(command, VoiceCommand::OrganizeTask);
     }
 
     #[test]
-    fn creates_a_tomorrow_task_with_the_relative_due_date() {
+    fn routes_a_tomorrow_task_request_to_the_assistant() {
         let command = interpret(
             "내일 할 일에 인생이란 추가해줘",
             reference_at(),
@@ -629,33 +577,15 @@ mod tests {
         )
         .expect("voice command should parse");
 
-        let VoiceCommand::CreateTask {
-            title,
-            due_at: Some(due_at),
-        } = command
-        else {
-            panic!("tomorrow task should be dated");
-        };
-        assert_eq!(title, "인생이란");
-        assert_eq!(due_at.date(), reference_at().date().next_day().unwrap());
-        assert_eq!(due_at.hour(), 23);
-        assert_eq!(due_at.minute(), 59);
+        assert_eq!(command, VoiceCommand::OrganizeTask);
     }
 
     #[test]
-    fn creates_a_tomorrow_task_from_short_natural_wording() {
+    fn routes_short_tomorrow_task_wording_to_the_assistant() {
         let command = interpret("내일 일에 일어나기 추가해주", reference_at(), "Asia/Seoul")
             .expect("voice command should parse");
 
-        let VoiceCommand::CreateTask {
-            title,
-            due_at: Some(due_at),
-        } = command
-        else {
-            panic!("tomorrow task should be created");
-        };
-        assert_eq!(title, "일어나기");
-        assert_eq!(due_at.date(), reference_at().date().next_day().unwrap());
+        assert_eq!(command, VoiceCommand::OrganizeTask);
     }
 
     #[test]

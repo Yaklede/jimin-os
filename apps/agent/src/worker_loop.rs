@@ -509,6 +509,10 @@ fn render_contextualized_turn(
          You may select up to 32 local planning actions in the actions array. Use an empty array for questions or ambiguous requests. \
          When the user asks to complete, cancel, or update several records, include one action for every matched record. \
          For updates, copy every replacement field from server context and change only what the user requested. \
+         For create_task, act like a chief of staff instead of copying the request. Rewrite the user's speech into one concise, \
+         action-oriented title that states the outcome, keeps proper nouns and numbers, and removes dates, filler, request verbs, \
+         honorifics, and repeated wording. Put useful context, requested deliverables, and the completion condition into notes as \
+         one to three short sentences. Do not invent details, and leave notes empty only for a genuinely simple task. \
          Treat an explicit clock-time departure or leave instruction, such as 출발 시간을 4시로, as a schedule event. \
          Use create_schedule for a new departure time and never create_task for that instruction. \
          When the user explicitly asks to delete or remove an existing project, use delete_project; its linked tasks become unassigned. \
@@ -810,8 +814,16 @@ fn assistant_output_schema() -> Value {
                         "entityId": { "type": "string" },
                         "workspaceId": { "type": "string" },
                         "projectId": { "type": "string" },
-                        "title": { "type": "string" },
-                        "notes": { "type": "string" },
+                        "title": {
+                            "type": "string",
+                            "description": "For create_task, a concise action or outcome title written by the assistant, never the user's full request.",
+                            "maxLength": 200
+                        },
+                        "notes": {
+                            "type": "string",
+                            "description": "For create_task, concise context, deliverables, and completion criteria from the request without invented facts.",
+                            "maxLength": 10000
+                        },
                         "priority": { "type": "integer" },
                         "dueAt": { "type": "string" },
                         "startsAt": { "type": "string" },
@@ -1075,6 +1087,8 @@ fn validated_agent_action(
                     time_zone,
                 }
             } else {
+                let (title, notes) =
+                    validated_created_task_copy(&context.prompt, &action.title, &action.notes)?;
                 AgentActionCommand::CreateTask {
                     id: Uuid::now_v7(),
                     project_id,
@@ -1252,13 +1266,80 @@ fn optional_action_text(value: &str, maximum: usize) -> Result<Option<String>, (
     }
 }
 
-fn task_action_is_clock_bound_schedule(prompt: &str, title: &str) -> bool {
+fn user_request_from_prompt(prompt: &str) -> &str {
     let request = prompt
         .rsplit_once("<user_request>\n")
         .map_or(prompt, |(_, request)| request);
-    let request = request
+    request
         .split_once("\n</user_request>")
-        .map_or(request, |(request, _)| request);
+        .map_or(request, |(request, _)| request)
+        .trim()
+}
+
+fn normalized_task_copy(value: &str) -> String {
+    value
+        .to_lowercase()
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .collect()
+}
+
+fn validated_created_task_copy(
+    prompt: &str,
+    title: &str,
+    notes: &str,
+) -> Result<(String, Option<String>), ()> {
+    let title = required_action_text(title, 80)?;
+    let notes = optional_action_text(notes, 2_000)?;
+    let request = user_request_from_prompt(prompt);
+    if request.is_empty() {
+        return Ok((title, notes));
+    }
+
+    let normalized_title = normalized_task_copy(&title);
+    let normalized_request = normalized_task_copy(request);
+    let title_keeps_request_language = [
+        "추가해줘",
+        "추가해주세요",
+        "등록해줘",
+        "등록해주세요",
+        "일감추가",
+        "할일에추가",
+    ]
+    .iter()
+    .any(|phrase| normalized_title.contains(phrase));
+    if title_keeps_request_language || normalized_title == normalized_request {
+        return Err(());
+    }
+
+    let request_needs_brief = [
+        "분석해서",
+        "정리해서",
+        "확인해서",
+        "검토해서",
+        "그리고",
+        "무엇을",
+        "어떻게",
+        "완료 조건",
+        "기반으로",
+        " 및 ",
+    ]
+    .iter()
+    .any(|phrase| request.contains(phrase));
+    if request_needs_brief && notes.is_none() {
+        return Err(());
+    }
+    if notes
+        .as_deref()
+        .is_some_and(|notes| normalized_task_copy(notes) == normalized_request)
+    {
+        return Err(());
+    }
+    Ok((title, notes))
+}
+
+fn task_action_is_clock_bound_schedule(prompt: &str, title: &str) -> bool {
+    let request = user_request_from_prompt(prompt);
     let normalize = |value: &str| {
         value
             .to_lowercase()
@@ -2609,6 +2690,51 @@ mod tests {
                 due_at: Some(actual_due_at),
                 ..
             } if title == "일어나기" && actual_due_at == due_at
+        ));
+    }
+
+    #[test]
+    fn complex_create_task_requires_an_assistant_written_brief() {
+        let context = TurnContext {
+            prompt: "<user_request>\n이노바일 선불전산과 코페이 메뉴얼 분석해서 명세서 출력 및 무엇을 만들어야하는지 정리해서 일감 추가해줘\n</user_request>"
+                .to_owned(),
+            schedule: Vec::new(),
+            tasks: Vec::new(),
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
+        };
+        let copied_request = StructuredAssistantAction {
+            kind: StructuredAssistantActionKind::CreateTask,
+            title: "이노바일 선불전산과 코페이 메뉴얼 분석해서 명세서 출력 및 무엇을 만들어야하는지 정리해서 일감 추가해줘"
+                .to_owned(),
+            priority: 1,
+            ..StructuredAssistantAction::default()
+        };
+        assert!(validated_agent_action(&copied_request, &context).is_err());
+
+        let organized = StructuredAssistantAction {
+            kind: StructuredAssistantActionKind::CreateTask,
+            title: "선불전산·코페이 매뉴얼 기반 개발 명세 정리".to_owned(),
+            notes: "이노바일 선불전산과 코페이 매뉴얼을 분석해 필요한 구현 항목을 정리한다. 결과를 개발 명세서로 작성한다."
+                .to_owned(),
+            priority: 1,
+            ..StructuredAssistantAction::default()
+        };
+        let command = validated_agent_action(&organized, &context)
+            .expect("organized action")
+            .expect("task command");
+        assert!(matches!(
+            command,
+            AgentActionCommand::CreateTask {
+                ref title,
+                notes: Some(ref notes),
+                ..
+            } if title == "선불전산·코페이 매뉴얼 기반 개발 명세 정리"
+                && notes.contains("필요한 구현 항목")
+                && notes.contains("개발 명세서")
         ));
     }
 
