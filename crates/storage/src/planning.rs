@@ -21,6 +21,18 @@ pub struct NewScheduleEntry {
     pub time_zone: String,
 }
 
+/// A version-checked replacement of one owned manual schedule entry.
+pub struct ScheduleEntryUpdate {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub title: String,
+    pub notes: Option<String>,
+    pub starts_at: OffsetDateTime,
+    pub ends_at: OffsetDateTime,
+    pub time_zone: String,
+    pub expected_version: i64,
+}
+
 impl NewScheduleEntry {
     /// Validates a bounded personal schedule entry before it reaches SQL.
     ///
@@ -36,6 +48,31 @@ impl NewScheduleEntry {
                 .is_none_or(|value| valid_text(value, MAX_NOTES_CHARS, true))
             || !valid_time_zone(&self.time_zone)
             || self.ends_at <= self.starts_at
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
+impl ScheduleEntryUpdate {
+    /// Validates an editable schedule entry before database access.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed IDs,
+    /// text, time ranges, time zones, or optimistic version values.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        if !is_v7(self.id)
+            || !is_v7(self.user_id)
+            || !valid_text(&self.title, MAX_TITLE_CHARS, false)
+            || !self
+                .notes
+                .as_deref()
+                .is_none_or(|value| valid_text(value, MAX_NOTES_CHARS, true))
+            || !valid_time_zone(&self.time_zone)
+            || self.ends_at <= self.starts_at
+            || self.expected_version <= 0
         {
             return Err(StorageError::InvalidConfiguration);
         }
@@ -355,6 +392,69 @@ impl Database {
         rows.into_iter().map(ScheduleEntry::try_from).collect()
     }
 
+    /// Replaces the editable fields of one owned manual schedule entry when
+    /// its version still matches. Provider-backed entries are intentionally
+    /// read-only in this storage path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for invalid input and a
+    /// classified persistence error when storage is unavailable.
+    pub async fn update_schedule_entry(
+        &self,
+        update: &ScheduleEntryUpdate,
+    ) -> Result<Option<ScheduleEntry>, StorageError> {
+        update.validate()?;
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let row = sqlx::query_as::<_, ScheduleRow>(
+            "\
+            UPDATE schedule_entries
+            SET title = $4,
+                notes = $5,
+                starts_at = $6,
+                ends_at = $7,
+                time_zone = $8
+            WHERE id = $1
+              AND user_id = $2
+              AND version = $3
+              AND source = 'manual'
+              AND status = 'confirmed'
+            RETURNING id, title, notes, starts_at, ends_at, time_zone, status, source, version",
+        )
+        .bind(update.id)
+        .bind(update.user_id)
+        .bind(update.expected_version)
+        .bind(update.title.trim())
+        .bind(
+            update
+                .notes
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(update.starts_at)
+        .bind(update.ends_at)
+        .bind(update.time_zone.trim())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some(row) = row else {
+            transaction.commit().await.map_err(classify)?;
+            return Ok(None);
+        };
+        let entry = ScheduleEntry::try_from(row)?;
+        append_change(
+            &mut transaction,
+            update.user_id,
+            "schedule_entry",
+            entry.id,
+            entry.version,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        Ok(Some(entry))
+    }
+
     /// Creates an open personal task and appends its matching sync change in
     /// the same transaction.
     ///
@@ -463,6 +563,35 @@ impl Database {
               AND status = 'open'
               AND (due_at IS NULL OR due_at < $2)
             ORDER BY priority DESC, due_at NULLS LAST, created_at ASC, id ASC",
+        )
+        .bind(user_id)
+        .bind(before)
+        .fetch_all(self.pool())
+        .await
+        .map_err(classify)?;
+        rows.into_iter().map(Task::try_from).collect()
+    }
+
+    /// Lists open dated tasks that need deadline attention before the supplied
+    /// exclusive boundary. Undated work stays in the normal daily queue.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified persistence error when storage is unavailable.
+    pub async fn deadline_tasks_for_user(
+        &self,
+        user_id: Uuid,
+        before: OffsetDateTime,
+    ) -> Result<Vec<Task>, StorageError> {
+        let rows = sqlx::query_as::<_, TaskRow>(
+            "\
+            SELECT id, project_id, title, notes, status, priority, due_at, completed_at, version
+            FROM tasks
+            WHERE user_id = $1
+              AND status = 'open'
+              AND due_at IS NOT NULL
+              AND due_at < $2
+            ORDER BY due_at ASC, priority DESC, created_at ASC, id ASC",
         )
         .bind(user_id)
         .bind(before)

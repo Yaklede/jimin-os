@@ -35,14 +35,14 @@ use jimin_storage::{
     auth::{Device, DeviceStatus, Profile},
     calendar::{CalendarAccount, CalendarAccountStatus, CreateCalendarOAuthAuthorization},
     planning::{
-        NewScheduleEntry, NewTask, ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus,
-        TaskUpdate,
+        NewScheduleEntry, NewTask, ScheduleEntry, ScheduleEntryUpdate, ScheduleSource,
+        ScheduleStatus, Task, TaskStatus, TaskUpdate,
     },
     work::{NewProject, Project, ProjectStatus, ProjectUpdate, Workspace, WorkspaceScope},
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{Duration as TimeDuration, OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use utoipa::{OpenApi, ToSchema};
@@ -355,6 +355,7 @@ pub struct ProjectListResponse {
 pub struct HomeSnapshotResponse {
     schedule: Vec<ScheduleEntryResponse>,
     tasks: Vec<TaskResponse>,
+    due_tasks: Vec<TaskResponse>,
 }
 
 /// Safe Google Calendar connection state. Provider credentials and identifiers
@@ -633,6 +634,17 @@ struct CreateScheduleRequest {
 
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UpdateScheduleRequest {
+    title: String,
+    notes: Option<String>,
+    starts_at: String,
+    ends_at: String,
+    time_zone: String,
+    expected_version: i64,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CreateTaskRequest {
     project_id: Option<uuid::Uuid>,
     title: String,
@@ -788,6 +800,7 @@ pub(crate) fn error_response(
         sync_google_calendar,
         get_home_snapshot,
         create_schedule_entry,
+        update_schedule_entry,
         list_workspaces,
         list_projects,
         create_project,
@@ -856,6 +869,7 @@ pub(crate) fn error_response(
         AgentReasoningEffortResponse,
         AgentModelSettingsResponse,
         CreateConversationRequest,
+        UpdateScheduleRequest,
         CreateProjectRequest,
         CreateTaskRequest,
         UpdateProjectRequest,
@@ -894,6 +908,10 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/schedule-entries",
             get(list_schedule_entries).post(create_schedule_entry),
+        )
+        .route(
+            "/v1/schedule-entries/{schedule_entry_id}",
+            axum::routing::put(update_schedule_entry),
         )
         .route(
             "/v1/calendar/connections/google",
@@ -1229,10 +1247,14 @@ async fn get_home_snapshot(
     let Some(planning) = state.planning() else {
         return unavailable_response(request_id);
     };
+    let Some(deadline_boundary) = to.checked_add(TimeDuration::days(1)) else {
+        return invalid_request_response(request_id);
+    };
     let user_id = principal.identity().user_id();
-    let (schedule, tasks) = match tokio::try_join!(
+    let (schedule, tasks, due_tasks) = match tokio::try_join!(
         planning.schedule_entries_in_range(user_id, from, to),
         planning.home_tasks_for_user(user_id, to),
+        planning.deadline_tasks_for_user(user_id, deadline_boundary),
     ) {
         Ok(values) => values,
         Err(error) => return storage_error_response(&error, request_id),
@@ -1251,8 +1273,20 @@ async fn get_home_snapshot(
     else {
         return unavailable_response(request_id);
     };
+    let Ok(due_tasks) = due_tasks
+        .into_iter()
+        .map(task_response)
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return unavailable_response(request_id);
+    };
 
-    Json(HomeSnapshotResponse { schedule, tasks }).into_response()
+    Json(HomeSnapshotResponse {
+        schedule,
+        tasks,
+        due_tasks,
+    })
+    .into_response()
 }
 
 #[utoipa::path(
@@ -1296,6 +1330,62 @@ async fn create_schedule_entry(
             Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
             Err(()) => unavailable_response(request_id),
         },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/schedule-entries/{schedule_entry_id}",
+    tag = "planning",
+    params(("schedule_entry_id" = String, Path)),
+    request_body = UpdateScheduleRequest,
+    responses((status = 200, body = ScheduleEntryResponse), (status = 400), (status = 401), (status = 409), (status = 503))
+)]
+async fn update_schedule_entry(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(schedule_entry_id): Path<uuid::Uuid>,
+    Json(body): Json<UpdateScheduleRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let (Ok(starts_at), Ok(ends_at)) = (
+        OffsetDateTime::parse(&body.starts_at, &Rfc3339),
+        OffsetDateTime::parse(&body.ends_at, &Rfc3339),
+    ) else {
+        return invalid_request_response(request_id);
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .update_schedule_entry(&ScheduleEntryUpdate {
+            id: schedule_entry_id,
+            user_id: principal.identity().user_id(),
+            title: body.title,
+            notes: body.notes,
+            starts_at,
+            ends_at,
+            time_zone: body.time_zone,
+            expected_version: body.expected_version,
+        })
+        .await
+    {
+        Ok(Some(entry)) => match schedule_entry_response(entry) {
+            Ok(response) => Json(response).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Ok(None) => error_response(
+            StatusCode::CONFLICT,
+            "schedule.version_conflict",
+            "일정이 다른 곳에서 변경됐거나 연결된 캘린더 일정이에요. 최신 상태를 확인해 주세요.",
+            request_id,
+            false,
+        ),
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -3775,6 +3865,7 @@ mod tests {
                 "/v1/projects",
                 "/v1/projects/{project_id}",
                 "/v1/schedule-entries",
+                "/v1/schedule-entries/{schedule_entry_id}",
                 "/v1/tasks",
                 "/v1/tasks/{task_id}",
                 "/v1/tasks/{task_id}/complete",
@@ -3867,6 +3958,29 @@ mod tests {
             .await
             .expect("handler should respond");
         assert_eq!(project_update_response.status(), StatusCode::UNAUTHORIZED);
+
+        let schedule_update_response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/schedule-entries/019f68cb-9400-7000-8000-000000000003")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "title": "병원 방문",
+                            "notes": null,
+                            "startsAt": "2026-07-14T08:00:00Z",
+                            "endsAt": "2026-07-14T09:00:00Z",
+                            "timeZone": "Asia/Seoul",
+                            "expectedVersion": 1
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+        assert_eq!(schedule_update_response.status(), StatusCode::UNAUTHORIZED);
 
         let task_update_response = router(state)
             .oneshot(

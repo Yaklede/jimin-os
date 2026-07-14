@@ -14,7 +14,7 @@ use jimin_storage::{
         ConsumeDevicePairing, CreateDevicePairing, PairingConsumption, ProvisionLogin,
         RefreshRotation, RotateRefreshToken,
     },
-    planning::{NewScheduleEntry, NewTask, TaskStatus, TaskUpdate},
+    planning::{NewScheduleEntry, NewTask, ScheduleEntryUpdate, TaskStatus, TaskUpdate},
     work::{NewProject, ProjectStatus, ProjectUpdate, WorkspaceScope},
 };
 use secrecy::SecretString;
@@ -373,7 +373,7 @@ async fn pairing_consumes_one_short_lived_token_into_one_device_session() {
 }
 
 #[tokio::test]
-async fn manual_schedule_and_tasks_are_scoped_and_emit_current_state() {
+async fn manual_schedules_are_scoped_and_version_checked() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;
     };
@@ -405,7 +405,58 @@ async fn manual_schedule_and_tasks_are_scoped_and_emit_current_state() {
         .schedule_entries_in_range(provisioned.profile.id, now, now + TimeDuration::days(1))
         .await
         .expect("schedule query should succeed");
-    assert_eq!(listed, vec![schedule]);
+    assert_eq!(listed, vec![schedule.clone()]);
+    let updated_schedule = database
+        .update_schedule_entry(&ScheduleEntryUpdate {
+            id: schedule.id,
+            user_id: provisioned.profile.id,
+            title: "수정한 개인 일정".to_owned(),
+            notes: Some("시간을 직접 변경함".to_owned()),
+            starts_at: now + TimeDuration::hours(2),
+            ends_at: now + TimeDuration::hours(3),
+            time_zone: "Asia/Seoul".to_owned(),
+            expected_version: schedule.version,
+        })
+        .await
+        .expect("manual schedule update should succeed")
+        .expect("current manual schedule should update");
+    assert_eq!(updated_schedule.title, "수정한 개인 일정");
+    assert!(
+        database
+            .update_schedule_entry(&ScheduleEntryUpdate {
+                id: schedule.id,
+                user_id: provisioned.profile.id,
+                title: "오래된 일정 수정".to_owned(),
+                notes: None,
+                starts_at: now + TimeDuration::hours(3),
+                ends_at: now + TimeDuration::hours(4),
+                time_zone: "Asia/Seoul".to_owned(),
+                expected_version: schedule.version,
+            })
+            .await
+            .expect("stale schedule update should not fail")
+            .is_none()
+    );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn tasks_are_scoped_and_emit_current_state() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database
+        .migrate()
+        .await
+        .expect("planning migration should succeed");
+    let provisioned = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let now = OffsetDateTime::now_utc();
 
     let task = database
         .create_task(&NewTask {
@@ -438,6 +489,20 @@ async fn manual_schedule_and_tasks_are_scoped_and_emit_current_state() {
             .home_tasks_for_user(provisioned.profile.id, now + TimeDuration::days(2))
             .await
             .expect("later home task query should succeed"),
+        vec![task.clone()]
+    );
+    assert!(
+        database
+            .deadline_tasks_for_user(provisioned.profile.id, now + TimeDuration::hours(12))
+            .await
+            .expect("early deadline query should succeed")
+            .is_empty()
+    );
+    assert_eq!(
+        database
+            .deadline_tasks_for_user(provisioned.profile.id, now + TimeDuration::days(2))
+            .await
+            .expect("deadline attention query should succeed"),
         vec![task.clone()]
     );
     let completed = database
