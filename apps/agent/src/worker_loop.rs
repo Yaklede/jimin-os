@@ -509,6 +509,8 @@ fn render_contextualized_turn(
          You may select up to 32 local planning actions in the actions array. Use an empty array for questions or ambiguous requests. \
          When the user asks to complete, cancel, or update several records, include one action for every matched record. \
          For updates, copy every replacement field from server context and change only what the user requested. \
+         Treat an explicit clock-time departure or leave instruction, such as 출발 시간을 4시로, as a schedule event. \
+         Use create_schedule for a new departure time and never create_task for that instruction. \
          When the user explicitly asks to delete or remove an existing project, use delete_project; its linked tasks become unassigned. \
          Use exact existing entity, workspace, and project IDs; the server creates IDs for new records. \
          Use RFC3339 timestamps with the current +09:00 offset. An empty optional string means no value. \
@@ -1046,13 +1048,41 @@ fn validated_agent_action(
             {
                 return Err(());
             }
-            AgentActionCommand::CreateTask {
-                id: Uuid::now_v7(),
-                project_id,
-                title: required_action_text(&action.title, 200)?,
-                notes: optional_action_text(&action.notes, 10_000)?,
-                priority: validated_level(action.priority)?,
-                due_at: parse_optional_timestamp(&action.due_at)?,
+            let title = required_action_text(&action.title, 200)?;
+            let notes = optional_action_text(&action.notes, 10_000)?;
+            let due_at = parse_optional_timestamp(&action.due_at)?;
+            if task_action_is_clock_bound_schedule(&context.prompt, &title) {
+                let starts_at = due_at
+                    .or(parse_optional_timestamp(&action.starts_at)?)
+                    .ok_or(())?;
+                let ends_at = parse_optional_timestamp(&action.ends_at)?
+                    .map_or_else(|| starts_at.checked_add(TimeDuration::hours(1)), Some)
+                    .ok_or(())?;
+                if ends_at <= starts_at {
+                    return Err(());
+                }
+                let time_zone = if action.time_zone.trim().is_empty() {
+                    "Asia/Seoul".to_owned()
+                } else {
+                    required_action_text(&action.time_zone, 80)?
+                };
+                AgentActionCommand::CreateSchedule {
+                    id: Uuid::now_v7(),
+                    title,
+                    notes,
+                    starts_at,
+                    ends_at,
+                    time_zone,
+                }
+            } else {
+                AgentActionCommand::CreateTask {
+                    id: Uuid::now_v7(),
+                    project_id,
+                    title,
+                    notes,
+                    priority: validated_level(action.priority)?,
+                    due_at,
+                }
             }
         }
         StructuredAssistantActionKind::UpdateTask => {
@@ -1087,18 +1117,27 @@ fn validated_agent_action(
             }
         }
         StructuredAssistantActionKind::CreateSchedule => {
-            let starts_at = parse_timestamp(&action.starts_at)?;
-            let ends_at = parse_timestamp(&action.ends_at)?;
+            let starts_at = parse_optional_timestamp(&action.starts_at)?
+                .or(parse_optional_timestamp(&action.due_at)?)
+                .ok_or(())?;
+            let ends_at = parse_optional_timestamp(&action.ends_at)?
+                .map_or_else(|| starts_at.checked_add(TimeDuration::hours(1)), Some)
+                .ok_or(())?;
             if ends_at <= starts_at {
                 return Err(());
             }
+            let time_zone = if action.time_zone.trim().is_empty() {
+                "Asia/Seoul".to_owned()
+            } else {
+                required_action_text(&action.time_zone, 80)?
+            };
             AgentActionCommand::CreateSchedule {
                 id: Uuid::now_v7(),
                 title: required_action_text(&action.title, 200)?,
                 notes: optional_action_text(&action.notes, 10_000)?,
                 starts_at,
                 ends_at,
-                time_zone: required_action_text(&action.time_zone, 80)?,
+                time_zone,
             }
         }
         StructuredAssistantActionKind::UpdateSchedule => {
@@ -1213,6 +1252,37 @@ fn optional_action_text(value: &str, maximum: usize) -> Result<Option<String>, (
     }
 }
 
+fn task_action_is_clock_bound_schedule(prompt: &str, title: &str) -> bool {
+    let request = prompt
+        .rsplit_once("<user_request>\n")
+        .map_or(prompt, |(_, request)| request);
+    let request = request
+        .split_once("\n</user_request>")
+        .map_or(request, |(request, _)| request);
+    let normalize = |value: &str| {
+        value
+            .to_lowercase()
+            .chars()
+            .filter(|character| character.is_alphanumeric())
+            .collect::<String>()
+    };
+    let request = normalize(request);
+    let title = normalize(title);
+    let names_departure = ["출발", "departure", "leave"]
+        .iter()
+        .any(|term| title.contains(term));
+    let requests_departure_time = [
+        "출발시간",
+        "출발시각",
+        "출발일정",
+        "departuretime",
+        "leavetime",
+    ]
+    .iter()
+    .any(|term| request.contains(term));
+    names_departure && requests_departure_time
+}
+
 fn validated_level(value: i16) -> Result<i16, ()> {
     (0..=3).contains(&value).then_some(value).ok_or(())
 }
@@ -1288,6 +1358,14 @@ fn agent_action_results(
     let all_cancelled_schedules = actions
         .iter()
         .all(|action| matches!(action, AgentActionCommand::CancelSchedule { .. }));
+    let all_schedule_actions = actions.iter().all(|action| {
+        matches!(
+            action,
+            AgentActionCommand::CreateSchedule { .. }
+                | AgentActionCommand::UpdateSchedule { .. }
+                | AgentActionCommand::CancelSchedule { .. }
+        )
+    });
     let all_created_projects = actions
         .iter()
         .all(|action| matches!(action, AgentActionCommand::CreateProject { .. }));
@@ -1334,6 +1412,14 @@ fn agent_action_results(
                 format!("일정 {count}개를 취소했어요"),
                 "처리한 할 일",
                 "취소한 일정",
+                "처리한 프로젝트",
+            )
+        } else if all_schedule_actions {
+            (
+                format!("일정 {count}개를 처리했어요."),
+                format!("일정 {count}개를 처리했어요"),
+                "처리한 할 일",
+                "처리한 일정",
                 "처리한 프로젝트",
             )
         } else if all_created_projects {
@@ -2146,7 +2232,7 @@ async fn wait_for_shutdown_signal() -> std::io::Result<()> {
 mod tests {
     use jimin_codex_client::Error as CodexError;
     use jimin_storage::{
-        agent::{AgentActionCommand, AssistantPresentationItem},
+        agent::{AgentActionCommand, AssistantPresentationItem, AssistantPresentationSectionKind},
         gmail::GmailMessage,
         planning::{ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus},
         work::{Project, ProjectStatus, Workspace, WorkspaceScope},
@@ -2524,6 +2610,175 @@ mod tests {
                 ..
             } if title == "일어나기" && actual_due_at == due_at
         ));
+    }
+
+    #[test]
+    fn create_schedule_repairs_a_missing_range_from_the_model() {
+        let starts_at = OffsetDateTime::parse(
+            "2026-07-14T16:00:00+09:00",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("timestamp");
+        let context = TurnContext {
+            prompt: String::new(),
+            schedule: Vec::new(),
+            tasks: Vec::new(),
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
+        };
+        let action = StructuredAssistantAction {
+            kind: StructuredAssistantActionKind::CreateSchedule,
+            title: "레이저제모 출발".to_owned(),
+            due_at: "2026-07-14T16:00:00+09:00".to_owned(),
+            ..StructuredAssistantAction::default()
+        };
+
+        let command = validated_agent_action(&action, &context)
+            .expect("valid action")
+            .expect("action command");
+        assert!(matches!(
+            command,
+            AgentActionCommand::CreateSchedule {
+                ref title,
+                starts_at: actual_starts_at,
+                ends_at,
+                ref time_zone,
+                ..
+            } if title == "레이저제모 출발"
+                && actual_starts_at == starts_at
+                && ends_at == starts_at + Duration::hours(1)
+                && time_zone == "Asia/Seoul"
+        ));
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The regression keeps the exact two-action model response and its repaired schedule result together."
+    )]
+    fn departure_clock_time_is_repaired_to_a_schedule_action() {
+        let appointment_id = Uuid::now_v7();
+        let existing_start = OffsetDateTime::parse(
+            "2026-07-14T18:00:00+09:00",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("existing start");
+        let updated_start = OffsetDateTime::parse(
+            "2026-07-14T17:30:00+09:00",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("updated start");
+        let departure_start = OffsetDateTime::parse(
+            "2026-07-14T16:00:00+09:00",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("departure start");
+        let context = TurnContext {
+            prompt: "<user_request>\n레이저 제모 일정 5시 30분으로 수정하고 출발 시간을 4시로 해야함\n</user_request>"
+                .to_owned(),
+            schedule: vec![ScheduleEntry {
+                id: appointment_id,
+                title: "레이저제모".to_owned(),
+                notes: None,
+                starts_at: existing_start,
+                ends_at: existing_start + Duration::hours(1),
+                time_zone: "Asia/Seoul".to_owned(),
+                status: ScheduleStatus::Confirmed,
+                source: ScheduleSource::Manual,
+                version: 1,
+            }],
+            tasks: Vec::new(),
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
+        };
+        let response = serde_json::json!({
+            "answer": "요청을 처리 중입니다.",
+            "presentation": {
+                "title": "",
+                "layout": "stack",
+                "focusEntityId": "",
+                "sections": []
+            },
+            "actions": [
+                {
+                    "kind": "update_schedule",
+                    "entityId": appointment_id,
+                    "workspaceId": "",
+                    "projectId": "",
+                    "title": "레이저제모",
+                    "notes": "",
+                    "priority": 0,
+                    "dueAt": "",
+                    "startsAt": "2026-07-14T17:30:00+09:00",
+                    "endsAt": "2026-07-14T18:30:00+09:00",
+                    "timeZone": "Asia/Seoul",
+                    "status": "",
+                    "riskLevel": 0,
+                    "objective": "",
+                    "nextAction": ""
+                },
+                {
+                    "kind": "create_task",
+                    "entityId": "",
+                    "workspaceId": "",
+                    "projectId": "",
+                    "title": "레이저제모 출발",
+                    "notes": "",
+                    "priority": 0,
+                    "dueAt": "2026-07-14T16:00:00+09:00",
+                    "startsAt": "",
+                    "endsAt": "",
+                    "timeZone": "",
+                    "status": "",
+                    "riskLevel": 0,
+                    "objective": "",
+                    "nextAction": ""
+                }
+            ]
+        })
+        .to_string();
+
+        let (_, _, actions) =
+            validated_assistant_response(&response, &context).expect("repaired actions");
+        assert!(matches!(
+            actions.as_slice(),
+            [
+                AgentActionCommand::UpdateSchedule {
+                    id,
+                    starts_at,
+                    ..
+                },
+                AgentActionCommand::CreateSchedule {
+                    title,
+                    starts_at: actual_departure_start,
+                    ends_at: actual_departure_end,
+                    time_zone,
+                    ..
+                }
+            ] if *id == appointment_id
+                && *starts_at == updated_start
+                && title == "레이저제모 출발"
+                && *actual_departure_start == departure_start
+                && *actual_departure_end == departure_start + Duration::hours(1)
+                && time_zone == "Asia/Seoul"
+        ));
+
+        let (answer, presentation) =
+            agent_action_results(&actions, &context).expect("schedule result");
+        assert_eq!(answer, "일정 2개를 처리했어요.");
+        assert_eq!(presentation.title, "일정 2개를 처리했어요");
+        assert_eq!(presentation.sections.len(), 1);
+        assert_eq!(
+            presentation.sections[0].kind,
+            AssistantPresentationSectionKind::Schedule
+        );
+        assert_eq!(presentation.sections[0].item_ids.len(), 2);
     }
 
     #[test]

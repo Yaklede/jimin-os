@@ -21,6 +21,12 @@
 
 서비스별 용어를 여기에 추가해요.
 
+### 일정과 할 일 구분
+
+- 특정 시각에 발생하는 약속, 이동, 출발, 방문은 `일정`으로 표현해요.
+- 완료해야 하는 결과나 후속 조치는 `할 일`로 표현해요.
+- 사용자가 `출발 시간`처럼 정확한 시각을 정하면 일감이 아니라 일정으로 확인해요.
+
 | Concept | Korean | English | Avoid |
 | --- | --- | --- | --- |
 | server connection | 서버 연결 | Server connection | endpoint status, host reachability |
