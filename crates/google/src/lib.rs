@@ -12,11 +12,11 @@ use jimin_domain::{ClientPlatform, EmailAddress, GoogleSubject, PkceVerifier};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
 use reqwest::{
     Client, Response,
-    header::{CACHE_CONTROL, CONTENT_TYPE},
+    header::{CACHE_CONTROL, CONTENT_TYPE, IF_MATCH},
     redirect::Policy,
 };
 use secrecy::{ExposeSecret, SecretString};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::{Date, Duration as TimeDuration, Month, OffsetDateTime};
 use tokio::sync::Mutex;
@@ -56,6 +56,10 @@ pub enum GoogleAuthError {
     IdentityRejected,
     #[error("Google identity provider is temporarily unavailable")]
     ProviderUnavailable,
+    #[error("Google Calendar incremental synchronization token expired")]
+    CalendarSyncTokenExpired,
+    #[error("Google Calendar event changed before the requested mutation")]
+    CalendarEventConflict,
 }
 
 /// One server-owned client profile. Callers cannot supply a client ID, token
@@ -266,6 +270,25 @@ pub struct GoogleCalendarEventEntry {
     pub is_editable: bool,
 }
 
+/// One validated Calendar events response assembled across every provider
+/// page. The next synchronization token stays secret and must be persisted
+/// encrypted by the caller.
+pub struct GoogleCalendarEventSync {
+    pub events: Vec<GoogleCalendarEventEntry>,
+    pub next_sync_token: SecretString,
+}
+
+/// Validated timed-event replacement sent to the fixed Google Calendar API.
+/// Calendar and event identifiers are supplied separately and never accepted
+/// as arbitrary endpoint URLs.
+pub struct GoogleCalendarEventMutation {
+    pub title: String,
+    pub description: Option<String>,
+    pub start: OffsetDateTime,
+    pub end: OffsetDateTime,
+    pub time_zone: String,
+}
+
 /// The two mutually exclusive time representations accepted by Google
 /// Calendar. All-day events retain their date semantics until persistence.
 pub enum GoogleCalendarEventTime {
@@ -454,7 +477,26 @@ impl GoogleCalendarAdapter {
         access_token: &SecretString,
         provider_calendar_id: &str,
         calendar_time_zone: &str,
-    ) -> Result<Vec<GoogleCalendarEventEntry>, GoogleAuthError> {
+    ) -> Result<GoogleCalendarEventSync, GoogleAuthError> {
+        self.list_event_changes(access_token, provider_calendar_id, calendar_time_zone, None)
+            .await
+    }
+
+    /// Loads only changes since a previously persisted Google sync token.
+    /// A provider HTTP 410 response is classified separately so callers can
+    /// discard the expired token and safely restart with a full sync.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GoogleAuthError::CalendarSyncTokenExpired`] for an expired
+    /// token and a sanitized provider error for all other failures.
+    pub async fn list_event_changes(
+        &self,
+        access_token: &SecretString,
+        provider_calendar_id: &str,
+        calendar_time_zone: &str,
+        sync_token: Option<&SecretString>,
+    ) -> Result<GoogleCalendarEventSync, GoogleAuthError> {
         let token = access_token.expose_secret();
         let provider_calendar_id = validate_text(provider_calendar_id.to_owned(), 1_024)?;
         let calendar_time_zone = validate_text(calendar_time_zone.to_owned(), 80)?;
@@ -462,6 +504,13 @@ impl GoogleCalendarAdapter {
             || token.len() > MAX_TOKEN_RESPONSE_BYTES
             || token.chars().any(char::is_control)
         {
+            return Err(GoogleAuthError::InvalidRequest);
+        }
+        if sync_token.is_some_and(|value| {
+            value.expose_secret().is_empty()
+                || value.expose_secret().len() > MAX_TOKEN_RESPONSE_BYTES
+                || value.expose_secret().chars().any(char::is_control)
+        }) {
             return Err(GoogleAuthError::InvalidRequest);
         }
 
@@ -479,6 +528,9 @@ impl GoogleCalendarAdapter {
                 query.append_pair("singleEvents", "false");
                 query.append_pair("showDeleted", "true");
                 query.append_pair("maxResults", "2500");
+                if let Some(sync_token) = sync_token {
+                    query.append_pair("syncToken", sync_token.expose_secret());
+                }
                 if let Some(page_token) = &next_page_token {
                     query.append_pair("pageToken", page_token);
                 }
@@ -490,8 +542,10 @@ impl GoogleCalendarAdapter {
                 .send()
                 .await
                 .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
-            if !response.status().is_success() {
-                return Err(classify_provider_status(response.status().as_u16()));
+            if let Some(error) =
+                classify_calendar_event_status(response.status().as_u16(), sync_token.is_some())
+            {
+                return Err(error);
             }
             if !is_json_response(&response) {
                 return Err(GoogleAuthError::ProviderUnavailable);
@@ -507,10 +561,158 @@ impl GoogleCalendarAdapter {
             }
             next_page_token = page.next_page_token;
             if next_page_token.is_none() {
-                return Ok(events);
+                let next_sync_token = page
+                    .next_sync_token
+                    .filter(|value| {
+                        !value.is_empty()
+                            && value.len() <= MAX_TOKEN_RESPONSE_BYTES
+                            && !value.chars().any(char::is_control)
+                    })
+                    .ok_or(GoogleAuthError::ProviderRejected)?;
+                return Ok(GoogleCalendarEventSync {
+                    events,
+                    next_sync_token: SecretString::from(next_sync_token),
+                });
             }
         }
         Err(GoogleAuthError::ProviderRejected)
+    }
+
+    /// Replaces one timed event using its last provider `ETag` as an optimistic
+    /// concurrency guard.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GoogleAuthError::CalendarEventConflict`] when Google reports
+    /// that the event changed, or a sanitized provider failure otherwise.
+    pub async fn update_event(
+        &self,
+        access_token: &SecretString,
+        provider_calendar_id: &str,
+        provider_event_id: &str,
+        provider_etag: Option<&str>,
+        mutation: &GoogleCalendarEventMutation,
+    ) -> Result<GoogleCalendarEventEntry, GoogleAuthError> {
+        let (token, calendar_id, event_id, etag, body) = validated_event_mutation_request(
+            access_token,
+            provider_calendar_id,
+            provider_event_id,
+            provider_etag,
+            mutation,
+        )?;
+        let mut url = reqwest::Url::parse(GOOGLE_CALENDAR_EVENTS_ENDPOINT)
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        url.path_segments_mut()
+            .map_err(|()| GoogleAuthError::ProviderUnavailable)?
+            .push(&calendar_id)
+            .push("events")
+            .push(&event_id);
+        let mut request = self.client.put(url).bearer_auth(token).json(&body);
+        if let Some(etag) = etag {
+            request = request.header(IF_MATCH, etag);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        if !response.status().is_success() {
+            return Err(classify_calendar_mutation_status(
+                response.status().as_u16(),
+            ));
+        }
+        if !is_json_response(&response) {
+            return Err(GoogleAuthError::ProviderUnavailable);
+        }
+        let payload = bounded_body(response, MAX_CALENDAR_EVENT_RESPONSE_BYTES).await?;
+        let item: GoogleCalendarEventItem =
+            serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
+        normalize_calendar_event_item(item, &mutation.time_zone)
+    }
+
+    /// Creates one timed event in a fixed Google Calendar collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized validation, provider, or transport error.
+    pub async fn create_event(
+        &self,
+        access_token: &SecretString,
+        provider_calendar_id: &str,
+        mutation: &GoogleCalendarEventMutation,
+    ) -> Result<GoogleCalendarEventEntry, GoogleAuthError> {
+        let token = validate_access_token(access_token)?;
+        let calendar_id = validate_text(provider_calendar_id.to_owned(), 1_024)?;
+        let body = validated_event_mutation_body(mutation)?;
+        let mut url = reqwest::Url::parse(GOOGLE_CALENDAR_EVENTS_ENDPOINT)
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        url.path_segments_mut()
+            .map_err(|()| GoogleAuthError::ProviderUnavailable)?
+            .push(&calendar_id)
+            .push("events");
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        if !response.status().is_success() {
+            return Err(classify_calendar_mutation_status(
+                response.status().as_u16(),
+            ));
+        }
+        if !is_json_response(&response) {
+            return Err(GoogleAuthError::ProviderUnavailable);
+        }
+        let payload = bounded_body(response, MAX_CALENDAR_EVENT_RESPONSE_BYTES).await?;
+        let item: GoogleCalendarEventItem =
+            serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
+        normalize_calendar_event_item(item, &mutation.time_zone)
+    }
+
+    /// Deletes one event using its provider `ETag` as an optimistic concurrency
+    /// guard.
+    ///
+    /// # Errors
+    ///
+    /// Returns a conflict for a stale `ETag` and a sanitized provider error for
+    /// all other failures.
+    pub async fn delete_event(
+        &self,
+        access_token: &SecretString,
+        provider_calendar_id: &str,
+        provider_event_id: &str,
+        provider_etag: Option<&str>,
+    ) -> Result<(), GoogleAuthError> {
+        let token = validate_access_token(access_token)?;
+        let calendar_id = validate_text(provider_calendar_id.to_owned(), 1_024)?;
+        let event_id = validate_text(provider_event_id.to_owned(), 1_024)?;
+        let etag = provider_etag
+            .map(|value| validate_text(value.to_owned(), 2_048))
+            .transpose()?;
+        let mut url = reqwest::Url::parse(GOOGLE_CALENDAR_EVENTS_ENDPOINT)
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        url.path_segments_mut()
+            .map_err(|()| GoogleAuthError::ProviderUnavailable)?
+            .push(&calendar_id)
+            .push("events")
+            .push(&event_id);
+        let mut request = self.client.delete(url).bearer_auth(token);
+        if let Some(etag) = etag {
+            request = request.header(IF_MATCH, etag);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(classify_calendar_mutation_status(
+                response.status().as_u16(),
+            ))
+        }
     }
 
     /// Lists a bounded, read-only view of the Gmail inbox. The adapter first
@@ -888,6 +1090,7 @@ struct GoogleCalendarEventPage {
     #[serde(default)]
     items: Vec<GoogleCalendarEventItem>,
     next_page_token: Option<String>,
+    next_sync_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -919,6 +1122,23 @@ struct GoogleCalendarEventDateTime {
     date: Option<String>,
     date_time: Option<String>,
     time_zone: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleCalendarMutationBody {
+    summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    start: GoogleCalendarMutationDateTime,
+    end: GoogleCalendarMutationDateTime,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleCalendarMutationDateTime {
+    date_time: String,
+    time_zone: String,
 }
 
 #[derive(Deserialize)]
@@ -1171,6 +1391,78 @@ fn normalize_calendar_event_item(
     })
 }
 
+fn validate_access_token(token: &SecretString) -> Result<&str, GoogleAuthError> {
+    let value = token.expose_secret();
+    if value.is_empty()
+        || value.len() > MAX_TOKEN_RESPONSE_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(GoogleAuthError::InvalidRequest);
+    }
+    Ok(value)
+}
+
+fn validated_event_mutation_request<'a>(
+    access_token: &'a SecretString,
+    provider_calendar_id: &str,
+    provider_event_id: &str,
+    provider_etag: Option<&str>,
+    mutation: &GoogleCalendarEventMutation,
+) -> Result<
+    (
+        &'a str,
+        String,
+        String,
+        Option<String>,
+        GoogleCalendarMutationBody,
+    ),
+    GoogleAuthError,
+> {
+    let token = validate_access_token(access_token)?;
+    let calendar_id = validate_text(provider_calendar_id.to_owned(), 1_024)?;
+    let event_id = validate_text(provider_event_id.to_owned(), 1_024)?;
+    let etag = provider_etag
+        .map(|value| validate_text(value.to_owned(), 2_048))
+        .transpose()?;
+    let body = validated_event_mutation_body(mutation)?;
+    Ok((token, calendar_id, event_id, etag, body))
+}
+
+fn validated_event_mutation_body(
+    mutation: &GoogleCalendarEventMutation,
+) -> Result<GoogleCalendarMutationBody, GoogleAuthError> {
+    let title = validate_text(mutation.title.clone(), 300)?;
+    let description = mutation
+        .description
+        .clone()
+        .map(|value| validate_text(value, 8_192))
+        .transpose()?;
+    let time_zone = validate_text(mutation.time_zone.clone(), 80)?;
+    if mutation.end <= mutation.start {
+        return Err(GoogleAuthError::InvalidRequest);
+    }
+    let start = mutation
+        .start
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|_| GoogleAuthError::InvalidRequest)?;
+    let end = mutation
+        .end
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|_| GoogleAuthError::InvalidRequest)?;
+    Ok(GoogleCalendarMutationBody {
+        summary: title,
+        description,
+        start: GoogleCalendarMutationDateTime {
+            date_time: start,
+            time_zone: time_zone.clone(),
+        },
+        end: GoogleCalendarMutationDateTime {
+            date_time: end,
+            time_zone,
+        },
+    })
+}
+
 fn normalize_gmail_message(
     message: GoogleGmailMessageResponse,
     expected_message_id: &str,
@@ -1386,9 +1678,54 @@ fn classify_provider_status(status: u16) -> GoogleAuthError {
     }
 }
 
+fn classify_calendar_event_status(status: u16, incremental: bool) -> Option<GoogleAuthError> {
+    if (200..300).contains(&status) {
+        None
+    } else if status == 410 && incremental {
+        Some(GoogleAuthError::CalendarSyncTokenExpired)
+    } else {
+        Some(classify_provider_status(status))
+    }
+}
+
+fn classify_calendar_mutation_status(status: u16) -> GoogleAuthError {
+    if status == 409 || status == 412 {
+        GoogleAuthError::CalendarEventConflict
+    } else {
+        classify_provider_status(status)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calendar_event_status_requires_full_reset_only_for_incremental_http_410() {
+        assert_eq!(
+            classify_calendar_event_status(410, true),
+            Some(GoogleAuthError::CalendarSyncTokenExpired)
+        );
+        assert_eq!(
+            classify_calendar_event_status(410, false),
+            Some(GoogleAuthError::ProviderRejected)
+        );
+        assert_eq!(classify_calendar_event_status(200, true), None);
+        assert_eq!(
+            classify_calendar_event_status(503, true),
+            Some(GoogleAuthError::ProviderUnavailable)
+        );
+    }
+
+    #[test]
+    fn calendar_event_page_captures_the_terminal_sync_token() {
+        let page: GoogleCalendarEventPage =
+            serde_json::from_str(r#"{"items":[],"nextSyncToken":"opaque-sync-token"}"#)
+                .expect("valid Calendar event page");
+
+        assert!(page.next_page_token.is_none());
+        assert_eq!(page.next_sync_token.as_deref(), Some("opaque-sync-token"));
+    }
 
     #[test]
     fn profile_requires_unique_redirects_and_exact_matching() {
@@ -1494,5 +1831,21 @@ mod tests {
         assert_eq!(entry.subject.as_deref(), Some("내일 회의"));
         assert!(entry.is_unread);
         assert!(entry.received_at.is_some());
+    }
+
+    #[test]
+    fn calendar_mutation_classifies_stale_etags_as_conflicts() {
+        assert_eq!(
+            classify_calendar_mutation_status(412),
+            GoogleAuthError::CalendarEventConflict
+        );
+        assert_eq!(
+            classify_calendar_mutation_status(409),
+            GoogleAuthError::CalendarEventConflict
+        );
+        assert_eq!(
+            classify_calendar_mutation_status(503),
+            GoogleAuthError::ProviderUnavailable
+        );
     }
 }

@@ -15,11 +15,136 @@ use jimin_storage::{
         RefreshRotation, RotateRefreshToken,
     },
     planning::{NewScheduleEntry, NewTask, ScheduleEntryUpdate, TaskStatus, TaskUpdate},
+    webhook::{EncryptedWebhookSecret, NewProjectWebhook},
     work::{NewProject, ProjectStatus, ProjectUpdate, WorkspaceScope},
 };
 use secrecy::SecretString;
 use time::{Duration as TimeDuration, OffsetDateTime};
 use uuid::Uuid;
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The integration test verifies configuration, snapshot retention, completion, retry, and safe history together."
+)]
+async fn project_webhook_queue_keeps_a_safe_delivery_snapshot() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 2, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let provisioned = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let personal = database
+        .workspaces_for_user(provisioned.profile.id)
+        .await
+        .expect("workspace query should succeed")
+        .into_iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Personal)
+        .expect("personal workspace should exist");
+    let project = database
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: provisioned.profile.id,
+            workspace_id: personal.id,
+            title: "Webhook 검증".to_owned(),
+            objective: None,
+            risk_level: 0,
+            next_action: None,
+            due_at: None,
+        })
+        .await
+        .expect("project should persist");
+    let webhook = database
+        .create_project_webhook(&NewProjectWebhook {
+            id: Uuid::now_v7(),
+            user_id: provisioned.profile.id,
+            project_id: project.id,
+            url: "https://automation.example/webhook".to_owned(),
+            events: vec!["task.created".to_owned(), "task.updated".to_owned()],
+            authentication: Some(EncryptedWebhookSecret {
+                ciphertext: vec![7; 32],
+                nonce: vec![8; 24],
+            }),
+        })
+        .await
+        .expect("webhook should persist");
+    for event_type in ["task.created", "task.updated"] {
+        assert_eq!(
+            database
+                .queue_project_webhook_event(
+                    provisioned.profile.id,
+                    project.id,
+                    event_type,
+                    &serde_json::json!({ "event": event_type }),
+                )
+                .await
+                .expect("event should queue"),
+            1
+        );
+    }
+    assert!(
+        database
+            .delete_project_webhook(
+                provisioned.profile.id,
+                project.id,
+                webhook.id,
+                webhook.version,
+            )
+            .await
+            .expect("webhook should delete")
+    );
+
+    let claimed = database
+        .claim_webhook_deliveries(10)
+        .await
+        .expect("snapshotted deliveries should remain claimable");
+    assert_eq!(claimed.len(), 2);
+    assert!(claimed.iter().all(|delivery| {
+        delivery.url == "https://automation.example/webhook"
+            && delivery
+                .auth_header_ciphertext
+                .as_deref()
+                .is_some_and(|value| value == [7; 32])
+            && delivery
+                .auth_header_nonce
+                .as_deref()
+                .is_some_and(|value| value == [8; 24])
+    }));
+    database
+        .complete_webhook_delivery(claimed[0].id, 204)
+        .await
+        .expect("successful delivery should complete");
+    database
+        .fail_webhook_delivery(
+            claimed[1].id,
+            claimed[1].attempt_count,
+            Some(503),
+            "webhook.destination_rejected",
+        )
+        .await
+        .expect("failed delivery should enter retry wait");
+    let history = database
+        .webhook_delivery_history(provisioned.profile.id, project.id)
+        .await
+        .expect("delivery history should load");
+    assert_eq!(history.len(), 2);
+    assert!(
+        history
+            .iter()
+            .any(|delivery| delivery.status == "delivered")
+    );
+    assert!(history.iter().any(|delivery| {
+        delivery.status == "retry_wait"
+            && delivery.response_code == Some(503)
+            && delivery.attempt_count == 1
+    }));
+    database.close().await;
+}
 
 #[tokio::test]
 async fn baseline_migration_and_schema_version_are_consistent() {

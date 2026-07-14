@@ -162,6 +162,7 @@ pub struct ScheduleEntry {
     pub time_zone: String,
     pub status: ScheduleStatus,
     pub source: ScheduleSource,
+    pub editable: bool,
     pub version: i64,
 }
 
@@ -210,6 +211,7 @@ struct ScheduleRow {
     time_zone: String,
     status: String,
     source: String,
+    editable: bool,
     version: i64,
 }
 
@@ -249,6 +251,7 @@ impl TryFrom<ScheduleRow> for ScheduleEntry {
             time_zone: row.time_zone,
             status,
             source,
+            editable: row.editable,
             version: row.version,
         })
     }
@@ -297,7 +300,8 @@ impl Database {
             INSERT INTO schedule_entries (
                 id, user_id, title, notes, starts_at, ends_at, time_zone, source, status
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'manual', 'confirmed')
-            RETURNING id, title, notes, starts_at, ends_at, time_zone, status, source, version",
+            RETURNING id, title, notes, starts_at, ends_at, time_zone, status, source,
+                TRUE AS editable, version",
         )
         .bind(entry.id)
         .bind(entry.user_id)
@@ -348,7 +352,8 @@ impl Database {
             "\
             SELECT *
             FROM (
-                SELECT id, title, notes, starts_at, ends_at, time_zone, status, source, version
+                SELECT id, title, notes, starts_at, ends_at, time_zone, status, source,
+                    TRUE AS editable, version
                 FROM schedule_entries
                 WHERE user_id = $1
                   AND status = 'confirmed'
@@ -357,7 +362,12 @@ impl Database {
                 UNION ALL
                 SELECT id, title, description_text AS notes, start_at AS starts_at, end_at AS ends_at,
                     source_time_zone AS time_zone, 'confirmed'::TEXT AS status,
-                    'google_calendar'::TEXT AS source, version
+                    'google_calendar'::TEXT AS source,
+                    EXISTS (
+                        SELECT 1 FROM calendars
+                        WHERE calendars.id = calendar_events.calendar_id
+                          AND calendars.access_role IN ('owner', 'writer')
+                    ) AS editable, version
                 FROM calendar_events
                 WHERE user_id = $1
                   AND provider_deleted_at IS NULL
@@ -370,7 +380,7 @@ impl Database {
                     (start_date::timestamp AT TIME ZONE 'UTC') AS starts_at,
                     (end_date::timestamp AT TIME ZONE 'UTC') AS ends_at,
                     'UTC'::TEXT AS time_zone, 'confirmed'::TEXT AS status,
-                    'google_calendar'::TEXT AS source, version
+                    'google_calendar'::TEXT AS source, FALSE AS editable, version
                 FROM calendar_events
                 WHERE user_id = $1
                   AND provider_deleted_at IS NULL
@@ -390,6 +400,53 @@ impl Database {
         .await
         .map_err(classify)?;
         rows.into_iter().map(ScheduleEntry::try_from).collect()
+    }
+
+    /// Returns one visible schedule entry from either the manual or connected
+    /// Google read model after a mutation has been reconciled.
+    /// Loads one visible schedule entry owned by the current user.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified persistence error or invalid-input error.
+    pub async fn schedule_entry_by_id(
+        &self,
+        user_id: Uuid,
+        schedule_entry_id: Uuid,
+    ) -> Result<Option<ScheduleEntry>, StorageError> {
+        if !is_v7(user_id) || !is_v7(schedule_entry_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let row = sqlx::query_as::<_, ScheduleRow>(
+            "\
+            SELECT * FROM (
+                SELECT id, title, notes, starts_at, ends_at, time_zone, status, source,
+                    TRUE AS editable, version
+                FROM schedule_entries
+                WHERE id = $1 AND user_id = $2 AND status = 'confirmed'
+                UNION ALL
+                SELECT id, title, description_text AS notes, start_at AS starts_at,
+                    end_at AS ends_at, source_time_zone AS time_zone,
+                    'confirmed'::TEXT AS status, 'google_calendar'::TEXT AS source,
+                    EXISTS (
+                        SELECT 1 FROM calendars
+                        WHERE calendars.id = calendar_events.calendar_id
+                          AND calendars.access_role IN ('owner', 'writer')
+                    ) AS editable, version
+                FROM calendar_events
+                WHERE id = $1 AND user_id = $2
+                  AND provider_deleted_at IS NULL
+                  AND provider_status IN ('confirmed', 'tentative')
+                  AND time_kind = 'date_time'
+            ) AS schedule
+            LIMIT 1",
+        )
+        .bind(schedule_entry_id)
+        .bind(user_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(classify)?;
+        row.map(ScheduleEntry::try_from).transpose()
     }
 
     /// Replaces the editable fields of one owned manual schedule entry when
@@ -419,7 +476,8 @@ impl Database {
               AND version = $3
               AND source = 'manual'
               AND status = 'confirmed'
-            RETURNING id, title, notes, starts_at, ends_at, time_zone, status, source, version",
+            RETURNING id, title, notes, starts_at, ends_at, time_zone, status, source,
+                TRUE AS editable, version",
         )
         .bind(update.id)
         .bind(update.user_id)
@@ -453,6 +511,55 @@ impl Database {
         .await?;
         transaction.commit().await.map_err(classify)?;
         Ok(Some(entry))
+    }
+
+    /// Cancels one owned manual schedule entry with optimistic concurrency and
+    /// appends the matching device change. Rows remain available for audit and
+    /// future recovery instead of being physically deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for unsafe IDs or
+    /// versions and a classified persistence error when storage is unavailable.
+    pub async fn cancel_schedule_entry(
+        &self,
+        user_id: Uuid,
+        schedule_entry_id: Uuid,
+        expected_version: i64,
+    ) -> Result<Option<i64>, StorageError> {
+        if !is_v7(user_id) || !is_v7(schedule_entry_id) || expected_version <= 0 {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let version = sqlx::query_scalar::<_, i64>(
+            "\
+            UPDATE schedule_entries
+            SET status = 'cancelled'
+            WHERE id = $1
+              AND user_id = $2
+              AND version = $3
+              AND source = 'manual'
+              AND status = 'confirmed'
+            RETURNING version",
+        )
+        .bind(schedule_entry_id)
+        .bind(user_id)
+        .bind(expected_version)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        if let Some(version) = version {
+            append_change(
+                &mut transaction,
+                user_id,
+                "schedule_entry",
+                schedule_entry_id,
+                version,
+            )
+            .await?;
+        }
+        transaction.commit().await.map_err(classify)?;
+        Ok(version)
     }
 
     /// Creates an open personal task and appends its matching sync change in
@@ -541,6 +648,34 @@ impl Database {
         .await
         .map_err(classify)?;
         rows.into_iter().map(Task::try_from).collect()
+    }
+
+    /// Loads one task owned by the current user so callers can compare state
+    /// transitions without exposing another user's work item.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified persistence error when storage is unavailable.
+    pub async fn task_for_user(
+        &self,
+        user_id: Uuid,
+        task_id: Uuid,
+    ) -> Result<Option<Task>, StorageError> {
+        if !is_v7(user_id) || !is_v7(task_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let row = sqlx::query_as::<_, TaskRow>(
+            "\
+            SELECT id, project_id, title, notes, status, priority, due_at, completed_at, version
+            FROM tasks
+            WHERE user_id = $1 AND id = $2",
+        )
+        .bind(user_id)
+        .bind(task_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(classify)?;
+        row.map(Task::try_from).transpose()
     }
 
     /// Lists the open tasks that belong on the daily home before the supplied

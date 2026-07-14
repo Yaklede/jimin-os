@@ -3,6 +3,7 @@ pub mod calendar_oauth;
 pub mod config;
 pub mod probe;
 mod voice_command;
+pub mod webhook;
 
 use std::{collections::BTreeMap, convert::Infallible, future::Future, sync::Arc, time::Duration};
 
@@ -38,6 +39,7 @@ use jimin_storage::{
         NewScheduleEntry, NewTask, ScheduleEntry, ScheduleEntryUpdate, ScheduleSource,
         ScheduleStatus, Task, TaskStatus, TaskUpdate,
     },
+    webhook::{NewProjectWebhook, ProjectWebhook, WebhookDelivery},
     work::{NewProject, Project, ProjectStatus, ProjectUpdate, Workspace, WorkspaceScope},
 };
 use secrecy::{ExposeSecret, SecretString};
@@ -45,6 +47,7 @@ use serde::{Deserialize, Serialize};
 use time::{Duration as TimeDuration, OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
+use tracing::warn;
 use utoipa::{OpenApi, ToSchema};
 
 use crate::{
@@ -75,6 +78,7 @@ pub struct ApiState {
     pairing: Option<Arc<PairingRuntime>>,
     planning: Option<Database>,
     calendar_oauth: Option<Arc<CalendarOAuthRuntime>>,
+    webhook: Option<Arc<webhook::WebhookRuntime>>,
     agent: Option<Database>,
 }
 
@@ -95,6 +99,7 @@ impl ApiState {
             pairing: None,
             planning: None,
             calendar_oauth: None,
+            webhook: None,
             agent: None,
         }
     }
@@ -149,6 +154,16 @@ impl ApiState {
     pub fn with_calendar_oauth(mut self, calendar_oauth: CalendarOAuthRuntime) -> Self {
         self.calendar_oauth = Some(Arc::new(calendar_oauth));
         self
+    }
+
+    #[must_use]
+    pub fn with_webhook_runtime(mut self, runtime: webhook::WebhookRuntime) -> Self {
+        self.webhook = Some(Arc::new(runtime));
+        self
+    }
+
+    fn webhook(&self) -> Option<&Arc<webhook::WebhookRuntime>> {
+        self.webhook.as_ref()
     }
 
     #[must_use]
@@ -274,6 +289,7 @@ pub struct ScheduleEntryResponse {
     time_zone: String,
     status: String,
     source: String,
+    editable: bool,
     version: i64,
 }
 
@@ -345,6 +361,46 @@ pub struct ProjectListResponse {
     next_cursor: Option<String>,
 }
 
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectWebhookResponse {
+    id: uuid::Uuid,
+    project_id: uuid::Uuid,
+    url: String,
+    events: Vec<String>,
+    has_authentication: bool,
+    enabled: bool,
+    version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectWebhookListResponse {
+    items: Vec<ProjectWebhookResponse>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookDeliveryResponse {
+    id: uuid::Uuid,
+    webhook_id: uuid::Uuid,
+    event_type: String,
+    status: String,
+    attempt_count: i32,
+    response_code: Option<i32>,
+    error_code: Option<String>,
+    created_at: String,
+    delivered_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookDeliveryListResponse {
+    items: Vec<WebhookDeliveryResponse>,
+    next_cursor: Option<String>,
+}
+
 /// Server-owned read model for the real planning data shown on the daily home.
 ///
 /// The snapshot deliberately excludes provider-shaped placeholders: a future
@@ -368,6 +424,7 @@ pub struct GoogleCalendarConnectionResponse {
     email: Option<String>,
     granted_scopes: Vec<String>,
     last_successful_sync_at: Option<String>,
+    last_error_code: Option<String>,
     reauth_required: bool,
     version: Option<i64>,
 }
@@ -646,6 +703,12 @@ struct UpdateScheduleRequest {
 
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct DeleteScheduleRequest {
+    expected_version: i64,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CreateTaskRequest {
     project_id: Option<uuid::Uuid>,
     title: String,
@@ -686,6 +749,20 @@ struct UpdateProjectRequest {
     risk_level: i16,
     next_action: Option<String>,
     due_at: Option<String>,
+    expected_version: i64,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CreateProjectWebhookRequest {
+    url: String,
+    events: Vec<String>,
+    authorization: Option<String>,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct DeleteProjectWebhookRequest {
     expected_version: i64,
 }
 
@@ -802,10 +879,16 @@ pub(crate) fn error_response(
         get_home_snapshot,
         create_schedule_entry,
         update_schedule_entry,
+        delete_schedule_entry,
         list_workspaces,
         list_projects,
         create_project,
         update_project,
+        list_project_webhooks,
+        create_project_webhook,
+        delete_project_webhook,
+        test_project_webhook,
+        list_webhook_deliveries,
         list_open_tasks,
         create_task,
         update_task,
@@ -851,6 +934,10 @@ pub(crate) fn error_response(
         WorkspaceListResponse,
         ProjectResponse,
         ProjectListResponse,
+        ProjectWebhookResponse,
+        ProjectWebhookListResponse,
+        WebhookDeliveryResponse,
+        WebhookDeliveryListResponse,
         VoiceCommandKind,
         VoiceCommandDestination,
         VoiceCommandResponse,
@@ -871,9 +958,12 @@ pub(crate) fn error_response(
         AgentModelSettingsResponse,
         CreateConversationRequest,
         UpdateScheduleRequest,
+        DeleteScheduleRequest,
         CreateProjectRequest,
         CreateTaskRequest,
         UpdateProjectRequest,
+        CreateProjectWebhookRequest,
+        DeleteProjectWebhookRequest,
         UpdateTaskRequest,
         CreateAgentTurnRequest,
         ResolveAgentActionRequest,
@@ -897,10 +987,7 @@ pub fn router(state: ApiState) -> Router {
     let router = Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
-        .route(
-            "/oauth/google/calendar/callback",
-            get(complete_google_calendar_authorization),
-        )
+        .merge(calendar_router())
         .route("/v1/auth/refresh", axum::routing::post(refresh_session))
         .route(
             "/v1/access/session",
@@ -912,19 +999,7 @@ pub fn router(state: ApiState) -> Router {
         )
         .route(
             "/v1/schedule-entries/{schedule_entry_id}",
-            axum::routing::put(update_schedule_entry),
-        )
-        .route(
-            "/v1/calendar/connections/google",
-            get(get_google_calendar_connection),
-        )
-        .route(
-            "/v1/calendar/connections/google/authorizations",
-            post(start_google_calendar_authorization),
-        )
-        .route(
-            "/v1/calendar/connections/google/sync",
-            post(sync_google_calendar),
+            axum::routing::put(update_schedule_entry).delete(delete_schedule_entry),
         )
         .route("/v1/home", get(get_home_snapshot))
         .route("/v1/workspaces", get(list_workspaces))
@@ -933,6 +1008,7 @@ pub fn router(state: ApiState) -> Router {
             "/v1/projects/{project_id}",
             axum::routing::put(update_project),
         )
+        .merge(webhook_router())
         .route("/v1/tasks", get(list_open_tasks).post(create_task))
         .route("/v1/tasks/{task_id}", axum::routing::put(update_task))
         .route(
@@ -992,13 +1068,59 @@ pub fn router(state: ApiState) -> Router {
                 // Do not widen this to arbitrary web origins: this API accepts
                 // bearer tokens from the installed personal client.
                 .allow_origin(allowed_origins)
-                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
+                .allow_methods([
+                    Method::GET,
+                    Method::POST,
+                    Method::PUT,
+                    Method::DELETE,
+                    Method::OPTIONS,
+                ])
                 .allow_headers([
                     axum::http::header::AUTHORIZATION,
                     axum::http::header::CONTENT_TYPE,
                 ]),
         )
         .layer(middleware::from_fn(request_context))
+}
+
+fn webhook_router() -> Router<ApiState> {
+    Router::new()
+        .route(
+            "/v1/projects/{project_id}/webhooks",
+            get(list_project_webhooks).post(create_project_webhook),
+        )
+        .route(
+            "/v1/projects/{project_id}/webhooks/{webhook_id}",
+            axum::routing::delete(delete_project_webhook),
+        )
+        .route(
+            "/v1/projects/{project_id}/webhooks/{webhook_id}/test",
+            post(test_project_webhook),
+        )
+        .route(
+            "/v1/projects/{project_id}/webhook-deliveries",
+            get(list_webhook_deliveries),
+        )
+}
+
+fn calendar_router() -> Router<ApiState> {
+    Router::new()
+        .route(
+            "/oauth/google/calendar/callback",
+            get(complete_google_calendar_authorization),
+        )
+        .route(
+            "/v1/calendar/connections/google",
+            get(get_google_calendar_connection),
+        )
+        .route(
+            "/v1/calendar/connections/google/authorizations",
+            post(start_google_calendar_authorization),
+        )
+        .route(
+            "/v1/calendar/connections/google/sync",
+            post(sync_google_calendar),
+        )
 }
 
 fn allowed_client_origins(trusted_network: bool) -> Vec<HeaderValue> {
@@ -1032,6 +1154,104 @@ where
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await
+}
+
+const CALENDAR_SYNC_INITIAL_DELAY: Duration = Duration::from_secs(30);
+const CALENDAR_SYNC_INTERVAL: Duration = Duration::from_mins(5);
+
+/// Starts the single-process Google Calendar reconciliation loop when both
+/// storage and provider configuration are available. The loop processes
+/// accounts sequentially to avoid a provider burst and never logs owner IDs,
+/// credentials, sync tokens, or event content.
+#[must_use]
+pub fn spawn_calendar_sync_worker(state: &ApiState) -> Option<tokio::task::JoinHandle<()>> {
+    let planning = state.planning()?.clone();
+    let calendar_oauth = Arc::clone(state.calendar_oauth()?);
+    Some(tokio::spawn(async move {
+        tokio::time::sleep(CALENDAR_SYNC_INITIAL_DELAY).await;
+        loop {
+            if let Ok(identities) = planning.active_calendar_sync_identities().await {
+                for identity in identities {
+                    if let Err(error) = synchronize_google_calendar(
+                        &planning,
+                        &calendar_oauth,
+                        identity.account_id,
+                        identity.user_id,
+                    )
+                    .await
+                    {
+                        let _ = planning
+                            .mark_calendar_sync_failure(
+                                identity.account_id,
+                                identity.user_id,
+                                error.failure_code(),
+                            )
+                            .await;
+                        warn!(
+                            event = "calendar.periodic_sync_failed",
+                            error_code = error.failure_code(),
+                            retryable = error.retryable()
+                        );
+                    }
+                }
+            } else {
+                warn!(
+                    event = "calendar.periodic_sync_deferred",
+                    error_code = "storage.persistence_unavailable"
+                );
+            }
+            tokio::time::sleep(CALENDAR_SYNC_INTERVAL).await;
+        }
+    }))
+}
+
+/// Starts the durable project-webhook delivery loop. Claims are bounded and
+/// each failure is persisted with exponential backoff before another claim.
+#[must_use]
+pub fn spawn_webhook_delivery_worker(state: &ApiState) -> Option<tokio::task::JoinHandle<()>> {
+    let planning = state.planning()?.clone();
+    let runtime = Arc::clone(state.webhook()?);
+    Some(tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        loop {
+            if let Ok(deliveries) = planning.claim_webhook_deliveries(10).await {
+                for delivery in deliveries {
+                    match runtime.deliver(&delivery).await {
+                        Ok(result) => {
+                            let _ = planning
+                                .complete_webhook_delivery(delivery.id, result.response_code)
+                                .await;
+                        }
+                        Err(error) => {
+                            let response_code = match error {
+                                webhook::WebhookRuntimeError::Rejected(code) => Some(code),
+                                _ => None,
+                            };
+                            let _ = planning
+                                .fail_webhook_delivery(
+                                    delivery.id,
+                                    delivery.attempt_count,
+                                    response_code,
+                                    error.code(),
+                                )
+                                .await;
+                            warn!(
+                                event = "webhook.delivery_failed",
+                                error_code = error.code(),
+                                attempt = delivery.attempt_count
+                            );
+                        }
+                    }
+                }
+            } else {
+                warn!(
+                    event = "webhook.delivery_deferred",
+                    error_code = "storage.persistence_unavailable"
+                );
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }))
 }
 
 #[utoipa::path(
@@ -1222,6 +1442,68 @@ async fn list_schedule_entries(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn create_google_schedule_entry(
+    state: &ApiState,
+    planning: &Database,
+    user_id: uuid::Uuid,
+    target: jimin_storage::calendar::PrimaryCalendarMutationTarget,
+    body: &CreateScheduleRequest,
+    starts_at: OffsetDateTime,
+    ends_at: OffsetDateTime,
+    request_id: RequestId,
+) -> Response {
+    let Some(calendar_oauth) = state.calendar_oauth() else {
+        return calendar_oauth_error_response(CalendarOAuthError::Configuration, request_id);
+    };
+    let connection = match planning
+        .calendar_sync_connection(target.account_id, user_id)
+        .await
+    {
+        Ok(Some(connection)) => connection,
+        Ok(None) => return schedule_conflict_response(request_id),
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    let event = match calendar_oauth
+        .create_calendar_event(
+            &connection,
+            &target,
+            jimin_google::GoogleCalendarEventMutation {
+                title: body.title.clone(),
+                description: body.notes.clone(),
+                start: starts_at,
+                end: ends_at,
+                time_zone: body.time_zone.clone(),
+            },
+        )
+        .await
+    {
+        Ok(event) => event,
+        Err(error) => return calendar_oauth_error_response(error, request_id),
+    };
+    if let Err(error) =
+        synchronize_google_calendar(planning, calendar_oauth, target.account_id, user_id).await
+    {
+        return calendar_oauth_error_response(error, request_id);
+    }
+    let event_id = match planning
+        .calendar_event_id_by_provider(user_id, target.calendar_id, &event.provider_event_id)
+        .await
+    {
+        Ok(Some(event_id)) => event_id,
+        Ok(None) => return unavailable_response(request_id),
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    match planning.schedule_entry_by_id(user_id, event_id).await {
+        Ok(Some(entry)) => match schedule_entry_response(entry) {
+            Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Ok(None) => unavailable_response(request_id),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/v1/home",
@@ -1316,6 +1598,26 @@ async fn create_schedule_entry(
         return unavailable_response(request_id);
     };
     match planning
+        .primary_calendar_mutation_target(principal.identity().user_id())
+        .await
+    {
+        Ok(Some(target)) => {
+            return create_google_schedule_entry(
+                &state,
+                planning,
+                principal.identity().user_id(),
+                target,
+                &body,
+                starts_at,
+                ends_at,
+                request_id,
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(error) => return storage_error_response(&error, request_id),
+    }
+    match planning
         .create_schedule_entry(&NewScheduleEntry {
             id: uuid::Uuid::now_v7(),
             user_id: principal.identity().user_id(),
@@ -1367,11 +1669,11 @@ async fn update_schedule_entry(
         .update_schedule_entry(&ScheduleEntryUpdate {
             id: schedule_entry_id,
             user_id: principal.identity().user_id(),
-            title: body.title,
-            notes: body.notes,
+            title: body.title.clone(),
+            notes: body.notes.clone(),
             starts_at,
             ends_at,
-            time_zone: body.time_zone,
+            time_zone: body.time_zone.clone(),
             expected_version: body.expected_version,
         })
         .await
@@ -1380,15 +1682,179 @@ async fn update_schedule_entry(
             Ok(response) => Json(response).into_response(),
             Err(()) => unavailable_response(request_id),
         },
-        Ok(None) => error_response(
-            StatusCode::CONFLICT,
-            "schedule.version_conflict",
-            "일정이 다른 곳에서 변경됐거나 연결된 캘린더 일정이에요. 최신 상태를 확인해 주세요.",
-            request_id,
-            false,
-        ),
+        Ok(None) => {
+            update_google_schedule_entry(
+                &state,
+                planning,
+                principal.identity().user_id(),
+                schedule_entry_id,
+                &body,
+                starts_at,
+                ends_at,
+                request_id,
+            )
+            .await
+        }
         Err(error) => storage_error_response(&error, request_id),
     }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/schedule-entries/{schedule_entry_id}",
+    tag = "planning",
+    params(("schedule_entry_id" = String, Path)),
+    request_body = DeleteScheduleRequest,
+    responses((status = 204), (status = 400), (status = 401), (status = 409), (status = 503))
+)]
+async fn delete_schedule_entry(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(schedule_entry_id): Path<uuid::Uuid>,
+    Json(body): Json<DeleteScheduleRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .cancel_schedule_entry(
+            principal.identity().user_id(),
+            schedule_entry_id,
+            body.expected_version,
+        )
+        .await
+    {
+        Ok(Some(_)) => StatusCode::NO_CONTENT.into_response(),
+        Ok(None) => {
+            delete_google_schedule_entry(
+                &state,
+                planning,
+                principal.identity().user_id(),
+                schedule_entry_id,
+                body.expected_version,
+                request_id,
+            )
+            .await
+        }
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn update_google_schedule_entry(
+    state: &ApiState,
+    planning: &Database,
+    user_id: uuid::Uuid,
+    schedule_entry_id: uuid::Uuid,
+    body: &UpdateScheduleRequest,
+    starts_at: OffsetDateTime,
+    ends_at: OffsetDateTime,
+    request_id: RequestId,
+) -> Response {
+    let target = match planning
+        .calendar_event_mutation_target(user_id, schedule_entry_id, body.expected_version)
+        .await
+    {
+        Ok(Some(target)) => target,
+        Ok(None) => return schedule_conflict_response(request_id),
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    let Some(calendar_oauth) = state.calendar_oauth() else {
+        return calendar_oauth_error_response(CalendarOAuthError::Configuration, request_id);
+    };
+    let connection = match planning
+        .calendar_sync_connection(target.account_id, user_id)
+        .await
+    {
+        Ok(Some(connection)) => connection,
+        Ok(None) => return schedule_conflict_response(request_id),
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    let mutation = jimin_google::GoogleCalendarEventMutation {
+        title: body.title.clone(),
+        description: body.notes.clone(),
+        start: starts_at,
+        end: ends_at,
+        time_zone: body.time_zone.clone(),
+    };
+    if let Err(error) = calendar_oauth
+        .update_calendar_event(&connection, &target, mutation)
+        .await
+    {
+        return calendar_oauth_error_response(error, request_id);
+    }
+    if let Err(error) =
+        synchronize_google_calendar(planning, calendar_oauth, target.account_id, user_id).await
+    {
+        return calendar_oauth_error_response(error, request_id);
+    }
+    match planning
+        .schedule_entry_by_id(user_id, schedule_entry_id)
+        .await
+    {
+        Ok(Some(entry)) => match schedule_entry_response(entry) {
+            Ok(response) => Json(response).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Ok(None) => schedule_conflict_response(request_id),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+async fn delete_google_schedule_entry(
+    state: &ApiState,
+    planning: &Database,
+    user_id: uuid::Uuid,
+    schedule_entry_id: uuid::Uuid,
+    expected_version: i64,
+    request_id: RequestId,
+) -> Response {
+    let target = match planning
+        .calendar_event_mutation_target(user_id, schedule_entry_id, expected_version)
+        .await
+    {
+        Ok(Some(target)) => target,
+        Ok(None) => return schedule_conflict_response(request_id),
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    let Some(calendar_oauth) = state.calendar_oauth() else {
+        return calendar_oauth_error_response(CalendarOAuthError::Configuration, request_id);
+    };
+    let connection = match planning
+        .calendar_sync_connection(target.account_id, user_id)
+        .await
+    {
+        Ok(Some(connection)) => connection,
+        Ok(None) => return schedule_conflict_response(request_id),
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    if let Err(error) = calendar_oauth
+        .delete_calendar_event(&connection, &target)
+        .await
+    {
+        return calendar_oauth_error_response(error, request_id);
+    }
+    if let Err(error) =
+        synchronize_google_calendar(planning, calendar_oauth, target.account_id, user_id).await
+    {
+        return calendar_oauth_error_response(error, request_id);
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+fn schedule_conflict_response(request_id: RequestId) -> Response {
+    error_response(
+        StatusCode::CONFLICT,
+        "schedule.version_conflict",
+        "일정이 다른 곳에서 변경됐어요. 최신 상태를 확인한 뒤 다시 시도해 주세요.",
+        request_id,
+        false,
+    )
 }
 
 #[utoipa::path(
@@ -1489,10 +1955,11 @@ async fn create_project(
     let Some(planning) = state.planning() else {
         return unavailable_response(request_id);
     };
+    let user_id = principal.identity().user_id();
     match planning
         .create_project(&NewProject {
             id: uuid::Uuid::now_v7(),
-            user_id: principal.identity().user_id(),
+            user_id,
             workspace_id: body.workspace_id,
             title: body.title,
             objective: body.objective,
@@ -1502,10 +1969,20 @@ async fn create_project(
         })
         .await
     {
-        Ok(project) => match project_response(project) {
-            Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
-            Err(()) => unavailable_response(request_id),
-        },
+        Ok(project) => {
+            queue_project_event(
+                planning,
+                user_id,
+                project.id,
+                "project.created",
+                Some(project.id),
+            )
+            .await;
+            match project_response(project) {
+                Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+                Err(()) => unavailable_response(request_id),
+            }
+        }
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -1545,10 +2022,11 @@ async fn update_project(
     let Some(planning) = state.planning() else {
         return unavailable_response(request_id);
     };
+    let user_id = principal.identity().user_id();
     match planning
         .update_project(&ProjectUpdate {
             id: project_id,
-            user_id: principal.identity().user_id(),
+            user_id,
             title: body.title,
             objective: body.objective,
             status,
@@ -1559,10 +2037,20 @@ async fn update_project(
         })
         .await
     {
-        Ok(Some(project)) => match project_response(project) {
-            Ok(response) => Json(response).into_response(),
-            Err(()) => unavailable_response(request_id),
-        },
+        Ok(Some(project)) => {
+            queue_project_event(
+                planning,
+                user_id,
+                project_id,
+                "project.updated",
+                Some(project_id),
+            )
+            .await;
+            match project_response(project) {
+                Ok(response) => Json(response).into_response(),
+                Err(()) => unavailable_response(request_id),
+            }
+        }
         Ok(None) => error_response(
             StatusCode::CONFLICT,
             "project.version_conflict",
@@ -1570,6 +2058,228 @@ async fn update_project(
             request_id,
             false,
         ),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/webhooks",
+    tag = "work",
+    params(("project_id" = String, Path)),
+    responses((status = 200, body = ProjectWebhookListResponse), (status = 401), (status = 503))
+)]
+async fn list_project_webhooks(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(project_id): Path<uuid::Uuid>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .project_webhooks(principal.identity().user_id(), project_id)
+        .await
+    {
+        Ok(items) => Json(ProjectWebhookListResponse {
+            items: items.into_iter().map(project_webhook_response).collect(),
+            next_cursor: None,
+        })
+        .into_response(),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/webhooks",
+    tag = "work",
+    params(("project_id" = String, Path)),
+    request_body = CreateProjectWebhookRequest,
+    responses((status = 201, body = ProjectWebhookResponse), (status = 400), (status = 401), (status = 503))
+)]
+async fn create_project_webhook(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(project_id): Path<uuid::Uuid>,
+    Json(body): Json<CreateProjectWebhookRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    if !valid_webhook_url(&body.url) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "webhook.url_invalid",
+            "http 또는 https 웹훅 주소를 확인해 주세요.",
+            request_id,
+            false,
+        );
+    }
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let Some(runtime) = state.webhook() else {
+        return unavailable_response(request_id);
+    };
+    let webhook_id = uuid::Uuid::now_v7();
+    let authentication = match body
+        .authorization
+        .filter(|value| !value.trim().is_empty())
+        .map(SecretString::from)
+    {
+        Some(value) => match runtime.encrypt_authentication(webhook_id, &value) {
+            Ok(value) => Some(value),
+            Err(_) => return invalid_request_response(request_id),
+        },
+        None => None,
+    };
+    match planning
+        .create_project_webhook(&NewProjectWebhook {
+            id: webhook_id,
+            user_id: principal.identity().user_id(),
+            project_id,
+            url: body.url,
+            events: body.events,
+            authentication,
+        })
+        .await
+    {
+        Ok(webhook) => {
+            (StatusCode::CREATED, Json(project_webhook_response(webhook))).into_response()
+        }
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/projects/{project_id}/webhooks/{webhook_id}",
+    tag = "work",
+    params(("project_id" = String, Path), ("webhook_id" = String, Path)),
+    request_body = DeleteProjectWebhookRequest,
+    responses((status = 204), (status = 401), (status = 409), (status = 503))
+)]
+async fn delete_project_webhook(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path((project_id, webhook_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+    Json(body): Json<DeleteProjectWebhookRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .delete_project_webhook(
+            principal.identity().user_id(),
+            project_id,
+            webhook_id,
+            body.expected_version,
+        )
+        .await
+    {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => error_response(
+            StatusCode::CONFLICT,
+            "webhook.version_conflict",
+            "웹훅 설정이 변경됐어요. 다시 불러온 뒤 삭제해 주세요.",
+            request_id,
+            false,
+        ),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/webhooks/{webhook_id}/test",
+    tag = "work",
+    params(("project_id" = String, Path), ("webhook_id" = String, Path)),
+    responses((status = 202), (status = 401), (status = 409), (status = 503))
+)]
+async fn test_project_webhook(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path((project_id, webhook_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let payload = webhook_payload("webhook.test", project_id, None);
+    match planning
+        .queue_webhook_test(
+            principal.identity().user_id(),
+            project_id,
+            webhook_id,
+            &payload,
+        )
+        .await
+    {
+        Ok(Some(_)) => StatusCode::ACCEPTED.into_response(),
+        Ok(None) => error_response(
+            StatusCode::CONFLICT,
+            "webhook.unavailable",
+            "웹훅 설정을 다시 확인해 주세요.",
+            request_id,
+            false,
+        ),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/webhook-deliveries",
+    tag = "work",
+    params(("project_id" = String, Path)),
+    responses((status = 200, body = WebhookDeliveryListResponse), (status = 401), (status = 503))
+)]
+async fn list_webhook_deliveries(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(project_id): Path<uuid::Uuid>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .webhook_delivery_history(principal.identity().user_id(), project_id)
+        .await
+    {
+        Ok(items) => match items
+            .into_iter()
+            .map(webhook_delivery_response)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(items) => Json(WebhookDeliveryListResponse {
+                items,
+                next_cursor: None,
+            })
+            .into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -1650,10 +2360,11 @@ async fn create_task(
     let Some(planning) = state.planning() else {
         return unavailable_response(request_id);
     };
+    let user_id = principal.identity().user_id();
     match planning
         .create_task(&NewTask {
             id: uuid::Uuid::now_v7(),
-            user_id: principal.identity().user_id(),
+            user_id,
             project_id: body.project_id,
             title: body.title,
             notes: body.notes,
@@ -1662,10 +2373,16 @@ async fn create_task(
         })
         .await
     {
-        Ok(task) => match task_response(task) {
-            Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
-            Err(()) => unavailable_response(request_id),
-        },
+        Ok(task) => {
+            if let Some(project_id) = task.project_id {
+                queue_project_event(planning, user_id, project_id, "task.created", Some(task.id))
+                    .await;
+            }
+            match task_response(task) {
+                Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+                Err(()) => unavailable_response(request_id),
+            }
+        }
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -1705,10 +2422,17 @@ async fn update_task(
     let Some(planning) = state.planning() else {
         return unavailable_response(request_id);
     };
+    let user_id = principal.identity().user_id();
+    let previous_status = planning
+        .task_for_user(user_id, task_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|task| task.status);
     match planning
         .update_task(&TaskUpdate {
             id: task_id,
-            user_id: principal.identity().user_id(),
+            user_id,
             project_id: body.project_id,
             title: body.title,
             notes: body.notes,
@@ -1719,10 +2443,21 @@ async fn update_task(
         })
         .await
     {
-        Ok(Some(task)) => match task_response(task) {
-            Ok(response) => Json(response).into_response(),
-            Err(()) => unavailable_response(request_id),
-        },
+        Ok(Some(task)) => {
+            if let Some(project_id) = task.project_id {
+                let event_type = match (previous_status, task.status) {
+                    (Some(TaskStatus::Completed), TaskStatus::Open) => "task.restored",
+                    (_, TaskStatus::Completed) => "task.completed",
+                    (_, TaskStatus::Cancelled) => "task.deleted",
+                    _ => "task.updated",
+                };
+                queue_project_event(planning, user_id, project_id, event_type, Some(task.id)).await;
+            }
+            match task_response(task) {
+                Ok(response) => Json(response).into_response(),
+                Err(()) => unavailable_response(request_id),
+            }
+        }
         Ok(None) => error_response(
             StatusCode::CONFLICT,
             "task.version_conflict",
@@ -1953,18 +2688,27 @@ async fn complete_task(
     let Some(planning) = state.planning() else {
         return unavailable_response(request_id);
     };
+    let user_id = principal.identity().user_id();
     match planning
-        .complete_task(
-            principal.identity().user_id(),
-            task_id,
-            body.expected_version,
-        )
+        .complete_task(user_id, task_id, body.expected_version)
         .await
     {
-        Ok(Some(task)) => match task_response(task) {
-            Ok(response) => Json(response).into_response(),
-            Err(()) => unavailable_response(request_id),
-        },
+        Ok(Some(task)) => {
+            if let Some(project_id) = task.project_id {
+                queue_project_event(
+                    planning,
+                    user_id,
+                    project_id,
+                    "task.completed",
+                    Some(task.id),
+                )
+                .await;
+            }
+            match task_response(task) {
+                Ok(response) => Json(response).into_response(),
+                Err(()) => unavailable_response(request_id),
+            }
+        }
         Ok(None) => error_response(
             StatusCode::CONFLICT,
             "task.version_conflict",
@@ -2895,14 +3639,33 @@ async fn synchronize_google_calendar(
         .calendar_sync_targets(account_id, user_id)
         .await
         .map_err(|_| CalendarOAuthError::ProviderUnavailable)?;
-    let events = calendar_oauth
-        .initial_calendar_event_sync(&connection, &targets)
+    let batches = calendar_oauth
+        .calendar_event_sync(&connection, &targets)
         .await?;
-    for (calendar_id, events) in events {
-        planning
-            .apply_calendar_event_full_sync(account_id, user_id, calendar_id, &events)
-            .await
-            .map_err(|_| CalendarOAuthError::ProviderUnavailable)?;
+    for batch in batches {
+        if batch.is_full_sync {
+            planning
+                .apply_calendar_event_full_sync(
+                    account_id,
+                    user_id,
+                    batch.calendar_id,
+                    &batch.events,
+                    &batch.next_sync_token,
+                )
+                .await
+                .map_err(|_| CalendarOAuthError::ProviderUnavailable)?;
+        } else {
+            planning
+                .apply_calendar_event_incremental_sync(
+                    account_id,
+                    user_id,
+                    batch.calendar_id,
+                    &batch.events,
+                    &batch.next_sync_token,
+                )
+                .await
+                .map_err(|_| CalendarOAuthError::ProviderUnavailable)?;
+        }
     }
     match calendar_oauth.initial_gmail_inbox_sync(&connection).await {
         Ok(Some(messages)) => {
@@ -2938,6 +3701,11 @@ fn calendar_oauth_error_response(error: CalendarOAuthError, request_id: RequestI
             "calendar.provider_unavailable",
             "Google Calendar에 연결할 수 없어요. 잠시 후 다시 시도해 주세요.",
         ),
+        CalendarOAuthError::Conflict => (
+            StatusCode::CONFLICT,
+            "calendar.event_conflict",
+            "Google Calendar에서 일정이 먼저 변경됐어요. 최신 상태를 확인해 주세요.",
+        ),
         CalendarOAuthError::IdentityMismatch => (
             StatusCode::FORBIDDEN,
             "calendar.account_mismatch",
@@ -2959,6 +3727,9 @@ fn calendar_callback_error_page(error: CalendarOAuthError) -> Response {
     let message = match error {
         CalendarOAuthError::ProviderUnavailable => {
             "Google Calendar에 연결할 수 없어요. 잠시 후 앱에서 다시 시도해 주세요."
+        }
+        CalendarOAuthError::Conflict => {
+            "Google Calendar에서 일정이 변경됐어요. 앱에서 새로고침한 뒤 다시 시도해 주세요."
         }
         CalendarOAuthError::IdentityMismatch => {
             "Jimin OS에 로그인한 계정과 같은 Google 계정으로 다시 연결해 주세요."
@@ -3018,6 +3789,7 @@ fn calendar_connection_response(
             email: None,
             granted_scopes: Vec::new(),
             last_successful_sync_at: None,
+            last_error_code: None,
             reauth_required: false,
             version: None,
         };
@@ -3038,6 +3810,7 @@ fn calendar_connection_response(
         last_successful_sync_at: account
             .last_successful_sync_at
             .map(|value| value.format(&Rfc3339).unwrap_or_default()),
+        last_error_code: account.last_error_code,
         reauth_required: account.status == CalendarAccountStatus::ReauthRequired,
         version: Some(account.version),
     }
@@ -3207,6 +3980,7 @@ fn schedule_entry_response(entry: ScheduleEntry) -> Result<ScheduleEntryResponse
             ScheduleSource::Manual => "manual".to_owned(),
             ScheduleSource::GoogleCalendar => "google_calendar".to_owned(),
         },
+        editable: entry.editable,
         version: entry.version,
     })
 }
@@ -3267,6 +4041,81 @@ fn project_response(project: Project) -> Result<ProjectResponse, ()> {
         open_task_count: project.open_task_count,
         version: project.version,
     })
+}
+
+fn project_webhook_response(webhook: ProjectWebhook) -> ProjectWebhookResponse {
+    ProjectWebhookResponse {
+        id: webhook.id,
+        project_id: webhook.project_id,
+        url: webhook.url,
+        events: webhook.events,
+        has_authentication: webhook.has_authentication,
+        enabled: webhook.enabled,
+        version: webhook.version,
+    }
+}
+
+fn webhook_delivery_response(delivery: WebhookDelivery) -> Result<WebhookDeliveryResponse, ()> {
+    Ok(WebhookDeliveryResponse {
+        id: delivery.id,
+        webhook_id: delivery.webhook_id,
+        event_type: delivery.event_type,
+        status: delivery.status,
+        attempt_count: delivery.attempt_count,
+        response_code: delivery.response_code,
+        error_code: delivery.last_error_code,
+        created_at: delivery.created_at.format(&Rfc3339).map_err(|_| ())?,
+        delivered_at: delivery
+            .delivered_at
+            .map(|value| value.format(&Rfc3339).map_err(|_| ()))
+            .transpose()?,
+    })
+}
+
+fn valid_webhook_url(value: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(value.trim()) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none()
+        && value.len() <= 4_096
+}
+
+fn webhook_payload(
+    event_type: &str,
+    project_id: uuid::Uuid,
+    entity_id: Option<uuid::Uuid>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "event": event_type,
+        "projectId": project_id,
+        "entityId": entity_id,
+        "occurredAt": OffsetDateTime::now_utc().format(&Rfc3339).ok(),
+    })
+}
+
+async fn queue_project_event(
+    planning: &Database,
+    user_id: uuid::Uuid,
+    project_id: uuid::Uuid,
+    event_type: &'static str,
+    entity_id: Option<uuid::Uuid>,
+) {
+    let payload = webhook_payload(event_type, project_id, entity_id);
+    if planning
+        .queue_project_webhook_event(user_id, project_id, event_type, &payload)
+        .await
+        .is_err()
+    {
+        warn!(
+            event = "webhook.event_queue_failed",
+            error_code = "storage.persistence_unavailable",
+            event_type
+        );
+    }
 }
 
 fn conversation_response(conversation: Conversation) -> Result<ConversationResponse, ()> {
@@ -3884,6 +4733,10 @@ mod tests {
                 "/v1/me",
                 "/v1/projects",
                 "/v1/projects/{project_id}",
+                "/v1/projects/{project_id}/webhook-deliveries",
+                "/v1/projects/{project_id}/webhooks",
+                "/v1/projects/{project_id}/webhooks/{webhook_id}",
+                "/v1/projects/{project_id}/webhooks/{webhook_id}/test",
                 "/v1/schedule-entries",
                 "/v1/schedule-entries/{schedule_entry_id}",
                 "/v1/tasks",
@@ -4025,6 +4878,55 @@ mod tests {
             .await
             .expect("handler should respond");
         assert_eq!(task_update_response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn webhook_endpoints_require_a_live_signed_session() {
+        let (state, _, _) = signed_auth_state(true);
+        let project_id = "019f68cb-9400-7000-8000-000000000001";
+        let webhook_id = "019f68cb-9400-7000-8000-000000000002";
+        for request in [
+            Request::builder()
+                .uri(format!("/v1/projects/{project_id}/webhooks"))
+                .body(Body::empty())
+                .expect("request should be valid"),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/projects/{project_id}/webhooks"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "url": "https://example.com/hook",
+                        "events": ["task.created"],
+                        "authorization": null
+                    })
+                    .to_string(),
+                ))
+                .expect("request should be valid"),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/v1/projects/{project_id}/webhooks/{webhook_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"expectedVersion":1}"#))
+                .expect("request should be valid"),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/v1/projects/{project_id}/webhooks/{webhook_id}/test"
+                ))
+                .body(Body::empty())
+                .expect("request should be valid"),
+            Request::builder()
+                .uri(format!("/v1/projects/{project_id}/webhook-deliveries"))
+                .body(Body::empty())
+                .expect("request should be valid"),
+        ] {
+            let response = router(state.clone())
+                .oneshot(request)
+                .await
+                .expect("handler should respond");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
     }
 
     #[tokio::test]

@@ -203,44 +203,60 @@ impl CalendarOAuthSetting {
         let client_secret = secret_from_environment("JIMIN_GOOGLE_CALENDAR_CREDENTIAL")?;
         let encryption_key = secret_from_environment("JIMIN_CALENDAR_ENCRYPTION_KEY")?;
 
-        let any_value_present = client_id.is_some()
-            || redirect_uri.is_some()
-            || encryption_key_version.is_some()
-            || !matches!(client_secret, SecretSetting::Missing)
-            || !matches!(encryption_key, SecretSetting::Missing);
-        if !any_value_present {
-            return Ok(Self::Missing);
-        }
-        let (Some(client_id), Some(redirect_uri)) = (client_id, redirect_uri) else {
-            return Ok(Self::Invalid);
-        };
-        let (SecretSetting::Available(client_secret), SecretSetting::Available(encryption_key)) =
-            (client_secret, encryption_key)
-        else {
-            return Ok(Self::Invalid);
-        };
-        let encryption_key_version = encryption_key_version
-            .map_or(Some(DEFAULT_CALENDAR_ENCRYPTION_KEY_VERSION), |value| {
-                value.parse::<i32>().ok()
-            })
-            .filter(|value| *value > 0);
-        let Some(encryption_key_version) = encryption_key_version else {
-            return Ok(Self::Invalid);
-        };
-        if !valid_google_client_id(&client_id)
-            || !valid_calendar_redirect_uri(&redirect_uri)
-            || !valid_calendar_key(&encryption_key)
-        {
-            return Ok(Self::Invalid);
-        }
-        Ok(Self::Available(CalendarOAuthSettings {
+        Ok(calendar_oauth_from_values(
             client_id,
-            client_secret,
             redirect_uri,
-            encryption_key,
             encryption_key_version,
-        }))
+            client_secret,
+            encryption_key,
+        ))
     }
+}
+
+fn calendar_oauth_from_values(
+    client_id: Option<String>,
+    redirect_uri: Option<String>,
+    encryption_key_version: Option<String>,
+    client_secret: SecretSetting,
+    encryption_key: SecretSetting,
+) -> CalendarOAuthSetting {
+    let any_value_present = client_id.is_some()
+        || redirect_uri.is_some()
+        || encryption_key_version.is_some()
+        || !matches!(client_secret, SecretSetting::Missing)
+        || !matches!(encryption_key, SecretSetting::Missing);
+    if !any_value_present {
+        return CalendarOAuthSetting::Missing;
+    }
+    let (Some(client_id), Some(redirect_uri)) = (client_id, redirect_uri) else {
+        return CalendarOAuthSetting::Invalid;
+    };
+    let (SecretSetting::Available(client_secret), SecretSetting::Available(encryption_key)) =
+        (client_secret, encryption_key)
+    else {
+        return CalendarOAuthSetting::Invalid;
+    };
+    let encryption_key_version = encryption_key_version
+        .map_or(Some(DEFAULT_CALENDAR_ENCRYPTION_KEY_VERSION), |value| {
+            value.parse::<i32>().ok()
+        })
+        .filter(|value| *value > 0);
+    let Some(encryption_key_version) = encryption_key_version else {
+        return CalendarOAuthSetting::Invalid;
+    };
+    if !valid_google_client_id(&client_id)
+        || !valid_calendar_redirect_uri(&redirect_uri)
+        || !valid_calendar_key(&encryption_key)
+    {
+        return CalendarOAuthSetting::Invalid;
+    }
+    CalendarOAuthSetting::Available(CalendarOAuthSettings {
+        client_id,
+        client_secret,
+        redirect_uri,
+        encryption_key,
+        encryption_key_version,
+    })
 }
 
 impl CalendarOAuthSettings {
@@ -560,5 +576,40 @@ mod tests {
             parse_boolean(Some("yes"), false),
             Err(ConfigError::InvalidTrustedNetwork)
         ));
+    }
+
+    #[test]
+    fn calendar_oauth_configuration_distinguishes_missing_partial_and_ready() {
+        let missing = calendar_oauth_from_values(
+            None,
+            None,
+            None,
+            SecretSetting::Missing,
+            SecretSetting::Missing,
+        );
+        assert!(matches!(missing, CalendarOAuthSetting::Missing));
+
+        let partial = calendar_oauth_from_values(
+            Some("client.apps.googleusercontent.com".to_owned()),
+            None,
+            None,
+            SecretSetting::Missing,
+            SecretSetting::Missing,
+        );
+        assert!(matches!(partial, CalendarOAuthSetting::Invalid));
+
+        let ready = calendar_oauth_from_values(
+            Some("client.apps.googleusercontent.com".to_owned()),
+            Some("https://localhost:8443/oauth/google/calendar/callback".to_owned()),
+            Some("2".to_owned()),
+            SecretSetting::Available(SecretString::from("calendar-client-secret")),
+            SecretSetting::Available(SecretString::from(
+                "calendar-encryption-key-with-more-than-32-bytes",
+            )),
+        );
+        let CalendarOAuthSetting::Available(settings) = ready else {
+            panic!("complete configuration should be ready");
+        };
+        assert_eq!(settings.encryption_key_version(), 2);
     }
 }

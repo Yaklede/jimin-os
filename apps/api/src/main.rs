@@ -9,7 +9,8 @@ use jimin_api::{
         SecretSetting,
     },
     probe::{ProbeTarget, run_probe},
-    router, serve_with_shutdown,
+    router, serve_with_shutdown, spawn_calendar_sync_worker, spawn_webhook_delivery_worker,
+    webhook::WebhookRuntime,
 };
 use jimin_application::{PairingLifetime, SessionLifetime, SessionService};
 use jimin_auth::{
@@ -107,6 +108,12 @@ async fn run_server() -> Result<(), &'static str> {
                 None
             }
         });
+    let webhook_runtime = match config.authentication() {
+        AuthenticationSetting::Available(settings) => {
+            WebhookRuntime::new(settings.pairing_pepper()).ok()
+        }
+        AuthenticationSetting::Missing | AuthenticationSetting::Invalid => None,
+    };
     let configuration_ready = configuration_ready && runtime.is_some();
     let readiness_database = database
         .as_ref()
@@ -120,6 +127,9 @@ async fn run_server() -> Result<(), &'static str> {
     if let Some((authentication, pairing)) = runtime {
         state = state.with_authentication(authentication);
         state = state.with_pairing(pairing);
+    }
+    if let Some(webhook_runtime) = webhook_runtime {
+        state = state.with_webhook_runtime(webhook_runtime);
     }
     match config.calendar_oauth() {
         CalendarOAuthSetting::Available(settings) => {
@@ -159,6 +169,8 @@ async fn run_server() -> Result<(), &'static str> {
     let migration_task = database
         .as_ref()
         .map(|database| tokio::spawn(reconcile_migrations(database.clone())));
+    let calendar_sync_task = spawn_calendar_sync_worker(&state);
+    let webhook_delivery_task = spawn_webhook_delivery_worker(&state);
     let result = serve_with_shutdown(listener, router(state), shutdown_signal())
         .await
         .map_err(|_| "api.serve_failed");
@@ -166,6 +178,14 @@ async fn run_server() -> Result<(), &'static str> {
     if let Some(migration_task) = migration_task {
         migration_task.abort();
         let _ = migration_task.await;
+    }
+    if let Some(calendar_sync_task) = calendar_sync_task {
+        calendar_sync_task.abort();
+        let _ = calendar_sync_task.await;
+    }
+    if let Some(webhook_delivery_task) = webhook_delivery_task {
+        webhook_delivery_task.abort();
+        let _ = webhook_delivery_task.await;
     }
     if let Some(database) = database {
         database.close().await;

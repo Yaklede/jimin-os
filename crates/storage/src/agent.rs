@@ -14,6 +14,7 @@ use crate::{
     Database, StorageError,
     auth::{append_change, append_delete_change},
     planning::TaskStatus,
+    webhook::queue_project_event_in_transaction,
     work::ProjectStatus,
 };
 
@@ -2968,6 +2969,7 @@ async fn persist_agent_action(
             id,
             expected_version,
         } => {
+            queue_agent_action_webhook(transaction, user_id, action).await?;
             let version = sqlx::query_scalar::<_, i64>(
                 "\
                 DELETE FROM projects
@@ -2985,7 +2987,57 @@ async fn persist_agent_action(
             return Ok(());
         }
     };
+    queue_agent_action_webhook(transaction, user_id, action).await?;
     append_change(transaction, user_id, entity_type, entity_id, version).await
+}
+
+async fn queue_agent_action_webhook(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    action: &AgentActionCommand,
+) -> Result<(), StorageError> {
+    let (project_id, event_type, entity_id) = match action {
+        AgentActionCommand::CreateTask {
+            id,
+            project_id: Some(project_id),
+            ..
+        } => (Some(*project_id), "task.created", *id),
+        AgentActionCommand::UpdateTask {
+            id,
+            project_id: Some(project_id),
+            ..
+        } => (Some(*project_id), "task.updated", *id),
+        AgentActionCommand::SetTaskStatus { id, status, .. } => {
+            let project_id: Option<Uuid> =
+                sqlx::query_scalar("SELECT project_id FROM tasks WHERE id = $1 AND user_id = $2")
+                    .bind(id)
+                    .bind(user_id)
+                    .fetch_optional(&mut **transaction)
+                    .await
+                    .map_err(|error| classify(&error))?
+                    .flatten();
+            let event_type = match status {
+                TaskStatus::Completed => "task.completed",
+                TaskStatus::Open => "task.restored",
+                TaskStatus::Cancelled => "task.deleted",
+            };
+            (project_id, event_type, *id)
+        }
+        AgentActionCommand::UpdateProject { id, .. } => (Some(*id), "project.updated", *id),
+        AgentActionCommand::DeleteProject { id, .. } => (Some(*id), "project.deleted", *id),
+        _ => (None, "", action.entity_id()),
+    };
+    if let Some(project_id) = project_id {
+        let payload = serde_json::json!({
+            "event": event_type,
+            "projectId": project_id,
+            "entityId": entity_id,
+            "occurredAt": OffsetDateTime::now_utc(),
+        });
+        queue_project_event_in_transaction(transaction, user_id, project_id, event_type, &payload)
+            .await?;
+    }
+    Ok(())
 }
 
 fn trim_optional_text(value: Option<&str>) -> Option<&str> {

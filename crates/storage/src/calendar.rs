@@ -57,6 +57,7 @@ pub struct CalendarAccount {
     pub status: CalendarAccountStatus,
     pub granted_scopes: Vec<String>,
     pub last_successful_sync_at: Option<OffsetDateTime>,
+    pub last_error_code: Option<String>,
     pub version: i64,
 }
 
@@ -67,6 +68,7 @@ struct CalendarAccountRow {
     status: String,
     granted_scopes: Vec<String>,
     last_successful_sync_at: Option<OffsetDateTime>,
+    last_error_code: Option<String>,
     version: i64,
 }
 
@@ -80,6 +82,7 @@ impl TryFrom<CalendarAccountRow> for CalendarAccount {
             status: CalendarAccountStatus::parse(&row.status)?,
             granted_scopes: row.granted_scopes,
             last_successful_sync_at: row.last_successful_sync_at,
+            last_error_code: row.last_error_code,
             version: row.version,
         })
     }
@@ -98,7 +101,8 @@ impl Database {
     ) -> Result<Option<CalendarAccount>, StorageError> {
         let row = sqlx::query_as::<_, CalendarAccountRow>(
             "\
-            SELECT id, email, status, granted_scopes, last_successful_sync_at, version
+            SELECT id, email, status, granted_scopes, last_successful_sync_at,
+                last_error_code, version
             FROM calendar_accounts
             WHERE user_id = $1",
         )
@@ -108,6 +112,28 @@ impl Database {
         .map_err(|_| StorageError::PersistenceUnavailable)?;
 
         row.map(CalendarAccount::try_from).transpose()
+    }
+
+    /// Lists active owner connections eligible for the server's periodic
+    /// synchronization loop. Only identifiers are returned; encrypted
+    /// credentials are loaded later for one account at a time.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified persistence error when the database is not ready.
+    pub async fn active_calendar_sync_identities(
+        &self,
+    ) -> Result<Vec<CalendarSyncIdentity>, StorageError> {
+        sqlx::query_as::<_, CalendarSyncIdentity>(
+            "\
+            SELECT id AS account_id, user_id
+            FROM calendar_accounts
+            WHERE status = 'active'
+            ORDER BY id ASC",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(|_| StorageError::PersistenceUnavailable)
     }
 
     /// Creates a short-lived server-owned OAuth transaction. Only the HMAC
@@ -406,9 +432,12 @@ impl Database {
     ) -> Result<Vec<CalendarSyncTarget>, StorageError> {
         let rows = sqlx::query_as::<_, CalendarSyncTargetRow>(
             "\
-            SELECT calendar.id, calendar.provider_calendar_id, calendar.time_zone
+            SELECT calendar.id, calendar.provider_calendar_id, calendar.time_zone,
+                sync_state.sync_token_ciphertext, sync_state.sync_token_nonce,
+                account.encryption_key_version
             FROM calendars AS calendar
             INNER JOIN calendar_accounts AS account ON account.id = calendar.account_id
+            INNER JOIN calendar_sync_states AS sync_state ON sync_state.calendar_id = calendar.id
             WHERE calendar.account_id = $1
               AND account.user_id = $2
               AND account.status IN ('connecting', 'active')
@@ -422,6 +451,123 @@ impl Database {
         .await
         .map_err(|_| StorageError::PersistenceUnavailable)?;
         rows.into_iter().map(CalendarSyncTarget::try_from).collect()
+    }
+
+    /// Returns the server-only identifiers needed to mutate one owned Google
+    /// event. The optimistic version guard prevents editing a stale local
+    /// representation, and read-only calendars are excluded.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified persistence error when the lookup cannot be
+    /// completed or a stored provider identifier is malformed.
+    pub async fn calendar_event_mutation_target(
+        &self,
+        user_id: Uuid,
+        event_id: Uuid,
+        expected_version: i64,
+    ) -> Result<Option<CalendarEventMutationTarget>, StorageError> {
+        if !all_version_seven(&[user_id, event_id]) || expected_version <= 0 {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let row = sqlx::query_as::<_, CalendarEventMutationTarget>(
+            "\
+            SELECT event.id AS event_id, account.id AS account_id,
+                event.calendar_id, calendar.provider_calendar_id,
+                event.provider_event_id, event.provider_etag,
+                calendar.time_zone, event.version
+            FROM calendar_events AS event
+            INNER JOIN calendars AS calendar ON calendar.id = event.calendar_id
+            INNER JOIN calendar_accounts AS account ON account.id = calendar.account_id
+            WHERE event.id = $1
+              AND event.user_id = $2
+              AND event.version = $3
+              AND event.time_kind = 'date_time'
+              AND event.provider_status <> 'cancelled'
+              AND event.provider_deleted_at IS NULL
+              AND calendar.provider_deleted_at IS NULL
+              AND calendar.access_role IN ('owner', 'writer')
+              AND account.status = 'active'",
+        )
+        .bind(event_id)
+        .bind(user_id)
+        .bind(expected_version)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|_| StorageError::PersistenceUnavailable)?;
+        if row.as_ref().is_some_and(|target| !target.valid()) {
+            return Err(StorageError::PersistenceUnavailable);
+        }
+        Ok(row)
+    }
+
+    /// Returns the owner's writable primary Google Calendar for new events.
+    /// Returns the writable primary Google calendar for a connected account.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified persistence error when storage is unavailable.
+    pub async fn primary_calendar_mutation_target(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Option<PrimaryCalendarMutationTarget>, StorageError> {
+        if user_id.get_version_num() != 7 {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let target = sqlx::query_as::<_, PrimaryCalendarMutationTarget>(
+            "\
+            SELECT account.id AS account_id, calendar.id AS calendar_id,
+                calendar.provider_calendar_id, calendar.time_zone
+            FROM calendars AS calendar
+            INNER JOIN calendar_accounts AS account ON account.id = calendar.account_id
+            WHERE account.user_id = $1
+              AND account.status = 'active'
+              AND calendar.is_primary = TRUE
+              AND calendar.sync_enabled = TRUE
+              AND calendar.provider_deleted_at IS NULL
+              AND calendar.access_role IN ('owner', 'writer')
+            LIMIT 1",
+        )
+        .bind(user_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|_| StorageError::PersistenceUnavailable)?;
+        if target.as_ref().is_some_and(|value| !value.valid()) {
+            return Err(StorageError::PersistenceUnavailable);
+        }
+        Ok(target)
+    }
+
+    /// Resolves a just-created provider event to its local read-model ID after
+    /// incremental reconciliation.
+    /// Resolves a provider event to the matching local schedule entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified persistence error or invalid-input error.
+    pub async fn calendar_event_id_by_provider(
+        &self,
+        user_id: Uuid,
+        calendar_id: Uuid,
+        provider_event_id: &str,
+    ) -> Result<Option<Uuid>, StorageError> {
+        if !all_version_seven(&[user_id, calendar_id])
+            || !valid_required_text(provider_event_id, 1_024)
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        sqlx::query_scalar(
+            "\
+            SELECT id FROM calendar_events
+            WHERE user_id = $1 AND calendar_id = $2 AND provider_event_id = $3
+              AND provider_deleted_at IS NULL",
+        )
+        .bind(user_id)
+        .bind(calendar_id)
+        .bind(provider_event_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|_| StorageError::PersistenceUnavailable)
     }
 
     /// Replaces Calendar metadata only after every provider page has been
@@ -595,8 +741,11 @@ impl Database {
         user_id: Uuid,
         calendar_id: Uuid,
         events: &[ProviderCalendarEvent],
+        next_sync_token: &EncryptedCalendarSecret,
     ) -> Result<CalendarEventSyncResult, StorageError> {
-        if !all_version_seven(&[account_id, user_id, calendar_id]) || !valid_provider_events(events)
+        if !all_version_seven(&[account_id, user_id, calendar_id])
+            || !valid_provider_events(events)
+            || !next_sync_token.valid()
         {
             return Err(StorageError::InvalidConfiguration);
         }
@@ -713,11 +862,153 @@ impl Database {
             UPDATE calendar_sync_states
             SET status = 'idle', last_started_at = COALESCE(last_started_at, $2),
                 last_successful_sync_at = $2, consecutive_failures = 0,
-                next_attempt_at = NULL, last_error_code = NULL
+                next_attempt_at = NULL, last_error_code = NULL,
+                sync_token_ciphertext = $3, sync_token_nonce = $4
             WHERE calendar_id = $1",
         )
         .bind(calendar_id)
         .bind(now)
+        .bind(&next_sync_token.ciphertext)
+        .bind(&next_sync_token.nonce)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| StorageError::PersistenceUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StorageError::PersistenceUnavailable)?;
+        Ok(CalendarEventSyncResult { active_count })
+    }
+
+    /// Applies only provider events returned for a valid incremental sync
+    /// token. Events absent from the batch remain untouched; explicit
+    /// cancelled entries become tombstones. The replacement sync token is
+    /// committed in the same transaction as the changed events.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed provider
+    /// data or ownership mismatches and a classified persistence error when
+    /// the atomic update cannot be committed.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The incremental transaction keeps every provider change and its replacement sync token atomic."
+    )]
+    pub async fn apply_calendar_event_incremental_sync(
+        &self,
+        account_id: Uuid,
+        user_id: Uuid,
+        calendar_id: Uuid,
+        events: &[ProviderCalendarEvent],
+        next_sync_token: &EncryptedCalendarSecret,
+    ) -> Result<CalendarEventSyncResult, StorageError> {
+        if !all_version_seven(&[account_id, user_id, calendar_id])
+            || !valid_provider_events(events)
+            || !next_sync_token.valid()
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|_| StorageError::PersistenceUnavailable)?;
+        let target_exists = sqlx::query_scalar::<_, Uuid>(
+            "\
+            SELECT calendar.id
+            FROM calendars AS calendar
+            INNER JOIN calendar_accounts AS account ON account.id = calendar.account_id
+            WHERE calendar.id = $1
+              AND calendar.account_id = $2
+              AND account.user_id = $3
+              AND account.status = 'active'
+              AND calendar.sync_enabled = TRUE
+              AND calendar.provider_deleted_at IS NULL
+            FOR UPDATE",
+        )
+        .bind(calendar_id)
+        .bind(account_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| StorageError::PersistenceUnavailable)?;
+        if target_exists.is_none() {
+            return Err(StorageError::InvalidConfiguration);
+        }
+
+        let now = OffsetDateTime::now_utc();
+        let mut active_count = 0_usize;
+        for event in events {
+            if event.status == ProviderCalendarEventStatus::Cancelled {
+                sqlx::query(
+                    "\
+                    UPDATE calendar_events
+                    SET provider_status = 'cancelled',
+                        provider_etag = COALESCE($3, provider_etag),
+                        provider_updated_at = COALESCE($4, provider_updated_at),
+                        provider_deleted_at = COALESCE(provider_deleted_at, $5),
+                        sync_state = 'synced'
+                    WHERE calendar_id = $1 AND provider_event_id = $2",
+                )
+                .bind(calendar_id)
+                .bind(&event.provider_event_id)
+                .bind(&event.provider_etag)
+                .bind(event.provider_updated_at)
+                .bind(now)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| StorageError::PersistenceUnavailable)?;
+                continue;
+            }
+            match event
+                .time
+                .as_ref()
+                .ok_or(StorageError::InvalidConfiguration)?
+            {
+                ProviderCalendarEventTime::Date { start, end } => {
+                    upsert_date_calendar_event(
+                        &mut transaction,
+                        calendar_id,
+                        user_id,
+                        event,
+                        *start,
+                        *end,
+                    )
+                    .await?;
+                }
+                ProviderCalendarEventTime::DateTime {
+                    start,
+                    end,
+                    time_zone,
+                } => {
+                    upsert_timed_calendar_event(
+                        &mut transaction,
+                        calendar_id,
+                        user_id,
+                        event,
+                        *start,
+                        *end,
+                        time_zone,
+                    )
+                    .await?;
+                }
+            }
+            active_count += 1;
+        }
+
+        sqlx::query(
+            "\
+            UPDATE calendar_sync_states
+            SET status = 'idle', last_started_at = COALESCE(last_started_at, $2),
+                last_successful_sync_at = $2, consecutive_failures = 0,
+                next_attempt_at = NULL, last_error_code = NULL,
+                sync_token_ciphertext = $3, sync_token_nonce = $4
+            WHERE calendar_id = $1",
+        )
+        .bind(calendar_id)
+        .bind(now)
+        .bind(&next_sync_token.ciphertext)
+        .bind(&next_sync_token.nonce)
         .execute(&mut *transaction)
         .await
         .map_err(|_| StorageError::PersistenceUnavailable)?;
@@ -751,7 +1042,11 @@ impl Database {
         sqlx::query(
             "\
             UPDATE calendar_accounts
-            SET status = 'error', last_error_code = $3
+            SET status = CASE
+                    WHEN $3 = 'calendar.provider_unavailable' THEN status
+                    ELSE 'error'
+                END,
+                last_error_code = $3
             WHERE id = $1
               AND user_id = $2
               AND status IN ('connecting', 'active')",
@@ -782,12 +1077,64 @@ pub struct CalendarSyncConnection {
     pub granted_scopes: Vec<String>,
 }
 
+/// Safe identifiers used by the periodic synchronization scheduler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::FromRow)]
+pub struct CalendarSyncIdentity {
+    pub account_id: Uuid,
+    pub user_id: Uuid,
+}
+
 /// One provider calendar eligible for a server-owned event synchronization.
 /// Provider IDs are never serialized by API handlers.
 pub struct CalendarSyncTarget {
     pub calendar_id: Uuid,
     pub provider_calendar_id: String,
     pub time_zone: String,
+    pub sync_token: Option<EncryptedCalendarSecret>,
+}
+
+/// Server-only routing material for one version-checked Google event change.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct CalendarEventMutationTarget {
+    pub event_id: Uuid,
+    pub account_id: Uuid,
+    pub calendar_id: Uuid,
+    pub provider_calendar_id: String,
+    pub provider_event_id: String,
+    pub provider_etag: Option<String>,
+    pub time_zone: String,
+    pub version: i64,
+}
+
+/// Writable primary Calendar routing material for a new provider event.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct PrimaryCalendarMutationTarget {
+    pub account_id: Uuid,
+    pub calendar_id: Uuid,
+    pub provider_calendar_id: String,
+    pub time_zone: String,
+}
+
+impl PrimaryCalendarMutationTarget {
+    fn valid(&self) -> bool {
+        all_version_seven(&[self.account_id, self.calendar_id])
+            && valid_required_text(&self.provider_calendar_id, 1_024)
+            && valid_required_text(&self.time_zone, 80)
+    }
+}
+
+impl CalendarEventMutationTarget {
+    fn valid(&self) -> bool {
+        all_version_seven(&[self.event_id, self.account_id, self.calendar_id])
+            && valid_required_text(&self.provider_calendar_id, 1_024)
+            && valid_required_text(&self.provider_event_id, 1_024)
+            && self
+                .provider_etag
+                .as_ref()
+                .is_none_or(|value| valid_required_text(value, 2_048))
+            && valid_required_text(&self.time_zone, 80)
+            && self.version > 0
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -795,6 +1142,9 @@ struct CalendarSyncTargetRow {
     id: Uuid,
     provider_calendar_id: String,
     time_zone: String,
+    sync_token_ciphertext: Option<Vec<u8>>,
+    sync_token_nonce: Option<Vec<u8>>,
+    encryption_key_version: Option<i32>,
 }
 
 impl TryFrom<CalendarSyncTargetRow> for CalendarSyncTarget {
@@ -807,10 +1157,30 @@ impl TryFrom<CalendarSyncTargetRow> for CalendarSyncTarget {
         {
             return Err(StorageError::PersistenceUnavailable);
         }
+        let sync_token = match (
+            row.sync_token_ciphertext,
+            row.sync_token_nonce,
+            row.encryption_key_version,
+        ) {
+            (None, None, _) => None,
+            (Some(ciphertext), Some(nonce), Some(key_version)) => {
+                let token = EncryptedCalendarSecret {
+                    ciphertext,
+                    nonce,
+                    key_version,
+                };
+                if !token.valid() {
+                    return Err(StorageError::PersistenceUnavailable);
+                }
+                Some(token)
+            }
+            _ => return Err(StorageError::PersistenceUnavailable),
+        };
         Ok(Self {
             calendar_id: row.id,
             provider_calendar_id: row.provider_calendar_id,
             time_zone: row.time_zone,
+            sync_token,
         })
     }
 }

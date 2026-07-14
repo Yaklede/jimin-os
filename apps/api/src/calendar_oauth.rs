@@ -13,9 +13,9 @@ use hmac::{Hmac, Mac, digest::KeyInit as HmacKeyInit};
 use jimin_domain::{ClientPlatform, PkceVerifier};
 use jimin_google::{
     GoogleAuthError, GoogleAuthorizationCode, GoogleCalendarAdapter, GoogleCalendarEventEntry,
-    GoogleCalendarEventStatus, GoogleCalendarEventTime, GoogleCalendarGrant,
-    GoogleCalendarListEntry, GoogleCalendarVisibility, GoogleGmailMessageEntry,
-    GoogleIdentityAdapter, GoogleOAuthProfile,
+    GoogleCalendarEventMutation, GoogleCalendarEventStatus, GoogleCalendarEventTime,
+    GoogleCalendarGrant, GoogleCalendarListEntry, GoogleCalendarVisibility,
+    GoogleGmailMessageEntry, GoogleIdentityAdapter, GoogleOAuthProfile,
 };
 use jimin_storage::{
     StorageError,
@@ -234,11 +234,11 @@ impl CalendarOAuthRuntime {
     ///
     /// Returns a sanitized provider or credential failure without leaking a
     /// calendar ID, token, or event content.
-    pub async fn initial_calendar_event_sync(
+    pub async fn calendar_event_sync(
         &self,
         connection: &CalendarSyncConnection,
         targets: &[CalendarSyncTarget],
-    ) -> Result<Vec<(Uuid, Vec<ProviderCalendarEvent>)>, CalendarOAuthError> {
+    ) -> Result<Vec<CalendarEventSyncBatch>, CalendarOAuthError> {
         let refresh_token = self.crypto.decrypt(
             &connection.refresh_token,
             &refresh_token_aad(connection.user_id),
@@ -250,21 +250,150 @@ impl CalendarOAuthRuntime {
             .map_err(CalendarOAuthError::from_google)?;
         let mut synced = Vec::with_capacity(targets.len());
         for target in targets {
-            let entries = self
-                .calendar
-                .list_events(
-                    &access_token,
-                    &target.provider_calendar_id,
-                    &target.time_zone,
+            let previous_sync_token = target
+                .sync_token
+                .as_ref()
+                .map(|token| {
+                    self.crypto
+                        .decrypt(token, &sync_token_aad(target.calendar_id))
+                })
+                .transpose()?;
+            let (response, is_full_sync) = if let Some(sync_token) = previous_sync_token.as_ref() {
+                match self
+                    .calendar
+                    .list_event_changes(
+                        &access_token,
+                        &target.provider_calendar_id,
+                        &target.time_zone,
+                        Some(sync_token),
+                    )
+                    .await
+                {
+                    Ok(response) => (response, false),
+                    Err(GoogleAuthError::CalendarSyncTokenExpired) => (
+                        self.calendar
+                            .list_events(
+                                &access_token,
+                                &target.provider_calendar_id,
+                                &target.time_zone,
+                            )
+                            .await
+                            .map_err(CalendarOAuthError::from_google)?,
+                        true,
+                    ),
+                    Err(error) => return Err(CalendarOAuthError::from_google(error)),
+                }
+            } else {
+                (
+                    self.calendar
+                        .list_events(
+                            &access_token,
+                            &target.provider_calendar_id,
+                            &target.time_zone,
+                        )
+                        .await
+                        .map_err(CalendarOAuthError::from_google)?,
+                    true,
                 )
-                .await
-                .map_err(CalendarOAuthError::from_google)?;
-            synced.push((
-                target.calendar_id,
-                entries.into_iter().map(provider_calendar_event).collect(),
-            ));
+            };
+            let next_sync_token = self.crypto.encrypt(
+                response.next_sync_token.expose_secret().as_bytes(),
+                &sync_token_aad(target.calendar_id),
+                self.encryption_key_version,
+            )?;
+            synced.push(CalendarEventSyncBatch {
+                calendar_id: target.calendar_id,
+                events: response
+                    .events
+                    .into_iter()
+                    .map(provider_calendar_event)
+                    .collect(),
+                next_sync_token,
+                is_full_sync,
+            });
         }
         Ok(synced)
+    }
+
+    /// Updates one provider event with its stored `ETag` after decrypting the
+    /// account credential only inside the server process.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized connection, credential, or provider error.
+    pub async fn update_calendar_event(
+        &self,
+        connection: &CalendarSyncConnection,
+        target: &jimin_storage::calendar::CalendarEventMutationTarget,
+        mutation: GoogleCalendarEventMutation,
+    ) -> Result<ProviderCalendarEvent, CalendarOAuthError> {
+        let access_token = self.calendar_access_token(connection).await?;
+        self.calendar
+            .update_event(
+                &access_token,
+                &target.provider_calendar_id,
+                &target.provider_event_id,
+                target.provider_etag.as_deref(),
+                &mutation,
+            )
+            .await
+            .map(provider_calendar_event)
+            .map_err(CalendarOAuthError::from_google)
+    }
+
+    /// Creates one event in the selected primary provider calendar.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized connection, credential, or provider error.
+    pub async fn create_calendar_event(
+        &self,
+        connection: &CalendarSyncConnection,
+        target: &jimin_storage::calendar::PrimaryCalendarMutationTarget,
+        mutation: GoogleCalendarEventMutation,
+    ) -> Result<ProviderCalendarEvent, CalendarOAuthError> {
+        let access_token = self.calendar_access_token(connection).await?;
+        self.calendar
+            .create_event(&access_token, &target.provider_calendar_id, &mutation)
+            .await
+            .map(provider_calendar_event)
+            .map_err(CalendarOAuthError::from_google)
+    }
+
+    /// Deletes one provider event with its stored `ETag`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized connection, credential, or provider error.
+    pub async fn delete_calendar_event(
+        &self,
+        connection: &CalendarSyncConnection,
+        target: &jimin_storage::calendar::CalendarEventMutationTarget,
+    ) -> Result<(), CalendarOAuthError> {
+        let access_token = self.calendar_access_token(connection).await?;
+        self.calendar
+            .delete_event(
+                &access_token,
+                &target.provider_calendar_id,
+                &target.provider_event_id,
+                target.provider_etag.as_deref(),
+            )
+            .await
+            .map_err(CalendarOAuthError::from_google)
+    }
+
+    async fn calendar_access_token(
+        &self,
+        connection: &CalendarSyncConnection,
+    ) -> Result<SecretString, CalendarOAuthError> {
+        let refresh_token = self.crypto.decrypt(
+            &connection.refresh_token,
+            &refresh_token_aad(connection.user_id),
+        )?;
+        self.calendar
+            .refresh_access_token(&refresh_token)
+            .await
+            .map_err(CalendarOAuthError::from_google)
     }
 
     /// Loads a bounded inbox metadata view only when the account has granted
@@ -315,6 +444,15 @@ pub struct NewCalendarOAuthAuthorization {
     pub expires_at: OffsetDateTime,
 }
 
+/// One atomic provider event batch ready for storage. Full batches replace a
+/// calendar read model; incremental batches apply only the returned changes.
+pub struct CalendarEventSyncBatch {
+    pub calendar_id: Uuid,
+    pub events: Vec<ProviderCalendarEvent>,
+    pub next_sync_token: EncryptedCalendarSecret,
+    pub is_full_sync: bool,
+}
+
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum CalendarOAuthError {
     #[error("Calendar OAuth configuration is invalid")]
@@ -325,6 +463,8 @@ pub enum CalendarOAuthError {
     ProviderRejected,
     #[error("Google Calendar is temporarily unavailable")]
     ProviderUnavailable,
+    #[error("Google Calendar event changed before the requested mutation")]
+    Conflict,
     #[error("Google account does not match the signed-in Jimin OS account")]
     IdentityMismatch,
     #[error("Google Calendar did not grant the required permissions")]
@@ -343,6 +483,7 @@ impl CalendarOAuthError {
             | Self::RequiredScopeMissing
             | Self::Encryption => "calendar.authorization_failed",
             Self::ProviderUnavailable => "calendar.provider_unavailable",
+            Self::Conflict => "calendar.event_conflict",
             Self::IdentityMismatch => "calendar.account_mismatch",
         }
     }
@@ -355,6 +496,8 @@ impl CalendarOAuthError {
     fn from_google(error: GoogleAuthError) -> Self {
         match error {
             GoogleAuthError::ProviderUnavailable => Self::ProviderUnavailable,
+            GoogleAuthError::CalendarSyncTokenExpired => Self::ProviderRejected,
+            GoogleAuthError::CalendarEventConflict => Self::Conflict,
             GoogleAuthError::InvalidRequest | GoogleAuthError::ProviderRejected => {
                 Self::ProviderRejected
             }
@@ -467,6 +610,10 @@ fn pkce_aad(authorization_id: Uuid) -> Vec<u8> {
 
 fn refresh_token_aad(user_id: Uuid) -> Vec<u8> {
     format!("jimin-os/calendar/refresh/{user_id}").into_bytes()
+}
+
+fn sync_token_aad(calendar_id: Uuid) -> Vec<u8> {
+    format!("jimin-os/calendar/sync/{calendar_id}").into_bytes()
 }
 
 fn calendar_scopes(scopes: &[String]) -> Result<Vec<String>, CalendarOAuthError> {

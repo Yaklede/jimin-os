@@ -2577,6 +2577,7 @@ mod tests {
             time_zone: "Asia/Seoul".to_owned(),
             status: ScheduleStatus::Confirmed,
             source: ScheduleSource::GoogleCalendar,
+            editable: false,
             version: 1,
         };
         let task = Task {
@@ -2774,6 +2775,7 @@ mod tests {
             time_zone: "Asia/Seoul".to_owned(),
             status: ScheduleStatus::Confirmed,
             source: ScheduleSource::Manual,
+            editable: true,
             version: 1,
         };
         let context = TurnContext {
@@ -3163,6 +3165,7 @@ mod tests {
                 time_zone: "Asia/Seoul".to_owned(),
                 status: ScheduleStatus::Confirmed,
                 source: ScheduleSource::Manual,
+                editable: true,
                 version: 1,
             }],
             tasks: Vec::new(),
@@ -3442,6 +3445,7 @@ mod tests {
             time_zone: "Asia/Seoul".to_owned(),
             status: ScheduleStatus::Confirmed,
             source: ScheduleSource::Manual,
+            editable: true,
             version: 3,
         };
         let second = ScheduleEntry {
@@ -3463,6 +3467,7 @@ mod tests {
             id: Uuid::now_v7(),
             title: "외부 일정".to_owned(),
             source: ScheduleSource::GoogleCalendar,
+            editable: false,
             ..second.clone()
         };
         let cancelled = ScheduleEntry {
