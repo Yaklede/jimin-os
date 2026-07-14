@@ -111,12 +111,14 @@ export const copy = {
           : "진행 전",
     scheduleStatus: (status: "confirmed" | "cancelled") =>
       status === "cancelled" ? "취소" : "예정",
-    projectStatus: (status: "active" | "paused" | "completed") =>
-      status === "completed"
-        ? "완료"
-        : status === "paused"
-          ? "잠시 멈춤"
-          : "진행 중",
+    projectStatus: (status: "active" | "paused" | "completed" | "removed") =>
+      status === "removed"
+        ? "제거됨"
+        : status === "completed"
+          ? "완료"
+          : status === "paused"
+            ? "잠시 멈춤"
+            : "진행 중",
     projectTaskCount: (count: number) => `열린 일감 ${count}개`,
     projectNextActionLabel: "다음 행동",
     openTaskAction: "일감 보기",

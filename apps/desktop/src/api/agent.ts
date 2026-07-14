@@ -58,7 +58,7 @@ export type AssistantPresentationItem =
       id: string;
       workspaceId: string;
       title: string;
-      status: "active" | "paused" | "completed";
+      status: "active" | "paused" | "completed" | "removed";
       objective: string | null;
       nextAction: string | null;
       riskLevel: number;
@@ -499,7 +499,8 @@ function isAssistantPresentationItem(
       typeof value.title === "string" &&
       (value.status === "active" ||
         value.status === "paused" ||
-        value.status === "completed") &&
+        value.status === "completed" ||
+        value.status === "removed") &&
       (value.objective === null || typeof value.objective === "string") &&
       (value.nextAction === null || typeof value.nextAction === "string") &&
       typeof value.riskLevel === "number" &&

@@ -369,24 +369,28 @@ function ItemDetail({
       <div className="assistant-canvas__detail-copy">
         <p>{`${copy.home.projectStatus(item.status)} · ${copy.home.projectTaskCount(item.openTaskCount)}`}</p>
         <h4>{item.title}</h4>
-        <span>
-          {item.nextAction
-            ? `${copy.home.projectNextActionLabel} · ${item.nextAction}`
-            : item.objective || copy.projects.noNextAction}
-        </span>
+        {item.status !== "removed" && (
+          <span>
+            {item.nextAction
+              ? `${copy.home.projectNextActionLabel} · ${item.nextAction}`
+              : item.objective || copy.projects.noNextAction}
+          </span>
+        )}
       </div>
-      <button
-        className="primary-button focus-visible-control"
-        type="button"
-        disabled={opening}
-        aria-busy={opening}
-        onClick={onOpen}
-      >
-        <DestinationActionContent
-          opening={opening}
-          label={copy.home.openProjectAction}
-        />
-      </button>
+      {canOpen && (
+        <button
+          className="primary-button focus-visible-control"
+          type="button"
+          disabled={opening}
+          aria-busy={opening}
+          onClick={onOpen}
+        >
+          <DestinationActionContent
+            opening={opening}
+            label={copy.home.openProjectAction}
+          />
+        </button>
+      )}
       {error && <ResultOpenError message={error} />}
     </>
   );
@@ -424,7 +428,7 @@ export function canOpenPresentationItem(
   item: AssistantPresentationSection["items"][number],
   now = new Date(),
 ): boolean {
-  if (item.type === "project") return true;
+  if (item.type === "project") return item.status !== "removed";
   if (item.type === "schedule") return item.status !== "cancelled";
   if (item.status !== "open") return false;
   if (item.projectId) return true;
