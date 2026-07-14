@@ -95,6 +95,8 @@ export function VoiceCommandSheet({
   const dialogRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
+  const processTranscriptRef = useRef(onProcessTranscript);
+  const openTextInputRef = useRef(onOpenTextInput);
   const recognizerRef = useRef<SpeechRecognitionLike | undefined>(undefined);
   const usingNativeRecognitionRef = useRef(false);
   const completedRef = useRef(false);
@@ -110,6 +112,11 @@ export function VoiceCommandSheet({
   const [processingCommand, setProcessingCommand] = useState(false);
   const [dragOffset, setDragOffset] = useState(0);
   const [dragging, setDragging] = useState(false);
+
+  useEffect(() => {
+    processTranscriptRef.current = onProcessTranscript;
+    openTextInputRef.current = onOpenTextInput;
+  }, [onOpenTextInput, onProcessTranscript]);
 
   useEffect(() => {
     if (!open) return;
@@ -237,11 +244,12 @@ export function VoiceCommandSheet({
     let cancelled = false;
     setProcessingCommand(true);
 
-    void onProcessTranscript(value)
+    void processTranscriptRef
+      .current(value)
       .then((outcome) => {
         if (cancelled) return;
         if (outcome.kind === "conversation") {
-          onOpenTextInput(value);
+          openTextInputRef.current(value);
           return;
         }
         setCommandOutcome(outcome);
@@ -261,14 +269,7 @@ export function VoiceCommandSheet({
     return () => {
       cancelled = true;
     };
-  }, [
-    commandOutcome,
-    onOpenTextInput,
-    onProcessTranscript,
-    open,
-    state,
-    transcript,
-  ]);
+  }, [commandOutcome, open, state, transcript]);
 
   useEffect(() => {
     if (!open) return;

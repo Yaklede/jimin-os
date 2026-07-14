@@ -1562,7 +1562,6 @@ export default function App() {
         processVoiceCommand(apiBaseUrl, accessToken, value),
       );
       if (result.kind === "schedule_listed" || result.kind === "tasks_listed") {
-        await loadHomeSnapshot();
         return {
           kind: "query",
           message: result.message,
