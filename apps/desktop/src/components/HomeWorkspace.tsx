@@ -30,9 +30,12 @@ type HomeWorkspaceProps = {
   loading: boolean;
   error: string | undefined;
   assistantReady: boolean;
+  assistantConversationId: string | undefined;
+  assistantRequest: string | undefined;
   assistantJob: AgentJob | undefined;
   assistantMessage: ConversationMessage | undefined;
   onOpenAssistant(): void;
+  onStartNewAssistant(): void;
   onSendAssistant(text: string, clientMessageId: string): Promise<boolean>;
   onCompleteTask(task: Task): Promise<void>;
   onOpenTask(task: Pick<Task, "id" | "projectId">): void | Promise<void>;
@@ -49,9 +52,12 @@ export function HomeWorkspace({
   loading,
   error,
   assistantReady,
+  assistantConversationId,
+  assistantRequest,
   assistantJob,
   assistantMessage,
   onOpenAssistant,
+  onStartNewAssistant,
   onSendAssistant,
   onCompleteTask,
   onOpenTask,
@@ -182,11 +188,14 @@ export function HomeWorkspace({
 
       <HomeAssistantCommand
         ready={assistantReady}
+        conversationId={assistantConversationId}
+        request={assistantRequest}
         job={assistantJob}
         message={assistantMessage}
         focused={assistantFocused}
         onFocusChange={setAssistantFocused}
         onOpenAssistant={onOpenAssistant}
+        onStartNew={onStartNewAssistant}
         onSend={onSendAssistant}
         onOpenTask={async (task) => {
           if (task.projectId) {
@@ -347,22 +356,28 @@ export function HomeWorkspace({
 
 function HomeAssistantCommand({
   ready,
+  conversationId,
+  request,
   job,
   message,
   focused,
   onFocusChange,
   onOpenAssistant,
+  onStartNew,
   onSend,
   onOpenTask,
   onOpenProject,
   onOpenSchedule,
 }: {
   ready: boolean;
+  conversationId: string | undefined;
+  request: string | undefined;
   job: AgentJob | undefined;
   message: ConversationMessage | undefined;
   focused: boolean;
   onFocusChange(focused: boolean): void;
   onOpenAssistant(): void;
+  onStartNew(): void;
   onSend(text: string, clientMessageId: string): Promise<boolean>;
   onOpenTask(task: Pick<Task, "id" | "projectId">): void | Promise<void>;
   onOpenProject(
@@ -378,7 +393,24 @@ function HomeAssistantCommand({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
   const inputRef = useRef<HTMLInputElement>(null);
+  const focusFrameRef = useRef<number | undefined>(undefined);
   const active = Boolean(job && !isTerminalJob(job.state));
+
+  useEffect(
+    () => () => {
+      if (focusFrameRef.current !== undefined) {
+        cancelAnimationFrame(focusFrameRef.current);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!conversationId || !request) return;
+    setSubmitted(true);
+    setSubmittedRequest(request);
+    onFocusChange(true);
+  }, [conversationId, onFocusChange, request]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -418,6 +450,65 @@ function HomeAssistantCommand({
       : status
         ? "attention"
         : "idle";
+  const continuing = Boolean(conversationId && submitted);
+  const composer = (
+    <form
+      className="home-command__form"
+      data-mode={continuing ? "follow-up" : "initial"}
+      aria-busy={sending || active}
+      onSubmit={(event) => void submit(event)}
+    >
+      <label className="sr-only" htmlFor="home-assistant-command">
+        {continuing ? copy.home.followUpLabel : copy.home.commandLabel}
+      </label>
+      <input
+        ref={inputRef}
+        id="home-assistant-command"
+        value={draft}
+        maxLength={24_000}
+        placeholder={
+          ready
+            ? continuing
+              ? copy.home.followUpPlaceholder
+              : copy.home.commandInputPlaceholder
+            : copy.home.commandNeedsConnection
+        }
+        disabled={!ready || sending || active}
+        onChange={(event) => {
+          setDraft(event.target.value);
+          setError(undefined);
+        }}
+      />
+      <button
+        className="primary-button focus-visible-control"
+        type="submit"
+        disabled={!ready || sending || active || !draft.trim()}
+        aria-label={continuing ? copy.home.followUpSend : copy.home.commandSend}
+      >
+        {sending || active ? (
+          <span className="button-spinner" aria-hidden="true" />
+        ) : (
+          <Send aria-hidden="true" />
+        )}
+      </button>
+    </form>
+  );
+
+  function startNewRequest() {
+    setDraft("");
+    setSubmitted(false);
+    setSubmittedRequest("");
+    setError(undefined);
+    onStartNew();
+    onFocusChange(false);
+    if (focusFrameRef.current !== undefined) {
+      cancelAnimationFrame(focusFrameRef.current);
+    }
+    focusFrameRef.current = requestAnimationFrame(() => {
+      focusFrameRef.current = undefined;
+      inputRef.current?.focus();
+    });
+  }
 
   return (
     <section
@@ -427,50 +518,20 @@ function HomeAssistantCommand({
     >
       <div className="home-command__heading">
         <div>
-          <h2 id="home-command-title">{copy.home.commandTitle}</h2>
-          <p>{copy.home.commandDescription}</p>
+          <h2 id="home-command-title">
+            {continuing ? copy.home.followUpTitle : copy.home.commandTitle}
+          </h2>
+          <p>
+            {continuing
+              ? copy.home.followUpDescription
+              : copy.home.commandDescription}
+          </p>
         </div>
         <span aria-hidden="true">
           <Sparkles />
         </span>
       </div>
-      <form
-        className="home-command__form"
-        aria-busy={sending || active}
-        onSubmit={(event) => void submit(event)}
-      >
-        <label className="sr-only" htmlFor="home-assistant-command">
-          {copy.home.commandLabel}
-        </label>
-        <input
-          ref={inputRef}
-          id="home-assistant-command"
-          value={draft}
-          maxLength={24_000}
-          placeholder={
-            ready
-              ? copy.home.commandInputPlaceholder
-              : copy.home.commandNeedsConnection
-          }
-          disabled={!ready || sending || active}
-          onChange={(event) => {
-            setDraft(event.target.value);
-            setError(undefined);
-          }}
-        />
-        <button
-          className="primary-button focus-visible-control"
-          type="submit"
-          disabled={!ready || sending || active || !draft.trim()}
-          aria-label={copy.home.commandSend}
-        >
-          {sending || active ? (
-            <span className="button-spinner" aria-hidden="true" />
-          ) : (
-            <Send aria-hidden="true" />
-          )}
-        </button>
-      </form>
+      {!continuing && composer}
       {focused && submittedRequest && (
         <div
           className="home-command__request"
@@ -490,17 +551,10 @@ function HomeAssistantCommand({
         <AssistantInteractiveCanvas
           key={message?.id}
           presentation={presentation}
-          onOpenAssistant={onOpenAssistant}
+          onContinue={() => inputRef.current?.focus()}
           onOpenTask={onOpenTask}
           onOpenProject={onOpenProject}
           onOpenSchedule={onOpenSchedule}
-          onReset={() => {
-            setSubmitted(false);
-            setSubmittedRequest("");
-            setError(undefined);
-            onFocusChange(false);
-            inputRef.current?.focus();
-          }}
         />
       ) : status ? (
         <div className="home-command__result" role="status" aria-live="polite">
@@ -512,13 +566,48 @@ function HomeAssistantCommand({
             <button
               className="secondary-button focus-visible-control"
               type="button"
-              onClick={onOpenAssistant}
+              onClick={() => {
+                if (job?.state === "waiting_approval") {
+                  onOpenAssistant();
+                  return;
+                }
+                inputRef.current?.focus();
+              }}
             >
-              {copy.home.commandReview}
+              {job?.state === "waiting_approval"
+                ? copy.home.commandReview
+                : copy.home.followUpAction}
             </button>
           )}
         </div>
       ) : null}
+      {continuing && (
+        <section
+          className="home-command__continuation"
+          aria-labelledby="home-command-continuation-title"
+        >
+          <div className="home-command__continuation-heading">
+            <span aria-hidden="true">
+              <MessageCircleMore />
+            </span>
+            <div>
+              <h3 id="home-command-continuation-title">
+                {copy.home.followUpAction}
+              </h3>
+              <p>{copy.home.followUpContext}</p>
+            </div>
+            <button
+              className="text-button focus-visible-control"
+              type="button"
+              onClick={startNewRequest}
+              disabled={sending || active}
+            >
+              {copy.home.startNewRequest}
+            </button>
+          </div>
+          {composer}
+        </section>
+      )}
     </section>
   );
 }

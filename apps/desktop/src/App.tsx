@@ -53,6 +53,10 @@ import { SettingsWorkspace } from "./components/SettingsWorkspace";
 import { type VoiceCommandOutcome } from "./components/VoiceCommandSheet";
 import { copy } from "./copy";
 import {
+  conversationIdForRequest,
+  type ConversationSendOptions,
+} from "./conversationRouting";
+import {
   clearDeviceSession,
   readDeviceSession,
   readOrCreateInstallationId,
@@ -101,6 +105,9 @@ export default function App() {
   const [projectsSaving, setProjectsSaving] = useState(false);
   const [projectsError, setProjectsError] = useState<string>();
   const [selectedConversationId, setSelectedConversationId] = useState<
+    string | undefined
+  >(undefined);
+  const [homeConversationId, setHomeConversationId] = useState<
     string | undefined
   >(undefined);
   const [assistantDraft, setAssistantDraft] = useState<
@@ -453,6 +460,7 @@ export default function App() {
       setProjectsError(undefined);
       setConversationMessages([]);
       setSelectedConversationId(undefined);
+      setHomeConversationId(undefined);
       setAssistantDraft(undefined);
       setConversationJobs({});
       setAgentAuthentication(undefined);
@@ -697,6 +705,26 @@ export default function App() {
     setConversationMessages([]);
     setConversationError(undefined);
     pendingConversationId.current = undefined;
+  }
+
+  function startHomeConversation() {
+    setHomeConversationId(undefined);
+    startConversation();
+  }
+
+  function openHomeAssistant() {
+    if (!homeConversationId) {
+      openNewAssistantRequest();
+      return;
+    }
+    setAssistantDraft(undefined);
+    setDestination("chat");
+    if (selectedConversationId !== homeConversationId) {
+      setSelectedConversationId(homeConversationId);
+      setConversationMessages([]);
+      void loadConversationMessages(homeConversationId);
+    }
+    void restoreConversationJob(homeConversationId);
   }
 
   async function completeHomeTask(task: Task): Promise<void> {
@@ -1142,13 +1170,16 @@ export default function App() {
   async function sendConversationRequest(
     text: string,
     clientMessageId: string,
-    startFresh = false,
+    options: ConversationSendOptions = {},
   ): Promise<boolean> {
     if (!tokens || agentAuthentication?.state !== "ready") {
       setConversationError(copy.messages.authenticationRequired);
       return false;
     }
-    let conversationId = startFresh ? undefined : selectedConversationId;
+    let conversationId = conversationIdForRequest(
+      selectedConversationId,
+      options,
+    );
     setConversationError(undefined);
     try {
       if (!conversationId) {
@@ -1173,6 +1204,13 @@ export default function App() {
         return false;
       }
       const targetConversationId = conversationId;
+      if (selectedConversationId !== targetConversationId) {
+        setSelectedConversationId(targetConversationId);
+        setConversationMessages([]);
+      }
+      if (options.rememberForHome) {
+        setHomeConversationId(targetConversationId);
+      }
       const queued = await withAuthenticatedSession((accessToken) =>
         queueAgentTurn(
           apiBaseUrl,
@@ -1247,9 +1285,23 @@ export default function App() {
   const latestAssistantMessage = [...conversationMessages]
     .reverse()
     .find((message) => message.role === "assistant");
+  const latestUserRequest = [...conversationMessages]
+    .reverse()
+    .find((message) => message.role === "user")?.content;
 
   function navigate(nextDestination: OsDestination): void {
     setDestination(nextDestination);
+    if (
+      nextDestination === "home" &&
+      homeConversationId &&
+      selectedConversationId !== homeConversationId
+    ) {
+      setSelectedConversationId(homeConversationId);
+      setConversationMessages([]);
+      void loadConversationMessages(homeConversationId);
+      void restoreConversationJob(homeConversationId);
+      return;
+    }
     if (nextDestination === "calendar") {
       const latestSchedule = [
         ...(latestAssistantMessage?.presentation?.items ?? []),
@@ -1319,14 +1371,29 @@ export default function App() {
               error={homeError ?? (mode === "error" ? message : undefined)}
               assistantReady={agentAuthentication?.state === "ready"}
               assistantJob={
-                selectedConversationId
-                  ? conversationJobs[selectedConversationId]
+                homeConversationId
+                  ? conversationJobs[homeConversationId]
                   : undefined
               }
-              assistantMessage={latestAssistantMessage}
-              onOpenAssistant={openNewAssistantRequest}
+              assistantConversationId={homeConversationId}
+              assistantRequest={
+                selectedConversationId === homeConversationId
+                  ? latestUserRequest
+                  : undefined
+              }
+              assistantMessage={
+                selectedConversationId === homeConversationId
+                  ? latestAssistantMessage
+                  : undefined
+              }
+              onOpenAssistant={openHomeAssistant}
+              onStartNewAssistant={startHomeConversation}
               onSendAssistant={(text, clientMessageId) =>
-                sendConversationRequest(text, clientMessageId, true)
+                sendConversationRequest(text, clientMessageId, {
+                  startFresh: !homeConversationId,
+                  targetConversationId: homeConversationId,
+                  rememberForHome: true,
+                })
               }
               onCompleteTask={completeHomeTask}
               onOpenTask={openTaskFromAssistant}

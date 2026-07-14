@@ -719,6 +719,62 @@ svg {
   -webkit-line-clamp: 3;
 }
 
+.home-command__continuation {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
+.home-command__continuation-heading {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.home-command__continuation-heading > span {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  color: var(--accent);
+}
+
+.home-command__continuation-heading svg {
+  width: 20px;
+  height: 20px;
+}
+
+.home-command__continuation-heading h3,
+.home-command__continuation-heading p {
+  margin: 0;
+}
+
+.home-command__continuation-heading h3 {
+  color: var(--text-strong);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.home-command__continuation-heading p {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.home-command__continuation-heading .text-button {
+  min-height: 44px;
+  white-space: nowrap;
+}
+
+.home-command__form[data-mode="follow-up"] input {
+  background: var(--surface-subtle);
+}
+
 .assistant-canvas {
   display: grid;
   min-width: 0;
@@ -3813,6 +3869,21 @@ svg {
 
   .home-command__result .secondary-button {
     width: 100%;
+  }
+
+  .home-command__continuation-heading {
+    grid-template-columns: 24px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .home-command__continuation-heading > span {
+    width: 24px;
+    height: 24px;
+  }
+
+  .home-command__continuation-heading .text-button {
+    grid-column: 1 / -1;
+    justify-self: start;
   }
 
   .home-page[data-assistant-state="working"] .home-greeting,

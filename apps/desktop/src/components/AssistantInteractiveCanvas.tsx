@@ -1,5 +1,4 @@
 import {
-  ArrowLeft,
   ArrowRight,
   CalendarDays,
   CheckCircle2,
@@ -20,7 +19,7 @@ import { copy } from "../copy";
 
 type AssistantInteractiveCanvasProps = {
   presentation: AssistantPresentation;
-  onOpenAssistant(): void;
+  onContinue(): void;
   onOpenTask(task: Pick<Task, "id" | "projectId">): void | Promise<void>;
   onOpenProject(
     project: Pick<Project, "id" | "workspaceId">,
@@ -28,16 +27,14 @@ type AssistantInteractiveCanvasProps = {
   onOpenSchedule(
     entry: Pick<ScheduleEntry, "id" | "startsAt">,
   ): void | Promise<void>;
-  onReset(): void;
 };
 
 export function AssistantInteractiveCanvas({
   presentation,
-  onOpenAssistant,
+  onContinue,
   onOpenTask,
   onOpenProject,
   onOpenSchedule,
-  onReset,
 }: AssistantInteractiveCanvasProps) {
   const canvasRef = useRef<HTMLElement | null>(null);
   const mountedRef = useRef(true);
@@ -135,14 +132,6 @@ export function AssistantInteractiveCanvas({
           <p>{copy.home.resultEyebrow}</p>
           <h3 id="assistant-canvas-title">{presentation.title}</h3>
         </div>
-        <button
-          className="text-button focus-visible-control"
-          type="button"
-          onClick={onReset}
-        >
-          <ArrowLeft aria-hidden="true" />
-          {copy.home.backToBriefing}
-        </button>
       </header>
       <p className="assistant-canvas__summary" aria-live="polite">
         {presentation.summary}
@@ -152,7 +141,7 @@ export function AssistantInteractiveCanvas({
         <button
           className="secondary-button assistant-canvas__follow-up focus-visible-control"
           type="button"
-          onClick={onOpenAssistant}
+          onClick={onContinue}
         >
           {copy.home.continueRequest}
           <ArrowRight aria-hidden="true" />
