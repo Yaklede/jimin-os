@@ -374,6 +374,7 @@ function HomeAssistantCommand({
 }) {
   const [draft, setDraft] = useState("");
   const [submitted, setSubmitted] = useState(false);
+  const [submittedRequest, setSubmittedRequest] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -383,22 +384,31 @@ function HomeAssistantCommand({
     event.preventDefault();
     const request = draft.trim();
     if (!request || sending || active || !ready) return;
+    setSubmittedRequest(request);
+    setSubmitted(true);
     setSending(true);
     setError(undefined);
+    onFocusChange(true);
     const sent = await onSend(request, createUuidV7());
     if (sent) {
       setDraft("");
-      setSubmitted(true);
-      onFocusChange(true);
     } else {
       setError(copy.home.commandFailed);
     }
     setSending(false);
   }
 
-  const status = submitted && focused ? commandStatus(job, message) : undefined;
+  const status =
+    submitted && focused && !sending && !error
+      ? commandStatus(job, message)
+      : undefined;
   const presentation =
-    focused && submitted && job?.state === "completed" && message
+    focused &&
+    submitted &&
+    !sending &&
+    !error &&
+    job?.state === "completed" &&
+    message
       ? presentationForMessage(message)
       : undefined;
   const stage = presentation
@@ -461,6 +471,16 @@ function HomeAssistantCommand({
           )}
         </button>
       </form>
+      {focused && submittedRequest && (
+        <div
+          className="home-command__request"
+          role="group"
+          aria-label={copy.home.commandRequestLabel}
+        >
+          <span>{copy.home.commandRequestLabel}</span>
+          <p>{submittedRequest}</p>
+        </div>
+      )}
       {error && (
         <p className="assistant-inline-alert" role="alert">
           {error}
@@ -475,6 +495,9 @@ function HomeAssistantCommand({
           onOpenProject={onOpenProject}
           onOpenSchedule={onOpenSchedule}
           onReset={() => {
+            setSubmitted(false);
+            setSubmittedRequest("");
+            setError(undefined);
             onFocusChange(false);
             inputRef.current?.focus();
           }}

@@ -73,6 +73,7 @@ export const copy = {
     commandDescription:
       "일정 확인부터 일 추가까지 말하듯 적으면 바로 처리해요.",
     commandLabel: "비서에게 바로 요청하기",
+    commandRequestLabel: "요청한 내용",
     commandInputPlaceholder: "예: 내일 할 일에 계약서 검토 추가해 줘",
     commandNeedsConnection: "ChatGPT를 연결하면 바로 요청할 수 있어요",
     commandSend: "요청 보내기",

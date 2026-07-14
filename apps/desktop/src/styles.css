@@ -658,6 +658,36 @@ svg {
   padding-inline: 0;
 }
 
+.home-command__request {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: 12px 14px;
+  background: var(--surface);
+}
+
+.home-command__request span,
+.home-command__request p {
+  margin: 0;
+}
+
+.home-command__request span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.home-command__request p {
+  min-width: 0;
+  color: var(--text-strong);
+  font-size: 15px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .home-command__result {
   display: flex;
   align-items: flex-start;
