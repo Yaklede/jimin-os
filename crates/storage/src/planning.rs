@@ -421,6 +421,28 @@ impl Database {
         rows.into_iter().map(Task::try_from).collect()
     }
 
+    /// Lists the owning user's completed task history with the most recently
+    /// completed work first. Reopened and cancelled tasks are not part of the
+    /// completed history because their completion timestamp is cleared.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified persistence error when storage is unavailable.
+    pub async fn completed_tasks_for_user(&self, user_id: Uuid) -> Result<Vec<Task>, StorageError> {
+        let rows = sqlx::query_as::<_, TaskRow>(
+            "\
+            SELECT id, project_id, title, notes, status, priority, due_at, completed_at, version
+            FROM tasks
+            WHERE user_id = $1 AND status = 'completed'
+            ORDER BY completed_at DESC NULLS LAST, id DESC",
+        )
+        .bind(user_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(classify)?;
+        rows.into_iter().map(Task::try_from).collect()
+    }
+
     /// Lists the open tasks that belong on the daily home before the supplied
     /// exclusive local-day boundary. Undated tasks remain in the active daily
     /// queue, while explicitly future-dated tasks stay out of today's view.

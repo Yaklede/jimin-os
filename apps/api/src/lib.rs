@@ -1489,7 +1489,7 @@ async fn update_project(
     tag = "planning",
     params(
         ("projectId" = Option<String>, Query),
-        ("status" = Option<String>, Query, description = "Use all with a project to include completed work")
+        ("status" = Option<String>, Query, description = "Use completed for global completion history or all with a project to include completed work")
     ),
     responses((status = 200, body = TaskListResponse), (status = 400), (status = 401), (status = 503))
 )]
@@ -1513,6 +1513,7 @@ async fn list_open_tasks(
             planning.open_tasks_for_project(user_id, project_id).await
         }
         (None, None | Some("open")) => planning.open_tasks_for_user(user_id).await,
+        (None, Some("completed")) => planning.completed_tasks_for_user(user_id).await,
         _ => return invalid_request_response(request_id),
     };
     match result {

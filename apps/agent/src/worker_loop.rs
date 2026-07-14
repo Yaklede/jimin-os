@@ -91,6 +91,7 @@ enum StructuredAssistantActionKind {
     UpdateTask,
     CompleteTask,
     CancelTask,
+    ReopenTask,
     CreateSchedule,
     UpdateSchedule,
     CancelSchedule,
@@ -438,18 +439,19 @@ async fn contextualized_turn_context(
     job: &ClaimedAgentJob,
 ) -> Result<TurnContext, StorageError> {
     let now = OffsetDateTime::now_utc();
-    let (schedule, tasks, workspaces, projects, inbox) = tokio::try_join!(
+    let daily_task_cutoff = korea_day_end(now)?;
+    let (schedule, mut tasks, completed_tasks, workspaces, projects, inbox) = tokio::try_join!(
         database.schedule_entries_in_range(
             job.user_id,
             now - TimeDuration::days(1),
             now + TimeDuration::days(14),
         ),
         database.open_tasks_for_user(job.user_id),
+        database.completed_tasks_for_user(job.user_id),
         database.workspaces_for_user(job.user_id),
         database.projects_for_user(job.user_id),
         database.recent_gmail_messages_for_user(job.user_id),
     )?;
-    let daily_task_cutoff = korea_day_end(now)?;
     let daily_tasks = tasks
         .iter()
         .filter(|task| task.due_at.is_none_or(|due_at| due_at < daily_task_cutoff))
@@ -461,12 +463,14 @@ async fn contextualized_turn_context(
         &job.input_content,
         &schedule,
         &tasks,
+        &completed_tasks,
         &workspaces,
         &projects,
         &inbox,
         now,
         daily_task_cutoff,
     );
+    tasks.extend(completed_tasks);
     Ok(TurnContext {
         prompt,
         schedule,
@@ -484,6 +488,7 @@ fn render_contextualized_turn(
     input: &str,
     schedule: &[ScheduleEntry],
     tasks: &[Task],
+    completed_tasks: &[Task],
     workspaces: &[Workspace],
     projects: &[Project],
     inbox: &[GmailMessage],
@@ -508,6 +513,9 @@ fn render_contextualized_turn(
          Do not claim that an external action was completed unless the conversation contains a confirmed result. \
          You may select up to 32 local planning actions in the actions array. Use an empty array for questions or ambiguous requests. \
          When the user asks to complete, cancel, or update several records, include one action for every matched record. \
+         completed_tasks contains real completion history in newest-first order. For requests about work completed today, \
+         use only records whose completed timestamp falls within the current Korea local day. Never infer completion from open_tasks. \
+         When the user asks to undo an accidental completion or restore completed work, use reopen_task with the completed task ID. \
          For updates, copy every replacement field from server context and change only what the user requested. \
          For create_task, act like a chief of staff instead of copying the request. Rewrite the user's speech into one concise, \
          action-oriented title that states the outcome, keeps proper nouns and numbers, and removes dates, filler, request verbs, \
@@ -568,7 +576,31 @@ fn render_contextualized_turn(
             );
         }
     }
-    prompt.push_str("</open_tasks>\n<workspaces>\n");
+    prompt.push_str("</open_tasks>\n<completed_tasks>\n");
+    if completed_tasks.is_empty() {
+        prompt.push_str("(no completed tasks)\n");
+    } else {
+        for task in completed_tasks.iter().take(CONTEXT_TASK_LIMIT) {
+            let due = task
+                .due_at
+                .map_or_else(|| "no due date".to_owned(), |date| date.to_string());
+            let completed = task
+                .completed_at
+                .map_or_else(|| "unknown".to_owned(), |date| date.to_string());
+            let _ = writeln!(
+                prompt,
+                "- [id {} | project {} | priority {} | due {due} | completed {completed} | version {}] {} | notes: {}",
+                task.id,
+                task.project_id
+                    .map_or_else(|| "none".to_owned(), |id| id.to_string()),
+                task.priority,
+                task.version,
+                task.title,
+                task.notes.as_deref().unwrap_or("none")
+            );
+        }
+    }
+    prompt.push_str("</completed_tasks>\n<workspaces>\n");
     if workspaces.is_empty() {
         prompt.push_str("(no workspaces)\n");
     } else {
@@ -803,6 +835,7 @@ fn assistant_output_schema() -> Value {
                                 "update_task",
                                 "complete_task",
                                 "cancel_task",
+                                "reopen_task",
                                 "create_schedule",
                                 "update_schedule",
                                 "cancel_schedule",
@@ -1101,7 +1134,11 @@ fn validated_agent_action(
         }
         StructuredAssistantActionKind::UpdateTask => {
             let id = parse_existing_id(&action.entity_id)?;
-            let task = context.tasks.iter().find(|task| task.id == id).ok_or(())?;
+            let task = context
+                .tasks
+                .iter()
+                .find(|task| task.id == id && task.status == TaskStatus::Open)
+                .ok_or(())?;
             let project_id = parse_optional_id(&action.project_id)?;
             if project_id.is_some_and(|id| !context.projects.iter().any(|project| project.id == id))
             {
@@ -1119,7 +1156,11 @@ fn validated_agent_action(
         }
         StructuredAssistantActionKind::CompleteTask | StructuredAssistantActionKind::CancelTask => {
             let id = parse_existing_id(&action.entity_id)?;
-            let task = context.tasks.iter().find(|task| task.id == id).ok_or(())?;
+            let task = context
+                .tasks
+                .iter()
+                .find(|task| task.id == id && task.status == TaskStatus::Open)
+                .ok_or(())?;
             AgentActionCommand::SetTaskStatus {
                 id,
                 status: if action.kind == StructuredAssistantActionKind::CompleteTask {
@@ -1127,6 +1168,19 @@ fn validated_agent_action(
                 } else {
                     TaskStatus::Cancelled
                 },
+                expected_version: task.version,
+            }
+        }
+        StructuredAssistantActionKind::ReopenTask => {
+            let id = parse_existing_id(&action.entity_id)?;
+            let task = context
+                .tasks
+                .iter()
+                .find(|task| task.id == id && task.status == TaskStatus::Completed)
+                .ok_or(())?;
+            AgentActionCommand::SetTaskStatus {
+                id,
+                status: TaskStatus::Open,
                 expected_version: task.version,
             }
         }
@@ -1430,6 +1484,15 @@ fn agent_action_results(
             }
         )
     });
+    let all_reopened_tasks = actions.iter().all(|action| {
+        matches!(
+            action,
+            AgentActionCommand::SetTaskStatus {
+                status: TaskStatus::Open,
+                ..
+            }
+        )
+    });
     let all_created_tasks = actions
         .iter()
         .all(|action| matches!(action, AgentActionCommand::CreateTask { .. }));
@@ -1468,6 +1531,14 @@ fn agent_action_results(
                 format!("할 일 {count}개를 취소했어요."),
                 format!("할 일 {count}개를 취소했어요"),
                 "취소한 할 일",
+                "처리한 일정",
+                "처리한 프로젝트",
+            )
+        } else if all_reopened_tasks {
+            (
+                format!("할 일 {count}개를 다시 진행할 수 있게 복구했어요."),
+                format!("할 일 {count}개를 복구했어요"),
+                "다시 진행할 할 일",
                 "처리한 일정",
                 "처리한 프로젝트",
             )
@@ -1637,7 +1708,11 @@ fn agent_action_result(
             let (verb, title, section_title) = match status {
                 TaskStatus::Completed => ("완료했어요", "할 일을 완료했어요", "완료한 할 일"),
                 TaskStatus::Cancelled => ("취소했어요", "할 일을 취소했어요", "취소한 할 일"),
-                TaskStatus::Open => return Err(()),
+                TaskStatus::Open => (
+                    "다시 진행할 수 있게 복구했어요",
+                    "할 일을 복구했어요",
+                    "다시 진행할 할 일",
+                ),
             };
             (
                 format!("{} 할 일을 {verb}.", task.title),
@@ -2364,6 +2439,18 @@ mod tests {
         };
         let schedule_id = schedule.id;
         let task_id = task.id;
+        let completed_task = Task {
+            id: Uuid::now_v7(),
+            project_id: None,
+            title: "배포 완료".to_owned(),
+            notes: None,
+            status: TaskStatus::Completed,
+            priority: 1,
+            due_at: None,
+            completed_at: Some(now),
+            version: 2,
+        };
+        let completed_task_id = completed_task.id;
 
         let inbox = GmailMessage {
             id: Uuid::now_v7(),
@@ -2396,6 +2483,7 @@ mod tests {
             "내일 일정 알려줘",
             &[schedule],
             &[task],
+            &[completed_task],
             &[workspace],
             &[project],
             &[inbox],
@@ -2408,6 +2496,9 @@ mod tests {
         assert!(prompt.contains(&schedule_id.to_string()));
         assert!(prompt.contains("장보기"));
         assert!(prompt.contains(&task_id.to_string()));
+        assert!(prompt.contains("<completed_tasks>"));
+        assert!(prompt.contains("배포 완료"));
+        assert!(prompt.contains(&completed_task_id.to_string()));
         assert!(prompt.contains("개인 운영체제"));
         assert!(prompt.contains(&project_id.to_string()));
         assert!(prompt.contains("[unread"));
@@ -3201,6 +3292,76 @@ mod tests {
             agent_action_results(&actions, &context).expect("bulk cancellation presentation");
         assert_eq!(answer, "일정 2개를 취소했어요.");
         assert_eq!(presentation.sections[0].item_ids, vec![first.id, second.id]);
+    }
+
+    #[test]
+    fn structured_action_reopens_a_verified_completed_task() {
+        let completed = Task {
+            id: Uuid::now_v7(),
+            project_id: None,
+            title: "실수로 완료한 일".to_owned(),
+            notes: None,
+            status: TaskStatus::Completed,
+            priority: 2,
+            due_at: None,
+            completed_at: Some(OffsetDateTime::now_utc()),
+            version: 3,
+        };
+        let context = TurnContext {
+            prompt: String::new(),
+            schedule: Vec::new(),
+            tasks: vec![completed.clone()],
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
+        };
+        let response = serde_json::json!({
+            "answer": "요청을 처리 중입니다.",
+            "presentation": {
+                "title": "",
+                "layout": "stack",
+                "focusEntityId": "",
+                "sections": []
+            },
+            "actions": [{
+                "kind": "reopen_task",
+                "entityId": completed.id,
+                "workspaceId": "",
+                "projectId": "",
+                "title": "",
+                "notes": "",
+                "priority": 0,
+                "dueAt": "",
+                "startsAt": "",
+                "endsAt": "",
+                "timeZone": "",
+                "status": "",
+                "riskLevel": 0,
+                "objective": "",
+                "nextAction": ""
+            }]
+        })
+        .to_string();
+
+        let (_, _, actions) =
+            validated_assistant_response(&response, &context).expect("reopen action result");
+        assert!(matches!(
+            actions.as_slice(),
+            [AgentActionCommand::SetTaskStatus {
+                id,
+                status: TaskStatus::Open,
+                expected_version: 3,
+            }] if *id == completed.id
+        ));
+        let (answer, presentation) =
+            agent_action_results(&actions, &context).expect("reopen presentation");
+        assert!(answer.contains("복구했어요"));
+        assert!(matches!(
+            presentation.items.as_slice(),
+            [AssistantPresentationItem::Task { status, .. }] if status == "open"
+        ));
     }
 
     #[test]

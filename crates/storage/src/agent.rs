@@ -213,13 +213,18 @@ impl AgentActionCommand {
             }
             Self::SetTaskStatus {
                 id,
-                status,
+                expected_version,
+                ..
+            }
+            | Self::CancelSchedule {
+                id,
+                expected_version,
+            }
+            | Self::DeleteProject {
+                id,
                 expected_version,
             } => {
-                if is_v7(*id)
-                    && matches!(status, TaskStatus::Completed | TaskStatus::Cancelled)
-                    && *expected_version > 0
-                {
+                if is_v7(*id) && *expected_version > 0 {
                     Ok(())
                 } else {
                     Err(StorageError::InvalidConfiguration)
@@ -260,20 +265,6 @@ impl AgentActionCommand {
                     && ends_at > starts_at
                     && *expected_version > 0
                 {
-                    Ok(())
-                } else {
-                    Err(StorageError::InvalidConfiguration)
-                }
-            }
-            Self::CancelSchedule {
-                id,
-                expected_version,
-            }
-            | Self::DeleteProject {
-                id,
-                expected_version,
-            } => {
-                if is_v7(*id) && *expected_version > 0 {
                     Ok(())
                 } else {
                     Err(StorageError::InvalidConfiguration)
@@ -2798,22 +2789,23 @@ async fn persist_agent_action(
             status,
             expected_version,
         } => {
-            let status = match status {
-                TaskStatus::Completed => "completed",
-                TaskStatus::Cancelled => "cancelled",
-                TaskStatus::Open => return Err(StorageError::InvalidConfiguration),
+            let (status, current_status) = match status {
+                TaskStatus::Completed => ("completed", "open"),
+                TaskStatus::Cancelled => ("cancelled", "open"),
+                TaskStatus::Open => ("open", "completed"),
             };
             let version = sqlx::query_scalar::<_, i64>(
                 "\
                 UPDATE tasks
                 SET status = $3,
                     completed_at = CASE WHEN $3 = 'completed' THEN NOW() ELSE NULL END
-                WHERE id = $1 AND user_id = $2 AND status = 'open' AND version = $4
+                WHERE id = $1 AND user_id = $2 AND status = $4 AND version = $5
                 RETURNING version",
             )
             .bind(id)
             .bind(user_id)
             .bind(status)
+            .bind(current_status)
             .bind(expected_version)
             .fetch_optional(&mut **transaction)
             .await
@@ -3394,11 +3386,11 @@ fn classify(error: &sqlx::Error) -> StorageError {
 #[cfg(test)]
 mod tests {
     use super::{
-        AssistantPresentation, AssistantPresentationItem, AssistantPresentationKind,
-        AssistantPresentationLayout, AssistantPresentationSection,
+        AgentActionCommand, AssistantPresentation, AssistantPresentationItem,
+        AssistantPresentationKind, AssistantPresentationLayout, AssistantPresentationSection,
         AssistantPresentationSectionKind, AssistantPresentationView, NewAgentTurn, NewConversation,
     };
-    use crate::StorageError;
+    use crate::{StorageError, planning::TaskStatus};
     use uuid::Uuid;
 
     #[test]
@@ -3428,6 +3420,18 @@ mod tests {
             invalid.validate(),
             Err(StorageError::InvalidConfiguration)
         ));
+    }
+
+    #[test]
+    fn agent_action_accepts_reopening_a_completed_task() {
+        let action = AgentActionCommand::SetTaskStatus {
+            id: Uuid::now_v7(),
+            status: TaskStatus::Open,
+            expected_version: 2,
+        };
+
+        assert!(action.validate().is_ok());
+        assert_eq!(action.action_type(), "update_task");
     }
 
     #[test]

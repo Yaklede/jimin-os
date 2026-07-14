@@ -446,6 +446,13 @@ async fn manual_schedule_and_tasks_are_scoped_and_emit_current_state() {
         .expect("complete should succeed")
         .expect("open task should complete");
     assert_eq!(completed.status, TaskStatus::Completed);
+    assert_eq!(
+        database
+            .completed_tasks_for_user(provisioned.profile.id)
+            .await
+            .expect("completed task query should succeed"),
+        vec![completed.clone()]
+    );
     assert!(
         database
             .open_tasks_for_user(provisioned.profile.id)
@@ -510,6 +517,13 @@ async fn task_update_reopens_soft_deletes_and_rejects_stale_versions() {
         .expect("current task should update");
     assert_eq!(reopened.status, TaskStatus::Open);
     assert!(reopened.completed_at.is_none());
+    assert!(
+        database
+            .completed_tasks_for_user(provisioned.profile.id)
+            .await
+            .expect("reopened task should leave completion history")
+            .is_empty()
+    );
     assert!(
         database
             .update_task(&TaskUpdate {
