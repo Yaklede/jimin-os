@@ -35,6 +35,8 @@ export const copy = {
     addTask: "할 일 추가하기",
     addWorkItem: "일 추가하기",
     addSchedule: "일정 추가하기",
+    edit: "수정하기",
+    saveChanges: "변경 내용 저장하기",
     createProject: "프로젝트 만들기",
     cancel: "취소",
     saving: "저장하는 중",
@@ -178,6 +180,16 @@ export const copy = {
       "ChatGPT를 연결하면 대화를 바로 시작할 수 있어요.",
     assistantPrompt: "지민에게 말하기",
     loadingShort: "불러오는 중",
+    deadlineTitle: "기한 확인",
+    deadlineCount: (count: number) => `${count}개를 먼저 확인해 주세요`,
+    deadlineSummary: (overdue: number, upcoming: number) =>
+      overdue
+        ? `기한이 지난 할 일 ${overdue}개${upcoming ? `와 곧 마감할 일 ${upcoming}개` : ""}가 있어요.`
+        : `곧 마감할 할 일 ${upcoming}개가 있어요.`,
+    overdue: "기한 지남",
+    dueToday: "오늘 마감",
+    dueTomorrow: "내일 마감",
+    editTask: (title: string) => `${title} 수정하기`,
   },
   summary: {
     checkingTitle: "서버 상태를 확인하고 있어요",
@@ -213,6 +225,9 @@ export const copy = {
     empty: "앞으로 90일 안에 일정이 없어요. 필요한 시간을 먼저 잡아 보세요.",
     todayLabel: "오늘",
     tomorrowLabel: "내일",
+    editSchedule: (title: string) => `${title} 일정 수정하기`,
+    connectedCalendar: "연결된 캘린더",
+    connectedCalendarEdit: "연결된 캘린더에서 수정해 주세요.",
   },
   tasks: {
     title: "열린 할 일",
@@ -360,6 +375,22 @@ export const copy = {
     scheduleLabel: "일정 이름",
     startsAt: "시작 시간",
     endsAt: "종료 시간",
+    editTaskTitle: "할 일 수정",
+    editTaskDescription: "내용과 우선순위, 기한을 바로 바꿀 수 있어요.",
+    editScheduleTitle: "일정 수정",
+    editScheduleDescription: "일정 이름과 시간을 바로 바꿀 수 있어요.",
+    title: "제목",
+    notes: "설명 (선택)",
+    priority: "우선순위",
+    dueAt: "기한 (선택)",
+    dueAtDescription: "비워 두면 기한 없이 저장해요.",
+    priorityNormal: "일반",
+    prioritySoon: "먼저 처리",
+    priorityImportant: "중요",
+    priorityHighest: "가장 먼저",
+    titleRequired: "제목을 입력해 주세요.",
+    scheduleTimeRequired: "시작 시간과 종료 시간을 모두 입력해 주세요.",
+    scheduleTimeOrder: "종료 시간은 시작 시간보다 늦어야 해요.",
   },
   messages: {
     serverOffline: "VPN 연결과 개인 서버 상태를 확인한 뒤 다시 시도해 주세요.",
@@ -382,6 +413,10 @@ export const copy = {
     taskChanged:
       "할 일이 다른 기기에서 변경됐어요. 새로고침 후 다시 확인해 주세요.",
     scheduleAdded: "일정을 추가했어요.",
+    scheduleChanged:
+      "일정을 저장하지 못했어요. 최신 상태를 확인한 뒤 다시 시도해 주세요.",
+    taskSaveNotice:
+      "할 일을 저장하지 못했어요. 최신 상태를 확인한 뒤 다시 시도해 주세요.",
     conversationLoadNotice:
       "대화를 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
     conversationSendNotice:

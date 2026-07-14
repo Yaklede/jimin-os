@@ -7,6 +7,7 @@ import {
 export interface HomeSnapshot {
   schedule: ScheduleEntry[];
   tasks: Task[];
+  dueTasks: Task[];
 }
 
 export async function fetchHomeSnapshot(
@@ -29,7 +30,11 @@ export async function fetchHomeSnapshot(
   if (!response.ok || !isHomeSnapshot(body)) {
     throw errorFromStatus(response.status);
   }
-  return body;
+  return {
+    schedule: body.schedule,
+    tasks: body.tasks,
+    dueTasks: Array.isArray(body.dueTasks) ? body.dueTasks : [],
+  };
 }
 
 function normalizeBaseUrl(value: string): string {

@@ -7,6 +7,7 @@ import {
   createTask,
   refreshDeviceSession,
   updateTask,
+  updateScheduleEntry,
   fetchPlanning,
   type PlanningSnapshot,
   type ScheduleEntry,
@@ -48,6 +49,10 @@ import { AssistantRail, HomeWorkspace } from "./components/HomeWorkspace";
 import { MemoryWorkspace } from "./components/MemoryWorkspace";
 import { OsShell, type OsDestination } from "./components/OsShell";
 import { PlanningWorkspace } from "./components/PlanningWorkspace";
+import {
+  PlanningItemEditor,
+  type PlanningEditTarget,
+} from "./components/PlanningItemEditor";
 import { ProjectsWorkspace } from "./components/ProjectsWorkspace";
 import { SettingsWorkspace } from "./components/SettingsWorkspace";
 import { type VoiceCommandOutcome } from "./components/VoiceCommandSheet";
@@ -101,6 +106,11 @@ export default function App() {
   const [highlightedProjectTaskId, setHighlightedProjectTaskId] =
     useState<string>();
   const [highlightedScheduleId, setHighlightedScheduleId] = useState<string>();
+  const [highlightedPlanningTaskId, setHighlightedPlanningTaskId] =
+    useState<string>();
+  const [planningEditTarget, setPlanningEditTarget] = useState<
+    PlanningEditTarget | undefined
+  >();
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [projectsSaving, setProjectsSaving] = useState(false);
   const [projectsError, setProjectsError] = useState<string>();
@@ -457,6 +467,8 @@ export default function App() {
       setSelectedProjectId(undefined);
       setHighlightedProjectTaskId(undefined);
       setHighlightedScheduleId(undefined);
+      setHighlightedPlanningTaskId(undefined);
+      setPlanningEditTarget(undefined);
       setProjectsError(undefined);
       setConversationMessages([]);
       setSelectedConversationId(undefined);
@@ -826,6 +838,72 @@ export default function App() {
     }
   }
 
+  async function savePlanningTask(
+    task: Task,
+    input: {
+      title: string;
+      notes?: string;
+      status: Task["status"];
+      priority: number;
+      dueAt?: string;
+    },
+  ): Promise<void> {
+    setPlanningError(undefined);
+    const updated = await withAuthenticatedSession((accessToken) =>
+      updateTask(apiBaseUrl, accessToken, task, input),
+    );
+    setPlanningSnapshot((current) =>
+      current
+        ? {
+            ...current,
+            tasks: current.tasks.map((item) =>
+              item.id === updated.id ? updated : item,
+            ),
+          }
+        : current,
+    );
+    setProjectTasks((current) =>
+      current.map((item) => (item.id === updated.id ? updated : item)),
+    );
+    await Promise.all([
+      loadHomeSnapshot(),
+      loadPlanningSnapshot(),
+      task.projectId && task.projectId === selectedProjectId
+        ? loadProjectTasks(task.projectId)
+        : Promise.resolve(undefined),
+    ]);
+  }
+
+  async function savePlanningSchedule(
+    entry: ScheduleEntry,
+    input: {
+      title: string;
+      notes?: string;
+      startsAt: string;
+      endsAt: string;
+    },
+  ): Promise<void> {
+    if (entry.source !== "manual") throw new Error("schedule is read only");
+    setPlanningError(undefined);
+    const updated = await withAuthenticatedSession((accessToken) =>
+      updateScheduleEntry(apiBaseUrl, accessToken, entry, input),
+    );
+    setPlanningSnapshot((current) =>
+      current
+        ? {
+            ...current,
+            schedule: current.schedule.map((item) =>
+              item.id === updated.id ? updated : item,
+            ),
+          }
+        : current,
+    );
+    await Promise.all([
+      loadHomeSnapshot(),
+      loadPlanningSnapshot(updated.startsAt),
+    ]);
+  }
+
   function selectWorkspace(workspaceId: string) {
     if (workspaceId === selectedWorkspaceId) return;
     setHighlightedProjectTaskId(undefined);
@@ -919,6 +997,17 @@ export default function App() {
       throw new Error("schedule destination unavailable");
     }
     setHighlightedScheduleId(entry.id);
+    setDestination("calendar");
+  }
+
+  async function openPlanningTask(task: Task): Promise<void> {
+    const snapshot = await loadPlanningSnapshot();
+    if (!snapshot?.tasks.some((item) => item.id === task.id)) {
+      setHomeError(copy.home.taskDestinationNotice);
+      return;
+    }
+    setHighlightedScheduleId(undefined);
+    setHighlightedPlanningTaskId(task.id);
     setDestination("calendar");
   }
 
@@ -1396,6 +1485,13 @@ export default function App() {
                 })
               }
               onCompleteTask={completeHomeTask}
+              onEditTask={(task) =>
+                setPlanningEditTarget({ kind: "task", item: task })
+              }
+              onEditSchedule={(entry) =>
+                setPlanningEditTarget({ kind: "schedule", item: entry })
+              }
+              onOpenPlanningTask={openPlanningTask}
               onOpenTask={openTaskFromAssistant}
               onOpenProject={openProjectFromAssistant}
               onOpenSchedule={openScheduleFromAssistant}
@@ -1407,8 +1503,15 @@ export default function App() {
               loading={planningLoading || mode === "loading"}
               error={planningError ?? (mode === "error" ? message : undefined)}
               highlightedScheduleId={highlightedScheduleId}
+              highlightedTaskId={highlightedPlanningTaskId}
               onCompleteTask={completeHomeTask}
               onRestoreTask={restorePlanningTask}
+              onEditTask={(task) =>
+                setPlanningEditTarget({ kind: "task", item: task })
+              }
+              onEditSchedule={(entry) =>
+                setPlanningEditTarget({ kind: "schedule", item: entry })
+              }
             />
           )}
           {destination === "projects" && (
@@ -1479,6 +1582,12 @@ export default function App() {
               onResolveAction={resolveConversationAction}
             />
           )}
+          <PlanningItemEditor
+            target={planningEditTarget}
+            onClose={() => setPlanningEditTarget(undefined)}
+            onSaveTask={savePlanningTask}
+            onSaveSchedule={savePlanningSchedule}
+          />
         </OsShell>
       )}
     </div>

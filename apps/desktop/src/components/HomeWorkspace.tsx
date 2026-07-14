@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   CalendarDays,
   ChevronRight,
   Circle,
@@ -6,6 +7,7 @@ import {
   ListTodo,
   MessageCircleMore,
   Mic,
+  Pencil,
   Send,
   Sparkles,
 } from "lucide-react";
@@ -18,6 +20,11 @@ import { type Project } from "../api/projects";
 import { presentationForMessage } from "../assistantPresentation";
 import { copy } from "../copy";
 import { createUuidV7 } from "../uuid";
+import {
+  deadlineAttentionTasks,
+  taskDueState,
+  type TaskDueState,
+} from "../planningDue";
 import {
   SkeletonBlock,
   SkeletonGroup,
@@ -38,6 +45,9 @@ type HomeWorkspaceProps = {
   onStartNewAssistant(): void;
   onSendAssistant(text: string, clientMessageId: string): Promise<boolean>;
   onCompleteTask(task: Task): Promise<void>;
+  onEditTask(task: Task): void;
+  onEditSchedule(entry: ScheduleEntry): void;
+  onOpenPlanningTask(task: Task): void | Promise<void>;
   onOpenTask(task: Pick<Task, "id" | "projectId">): void | Promise<void>;
   onOpenProject(
     project: Pick<Project, "id" | "workspaceId">,
@@ -60,6 +70,9 @@ export function HomeWorkspace({
   onStartNewAssistant,
   onSendAssistant,
   onCompleteTask,
+  onEditTask,
+  onEditSchedule,
+  onOpenPlanningTask,
   onOpenTask,
   onOpenProject,
   onOpenSchedule,
@@ -79,6 +92,10 @@ export function HomeWorkspace({
   const nextSchedule = snapshot?.schedule[0];
   const scheduleCount = snapshot?.schedule.length ?? 0;
   const taskCount = snapshot?.tasks.length ?? 0;
+  const dueTasks = useMemo(
+    () => deadlineAttentionTasks(snapshot?.dueTasks ?? []),
+    [snapshot?.dueTasks],
+  );
   const assistantState = homeAssistantState(
     assistantFocused,
     assistantJob,
@@ -213,6 +230,14 @@ export function HomeWorkspace({
 
       {!assistantFocused && (
         <>
+          {!showingSkeleton && dueTasks.length > 0 && (
+            <DeadlineBrief
+              tasks={dueTasks}
+              onEditTask={onEditTask}
+              onOpenTask={onOpenPlanningTask}
+            />
+          )}
+
           <button
             className="home-briefing focus-visible-control"
             type="button"
@@ -269,7 +294,14 @@ export function HomeWorkspace({
             {showingSkeleton ? (
               <ScheduleSkeleton visible={skeletonVisible} />
             ) : nextSchedule ? (
-              <ScheduleHighlight entry={nextSchedule} />
+              <ScheduleHighlight
+                entry={nextSchedule}
+                onEdit={
+                  nextSchedule.source === "manual"
+                    ? () => onEditSchedule(nextSchedule)
+                    : undefined
+                }
+              />
             ) : (
               <EmptySurface
                 title={copy.home.scheduleEmptyTitle}
@@ -333,10 +365,22 @@ export function HomeWorkspace({
                       </button>
                       <span>{task.title}</span>
                       {task.dueAt && (
-                        <time dateTime={task.dueAt}>
-                          {dueLabel(task.dueAt)}
+                        <time
+                          dateTime={task.dueAt}
+                          data-due-state={taskDueState(task)}
+                        >
+                          {taskDueLabel(task)}
                         </time>
                       )}
+                      <button
+                        className="home-task-list__edit focus-visible-control"
+                        type="button"
+                        onClick={() => onEditTask(task)}
+                        disabled={Boolean(completingTaskId)}
+                        aria-label={copy.home.editTask(task.title)}
+                      >
+                        <Pencil aria-hidden="true" />
+                      </button>
                     </li>
                   ))}
                 </ul>
@@ -745,7 +789,13 @@ function TaskListSkeleton({
   );
 }
 
-function ScheduleHighlight({ entry }: { entry: ScheduleEntry }) {
+function ScheduleHighlight({
+  entry,
+  onEdit,
+}: {
+  entry: ScheduleEntry;
+  onEdit?: () => void;
+}) {
   return (
     <div className="schedule-highlight">
       <span className="schedule-highlight__icon" aria-hidden="true">
@@ -755,8 +805,83 @@ function ScheduleHighlight({ entry }: { entry: ScheduleEntry }) {
         <strong>{entry.title}</strong>
         <p>{scheduleDetail(entry)}</p>
       </div>
-      <ChevronRight aria-hidden="true" />
+      {onEdit ? (
+        <button
+          className="schedule-highlight__edit focus-visible-control"
+          type="button"
+          onClick={onEdit}
+          aria-label={copy.schedule.editSchedule(entry.title)}
+        >
+          <Pencil aria-hidden="true" />
+          <span>{copy.actions.edit}</span>
+        </button>
+      ) : (
+        <span className="schedule-highlight__source">
+          {copy.schedule.connectedCalendar}
+        </span>
+      )}
     </div>
+  );
+}
+
+function DeadlineBrief({
+  tasks,
+  onEditTask,
+  onOpenTask,
+}: {
+  tasks: Task[];
+  onEditTask(task: Task): void;
+  onOpenTask(task: Task): void | Promise<void>;
+}) {
+  const overdueCount = tasks.filter(
+    (task) => taskDueState(task) === "overdue",
+  ).length;
+  const upcomingCount = tasks.length - overdueCount;
+  return (
+    <section
+      className="home-deadline-brief"
+      aria-labelledby="home-deadline-title"
+    >
+      <header>
+        <span className="home-deadline-brief__icon" aria-hidden="true">
+          <AlertTriangle />
+        </span>
+        <div>
+          <h2 id="home-deadline-title">{copy.home.deadlineTitle}</h2>
+          <p>{copy.home.deadlineSummary(overdueCount, upcomingCount)}</p>
+        </div>
+        <strong>{copy.home.deadlineCount(tasks.length)}</strong>
+      </header>
+      <ul>
+        {tasks.slice(0, 4).map((task) => {
+          const state = taskDueState(task);
+          return (
+            <li key={task.id} data-due-state={state}>
+              <button
+                className="home-deadline-brief__task focus-visible-control"
+                type="button"
+                onClick={() => void onOpenTask(task)}
+              >
+                <span>{dueStateLabel(state)}</span>
+                <strong>{task.title}</strong>
+                {task.dueAt && (
+                  <time dateTime={task.dueAt}>{formatDueTime(task.dueAt)}</time>
+                )}
+              </button>
+              <button
+                className="home-deadline-brief__edit focus-visible-control"
+                type="button"
+                onClick={() => onEditTask(task)}
+                aria-label={copy.home.editTask(task.title)}
+              >
+                <Pencil aria-hidden="true" />
+                <span>{copy.actions.edit}</span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
   );
 }
 
@@ -823,6 +948,27 @@ function dueLabel(value: string): string {
   return new Intl.DateTimeFormat("ko-KR", {
     month: "numeric",
     day: "numeric",
+  }).format(new Date(value));
+}
+
+function taskDueLabel(task: Task): string {
+  const state = taskDueState(task);
+  return state === "later" ? dueLabel(task.dueAt ?? "") : dueStateLabel(state);
+}
+
+function dueStateLabel(state: TaskDueState): string {
+  if (state === "overdue") return copy.home.overdue;
+  if (state === "today") return copy.home.dueToday;
+  if (state === "tomorrow") return copy.home.dueTomorrow;
+  return "";
+}
+
+function formatDueTime(value: string): string {
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
   }).format(new Date(value));
 }
 

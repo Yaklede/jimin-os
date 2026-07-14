@@ -12,6 +12,7 @@ export interface ScheduleEntry {
   endsAt: string;
   timeZone: string;
   status: "confirmed" | "cancelled";
+  source: "manual" | "google_calendar";
   version: number;
 }
 
@@ -249,6 +250,29 @@ export async function createScheduleEntry(
       endsAt: new Date(input.endsAt).toISOString(),
       timeZone:
         Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Seoul",
+    },
+  );
+}
+
+export async function updateScheduleEntry(
+  baseUrl: string,
+  access: string,
+  entry: ScheduleEntry,
+  input: { title: string; startsAt: string; endsAt: string; notes?: string },
+): Promise<ScheduleEntry> {
+  return request<ScheduleEntry>(
+    baseUrl,
+    access,
+    `/v1/schedule-entries/${entry.id}`,
+    "PUT",
+    {
+      title: input.title,
+      notes: input.notes || null,
+      startsAt: new Date(input.startsAt).toISOString(),
+      endsAt: new Date(input.endsAt).toISOString(),
+      timeZone:
+        Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Seoul",
+      expectedVersion: entry.version,
     },
   );
 }

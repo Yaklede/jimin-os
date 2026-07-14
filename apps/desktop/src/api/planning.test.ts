@@ -6,6 +6,7 @@ import {
   clientPlatformForUserAgent,
   fetchPlanning,
   refreshDeviceSession,
+  updateScheduleEntry,
   updateTask,
 } from "./planning";
 
@@ -227,6 +228,54 @@ describe("task client", () => {
       status: "open",
       priority: 3,
       expectedVersion: 4,
+    });
+  });
+});
+
+describe("schedule client", () => {
+  it("sends a version-checked manual schedule update", async () => {
+    const updated = {
+      id: "019f68cb-9400-7000-8000-000000000020",
+      title: "치과 방문",
+      notes: "접수 10분 전",
+      startsAt: "2026-07-14T08:00:00.000Z",
+      endsAt: "2026-07-14T09:00:00.000Z",
+      timeZone: "Asia/Seoul",
+      status: "confirmed" as const,
+      source: "manual" as const,
+      version: 3,
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(updated), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await updateScheduleEntry(
+      "https://jimin-os.example/",
+      "access",
+      { ...updated, version: 2 },
+      {
+        title: updated.title,
+        notes: updated.notes,
+        startsAt: updated.startsAt,
+        endsAt: updated.endsAt,
+      },
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://jimin-os.example/v1/schedule-entries/019f68cb-9400-7000-8000-000000000020",
+      expect.objectContaining({ method: "PUT" }),
+    );
+    const request = fetchMock.mock.calls[0]?.[1];
+    expect(JSON.parse(String(request?.body))).toMatchObject({
+      title: "치과 방문",
+      notes: "접수 10분 전",
+      startsAt: "2026-07-14T08:00:00.000Z",
+      endsAt: "2026-07-14T09:00:00.000Z",
+      expectedVersion: 2,
     });
   });
 });

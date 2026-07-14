@@ -24,7 +24,7 @@ describe("home snapshot API", () => {
         new Date("2026-07-12T00:00:00+09:00"),
         new Date("2026-07-13T00:00:00+09:00"),
       ),
-    ).resolves.toEqual({ schedule: [], tasks: [] });
+    ).resolves.toEqual({ schedule: [], tasks: [], dueTasks: [] });
 
     const [url, options] = fetchMock.mock.calls[0] ?? [];
     expect(url).toContain("https://jimin-os.example/v1/home?");

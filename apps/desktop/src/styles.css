@@ -15,6 +15,7 @@
   --focus: #5e50cd;
   --success: #278a53;
   --warning: #a5702c;
+  --warning-tint: #faf1e5;
   --danger: #b25058;
   --danger-tint: #fbedee;
   --shadow-panel: 0 10px 24px rgb(43 44 67 / 6%);
@@ -46,6 +47,7 @@
     --focus: #c4bcff;
     --success: #68c98e;
     --warning: #e2bb7d;
+    --warning-tint: #453826;
     --danger: #e69ba1;
     --danger-tint: #4b2b32;
     --shadow-panel: none;
@@ -477,6 +479,7 @@ svg {
 .home-greeting,
 .home-command,
 .home-briefing,
+.home-deadline-brief,
 .home-page > .inline-alert {
   grid-column: 1 / -1;
 }
@@ -545,6 +548,7 @@ svg {
 
 .home-briefing,
 .home-command,
+.home-deadline-brief,
 .home-voice-callout,
 .home-next-schedule,
 .home-task-surface,
@@ -1200,6 +1204,160 @@ svg {
   text-align: left;
 }
 
+.home-deadline-brief {
+  overflow: hidden;
+}
+
+.home-deadline-brief > header {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.home-deadline-brief__icon {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: var(--radius-control);
+  background: var(--warning-tint);
+  color: var(--warning);
+}
+
+.home-deadline-brief h2,
+.home-deadline-brief p {
+  margin: 0;
+}
+
+.home-deadline-brief h2 {
+  color: var(--text-strong);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.home-deadline-brief p,
+.home-deadline-brief > header > strong {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.home-deadline-brief > header > strong {
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.home-deadline-brief ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.home-deadline-brief li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  min-height: 58px;
+}
+
+.home-deadline-brief li + li {
+  border-top: 1px solid var(--border);
+}
+
+.home-deadline-brief__task,
+.home-deadline-brief__edit {
+  border: 0;
+  background: transparent;
+}
+
+.home-deadline-brief__task {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 4px 8px 18px;
+  text-align: left;
+}
+
+.home-deadline-brief__task:hover {
+  background: var(--surface-subtle);
+}
+
+.home-deadline-brief__task > span,
+.home-deadline-brief__task time {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.home-deadline-brief__task > span {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+.home-deadline-brief
+  li[data-due-state="overdue"]
+  .home-deadline-brief__task
+  > span {
+  color: var(--danger);
+}
+
+.home-deadline-brief__task strong {
+  overflow: hidden;
+  color: var(--text-strong);
+  font-size: 14px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.home-deadline-brief__task time {
+  color: var(--muted);
+}
+
+.home-deadline-brief__edit,
+.planning-row-edit,
+.schedule-highlight__edit,
+.home-task-list__edit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.home-deadline-brief__edit {
+  align-self: center;
+  margin-right: 8px;
+  padding: 0 10px;
+}
+
+.home-deadline-brief__edit:hover,
+.planning-row-edit:hover,
+.schedule-highlight__edit:hover,
+.home-task-list__edit:hover {
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.home-deadline-brief__edit svg,
+.planning-row-edit svg,
+.schedule-highlight__edit svg,
+.home-task-list__edit svg {
+  width: 16px;
+  height: 16px;
+}
+
 .home-briefing:hover,
 .home-voice-callout:hover {
   border-color: var(--border-strong);
@@ -1334,11 +1492,19 @@ svg {
   white-space: nowrap;
 }
 
-.schedule-highlight > svg {
-  width: 18px;
-  height: 18px;
+.schedule-highlight__edit,
+.schedule-highlight__source {
   margin-left: auto;
-  color: var(--faint);
+  flex: 0 0 auto;
+}
+
+.schedule-highlight__edit {
+  padding: 0 10px;
+}
+
+.schedule-highlight__source {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .home-task-surface {
@@ -1357,7 +1523,7 @@ svg {
 
 .home-task-list li {
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) auto;
+  grid-template-columns: 32px minmax(0, 1fr) auto 44px;
   align-items: center;
   column-gap: 8px;
   min-height: 56px;
@@ -1370,6 +1536,7 @@ svg {
 
 .home-task-list li[data-highlighted="true"],
 .project-task-list li[data-highlighted="true"],
+.planning-task-list li[data-highlighted="true"],
 .planning-timeline li[data-highlighted="true"] {
   border-radius: var(--radius-control);
   background: var(--accent-tint);
@@ -1437,6 +1604,26 @@ svg {
   color: var(--faint);
   font-size: 12px;
   white-space: nowrap;
+}
+
+.home-task-list time[data-due-state="overdue"],
+.planning-task-list time[data-due-state="overdue"] {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.home-task-list time[data-due-state="today"],
+.home-task-list time[data-due-state="tomorrow"],
+.planning-task-list time[data-due-state="today"],
+.planning-task-list time[data-due-state="tomorrow"] {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+.home-task-list__edit {
+  width: 44px;
+  height: 44px;
+  padding: 0;
 }
 
 .text-button {
@@ -1991,7 +2178,7 @@ svg {
 
 .planning-timeline li {
   display: grid;
-  grid-template-columns: 72px 2px minmax(0, 1fr);
+  grid-template-columns: 72px 2px minmax(0, 1fr) auto;
   gap: 12px;
   padding: 14px 16px;
 }
@@ -2030,6 +2217,18 @@ svg {
   background: var(--accent);
 }
 
+.planning-row-edit {
+  align-self: center;
+  padding: 0 10px;
+}
+
+.planning-row-source {
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .planning-timeline strong,
 .planning-task-list strong {
   color: var(--text-strong);
@@ -2049,7 +2248,7 @@ svg {
 
 .planning-task-list li {
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) auto;
+  grid-template-columns: 44px minmax(0, 1fr) auto auto;
   align-items: center;
   column-gap: 8px;
   min-height: 60px;
@@ -2101,6 +2300,188 @@ svg {
   color: var(--faint);
   font-size: 12px;
   white-space: nowrap;
+}
+
+.planning-editor {
+  width: min(calc(100% - 32px), 620px);
+  max-height: min(760px, calc(100dvh - 48px));
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-panel);
+  padding: 0;
+  overflow: hidden auto;
+  background: var(--surface);
+  box-shadow: var(--shadow-float);
+  color: var(--text);
+}
+
+.planning-editor[open] {
+  animation: planning-editor-in 180ms ease-out both;
+}
+
+.planning-editor::backdrop {
+  background: rgb(23 23 32 / 58%);
+  animation: planning-editor-backdrop 160ms ease-out both;
+}
+
+.planning-editor > form {
+  display: grid;
+  gap: 18px;
+  padding: 22px;
+}
+
+.planning-editor__heading {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) 44px;
+  align-items: start;
+  gap: 12px;
+}
+
+.planning-editor__heading > span {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: var(--radius-control);
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.planning-editor__heading h2,
+.planning-editor__heading p {
+  margin: 0;
+}
+
+.planning-editor__heading h2 {
+  color: var(--text-strong);
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.planning-editor__heading p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.planning-editor__close {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--muted);
+}
+
+.planning-editor__close:hover {
+  background: var(--surface-subtle);
+  color: var(--text-strong);
+}
+
+.planning-editor fieldset {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.planning-editor__field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.planning-editor__field {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.planning-editor__field label {
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.planning-editor__field input,
+.planning-editor__field textarea,
+.planning-editor__field select {
+  width: 100%;
+  min-height: 48px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  padding: 10px 12px;
+  background: var(--surface);
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 14px;
+  transition:
+    border-color 160ms ease,
+    background-color 160ms ease;
+}
+
+.planning-editor__field textarea {
+  min-height: 104px;
+  resize: vertical;
+}
+
+.planning-editor__field input:focus-visible,
+.planning-editor__field textarea:focus-visible,
+.planning-editor__field select:focus-visible {
+  border-color: var(--focus);
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.planning-editor__field p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.planning-editor__error {
+  margin: 0;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+  border-radius: var(--radius-control);
+  padding: 10px 12px;
+  background: var(--danger-tint);
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.planning-editor__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.planning-editor__actions .primary-button,
+.planning-editor__actions .secondary-button {
+  min-width: 120px;
+}
+
+@keyframes planning-editor-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes planning-editor-backdrop {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .projects-page {
@@ -4043,6 +4424,7 @@ svg {
 
   .home-greeting,
   .home-briefing,
+  .home-deadline-brief,
   .home-voice-callout,
   .home-next-schedule,
   .home-tasks,
@@ -4079,12 +4461,154 @@ svg {
     font-size: 15px;
   }
 
+  .home-deadline-brief > header {
+    grid-template-columns: 40px minmax(0, 1fr);
+    padding: 14px;
+  }
+
+  .home-deadline-brief > header > strong {
+    grid-column: 2;
+  }
+
+  .home-deadline-brief__task {
+    grid-template-columns: 68px minmax(0, 1fr);
+    padding-left: 14px;
+  }
+
+  .home-deadline-brief__task time {
+    grid-column: 2;
+  }
+
+  .home-deadline-brief__edit {
+    width: 44px;
+    padding: 0;
+  }
+
+  .home-deadline-brief__edit span,
+  .planning-row-edit span,
+  .schedule-highlight__edit span {
+    display: none;
+  }
+
   .home-voice-callout {
     display: flex;
   }
 
   .home-next-schedule {
     padding: 16px;
+  }
+
+  .home-task-list li {
+    grid-template-columns: 44px minmax(0, 1fr) 44px;
+    grid-template-rows: auto auto;
+    column-gap: 6px;
+  }
+
+  .home-task-list__complete {
+    grid-row: 1 / 3;
+  }
+
+  .home-task-list > li > span {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .home-task-list time {
+    grid-column: 2;
+    grid-row: 2;
+    margin-top: -2px;
+  }
+
+  .home-task-list__edit {
+    grid-column: 3;
+    grid-row: 1 / 3;
+  }
+
+  .planning-page {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .planning-completed {
+    grid-column: auto;
+  }
+
+  .planning-timeline li {
+    grid-template-columns: 58px 2px minmax(0, 1fr) 44px;
+    gap: 8px;
+    padding: 12px;
+  }
+
+  .planning-row-edit {
+    width: 44px;
+    padding: 0;
+  }
+
+  .planning-row-source {
+    max-width: 68px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .planning-task-list li {
+    grid-template-columns: 44px minmax(0, 1fr) 44px;
+    grid-template-rows: auto auto;
+    column-gap: 6px;
+  }
+
+  .planning-task-list__complete,
+  .planning-task-list__restore {
+    grid-row: 1 / 3;
+  }
+
+  .planning-task-list li > div {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .planning-task-list time {
+    grid-column: 2;
+    grid-row: 2;
+    margin: -2px 0 0;
+  }
+
+  .planning-task-list .planning-row-edit {
+    grid-column: 3;
+    grid-row: 1 / 3;
+  }
+
+  .planning-editor {
+    width: 100%;
+    max-width: none;
+    max-height: calc(100dvh - var(--mobile-top-clearance));
+    margin: auto 0 0;
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 24px 24px 0 0;
+  }
+
+  .planning-editor[open] {
+    animation-duration: 240ms;
+  }
+
+  .planning-editor > form {
+    padding: 20px 16px calc(20px + var(--safe-area-bottom));
+  }
+
+  .planning-editor__field-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .planning-editor__actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .planning-editor__actions .primary-button,
+  .planning-editor__actions .secondary-button {
+    min-width: 0;
+    width: 100%;
   }
 
   .os-mobile-nav {

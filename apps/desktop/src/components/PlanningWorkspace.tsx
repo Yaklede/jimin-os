@@ -3,6 +3,7 @@ import {
   CheckCircle2,
   Circle,
   History,
+  Pencil,
   RotateCcw,
 } from "lucide-react";
 import { useEffect, useRef, useState, type RefObject } from "react";
@@ -13,6 +14,7 @@ import {
   type Task,
 } from "../api/planning";
 import { copy } from "../copy";
+import { taskDueState } from "../planningDue";
 import {
   SkeletonBlock,
   SkeletonGroup,
@@ -25,8 +27,11 @@ type PlanningWorkspaceProps = {
   loading: boolean;
   error: string | undefined;
   highlightedScheduleId?: string;
+  highlightedTaskId?: string;
   onCompleteTask(task: Task): Promise<void>;
   onRestoreTask(task: Task): Promise<void>;
+  onEditTask(task: Task): void;
+  onEditSchedule(entry: ScheduleEntry): void;
 };
 
 export function PlanningWorkspace({
@@ -34,14 +39,18 @@ export function PlanningWorkspace({
   loading,
   error,
   highlightedScheduleId,
+  highlightedTaskId,
   onCompleteTask,
   onRestoreTask,
+  onEditTask,
+  onEditSchedule,
 }: PlanningWorkspaceProps) {
   const [pendingTask, setPendingTask] = useState<{
     id: string;
     action: "complete" | "restore";
   }>();
   const highlightedScheduleRef = useRef<HTMLLIElement | null>(null);
+  const highlightedTaskRef = useRef<HTMLLIElement | null>(null);
   const skeletonVisible = useDelayedSkeleton(loading);
   const showingSkeleton = loading || skeletonVisible;
 
@@ -52,6 +61,14 @@ export function PlanningWorkspace({
     element.scrollIntoView({ block: "center", behavior: "smooth" });
     element.focus({ preventScroll: true });
   }, [highlightedScheduleId, snapshot?.schedule]);
+
+  useEffect(() => {
+    if (!highlightedTaskId) return;
+    const element = highlightedTaskRef.current;
+    if (!element) return;
+    element.scrollIntoView({ block: "center", behavior: "smooth" });
+    element.focus({ preventScroll: true });
+  }, [highlightedTaskId, snapshot?.tasks]);
 
   async function complete(task: Task) {
     if (pendingTask) return;
@@ -117,6 +134,7 @@ export function PlanningWorkspace({
                       ? highlightedScheduleRef
                       : undefined
                   }
+                  onEdit={onEditSchedule}
                   key={entry.id}
                 />
               ))}
@@ -150,7 +168,16 @@ export function PlanningWorkspace({
           ) : snapshot?.tasks.length ? (
             <ul className="planning-task-list">
               {snapshot.tasks.map((task) => (
-                <li key={task.id}>
+                <li
+                  key={task.id}
+                  ref={
+                    task.id === highlightedTaskId
+                      ? highlightedTaskRef
+                      : undefined
+                  }
+                  data-highlighted={task.id === highlightedTaskId}
+                  tabIndex={task.id === highlightedTaskId ? -1 : undefined}
+                >
                   <button
                     className="planning-task-list__complete focus-visible-control"
                     type="button"
@@ -170,8 +197,23 @@ export function PlanningWorkspace({
                     {task.notes && <p>{task.notes}</p>}
                   </div>
                   {task.dueAt && (
-                    <time dateTime={task.dueAt}>{dueLabel(task.dueAt)}</time>
+                    <time
+                      dateTime={task.dueAt}
+                      data-due-state={taskDueState(task)}
+                    >
+                      {taskDueLabel(task)}
+                    </time>
                   )}
+                  <button
+                    className="planning-row-edit focus-visible-control"
+                    type="button"
+                    onClick={() => onEditTask(task)}
+                    disabled={Boolean(pendingTask)}
+                    aria-label={copy.home.editTask(task.title)}
+                  >
+                    <Pencil aria-hidden="true" />
+                    <span>{copy.actions.edit}</span>
+                  </button>
                 </li>
               ))}
             </ul>
@@ -318,10 +360,12 @@ function ScheduleRow({
   entry,
   highlighted,
   elementRef,
+  onEdit,
 }: {
   entry: ScheduleEntry;
   highlighted: boolean;
   elementRef?: RefObject<HTMLLIElement | null>;
+  onEdit(entry: ScheduleEntry): void;
 }) {
   return (
     <li
@@ -341,6 +385,24 @@ function ScheduleRow({
             `${formatTime(entry.startsAt)}–${formatTime(entry.endsAt)}`}
         </p>
       </div>
+      {entry.source === "manual" ? (
+        <button
+          className="planning-row-edit focus-visible-control"
+          type="button"
+          onClick={() => onEdit(entry)}
+          aria-label={copy.schedule.editSchedule(entry.title)}
+        >
+          <Pencil aria-hidden="true" />
+          <span>{copy.actions.edit}</span>
+        </button>
+      ) : (
+        <span
+          className="planning-row-source"
+          title={copy.schedule.connectedCalendarEdit}
+        >
+          {copy.schedule.connectedCalendar}
+        </span>
+      )}
     </li>
   );
 }
@@ -391,6 +453,14 @@ function dueLabel(value: string) {
     month: "numeric",
     day: "numeric",
   }).format(new Date(value));
+}
+
+function taskDueLabel(task: Task): string {
+  const state = taskDueState(task);
+  if (state === "overdue") return copy.home.overdue;
+  if (state === "today") return copy.home.dueToday;
+  if (state === "tomorrow") return copy.home.dueTomorrow;
+  return task.dueAt ? dueLabel(task.dueAt) : "";
 }
 
 function completedAtLabel(value: string) {
