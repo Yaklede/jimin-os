@@ -11,7 +11,10 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    Database, StorageError, auth::append_change, planning::TaskStatus, work::ProjectStatus,
+    Database, StorageError,
+    auth::{append_change, append_delete_change},
+    planning::TaskStatus,
+    work::ProjectStatus,
 };
 
 const MAX_CONTENT_CHARS: usize = 24_000;
@@ -155,6 +158,10 @@ pub enum AgentActionCommand {
         due_at: Option<OffsetDateTime>,
         expected_version: i64,
     },
+    DeleteProject {
+        id: Uuid,
+        expected_version: i64,
+    },
 }
 
 impl AgentActionCommand {
@@ -261,6 +268,10 @@ impl AgentActionCommand {
             Self::CancelSchedule {
                 id,
                 expected_version,
+            }
+            | Self::DeleteProject {
+                id,
+                expected_version,
             } => {
                 if is_v7(*id) && *expected_version > 0 {
                     Ok(())
@@ -334,6 +345,7 @@ impl AgentActionCommand {
             Self::CancelSchedule { .. } => "cancel_schedule",
             Self::CreateProject { .. } => "create_project",
             Self::UpdateProject { .. } => "update_project",
+            Self::DeleteProject { .. } => "delete_project",
         }
     }
 
@@ -346,7 +358,8 @@ impl AgentActionCommand {
             | Self::UpdateSchedule { id, .. }
             | Self::CancelSchedule { id, .. }
             | Self::CreateProject { id, .. }
-            | Self::UpdateProject { id, .. } => *id,
+            | Self::UpdateProject { id, .. }
+            | Self::DeleteProject { id, .. } => *id,
         }
     }
 }
@@ -2959,6 +2972,26 @@ async fn persist_agent_action(
             .ok_or(StorageError::IdentityConflict)?;
             ("project", *id, version)
         }
+        AgentActionCommand::DeleteProject {
+            id,
+            expected_version,
+        } => {
+            let version = sqlx::query_scalar::<_, i64>(
+                "\
+                DELETE FROM projects
+                WHERE id = $1 AND user_id = $2 AND version = $3
+                RETURNING version",
+            )
+            .bind(id)
+            .bind(user_id)
+            .bind(expected_version)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|error| classify(&error))?
+            .ok_or(StorageError::IdentityConflict)?;
+            append_delete_change(transaction, user_id, "project", *id, version).await?;
+            return Ok(());
+        }
     };
     append_change(transaction, user_id, entity_type, entity_id, version).await
 }
@@ -3298,7 +3331,10 @@ fn valid_presentation_item(item: &AssistantPresentationItem) -> bool {
             is_v7(*id)
                 && is_v7(*workspace_id)
                 && valid_text(title, MAX_TITLE_CHARS, false)
-                && matches!(status.as_str(), "active" | "paused" | "completed")
+                && matches!(
+                    status.as_str(),
+                    "active" | "paused" | "completed" | "removed"
+                )
                 && objective
                     .as_deref()
                     .is_none_or(|value| valid_text(value, MAX_PRESENTATION_DETAIL_CHARS, true))

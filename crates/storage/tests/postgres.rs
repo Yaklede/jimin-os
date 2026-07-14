@@ -1037,6 +1037,166 @@ async fn structured_agent_action_and_completion_message_commit_together() {
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
+    reason = "The integration test verifies project deletion, task detachment, sync tombstone, and agent audit in one transaction."
+)]
+async fn structured_agent_project_delete_commits_a_sync_tombstone() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        1,
+        Duration::from_secs(2),
+    )
+    .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let provisioned = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let personal = database
+        .workspaces_for_user(provisioned.profile.id)
+        .await
+        .expect("workspaces should load")
+        .into_iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Personal)
+        .expect("personal workspace should exist");
+    let project = database
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: provisioned.profile.id,
+            workspace_id: personal.id,
+            title: "비스킷링크".to_owned(),
+            objective: None,
+            risk_level: 0,
+            next_action: None,
+            due_at: None,
+        })
+        .await
+        .expect("project should persist");
+    let task = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id: provisioned.profile.id,
+            project_id: Some(project.id),
+            title: "연결 일감".to_owned(),
+            notes: None,
+            priority: 1,
+            due_at: None,
+        })
+        .await
+        .expect("linked task should persist");
+    let conversation_id = Uuid::now_v7();
+    database
+        .create_conversation(&NewConversation {
+            id: conversation_id,
+            user_id: provisioned.profile.id,
+            title: Some("프로젝트 제거".to_owned()),
+        })
+        .await
+        .expect("conversation should persist");
+    let queued = database
+        .enqueue_agent_turn(&NewAgentTurn {
+            job_id: Uuid::now_v7(),
+            message_id: Uuid::now_v7(),
+            client_message_id: Uuid::now_v7(),
+            user_id: provisioned.profile.id,
+            conversation_id,
+            content: "개인 프로젝트에서 비스킷링크 프로젝트 제거해".to_owned(),
+        })
+        .await
+        .expect("turn should queue");
+    let runner_id = "project-delete-agent";
+    let claim = database
+        .claim_next_agent_job(runner_id, Duration::from_secs(30))
+        .await
+        .expect("claim should succeed")
+        .expect("queued job should be claimed");
+    assert!(
+        database
+            .start_agent_job(
+                claim.id,
+                runner_id,
+                "thread-project-delete",
+                Duration::from_secs(30),
+            )
+            .await
+            .expect("job should start")
+    );
+    assert!(
+        database
+            .complete_agent_job_with_action(
+                claim.id,
+                runner_id,
+                Uuid::now_v7(),
+                "비스킷링크 프로젝트를 제거했어요.",
+                Some(&AssistantPresentation {
+                    kind: AssistantPresentationKind::Summary,
+                    title: "프로젝트를 제거했어요".to_owned(),
+                    items: Vec::new(),
+                    layout: AssistantPresentationLayout::Stack,
+                    sections: Vec::new(),
+                    focus_item_id: None,
+                }),
+                &AgentActionCommand::DeleteProject {
+                    id: project.id,
+                    expected_version: project.version,
+                },
+            )
+            .await
+            .expect("deletion and result should commit")
+    );
+    assert!(
+        database
+            .projects_for_workspace(provisioned.profile.id, personal.id)
+            .await
+            .expect("projects should load")
+            .is_empty()
+    );
+
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("test database should be reachable");
+    let detached_project_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT project_id FROM tasks WHERE id = $1")
+            .bind(task.id)
+            .fetch_one(&pool)
+            .await
+            .expect("detached task should load");
+    assert_eq!(detached_project_id, None);
+    let sync_operation: String = sqlx::query_scalar(
+        "SELECT operation FROM sync_changes WHERE user_id = $1 AND entity_type = 'project' AND entity_id = $2 ORDER BY sequence DESC LIMIT 1",
+    )
+    .bind(provisioned.profile.id)
+    .bind(project.id)
+    .fetch_one(&pool)
+    .await
+    .expect("project tombstone should load");
+    assert_eq!(sync_operation, "delete");
+    let audit: (Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT executed_action_type, executed_entity_id FROM agent_jobs WHERE id = $1",
+    )
+    .bind(queued.job_id)
+    .fetch_one(&pool)
+    .await
+    .expect("agent audit should load");
+    assert_eq!(audit, (Some("delete_project".to_owned()), Some(project.id)));
+    let ordered_audit: (String, Uuid) = sqlx::query_as(
+        "SELECT action_type, entity_id FROM agent_job_action_executions WHERE job_id = $1 AND action_index = 0",
+    )
+    .bind(queued.job_id)
+    .fetch_one(&pool)
+    .await
+    .expect("ordered agent audit should load");
+    assert_eq!(ordered_audit, ("delete_project".to_owned(), project.id));
+
+    pool.close().await;
+    database.close().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
     reason = "The integration test verifies batch mutation atomicity and the ordered audit trail."
 )]
 async fn structured_agent_batch_actions_commit_as_one_turn() {

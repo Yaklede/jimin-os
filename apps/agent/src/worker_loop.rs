@@ -96,6 +96,7 @@ enum StructuredAssistantActionKind {
     CancelSchedule,
     CreateProject,
     UpdateProject,
+    DeleteProject,
 }
 
 #[derive(Debug, Deserialize)]
@@ -508,6 +509,7 @@ fn render_contextualized_turn(
          You may select up to 32 local planning actions in the actions array. Use an empty array for questions or ambiguous requests. \
          When the user asks to complete, cancel, or update several records, include one action for every matched record. \
          For updates, copy every replacement field from server context and change only what the user requested. \
+         When the user explicitly asks to delete or remove an existing project, use delete_project; its linked tasks become unassigned. \
          Use exact existing entity, workspace, and project IDs; the server creates IDs for new records. \
          Use RFC3339 timestamps with the current +09:00 offset. An empty optional string means no value. \
          Never modify a Google Calendar entry; ask the user to change it in Google Calendar. \
@@ -799,7 +801,8 @@ fn assistant_output_schema() -> Value {
                                 "update_schedule",
                                 "cancel_schedule",
                                 "create_project",
-                                "update_project"
+                                "update_project",
+                                "delete_project"
                             ]
                         },
                         "entityId": { "type": "string" },
@@ -1174,6 +1177,18 @@ fn validated_agent_action(
                 expected_version: project.version,
             }
         }
+        StructuredAssistantActionKind::DeleteProject => {
+            let id = parse_existing_id(&action.entity_id)?;
+            let project = context
+                .projects
+                .iter()
+                .find(|project| project.id == id)
+                .ok_or(())?;
+            AgentActionCommand::DeleteProject {
+                id,
+                expected_version: project.version,
+            }
+        }
     };
     Ok(Some(command))
 }
@@ -1211,7 +1226,8 @@ const fn agent_action_entity_id(action: &AgentActionCommand) -> Uuid {
         | AgentActionCommand::UpdateSchedule { id, .. }
         | AgentActionCommand::CancelSchedule { id, .. }
         | AgentActionCommand::CreateProject { id, .. }
-        | AgentActionCommand::UpdateProject { id, .. } => *id,
+        | AgentActionCommand::UpdateProject { id, .. }
+        | AgentActionCommand::DeleteProject { id, .. } => *id,
     }
 }
 
@@ -1275,6 +1291,9 @@ fn agent_action_results(
     let all_created_projects = actions
         .iter()
         .all(|action| matches!(action, AgentActionCommand::CreateProject { .. }));
+    let all_deleted_projects = actions
+        .iter()
+        .all(|action| matches!(action, AgentActionCommand::DeleteProject { .. }));
     let count = actions.len();
     let (answer, title, task_section_title, schedule_section_title, project_section_title) =
         if all_completed_tasks {
@@ -1324,6 +1343,14 @@ fn agent_action_results(
                 "처리한 할 일",
                 "처리한 일정",
                 "추가한 프로젝트",
+            )
+        } else if all_deleted_projects {
+            (
+                format!("프로젝트 {count}개를 제거했어요."),
+                format!("프로젝트 {count}개를 제거했어요"),
+                "처리한 할 일",
+                "처리한 일정",
+                "제거한 프로젝트",
             )
         } else {
             (
@@ -1595,6 +1622,34 @@ fn agent_action_result(
                         .as_deref()
                         .map(|value| truncate_chars(value, MAX_PRESENTATION_DETAIL_CHARS)),
                     risk_level: *risk_level,
+                    open_task_count: project.open_task_count,
+                },
+            )
+        }
+        AgentActionCommand::DeleteProject { id, .. } => {
+            let project = context
+                .projects
+                .iter()
+                .find(|project| project.id == *id)
+                .ok_or(())?;
+            (
+                format!("{} 프로젝트를 제거했어요.", project.title),
+                "프로젝트를 제거했어요",
+                "제거한 프로젝트",
+                AssistantPresentationKind::Projects,
+                AssistantPresentationSectionKind::Projects,
+                AssistantPresentationView::Cards,
+                AssistantPresentationItem::Project {
+                    id: project.id,
+                    workspace_id: project.workspace_id,
+                    title: project.title.clone(),
+                    status: "removed".to_owned(),
+                    objective: project
+                        .objective
+                        .as_deref()
+                        .map(|value| truncate_chars(value, MAX_PRESENTATION_DETAIL_CHARS)),
+                    next_action: None,
+                    risk_level: project.risk_level,
                     open_task_count: project.open_task_count,
                 },
             )
@@ -2091,7 +2146,7 @@ async fn wait_for_shutdown_signal() -> std::io::Result<()> {
 mod tests {
     use jimin_codex_client::Error as CodexError;
     use jimin_storage::{
-        agent::AgentActionCommand,
+        agent::{AgentActionCommand, AssistantPresentationItem},
         gmail::GmailMessage,
         planning::{ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus},
         work::{Project, ProjectStatus, Workspace, WorkspaceScope},
@@ -2468,6 +2523,85 @@ mod tests {
                 due_at: Some(actual_due_at),
                 ..
             } if title == "일어나기" && actual_due_at == due_at
+        ));
+    }
+
+    #[test]
+    fn structured_project_delete_uses_authenticated_version_and_removed_result() {
+        let workspace_id = Uuid::now_v7();
+        let project = Project {
+            id: Uuid::now_v7(),
+            workspace_id,
+            title: "비스킷링크".to_owned(),
+            objective: Some("개인 프로젝트".to_owned()),
+            status: ProjectStatus::Active,
+            risk_level: 1,
+            next_action: Some("다음 작업 확인".to_owned()),
+            due_at: None,
+            open_task_count: 2,
+            version: 7,
+        };
+        let context = TurnContext {
+            prompt: String::new(),
+            schedule: Vec::new(),
+            tasks: Vec::new(),
+            daily_tasks: Vec::new(),
+            workspaces: vec![Workspace {
+                id: workspace_id,
+                scope: WorkspaceScope::Personal,
+                name: "개인".to_owned(),
+                version: 1,
+            }],
+            projects: vec![project.clone()],
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
+        };
+        let response = serde_json::json!({
+            "answer": "요청을 처리 중입니다.",
+            "presentation": {
+                "title": "",
+                "layout": "stack",
+                "focusEntityId": "",
+                "sections": []
+            },
+            "actions": [{
+                "kind": "delete_project",
+                "entityId": project.id,
+                "workspaceId": workspace_id,
+                "projectId": "",
+                "title": "",
+                "notes": "",
+                "priority": 0,
+                "dueAt": "",
+                "startsAt": "",
+                "endsAt": "",
+                "timeZone": "",
+                "status": "",
+                "riskLevel": 0,
+                "objective": "",
+                "nextAction": ""
+            }]
+        })
+        .to_string();
+
+        let (_, _, actions) =
+            validated_assistant_response(&response, &context).expect("delete action result");
+        assert!(matches!(
+            actions.as_slice(),
+            [AgentActionCommand::DeleteProject {
+                id,
+                expected_version: 7,
+            }] if *id == project.id
+        ));
+
+        let (answer, presentation) =
+            agent_action_results(&actions, &context).expect("removed project presentation");
+        assert_eq!(answer, "비스킷링크 프로젝트를 제거했어요.");
+        assert_eq!(presentation.sections[0].title, "제거한 프로젝트");
+        assert!(matches!(
+            presentation.items.as_slice(),
+            [AssistantPresentationItem::Project { id, status, .. }]
+                if *id == project.id && status == "removed"
         ));
     }
 

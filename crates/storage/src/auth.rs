@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::{Database, StorageError};
 
 const ACTIVE_STATUS: &str = "active";
+const SYNC_DELETE: &str = "delete";
 const SYNC_UPSERT: &str = "upsert";
 
 /// Validated, server-side inputs for creating a device session after Google
@@ -1139,6 +1140,43 @@ pub(crate) async fn append_change(
     entity_id: Uuid,
     entity_version: i64,
 ) -> Result<(), StorageError> {
+    append_sync_change(
+        transaction,
+        user_id,
+        entity_type,
+        entity_id,
+        entity_version,
+        SYNC_UPSERT,
+    )
+    .await
+}
+
+pub(crate) async fn append_delete_change(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    entity_type: &str,
+    entity_id: Uuid,
+    entity_version: i64,
+) -> Result<(), StorageError> {
+    append_sync_change(
+        transaction,
+        user_id,
+        entity_type,
+        entity_id,
+        entity_version,
+        SYNC_DELETE,
+    )
+    .await
+}
+
+async fn append_sync_change(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    entity_type: &str,
+    entity_id: Uuid,
+    entity_version: i64,
+    operation: &str,
+) -> Result<(), StorageError> {
     sqlx::query(
         "\
         INSERT INTO sync_changes (user_id, entity_type, entity_id, operation, entity_version)
@@ -1147,7 +1185,7 @@ pub(crate) async fn append_change(
     .bind(user_id)
     .bind(entity_type)
     .bind(entity_id)
-    .bind(SYNC_UPSERT)
+    .bind(operation)
     .bind(entity_version)
     .execute(&mut **transaction)
     .await
