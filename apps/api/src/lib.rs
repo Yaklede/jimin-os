@@ -363,6 +363,7 @@ pub struct HomeSnapshotResponse {
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GoogleCalendarConnectionResponse {
+    available: bool,
     status: String,
     email: Option<String>,
     granted_scopes: Vec<String>,
@@ -2596,7 +2597,11 @@ async fn get_google_calendar_connection(
         .calendar_account_for_user(principal.identity().user_id())
         .await
     {
-        Ok(account) => Json(calendar_connection_response(account)).into_response(),
+        Ok(account) => Json(calendar_connection_response(
+            account,
+            state.calendar_oauth().is_some(),
+        ))
+        .into_response(),
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -2856,7 +2861,7 @@ async fn sync_google_calendar(
     };
     match synchronize_google_calendar(planning, calendar_oauth, account.id, user_id).await {
         Ok(()) => match planning.calendar_account_for_user(user_id).await {
-            Ok(connection) => Json(calendar_connection_response(connection)).into_response(),
+            Ok(connection) => Json(calendar_connection_response(connection, true)).into_response(),
             Err(error) => storage_error_response(&error, request_id),
         },
         Err(error) => {
@@ -3004,9 +3009,11 @@ fn parse_client_platform(value: &str) -> Option<ClientPlatform> {
 
 fn calendar_connection_response(
     account: Option<CalendarAccount>,
+    available: bool,
 ) -> GoogleCalendarConnectionResponse {
     let Some(account) = account else {
         return GoogleCalendarConnectionResponse {
+            available,
             status: "not_connected".to_owned(),
             email: None,
             granted_scopes: Vec::new(),
@@ -3024,6 +3031,7 @@ fn calendar_connection_response(
         CalendarAccountStatus::Error => "error",
     };
     GoogleCalendarConnectionResponse {
+        available,
         status: status.to_owned(),
         email: Some(account.email),
         granted_scopes: account.granted_scopes,
@@ -3609,6 +3617,18 @@ mod tests {
     use super::*;
 
     struct FakeProbe(Readiness);
+
+    #[test]
+    fn calendar_connection_state_exposes_server_availability_without_credentials() {
+        let unavailable = calendar_connection_response(None, false);
+        assert!(!unavailable.available);
+        assert_eq!(unavailable.status, "not_connected");
+        assert_eq!(unavailable.email, None);
+
+        let available = calendar_connection_response(None, true);
+        assert!(available.available);
+        assert_eq!(available.status, "not_connected");
+    }
 
     #[async_trait]
     impl ReadinessProbe for FakeProbe {
