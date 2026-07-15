@@ -1,10 +1,20 @@
 //! Server-owned schedule and task persistence used before any external
 //! calendar provider is linked.
 
+use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::{Database, StorageError, auth::append_change};
+use crate::{
+    Database, StorageError,
+    auth::append_change,
+    calendar::PrimaryCalendarMutationTarget,
+    calendar_mutation::{
+        ScheduleCalendarMutationOperation, ScheduleCalendarMutationPayload,
+        attach_schedule_and_queue_create, queue_linked_schedule_mutation,
+    },
+    webhook::{project_event_payload, queue_project_event_in_transaction},
+};
 
 const MAX_TITLE_CHARS: usize = 200;
 const MAX_NOTES_CHARS: usize = 10_000;
@@ -201,6 +211,16 @@ pub enum TaskStatus {
     Cancelled,
 }
 
+/// Result of an idempotent task deletion request. Tasks are soft deleted so
+/// audit and sync history remain available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteTaskOutcome {
+    Deleted,
+    AlreadyDeleted,
+    AlreadyAbsent,
+    VersionConflict,
+}
+
 #[derive(sqlx::FromRow)]
 struct ScheduleRow {
     id: Uuid,
@@ -282,24 +302,28 @@ impl TryFrom<TaskRow> for Task {
 }
 
 impl Database {
-    /// Creates a manual schedule entry and appends the matching sync change in
-    /// the same transaction.
+    /// Creates a manual schedule entry using its client-generated ID as the
+    /// idempotency key. An exact retry returns the existing entry without
+    /// appending another sync change; reusing the ID for another owner or
+    /// payload is rejected.
     ///
     /// # Errors
     ///
-    /// Returns a classified storage error without exposing personal entry text.
+    /// Returns an identity-conflict error when the idempotency key has already
+    /// been used with different schedule data, and a classified persistence
+    /// error when the atomic write cannot commit.
     pub async fn create_schedule_entry(
         &self,
         entry: &NewScheduleEntry,
     ) -> Result<ScheduleEntry, StorageError> {
         entry.validate()?;
-        let user_id = entry.user_id;
         let mut transaction = self.pool().begin().await.map_err(classify)?;
         let row = sqlx::query_as::<_, ScheduleRow>(
             "\
             INSERT INTO schedule_entries (
                 id, user_id, title, notes, starts_at, ends_at, time_zone, source, status
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'manual', 'confirmed')
+            ON CONFLICT (id) DO NOTHING
             RETURNING id, title, notes, starts_at, ends_at, time_zone, status, source,
                 TRUE AS editable, version",
         )
@@ -316,20 +340,145 @@ impl Database {
         .bind(entry.starts_at)
         .bind(entry.ends_at)
         .bind(entry.time_zone.trim())
-        .fetch_one(&mut *transaction)
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(classify)?;
-        let entry = ScheduleEntry::try_from(row)?;
+        let Some(row) = row else {
+            let existing = sqlx::query_as::<_, ScheduleRow>(
+                "\
+                SELECT id, title, notes, starts_at, ends_at, time_zone, status, source,
+                    TRUE AS editable, version
+                FROM schedule_entries
+                WHERE id = $1
+                  AND user_id = $2
+                  AND source = 'manual'
+                  AND status = 'confirmed'",
+            )
+            .bind(entry.id)
+            .bind(entry.user_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(classify)?;
+            let existing = existing
+                .map(ScheduleEntry::try_from)
+                .transpose()?
+                .filter(|existing| schedule_matches_new(existing, entry))
+                .ok_or(StorageError::IdentityConflict)?;
+            transaction.commit().await.map_err(classify)?;
+            return Ok(existing);
+        };
+        let created = ScheduleEntry::try_from(row)?;
         append_change(
             &mut transaction,
-            user_id,
+            entry.user_id,
             "schedule_entry",
-            entry.id,
-            entry.version,
+            created.id,
+            created.version,
         )
         .await?;
         transaction.commit().await.map_err(classify)?;
-        Ok(entry)
+        Ok(created)
+    }
+
+    /// Creates a server-owned schedule and durably journals its Google create
+    /// in the same transaction. The returned schedule remains the canonical UI
+    /// record while the provider worker reconciles the deterministic event ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-configuration error for malformed schedule data or
+    /// an ownership mismatch, and a persistence error when the atomic write
+    /// cannot commit.
+    pub async fn create_schedule_entry_with_calendar_outbox(
+        &self,
+        entry: &NewScheduleEntry,
+        target: &PrimaryCalendarMutationTarget,
+    ) -> Result<ScheduleEntry, StorageError> {
+        entry.validate()?;
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let row = sqlx::query_as::<_, ScheduleRow>(
+            "\
+            INSERT INTO schedule_entries (
+                id, user_id, title, notes, starts_at, ends_at, time_zone, source, status
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'manual', 'confirmed')
+            ON CONFLICT (id) DO NOTHING
+            RETURNING id, title, notes, starts_at, ends_at, time_zone, status, source,
+                TRUE AS editable, version",
+        )
+        .bind(entry.id)
+        .bind(entry.user_id)
+        .bind(entry.title.trim())
+        .bind(
+            entry
+                .notes
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(entry.starts_at)
+        .bind(entry.ends_at)
+        .bind(entry.time_zone.trim())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some(row) = row else {
+            let existing = sqlx::query_as::<_, ScheduleRow>(
+                "\
+                SELECT schedule.id, schedule.title, schedule.notes, schedule.starts_at,
+                    schedule.ends_at, schedule.time_zone, schedule.status, schedule.source,
+                    TRUE AS editable, schedule.version
+                FROM schedule_entries AS schedule
+                INNER JOIN schedule_calendar_links AS link
+                    ON link.schedule_entry_id = schedule.id
+                WHERE schedule.id = $1
+                  AND schedule.user_id = $2
+                  AND schedule.source = 'manual'
+                  AND schedule.status = 'confirmed'
+                  AND link.user_id = $2
+                  AND link.account_id = $3
+                  AND link.calendar_id = $4
+                  AND EXISTS (
+                      SELECT 1 FROM calendar_mutations AS mutation
+                      WHERE mutation.schedule_entry_id = schedule.id
+                        AND mutation.operation = 'create'
+                  )",
+            )
+            .bind(entry.id)
+            .bind(entry.user_id)
+            .bind(target.account_id)
+            .bind(target.calendar_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(classify)?;
+            let existing = existing
+                .map(ScheduleEntry::try_from)
+                .transpose()?
+                .filter(|existing| schedule_matches_new(existing, entry))
+                .ok_or(StorageError::IdentityConflict)?;
+            transaction.commit().await.map_err(classify)?;
+            return Ok(existing);
+        };
+        let created = ScheduleEntry::try_from(row)?;
+        let payload = calendar_payload(&created);
+        attach_schedule_and_queue_create(
+            &mut transaction,
+            entry.user_id,
+            created.id,
+            created.version,
+            target,
+            &payload,
+        )
+        .await?;
+        append_change(
+            &mut transaction,
+            entry.user_id,
+            "schedule_entry",
+            created.id,
+            created.version,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        Ok(created)
     }
 
     /// Lists the owning user's confirmed schedule entries that overlap the
@@ -375,6 +524,11 @@ impl Database {
                   AND time_kind = 'date_time'
                   AND start_at < $2
                   AND end_at > $3
+                  AND NOT EXISTS (
+                      SELECT 1 FROM schedule_calendar_links AS link
+                      WHERE link.calendar_id = calendar_events.calendar_id
+                        AND link.provider_event_id = calendar_events.provider_event_id
+                  )
                 UNION ALL
                 SELECT id, title, description_text AS notes,
                     (start_date::timestamp AT TIME ZONE 'UTC') AS starts_at,
@@ -388,6 +542,11 @@ impl Database {
                   AND time_kind = 'date'
                   AND start_date < $4
                   AND end_date > $5
+                  AND NOT EXISTS (
+                      SELECT 1 FROM schedule_calendar_links AS link
+                      WHERE link.calendar_id = calendar_events.calendar_id
+                        AND link.provider_event_id = calendar_events.provider_event_id
+                  )
             ) AS schedule
             ORDER BY schedule.starts_at ASC, schedule.id ASC",
         )
@@ -438,6 +597,11 @@ impl Database {
                   AND provider_deleted_at IS NULL
                   AND provider_status IN ('confirmed', 'tentative')
                   AND time_kind = 'date_time'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM schedule_calendar_links AS link
+                      WHERE link.calendar_id = calendar_events.calendar_id
+                        AND link.provider_event_id = calendar_events.provider_event_id
+                  )
             ) AS schedule
             LIMIT 1",
         )
@@ -509,6 +673,15 @@ impl Database {
             entry.version,
         )
         .await?;
+        queue_linked_schedule_mutation(
+            &mut transaction,
+            update.user_id,
+            entry.id,
+            entry.version,
+            ScheduleCalendarMutationOperation::Update,
+            &calendar_payload(&entry),
+        )
+        .await?;
         transaction.commit().await.map_err(classify)?;
         Ok(Some(entry))
     }
@@ -531,7 +704,7 @@ impl Database {
             return Err(StorageError::InvalidConfiguration);
         }
         let mut transaction = self.pool().begin().await.map_err(classify)?;
-        let version = sqlx::query_scalar::<_, i64>(
+        let row = sqlx::query_as::<_, ScheduleRow>(
             "\
             UPDATE schedule_entries
             SET status = 'cancelled'
@@ -540,7 +713,8 @@ impl Database {
               AND version = $3
               AND source = 'manual'
               AND status = 'confirmed'
-            RETURNING version",
+            RETURNING id, title, notes, starts_at, ends_at, time_zone, status, source,
+                TRUE AS editable, version",
         )
         .bind(schedule_entry_id)
         .bind(user_id)
@@ -548,18 +722,28 @@ impl Database {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(classify)?;
-        if let Some(version) = version {
+        let cancelled = row.map(ScheduleEntry::try_from).transpose()?;
+        if let Some(entry) = cancelled.as_ref() {
             append_change(
                 &mut transaction,
                 user_id,
                 "schedule_entry",
                 schedule_entry_id,
-                version,
+                entry.version,
+            )
+            .await?;
+            queue_linked_schedule_mutation(
+                &mut transaction,
+                user_id,
+                schedule_entry_id,
+                entry.version,
+                ScheduleCalendarMutationOperation::Delete,
+                &calendar_payload(entry),
             )
             .await?;
         }
         transaction.commit().await.map_err(classify)?;
-        Ok(version)
+        Ok(cancelled.map(|entry| entry.version))
     }
 
     /// Creates an open personal task and appends its matching sync change in
@@ -602,8 +786,86 @@ impl Database {
         .map_err(classify)?;
         let task = Task::try_from(row)?;
         append_change(&mut transaction, user_id, "task", task.id, task.version).await?;
+        queue_task_webhook_in_transaction(&mut transaction, user_id, &task, "task.created").await?;
         transaction.commit().await.map_err(classify)?;
         Ok(task)
+    }
+
+    /// Creates a personal task using the client-generated task ID as the
+    /// idempotency key. An exact retry returns the existing task without
+    /// appending another sync change; reusing the ID for a different payload
+    /// or owner is rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an identity-conflict error when the idempotency key has already
+    /// been used with different task data, and a classified persistence error
+    /// when the atomic write cannot commit.
+    pub async fn create_task_idempotently(&self, task: &NewTask) -> Result<Task, StorageError> {
+        task.validate()?;
+        if let Some(project_id) = task.project_id
+            && !self
+                .project_exists_for_user(task.user_id, project_id)
+                .await?
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let row = sqlx::query_as::<_, TaskRow>(
+            "\
+            INSERT INTO tasks (id, user_id, project_id, title, notes, status, priority, due_at)
+            VALUES ($1, $2, $3, $4, $5, 'open', $6, $7)
+            ON CONFLICT (id) DO NOTHING
+            RETURNING id, project_id, title, notes, status, priority, due_at, completed_at, version",
+        )
+        .bind(task.id)
+        .bind(task.user_id)
+        .bind(task.project_id)
+        .bind(task.title.trim())
+        .bind(
+            task.notes
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(task.priority)
+        .bind(task.due_at)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some(row) = row else {
+            let existing = sqlx::query_as::<_, TaskRow>(
+                "\
+                SELECT id, project_id, title, notes, status, priority, due_at, completed_at, version
+                FROM tasks
+                WHERE id = $1 AND user_id = $2 AND status = 'open'",
+            )
+            .bind(task.id)
+            .bind(task.user_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(classify)?;
+            let existing = existing
+                .map(Task::try_from)
+                .transpose()?
+                .filter(|existing| task_matches_new(existing, task))
+                .ok_or(StorageError::IdentityConflict)?;
+            transaction.commit().await.map_err(classify)?;
+            return Ok(existing);
+        };
+        let created = Task::try_from(row)?;
+        append_change(
+            &mut transaction,
+            task.user_id,
+            "task",
+            created.id,
+            created.version,
+        )
+        .await?;
+        queue_task_webhook_in_transaction(&mut transaction, task.user_id, &created, "task.created")
+            .await?;
+        transaction.commit().await.map_err(classify)?;
+        Ok(created)
     }
 
     /// Lists active tasks in priority and due-date order for a personal home
@@ -821,6 +1083,14 @@ impl Database {
         }
         let status = task_status_name(update.status);
         let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let previous_status = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM tasks WHERE id = $1 AND user_id = $2 FOR UPDATE",
+        )
+        .bind(update.id)
+        .bind(update.user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
         let row = sqlx::query_as::<_, TaskRow>(
             "\
             UPDATE tasks
@@ -868,8 +1138,96 @@ impl Database {
             task.version,
         )
         .await?;
+        let event_type = task_update_event_type(previous_status.as_deref(), task.status);
+        queue_task_webhook_in_transaction(&mut transaction, update.user_id, &task, event_type)
+            .await?;
         transaction.commit().await.map_err(classify)?;
         Ok(Some(task))
+    }
+
+    /// Soft deletes one owned task with optimistic concurrency. Repeating a
+    /// successful deletion is safe, and missing or foreign tasks are handled
+    /// identically to avoid disclosing another user's data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed IDs or
+    /// versions and a classified persistence error when storage is unavailable.
+    pub async fn delete_task(
+        &self,
+        user_id: Uuid,
+        task_id: Uuid,
+        expected_version: i64,
+    ) -> Result<DeleteTaskOutcome, StorageError> {
+        if !is_v7(user_id) || !is_v7(task_id) || expected_version <= 0 {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let current = sqlx::query_as::<_, TaskRow>(
+            "\
+            SELECT id, project_id, title, notes, status, priority, due_at, completed_at, version
+            FROM tasks
+            WHERE id = $1 AND user_id = $2
+            FOR UPDATE",
+        )
+        .bind(task_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some(current) = current else {
+            transaction.commit().await.map_err(classify)?;
+            return Ok(DeleteTaskOutcome::AlreadyAbsent);
+        };
+        let current = Task::try_from(current)?;
+        if current.status == TaskStatus::Cancelled {
+            transaction.commit().await.map_err(classify)?;
+            return Ok(DeleteTaskOutcome::AlreadyDeleted);
+        }
+        if current.version != expected_version {
+            transaction.commit().await.map_err(classify)?;
+            return Ok(DeleteTaskOutcome::VersionConflict);
+        }
+
+        let deleted = sqlx::query_as::<_, TaskRow>(
+            "\
+            UPDATE tasks
+            SET status = 'cancelled', completed_at = NULL
+            WHERE id = $1 AND user_id = $2 AND version = $3
+            RETURNING id, project_id, title, notes, status, priority, due_at, completed_at, version",
+        )
+        .bind(task_id)
+        .bind(user_id)
+        .bind(expected_version)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some(deleted) = deleted else {
+            transaction.rollback().await.map_err(classify)?;
+            return Ok(DeleteTaskOutcome::VersionConflict);
+        };
+        let deleted = Task::try_from(deleted)?;
+        append_change(
+            &mut transaction,
+            user_id,
+            "task",
+            deleted.id,
+            deleted.version,
+        )
+        .await?;
+        if let Some(project_id) = deleted.project_id {
+            let payload = project_event_payload("task.deleted", project_id, deleted.id)?;
+            queue_project_event_in_transaction(
+                &mut transaction,
+                user_id,
+                project_id,
+                "task.deleted",
+                &payload,
+            )
+            .await?;
+        }
+        transaction.commit().await.map_err(classify)?;
+        Ok(DeleteTaskOutcome::Deleted)
     }
 
     /// Completes one open task with optimistic version matching. A missing,
@@ -910,6 +1268,8 @@ impl Database {
         };
         let task = Task::try_from(row)?;
         append_change(&mut transaction, user_id, "task", task.id, task.version).await?;
+        queue_task_webhook_in_transaction(&mut transaction, user_id, &task, "task.completed")
+            .await?;
         transaction.commit().await.map_err(classify)?;
         Ok(Some(task))
     }
@@ -927,6 +1287,69 @@ fn valid_text(value: &str, maximum: usize, allow_empty: bool) -> bool {
 
 fn valid_time_zone(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= 80 && !value.chars().any(char::is_control)
+}
+
+fn calendar_payload(entry: &ScheduleEntry) -> ScheduleCalendarMutationPayload {
+    ScheduleCalendarMutationPayload {
+        title: entry.title.clone(),
+        notes: entry.notes.clone(),
+        starts_at: entry.starts_at,
+        ends_at: entry.ends_at,
+        time_zone: entry.time_zone.clone(),
+    }
+}
+
+fn schedule_matches_new(existing: &ScheduleEntry, requested: &NewScheduleEntry) -> bool {
+    existing.title == requested.title.trim()
+        && existing.notes.as_deref()
+            == requested
+                .notes
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        && existing.starts_at == requested.starts_at
+        && existing.ends_at == requested.ends_at
+        && existing.time_zone == requested.time_zone.trim()
+}
+
+fn task_matches_new(existing: &Task, requested: &NewTask) -> bool {
+    existing.project_id == requested.project_id
+        && existing.title == requested.title.trim()
+        && existing.notes.as_deref()
+            == requested
+                .notes
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        && existing.priority == requested.priority
+        && existing.due_at == requested.due_at
+}
+
+async fn queue_task_webhook_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    task: &Task,
+    event_type: &str,
+) -> Result<(), StorageError> {
+    let Some(project_id) = task.project_id else {
+        return Ok(());
+    };
+    let payload = project_event_payload(event_type, project_id, task.id)?;
+    queue_project_event_in_transaction(transaction, user_id, project_id, event_type, &payload)
+        .await?;
+    Ok(())
+}
+
+fn task_update_event_type(
+    previous_status: Option<&str>,
+    current_status: TaskStatus,
+) -> &'static str {
+    match (previous_status, current_status) {
+        (Some("completed"), TaskStatus::Open) => "task.restored",
+        (_, TaskStatus::Completed) => "task.completed",
+        (_, TaskStatus::Cancelled) => "task.deleted",
+        _ => "task.updated",
+    }
 }
 
 fn task_status_name(status: TaskStatus) -> &'static str {

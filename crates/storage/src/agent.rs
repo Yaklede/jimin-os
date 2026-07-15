@@ -13,8 +13,12 @@ use uuid::Uuid;
 use crate::{
     Database, StorageError,
     auth::{append_change, append_delete_change},
+    calendar_mutation::{
+        ScheduleCalendarMutationOperation, ScheduleCalendarMutationPayload,
+        attach_schedule_to_active_primary_and_queue_create, queue_linked_schedule_mutation,
+    },
     planning::TaskStatus,
-    webhook::queue_project_event_in_transaction,
+    webhook::{project_event_payload, queue_project_event_in_transaction},
     work::ProjectStatus,
 };
 
@@ -2839,6 +2843,20 @@ async fn persist_agent_action(
             .fetch_one(&mut **transaction)
             .await
             .map_err(|error| classify(&error))?;
+            attach_schedule_to_active_primary_and_queue_create(
+                transaction,
+                user_id,
+                *id,
+                version,
+                &ScheduleCalendarMutationPayload {
+                    title: title.trim().to_owned(),
+                    notes: trim_optional_text(notes.as_deref()).map(str::to_owned),
+                    starts_at: *starts_at,
+                    ends_at: *ends_at,
+                    time_zone: time_zone.trim().to_owned(),
+                },
+            )
+            .await?;
             ("schedule_entry", *id, version)
         }
         AgentActionCommand::UpdateSchedule {
@@ -2870,19 +2888,44 @@ async fn persist_agent_action(
             .await
             .map_err(|error| classify(&error))?
             .ok_or(StorageError::IdentityConflict)?;
+            queue_linked_schedule_mutation(
+                transaction,
+                user_id,
+                *id,
+                version,
+                ScheduleCalendarMutationOperation::Update,
+                &ScheduleCalendarMutationPayload {
+                    title: title.trim().to_owned(),
+                    notes: trim_optional_text(notes.as_deref()).map(str::to_owned),
+                    starts_at: *starts_at,
+                    ends_at: *ends_at,
+                    time_zone: time_zone.trim().to_owned(),
+                },
+            )
+            .await?;
             ("schedule_entry", *id, version)
         }
         AgentActionCommand::CancelSchedule {
             id,
             expected_version,
         } => {
-            let version = sqlx::query_scalar::<_, i64>(
+            let cancelled = sqlx::query_as::<
+                _,
+                (
+                    i64,
+                    String,
+                    Option<String>,
+                    OffsetDateTime,
+                    OffsetDateTime,
+                    String,
+                ),
+            >(
                 "\
                 UPDATE schedule_entries
                 SET status = 'cancelled'
                 WHERE id = $1 AND user_id = $2 AND source = 'manual'
                   AND status = 'confirmed' AND version = $3
-                RETURNING version",
+                RETURNING version, title, notes, starts_at, ends_at, time_zone",
             )
             .bind(id)
             .bind(user_id)
@@ -2891,6 +2934,22 @@ async fn persist_agent_action(
             .await
             .map_err(|error| classify(&error))?
             .ok_or(StorageError::IdentityConflict)?;
+            let (version, title, notes, starts_at, ends_at, time_zone) = cancelled;
+            queue_linked_schedule_mutation(
+                transaction,
+                user_id,
+                *id,
+                version,
+                ScheduleCalendarMutationOperation::Delete,
+                &ScheduleCalendarMutationPayload {
+                    title,
+                    notes,
+                    starts_at,
+                    ends_at,
+                    time_zone,
+                },
+            )
+            .await?;
             ("schedule_entry", *id, version)
         }
         AgentActionCommand::CreateProject {
@@ -2970,6 +3029,21 @@ async fn persist_agent_action(
             expected_version,
         } => {
             queue_agent_action_webhook(transaction, user_id, action).await?;
+            let detached_tasks = sqlx::query_as::<_, (Uuid, i64)>(
+                "\
+                UPDATE tasks
+                SET project_id = NULL
+                WHERE user_id = $1 AND project_id = $2
+                RETURNING id, version",
+            )
+            .bind(user_id)
+            .bind(id)
+            .fetch_all(&mut **transaction)
+            .await
+            .map_err(|error| classify(&error))?;
+            for (task_id, task_version) in detached_tasks {
+                append_change(transaction, user_id, "task", task_id, task_version).await?;
+            }
             let version = sqlx::query_scalar::<_, i64>(
                 "\
                 DELETE FROM projects
@@ -3028,12 +3102,7 @@ async fn queue_agent_action_webhook(
         _ => (None, "", action.entity_id()),
     };
     if let Some(project_id) = project_id {
-        let payload = serde_json::json!({
-            "event": event_type,
-            "projectId": project_id,
-            "entityId": entity_id,
-            "occurredAt": OffsetDateTime::now_utc(),
-        });
+        let payload = project_event_payload(event_type, project_id, entity_id)?;
         queue_project_event_in_transaction(transaction, user_id, project_id, event_type, &payload)
             .await?;
     }
@@ -3090,6 +3159,20 @@ async fn persist_approved_agent_action(
             .fetch_one(&mut **transaction)
             .await
             .map_err(|error| classify(&error))?;
+            attach_schedule_to_active_primary_and_queue_create(
+                transaction,
+                user_id,
+                id,
+                version,
+                &ScheduleCalendarMutationPayload {
+                    title: title.trim().to_owned(),
+                    notes: None,
+                    starts_at: *starts_at,
+                    ends_at: *ends_at,
+                    time_zone: time_zone.trim().to_owned(),
+                },
+            )
+            .await?;
             append_change(transaction, user_id, "schedule_entry", id, version).await
         }
     }

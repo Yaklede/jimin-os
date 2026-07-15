@@ -3,7 +3,11 @@
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::{Database, StorageError, auth::append_change};
+use crate::{
+    Database, StorageError,
+    auth::{append_change, append_delete_change},
+    webhook::{project_event_payload, queue_project_event_in_transaction},
+};
 
 const MAX_TITLE_CHARS: usize = 200;
 const MAX_OBJECTIVE_CHARS: usize = 10_000;
@@ -73,6 +77,16 @@ pub struct ProjectUpdate {
     pub next_action: Option<String>,
     pub due_at: Option<OffsetDateTime>,
     pub expected_version: i64,
+}
+
+/// Result of deleting one user-owned project with optimistic concurrency.
+/// Missing and foreign projects intentionally share [`Self::AlreadyAbsent`]
+/// so callers cannot use deletion to discover another workspace's records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteProjectOutcome {
+    Deleted,
+    AlreadyAbsent,
+    VersionConflict,
 }
 
 impl NewProject {
@@ -251,6 +265,15 @@ impl Database {
             return Err(StorageError::InvalidConfiguration);
         };
         let project = Project::try_from(row)?;
+        let payload = project_event_payload("project.created", project.id, project.id)?;
+        queue_project_event_in_transaction(
+            &mut transaction,
+            user_id,
+            project.id,
+            "project.created",
+            &payload,
+        )
+        .await?;
         append_change(
             &mut transaction,
             user_id,
@@ -309,6 +332,15 @@ impl Database {
             return Ok(None);
         };
         let project = Project::try_from(row)?;
+        let payload = project_event_payload("project.updated", project.id, project.id)?;
+        queue_project_event_in_transaction(
+            &mut transaction,
+            update.user_id,
+            project.id,
+            "project.updated",
+            &payload,
+        )
+        .await?;
         append_change(
             &mut transaction,
             update.user_id,
@@ -319,6 +351,101 @@ impl Database {
         .await?;
         transaction.commit().await.map_err(classify)?;
         Ok(Some(project))
+    }
+
+    /// Deletes one owned project after safely detaching its tasks. Replaying a
+    /// successful deletion is idempotent. A foreign project is treated as
+    /// absent, while a stale version for an owned project remains visible as a
+    /// concurrency conflict.
+    ///
+    /// Task detachment, sync changes, the project deletion webhook snapshot,
+    /// and the project tombstone are committed atomically. This prevents a
+    /// synced device from retaining a task link to a project that no longer
+    /// exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed IDs or
+    /// versions and a classified persistence error for database failures.
+    pub async fn delete_project(
+        &self,
+        user_id: Uuid,
+        project_id: Uuid,
+        expected_version: i64,
+    ) -> Result<DeleteProjectOutcome, StorageError> {
+        if !is_v7(user_id) || !is_v7(project_id) || expected_version <= 0 {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let current_version = sqlx::query_scalar::<_, i64>(
+            "SELECT version FROM projects WHERE id = $1 AND user_id = $2 FOR UPDATE",
+        )
+        .bind(project_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some(current_version) = current_version else {
+            transaction.commit().await.map_err(classify)?;
+            return Ok(DeleteProjectOutcome::AlreadyAbsent);
+        };
+        if current_version != expected_version {
+            transaction.commit().await.map_err(classify)?;
+            return Ok(DeleteProjectOutcome::VersionConflict);
+        }
+
+        let payload = project_event_payload("project.deleted", project_id, project_id)?;
+        queue_project_event_in_transaction(
+            &mut transaction,
+            user_id,
+            project_id,
+            "project.deleted",
+            &payload,
+        )
+        .await?;
+
+        let detached_tasks = sqlx::query_as::<_, (Uuid, i64)>(
+            "\
+            UPDATE tasks
+            SET project_id = NULL
+            WHERE user_id = $1 AND project_id = $2
+            RETURNING id, version",
+        )
+        .bind(user_id)
+        .bind(project_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        for (task_id, task_version) in detached_tasks {
+            append_change(&mut transaction, user_id, "task", task_id, task_version).await?;
+        }
+
+        let deleted_version = sqlx::query_scalar::<_, i64>(
+            "\
+            DELETE FROM projects
+            WHERE id = $1 AND user_id = $2 AND version = $3
+            RETURNING version",
+        )
+        .bind(project_id)
+        .bind(user_id)
+        .bind(expected_version)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some(deleted_version) = deleted_version else {
+            transaction.rollback().await.map_err(classify)?;
+            return Ok(DeleteProjectOutcome::VersionConflict);
+        };
+        append_delete_change(
+            &mut transaction,
+            user_id,
+            "project",
+            project_id,
+            deleted_version,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        Ok(DeleteProjectOutcome::Deleted)
     }
 
     /// Lists projects in one owned workspace with their open work-item count.

@@ -1,15 +1,18 @@
 //! Project webhook configuration and durable outbound delivery queue.
 
 use serde_json::Value;
-use time::{Duration, OffsetDateTime};
+use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::{Database, StorageError};
 
 const MAX_URL_BYTES: usize = 4_096;
 const MAX_EVENT_TYPES: usize = 16;
-const MAX_SECRET_BYTES: usize = 8 * 1024;
+// XChaCha20-Poly1305 adds an authentication tag to the bounded 8 KiB header.
+const MAX_SECRET_BYTES: usize = 8 * 1024 + 32;
 const MAX_DELIVERY_ATTEMPTS: i32 = 5;
+const WEBHOOK_DELIVERY_LEASE_SECONDS: i64 = 30;
+const MAX_WORKER_ID_BYTES: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectWebhook {
@@ -42,9 +45,39 @@ pub struct NewProjectWebhook {
     pub authentication: Option<EncryptedWebhookSecret>,
 }
 
+/// Explicit secret mutation for a webhook update. The API must never infer a
+/// secret deletion from an omitted or empty value.
+pub enum WebhookAuthenticationUpdate {
+    Keep,
+    Replace(EncryptedWebhookSecret),
+    Remove,
+}
+
+/// Version-checked replacement of one owned webhook configuration.
+pub struct ProjectWebhookUpdate {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub project_id: Uuid,
+    pub url: String,
+    pub events: Vec<String>,
+    pub enabled: bool,
+    pub authentication: WebhookAuthenticationUpdate,
+    pub expected_version: i64,
+}
+
 pub struct EncryptedWebhookSecret {
     pub ciphertext: Vec<u8>,
     pub nonce: Vec<u8>,
+}
+
+/// Result of requesting a manual retry for one durable delivery. A delivery
+/// that is already queued is treated as an idempotent replay; active or final
+/// deliveries remain conflicts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryWebhookDeliveryOutcome {
+    Queued,
+    AlreadyQueued,
+    Conflict,
 }
 
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
@@ -150,6 +183,68 @@ impl Database {
         .await
         .map_err(classify)?;
         Ok(rows.into_iter().map(project_webhook).collect())
+    }
+
+    /// Updates one version-matched webhook owned by the current user without
+    /// exposing or accidentally clearing its encrypted authorization header.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-input error or a classified persistence error.
+    pub async fn update_project_webhook(
+        &self,
+        command: &ProjectWebhookUpdate,
+    ) -> Result<Option<ProjectWebhook>, StorageError> {
+        validate_webhook_update(command)?;
+        let (authentication_mode, ciphertext, nonce) = match &command.authentication {
+            WebhookAuthenticationUpdate::Keep => ("keep", None, None),
+            WebhookAuthenticationUpdate::Replace(secret) => (
+                "replace",
+                Some(secret.ciphertext.as_slice()),
+                Some(secret.nonce.as_slice()),
+            ),
+            WebhookAuthenticationUpdate::Remove => ("remove", None, None),
+        };
+        let row = sqlx::query_as::<_, ProjectWebhookRow>(
+            "\
+            UPDATE project_webhooks AS webhook
+            SET url = $4,
+                events = $5,
+                enabled = $6,
+                auth_header_ciphertext = CASE
+                    WHEN $7 = 'keep' THEN webhook.auth_header_ciphertext
+                    WHEN $7 = 'replace' THEN $8
+                    ELSE NULL
+                END,
+                auth_header_nonce = CASE
+                    WHEN $7 = 'keep' THEN webhook.auth_header_nonce
+                    WHEN $7 = 'replace' THEN $9
+                    ELSE NULL
+                END
+            FROM projects AS project
+            WHERE webhook.id = $1
+              AND webhook.project_id = $2
+              AND webhook.version = $3
+              AND project.id = webhook.project_id
+              AND project.user_id = $10
+            RETURNING webhook.id, webhook.project_id, webhook.url, webhook.events,
+                webhook.auth_header_ciphertext IS NOT NULL AS has_authentication,
+                webhook.enabled, webhook.version",
+        )
+        .bind(command.id)
+        .bind(command.project_id)
+        .bind(command.expected_version)
+        .bind(command.url.trim())
+        .bind(&command.events)
+        .bind(command.enabled)
+        .bind(authentication_mode)
+        .bind(ciphertext)
+        .bind(nonce)
+        .bind(command.user_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(classify)?;
+        Ok(row.map(project_webhook))
     }
 
     /// Deletes a version-matched webhook owned by the current user.
@@ -265,24 +360,53 @@ impl Database {
     /// Returns an invalid-input error or a classified persistence error.
     pub async fn claim_webhook_deliveries(
         &self,
+        worker_id: &str,
         limit: i64,
     ) -> Result<Vec<ClaimedWebhookDelivery>, StorageError> {
-        if !(1..=50).contains(&limit) {
+        if !valid_worker_id(worker_id) || !(1..=50).contains(&limit) {
             return Err(StorageError::InvalidConfiguration);
         }
-        sqlx::query_as::<_, ClaimedWebhookDelivery>(
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        sqlx::query(
+            "\
+            UPDATE webhook_deliveries
+            SET status = 'failed',
+                last_error_code = 'webhook.worker_lease_expired',
+                next_attempt_at = NULL,
+                lease_owner = NULL,
+                lease_expires_at = NULL
+            WHERE status = 'sending'
+              AND lease_expires_at <= NOW()
+              AND attempt_count >= $1",
+        )
+        .bind(MAX_DELIVERY_ATTEMPTS)
+        .execute(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let deliveries = sqlx::query_as::<_, ClaimedWebhookDelivery>(
             "\
             WITH candidates AS (
                 SELECT delivery.id
                 FROM webhook_deliveries AS delivery
-                WHERE delivery.status IN ('queued', 'retry_wait')
-                  AND COALESCE(delivery.next_attempt_at, delivery.created_at) <= NOW()
-                ORDER BY COALESCE(delivery.next_attempt_at, delivery.created_at), delivery.id
+                WHERE delivery.attempt_count < $4
+                  AND (
+                    (delivery.status IN ('queued', 'retry_wait')
+                      AND COALESCE(delivery.next_attempt_at, delivery.created_at) <= NOW())
+                    OR
+                    (delivery.status = 'sending' AND delivery.lease_expires_at <= NOW())
+                  )
+                ORDER BY CASE
+                    WHEN delivery.status = 'sending' THEN delivery.lease_expires_at
+                    ELSE COALESCE(delivery.next_attempt_at, delivery.created_at)
+                END, delivery.id
                 FOR UPDATE SKIP LOCKED
                 LIMIT $1
             )
             UPDATE webhook_deliveries AS delivery
-            SET status = 'sending', attempt_count = delivery.attempt_count + 1
+            SET status = 'sending',
+                attempt_count = delivery.attempt_count + 1,
+                lease_owner = $2,
+                lease_expires_at = NOW() + ($3 * INTERVAL '1 second')
             FROM candidates
             WHERE delivery.id = candidates.id
             RETURNING delivery.id, delivery.webhook_id, delivery.project_id,
@@ -291,9 +415,14 @@ impl Database {
                 delivery.auth_header_ciphertext, delivery.auth_header_nonce",
         )
         .bind(limit)
-        .fetch_all(self.pool())
+        .bind(worker_id)
+        .bind(WEBHOOK_DELIVERY_LEASE_SECONDS)
+        .bind(MAX_DELIVERY_ATTEMPTS)
+        .fetch_all(&mut *transaction)
         .await
-        .map_err(classify)
+        .map_err(classify)?;
+        transaction.commit().await.map_err(classify)?;
+        Ok(deliveries)
     }
 
     /// Marks a claimed delivery as successfully delivered.
@@ -304,24 +433,36 @@ impl Database {
     pub async fn complete_webhook_delivery(
         &self,
         delivery_id: Uuid,
+        worker_id: &str,
+        attempt_count: i32,
         response_code: i32,
-    ) -> Result<(), StorageError> {
-        if !is_v7(delivery_id) || !(200..=299).contains(&response_code) {
+    ) -> Result<bool, StorageError> {
+        if !is_v7(delivery_id)
+            || !valid_worker_id(worker_id)
+            || !(1..=MAX_DELIVERY_ATTEMPTS).contains(&attempt_count)
+            || !(200..=299).contains(&response_code)
+        {
             return Err(StorageError::InvalidConfiguration);
         }
-        sqlx::query(
+        let result = sqlx::query(
             "\
             UPDATE webhook_deliveries
             SET status = 'delivered', response_code = $2,
-                last_error_code = NULL, delivered_at = NOW(), next_attempt_at = NULL
-            WHERE id = $1 AND status = 'sending'",
+                last_error_code = NULL, delivered_at = NOW(), next_attempt_at = NULL,
+                lease_owner = NULL, lease_expires_at = NULL
+            WHERE id = $1
+              AND status = 'sending'
+              AND lease_owner = $3
+              AND attempt_count = $4",
         )
         .bind(delivery_id)
         .bind(response_code)
+        .bind(worker_id)
+        .bind(attempt_count)
         .execute(self.pool())
         .await
         .map_err(classify)?;
-        Ok(())
+        Ok(result.rows_affected() == 1)
     }
 
     /// Records a bounded retry or terminal failure for a claimed delivery.
@@ -332,11 +473,13 @@ impl Database {
     pub async fn fail_webhook_delivery(
         &self,
         delivery_id: Uuid,
+        worker_id: &str,
         attempt_count: i32,
         response_code: Option<i32>,
         error_code: &str,
-    ) -> Result<(), StorageError> {
+    ) -> Result<bool, StorageError> {
         if !is_v7(delivery_id)
+            || !valid_worker_id(worker_id)
             || !(1..=MAX_DELIVERY_ATTEMPTS).contains(&attempt_count)
             || response_code.is_some_and(|code| !(100..=599).contains(&code))
             || !valid_error_code(error_code)
@@ -347,22 +490,94 @@ impl Database {
         let delay_seconds = i64::from(2_i32.pow((attempt_count - 1).cast_unsigned()).min(60));
         let next_attempt =
             (!exhausted).then(|| OffsetDateTime::now_utc() + Duration::seconds(delay_seconds));
-        sqlx::query(
+        let result = sqlx::query(
             "\
             UPDATE webhook_deliveries
             SET status = CASE WHEN $2 THEN 'failed' ELSE 'retry_wait' END,
-                response_code = $3, last_error_code = $4, next_attempt_at = $5
-            WHERE id = $1 AND status = 'sending'",
+                response_code = $3, last_error_code = $4, next_attempt_at = $5,
+                lease_owner = NULL, lease_expires_at = NULL
+            WHERE id = $1
+              AND status = 'sending'
+              AND lease_owner = $6
+              AND attempt_count = $7",
         )
         .bind(delivery_id)
         .bind(exhausted)
         .bind(response_code)
         .bind(error_code)
         .bind(next_attempt)
+        .bind(worker_id)
+        .bind(attempt_count)
         .execute(self.pool())
         .await
         .map_err(classify)?;
-        Ok(())
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Requeues one terminally failed delivery using its original ID and
+    /// immutable destination snapshot. The stable delivery ID also remains the
+    /// outbound idempotency key. Pending retries are accepted idempotently,
+    /// while sending or delivered rows return a conflict.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-input error or a classified persistence error.
+    pub async fn retry_webhook_delivery(
+        &self,
+        user_id: Uuid,
+        project_id: Uuid,
+        delivery_id: Uuid,
+    ) -> Result<RetryWebhookDeliveryOutcome, StorageError> {
+        if !is_v7(user_id) || !is_v7(project_id) || !is_v7(delivery_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let status = sqlx::query_scalar::<_, String>(
+            "\
+            SELECT delivery.status
+            FROM webhook_deliveries AS delivery
+            WHERE delivery.id = $1
+              AND delivery.project_id = $2
+              AND delivery.user_id = $3
+            FOR UPDATE",
+        )
+        .bind(delivery_id)
+        .bind(project_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let outcome = match status.as_deref() {
+            Some("failed") => {
+                let result = sqlx::query(
+                    "\
+                    UPDATE webhook_deliveries
+                    SET status = 'queued',
+                        attempt_count = 0,
+                        next_attempt_at = NULL,
+                        response_code = NULL,
+                        last_error_code = NULL,
+                        delivered_at = NULL,
+                        lease_owner = NULL,
+                        lease_expires_at = NULL
+                    WHERE id = $1 AND status = 'failed'",
+                )
+                .bind(delivery_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(classify)?;
+                if result.rows_affected() == 1 {
+                    RetryWebhookDeliveryOutcome::Queued
+                } else {
+                    RetryWebhookDeliveryOutcome::Conflict
+                }
+            }
+            Some("queued" | "retry_wait") => RetryWebhookDeliveryOutcome::AlreadyQueued,
+            Some("sending" | "delivered") | None => RetryWebhookDeliveryOutcome::Conflict,
+            Some(_) => return Err(StorageError::PersistenceUnavailable),
+        };
+        transaction.commit().await.map_err(classify)?;
+        Ok(outcome)
     }
 
     /// Lists the latest delivery history without payloads or authentication.
@@ -384,8 +599,7 @@ impl Database {
                 delivery.status, delivery.attempt_count, delivery.response_code,
                 delivery.last_error_code, delivery.created_at, delivery.delivered_at
             FROM webhook_deliveries AS delivery
-            INNER JOIN projects AS project ON project.id = delivery.project_id
-            WHERE delivery.project_id = $1 AND project.user_id = $2
+            WHERE delivery.project_id = $1 AND delivery.user_id = $2
             ORDER BY delivery.created_at DESC, delivery.id DESC
             LIMIT 50",
         )
@@ -451,6 +665,22 @@ pub(crate) async fn queue_project_event_in_transaction(
     Ok(webhooks.len())
 }
 
+pub(crate) fn project_event_payload(
+    event_type: &str,
+    project_id: Uuid,
+    entity_id: Uuid,
+) -> Result<Value, StorageError> {
+    let occurred_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .map_err(|_| StorageError::PersistenceUnavailable)?;
+    Ok(serde_json::json!({
+        "event": event_type,
+        "projectId": project_id,
+        "entityId": entity_id,
+        "occurredAt": occurred_at,
+    }))
+}
+
 fn validate_new_webhook(command: &NewProjectWebhook) -> Result<(), StorageError> {
     if !is_v7(command.id)
         || !is_v7(command.user_id)
@@ -459,16 +689,48 @@ fn validate_new_webhook(command: &NewProjectWebhook) -> Result<(), StorageError>
         || command.url.trim().len() < 8
         || command.events.is_empty()
         || command.events.len() > MAX_EVENT_TYPES
-        || command.events.iter().any(|event| !valid_event_type(event))
-        || command.authentication.as_ref().is_some_and(|secret| {
-            secret.ciphertext.is_empty()
-                || secret.ciphertext.len() > MAX_SECRET_BYTES
-                || secret.nonce.len() != 24
-        })
+        || has_invalid_events(&command.events)
+        || command
+            .authentication
+            .as_ref()
+            .is_some_and(invalid_encrypted_secret)
     {
         return Err(StorageError::InvalidConfiguration);
     }
     Ok(())
+}
+
+fn validate_webhook_update(command: &ProjectWebhookUpdate) -> Result<(), StorageError> {
+    let invalid_authentication = match &command.authentication {
+        WebhookAuthenticationUpdate::Keep | WebhookAuthenticationUpdate::Remove => false,
+        WebhookAuthenticationUpdate::Replace(secret) => invalid_encrypted_secret(secret),
+    };
+    if !is_v7(command.id)
+        || !is_v7(command.user_id)
+        || !is_v7(command.project_id)
+        || command.url.trim().len() > MAX_URL_BYTES
+        || command.url.trim().len() < 8
+        || command.events.is_empty()
+        || command.events.len() > MAX_EVENT_TYPES
+        || has_invalid_events(&command.events)
+        || invalid_authentication
+        || command.expected_version <= 0
+    {
+        return Err(StorageError::InvalidConfiguration);
+    }
+    Ok(())
+}
+
+fn has_invalid_events(events: &[String]) -> bool {
+    events.iter().enumerate().any(|(index, event)| {
+        !valid_event_type(event) || events[..index].iter().any(|seen| seen == event)
+    })
+}
+
+fn invalid_encrypted_secret(secret: &EncryptedWebhookSecret) -> bool {
+    secret.ciphertext.is_empty()
+        || secret.ciphertext.len() > MAX_SECRET_BYTES
+        || secret.nonce.len() != 24
 }
 
 fn project_webhook(row: ProjectWebhookRow) -> ProjectWebhook {
@@ -506,10 +768,47 @@ fn valid_error_code(value: &str) -> bool {
         })
 }
 
+fn valid_worker_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_WORKER_ID_BYTES
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
 fn is_v7(value: Uuid) -> bool {
     value.get_version_num() == 7
 }
 
 fn classify(_: sqlx::Error) -> StorageError {
     StorageError::PersistenceUnavailable
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_event_payload_uses_parseable_rfc3339_time() {
+        let project_id = Uuid::now_v7();
+        let entity_id = Uuid::now_v7();
+        let payload = project_event_payload("task.created", project_id, entity_id)
+            .expect("the current UTC time should always format as RFC 3339");
+        let occurred_at = payload
+            .get("occurredAt")
+            .and_then(Value::as_str)
+            .expect("occurredAt should be a string");
+        let expected_project_id = project_id.to_string();
+        let expected_entity_id = entity_id.to_string();
+
+        assert!(OffsetDateTime::parse(occurred_at, &Rfc3339).is_ok());
+        assert_eq!(payload.get("event"), Some(&Value::from("task.created")));
+        assert_eq!(
+            payload.get("projectId").and_then(Value::as_str),
+            Some(expected_project_id.as_str())
+        );
+        assert_eq!(
+            payload.get("entityId").and_then(Value::as_str),
+            Some(expected_entity_id.as_str())
+        );
+    }
 }

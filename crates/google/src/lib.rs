@@ -22,6 +22,7 @@ use time::{Date, Duration as TimeDuration, Month, OffsetDateTime};
 use tokio::sync::Mutex;
 
 const GOOGLE_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
+const GOOGLE_TOKEN_REVOCATION_ENDPOINT: &str = "https://oauth2.googleapis.com/revoke";
 const GOOGLE_JWKS_ENDPOINT: &str = "https://www.googleapis.com/oauth2/v3/certs";
 const GOOGLE_AUTHORIZATION_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_CALENDAR_LIST_ENDPOINT: &str =
@@ -60,6 +61,10 @@ pub enum GoogleAuthError {
     CalendarSyncTokenExpired,
     #[error("Google Calendar event changed before the requested mutation")]
     CalendarEventConflict,
+    #[error("Google Calendar event no longer exists")]
+    CalendarEventNotFound,
+    #[error("Google Calendar rejected the event payload")]
+    CalendarEventRejected,
 }
 
 /// One server-owned client profile. Callers cannot supply a client ID, token
@@ -401,6 +406,40 @@ impl GoogleCalendarAdapter {
         Ok(SecretString::from(response.access_token))
     }
 
+    /// Best-effort revokes a refresh credential at Google's fixed revocation
+    /// endpoint. Callers must still delete the local encrypted credential when
+    /// this request fails because local disconnect must not depend on provider
+    /// availability.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized validation or provider error without exposing the
+    /// credential or response body.
+    pub async fn revoke_refresh_token(
+        &self,
+        refresh_token: &SecretString,
+    ) -> Result<(), GoogleAuthError> {
+        let token = refresh_token.expose_secret();
+        if token.is_empty()
+            || token.len() > MAX_TOKEN_RESPONSE_BYTES
+            || token.chars().any(char::is_control)
+        {
+            return Err(GoogleAuthError::InvalidRequest);
+        }
+        let response = self
+            .client
+            .post(GOOGLE_TOKEN_REVOCATION_ENDPOINT)
+            .form(&[("token", token)])
+            .send()
+            .await
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(classify_provider_status(response.status().as_u16()))
+        }
+    }
+
     /// Loads every page of the Google Calendar list with the stable full-sync
     /// query parameters required by the provider contract.
     ///
@@ -611,11 +650,17 @@ impl GoogleCalendarAdapter {
         if let Some(etag) = etag {
             request = request.header(IF_MATCH, etag);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        let Ok(response) = request.send().await else {
+            return self
+                .existing_event_if_matching(access_token, &calendar_id, &event_id, mutation)
+                .await;
+        };
         if !response.status().is_success() {
+            if matches!(response.status().as_u16(), 409 | 412) {
+                return self
+                    .existing_event_if_matching(access_token, &calendar_id, &event_id, mutation)
+                    .await;
+            }
             return Err(classify_calendar_mutation_status(
                 response.status().as_u16(),
             ));
@@ -640,20 +685,149 @@ impl GoogleCalendarAdapter {
         provider_calendar_id: &str,
         mutation: &GoogleCalendarEventMutation,
     ) -> Result<GoogleCalendarEventEntry, GoogleAuthError> {
+        self.create_event_inner(access_token, provider_calendar_id, None, mutation)
+            .await
+    }
+
+    /// Creates one event with a caller-owned deterministic Google event ID.
+    /// Replaying the same mutation after an unknown provider response loads and
+    /// validates that event instead of creating a duplicate.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized validation, conflict, transport, or provider error.
+    pub async fn create_event_with_id(
+        &self,
+        access_token: &SecretString,
+        provider_calendar_id: &str,
+        provider_event_id: &str,
+        mutation: &GoogleCalendarEventMutation,
+    ) -> Result<GoogleCalendarEventEntry, GoogleAuthError> {
+        let provider_event_id = validate_google_event_id(provider_event_id)?;
+        self.create_event_inner(
+            access_token,
+            provider_calendar_id,
+            Some(provider_event_id),
+            mutation,
+        )
+        .await
+    }
+
+    async fn create_event_inner(
+        &self,
+        access_token: &SecretString,
+        provider_calendar_id: &str,
+        provider_event_id: Option<String>,
+        mutation: &GoogleCalendarEventMutation,
+    ) -> Result<GoogleCalendarEventEntry, GoogleAuthError> {
         let token = validate_access_token(access_token)?;
         let calendar_id = validate_text(provider_calendar_id.to_owned(), 1_024)?;
-        let body = validated_event_mutation_body(mutation)?;
+        let mut body = validated_event_mutation_body(mutation)?;
+        body.id.clone_from(&provider_event_id);
         let mut url = reqwest::Url::parse(GOOGLE_CALENDAR_EVENTS_ENDPOINT)
             .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
         url.path_segments_mut()
             .map_err(|()| GoogleAuthError::ProviderUnavailable)?
             .push(&calendar_id)
             .push("events");
-        let response = self
+        let Ok(response) = self
             .client
             .post(url)
             .bearer_auth(token)
             .json(&body)
+            .send()
+            .await
+        else {
+            let Some(provider_event_id) = provider_event_id.as_deref() else {
+                return Err(GoogleAuthError::ProviderUnavailable);
+            };
+            return match self
+                .existing_event_if_matching(access_token, &calendar_id, provider_event_id, mutation)
+                .await
+            {
+                Ok(event) => Ok(event),
+                Err(GoogleAuthError::CalendarEventConflict) => {
+                    Err(GoogleAuthError::CalendarEventConflict)
+                }
+                Err(_) => Err(GoogleAuthError::ProviderUnavailable),
+            };
+        };
+        if !response.status().is_success() {
+            if response.status().as_u16() == 409
+                && let Some(provider_event_id) = provider_event_id.as_deref()
+            {
+                return self
+                    .existing_event_if_matching(
+                        access_token,
+                        &calendar_id,
+                        provider_event_id,
+                        mutation,
+                    )
+                    .await;
+            }
+            return Err(classify_calendar_mutation_status(
+                response.status().as_u16(),
+            ));
+        }
+        if !is_json_response(&response) {
+            return Err(GoogleAuthError::ProviderUnavailable);
+        }
+        let payload = bounded_body(response, MAX_CALENDAR_EVENT_RESPONSE_BYTES).await?;
+        let item: GoogleCalendarEventItem =
+            serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
+        normalize_calendar_event_item(item, &mutation.time_zone)
+    }
+
+    async fn existing_event_if_matching(
+        &self,
+        access_token: &SecretString,
+        provider_calendar_id: &str,
+        provider_event_id: &str,
+        mutation: &GoogleCalendarEventMutation,
+    ) -> Result<GoogleCalendarEventEntry, GoogleAuthError> {
+        let event = self
+            .get_event(
+                access_token,
+                provider_calendar_id,
+                provider_event_id,
+                &mutation.time_zone,
+            )
+            .await?;
+        if event_matches_mutation(&event, mutation) {
+            Ok(event)
+        } else {
+            Err(GoogleAuthError::CalendarEventConflict)
+        }
+    }
+
+    /// Loads one bounded event from a fixed Calendar endpoint for idempotency
+    /// reconciliation. Provider response bodies are discarded after parsing.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized validation, transport, or provider error.
+    pub async fn get_event(
+        &self,
+        access_token: &SecretString,
+        provider_calendar_id: &str,
+        provider_event_id: &str,
+        calendar_time_zone: &str,
+    ) -> Result<GoogleCalendarEventEntry, GoogleAuthError> {
+        let token = validate_access_token(access_token)?;
+        let calendar_id = validate_text(provider_calendar_id.to_owned(), 1_024)?;
+        let event_id = validate_text(provider_event_id.to_owned(), 1_024)?;
+        let calendar_time_zone = validate_text(calendar_time_zone.to_owned(), 80)?;
+        let mut url = reqwest::Url::parse(GOOGLE_CALENDAR_EVENTS_ENDPOINT)
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        url.path_segments_mut()
+            .map_err(|()| GoogleAuthError::ProviderUnavailable)?
+            .push(&calendar_id)
+            .push("events")
+            .push(&event_id);
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(token)
             .send()
             .await
             .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
@@ -668,7 +842,7 @@ impl GoogleCalendarAdapter {
         let payload = bounded_body(response, MAX_CALENDAR_EVENT_RESPONSE_BYTES).await?;
         let item: GoogleCalendarEventItem =
             serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
-        normalize_calendar_event_item(item, &mutation.time_zone)
+        normalize_calendar_event_item(item, &calendar_time_zone)
     }
 
     /// Deletes one event using its provider `ETag` as an optimistic concurrency
@@ -706,7 +880,7 @@ impl GoogleCalendarAdapter {
             .send()
             .await
             .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
-        if response.status().is_success() {
+        if response.status().is_success() || response.status().as_u16() == 404 {
             Ok(())
         } else {
             Err(classify_calendar_mutation_status(
@@ -1127,6 +1301,8 @@ struct GoogleCalendarEventDateTime {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GoogleCalendarMutationBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
     summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
@@ -1402,6 +1578,37 @@ fn validate_access_token(token: &SecretString) -> Result<&str, GoogleAuthError> 
     Ok(value)
 }
 
+fn validate_google_event_id(value: &str) -> Result<String, GoogleAuthError> {
+    if !(5..=1_024).contains(&value.len())
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'v'))
+    {
+        return Err(GoogleAuthError::InvalidRequest);
+    }
+    Ok(value.to_owned())
+}
+
+fn event_matches_mutation(
+    event: &GoogleCalendarEventEntry,
+    mutation: &GoogleCalendarEventMutation,
+) -> bool {
+    let Some(GoogleCalendarEventTime::DateTime {
+        start,
+        end,
+        time_zone,
+    }) = event.time.as_ref()
+    else {
+        return false;
+    };
+    event.status != GoogleCalendarEventStatus::Cancelled
+        && event.title.as_deref() == Some(mutation.title.as_str())
+        && event.description.as_deref() == mutation.description.as_deref()
+        && *start == mutation.start
+        && *end == mutation.end
+        && time_zone == &mutation.time_zone
+}
+
 fn validated_event_mutation_request<'a>(
     access_token: &'a SecretString,
     provider_calendar_id: &str,
@@ -1450,6 +1657,7 @@ fn validated_event_mutation_body(
         .format(&time::format_description::well_known::Rfc3339)
         .map_err(|_| GoogleAuthError::InvalidRequest)?;
     Ok(GoogleCalendarMutationBody {
+        id: None,
         summary: title,
         description,
         start: GoogleCalendarMutationDateTime {
@@ -1689,10 +1897,11 @@ fn classify_calendar_event_status(status: u16, incremental: bool) -> Option<Goog
 }
 
 fn classify_calendar_mutation_status(status: u16) -> GoogleAuthError {
-    if status == 409 || status == 412 {
-        GoogleAuthError::CalendarEventConflict
-    } else {
-        classify_provider_status(status)
+    match status {
+        400 => GoogleAuthError::CalendarEventRejected,
+        404 => GoogleAuthError::CalendarEventNotFound,
+        409 | 412 => GoogleAuthError::CalendarEventConflict,
+        _ => classify_provider_status(status),
     }
 }
 
@@ -1836,6 +2045,14 @@ mod tests {
     #[test]
     fn calendar_mutation_classifies_stale_etags_as_conflicts() {
         assert_eq!(
+            classify_calendar_mutation_status(400),
+            GoogleAuthError::CalendarEventRejected
+        );
+        assert_eq!(
+            classify_calendar_mutation_status(404),
+            GoogleAuthError::CalendarEventNotFound
+        );
+        assert_eq!(
             classify_calendar_mutation_status(412),
             GoogleAuthError::CalendarEventConflict
         );
@@ -1846,6 +2063,74 @@ mod tests {
         assert_eq!(
             classify_calendar_mutation_status(503),
             GoogleAuthError::ProviderUnavailable
+        );
+    }
+
+    #[test]
+    fn deterministic_calendar_event_ids_use_google_base32hex_alphabet() {
+        assert_eq!(
+            validate_google_event_id("jos019b1234abcdef0123456789abcdef0")
+                .expect("generated ID should be valid"),
+            "jos019b1234abcdef0123456789abcdef0"
+        );
+        assert_eq!(
+            validate_google_event_id("contains-w").expect_err("w is outside Google's alphabet"),
+            GoogleAuthError::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn provider_event_matches_only_the_retried_desired_state() {
+        let starts_at =
+            OffsetDateTime::from_unix_timestamp(1_800_000_000).expect("timestamp should be valid");
+        let mutation = GoogleCalendarEventMutation {
+            title: "회의".to_owned(),
+            description: Some("준비".to_owned()),
+            start: starts_at,
+            end: starts_at + TimeDuration::hours(1),
+            time_zone: "Asia/Seoul".to_owned(),
+        };
+        let event = GoogleCalendarEventEntry {
+            provider_event_id: "jos019b1234abcdef0123456789abcdef0".to_owned(),
+            provider_etag: Some("etag".to_owned()),
+            provider_updated_at: None,
+            ical_uid: None,
+            status: GoogleCalendarEventStatus::Confirmed,
+            event_type: "default".to_owned(),
+            title: Some("회의".to_owned()),
+            description: Some("준비".to_owned()),
+            location: None,
+            time: Some(GoogleCalendarEventTime::DateTime {
+                start: mutation.start,
+                end: mutation.end,
+                time_zone: mutation.time_zone.clone(),
+            }),
+            recurrence: None,
+            recurring_provider_event_id: None,
+            visibility: None,
+            transparency: None,
+            html_link: None,
+            is_editable: true,
+        };
+        assert!(event_matches_mutation(&event, &mutation));
+        let changed = GoogleCalendarEventMutation {
+            title: "다른 회의".to_owned(),
+            ..mutation
+        };
+        assert!(!event_matches_mutation(&event, &changed));
+    }
+
+    #[tokio::test]
+    async fn calendar_revocation_rejects_an_empty_credential_before_network_io() {
+        let adapter =
+            GoogleCalendarAdapter::new("calendar-client", SecretString::from("calendar-secret"))
+                .expect("adapter should be valid");
+
+        assert_eq!(
+            adapter
+                .revoke_refresh_token(&SecretString::from(String::new()))
+                .await,
+            Err(GoogleAuthError::InvalidRequest)
         );
     }
 }

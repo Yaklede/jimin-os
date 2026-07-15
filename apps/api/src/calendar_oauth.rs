@@ -25,6 +25,7 @@ use jimin_storage::{
         ProviderCalendarEvent, ProviderCalendarEventStatus, ProviderCalendarEventTime,
         ProviderCalendarVisibility,
     },
+    calendar_mutation::{ClaimedScheduleCalendarMutation, ScheduleCalendarMutationOperation},
     gmail::ProviderGmailMessage,
 };
 use rand::Rng;
@@ -382,6 +383,87 @@ impl CalendarOAuthRuntime {
             .map_err(CalendarOAuthError::from_google)
     }
 
+    /// Dispatches one leased schedule mutation using only the matching account
+    /// credential. Deterministic create IDs and provider `ETags` make replay
+    /// converge without logging event content or OAuth material.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized identity, credential, validation, conflict, or
+    /// provider failure.
+    pub async fn dispatch_schedule_calendar_mutation(
+        &self,
+        connection: &CalendarSyncConnection,
+        mutation: &ClaimedScheduleCalendarMutation,
+    ) -> Result<Option<String>, CalendarOAuthError> {
+        if connection.account_id != mutation.account_id || connection.user_id != mutation.user_id {
+            return Err(CalendarOAuthError::IdentityMismatch);
+        }
+        let access_token = self.calendar_access_token(connection).await?;
+        match mutation.operation {
+            ScheduleCalendarMutationOperation::Create => {
+                let provider = self
+                    .calendar
+                    .create_event_with_id(
+                        &access_token,
+                        &mutation.provider_calendar_id,
+                        &mutation.provider_event_id,
+                        &schedule_google_mutation(mutation),
+                    )
+                    .await
+                    .map_err(CalendarOAuthError::from_google)?;
+                Ok(provider.provider_etag)
+            }
+            ScheduleCalendarMutationOperation::Update => {
+                let provider = self
+                    .calendar
+                    .update_event(
+                        &access_token,
+                        &mutation.provider_calendar_id,
+                        &mutation.provider_event_id,
+                        mutation.provider_etag.as_deref(),
+                        &schedule_google_mutation(mutation),
+                    )
+                    .await
+                    .map_err(CalendarOAuthError::from_google)?;
+                Ok(provider.provider_etag)
+            }
+            ScheduleCalendarMutationOperation::Delete => {
+                self.calendar
+                    .delete_event(
+                        &access_token,
+                        &mutation.provider_calendar_id,
+                        &mutation.provider_event_id,
+                        mutation.provider_etag.as_deref(),
+                    )
+                    .await
+                    .map_err(CalendarOAuthError::from_google)?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Revokes the detached encrypted refresh credential after local Calendar
+    /// data has already been purged. Provider failure is intentionally safe to
+    /// ignore at the HTTP boundary because disconnect must remain local-first.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized credential or provider failure.
+    pub async fn revoke_calendar_connection(
+        &self,
+        connection: &CalendarSyncConnection,
+    ) -> Result<(), CalendarOAuthError> {
+        let refresh_token = self.crypto.decrypt(
+            &connection.refresh_token,
+            &refresh_token_aad(connection.user_id),
+        )?;
+        self.calendar
+            .revoke_refresh_token(&refresh_token)
+            .await
+            .map_err(CalendarOAuthError::from_google)
+    }
+
     async fn calendar_access_token(
         &self,
         connection: &CalendarSyncConnection,
@@ -435,6 +517,18 @@ impl CalendarOAuthRuntime {
     }
 }
 
+fn schedule_google_mutation(
+    mutation: &ClaimedScheduleCalendarMutation,
+) -> GoogleCalendarEventMutation {
+    GoogleCalendarEventMutation {
+        title: mutation.payload.title.clone(),
+        description: mutation.payload.notes.clone(),
+        start: mutation.payload.starts_at,
+        end: mutation.payload.ends_at,
+        time_zone: mutation.payload.time_zone.clone(),
+    }
+}
+
 /// Newly generated material that is safe to persist only through the matching
 /// storage command. The raw state is embedded in `authorization_url` only.
 pub struct NewCalendarOAuthAuthorization {
@@ -465,6 +559,10 @@ pub enum CalendarOAuthError {
     ProviderUnavailable,
     #[error("Google Calendar event changed before the requested mutation")]
     Conflict,
+    #[error("Google Calendar event no longer exists")]
+    EventNotFound,
+    #[error("Google Calendar rejected the event payload")]
+    EventRejected,
     #[error("Google account does not match the signed-in Jimin OS account")]
     IdentityMismatch,
     #[error("Google Calendar did not grant the required permissions")]
@@ -484,6 +582,8 @@ impl CalendarOAuthError {
             | Self::Encryption => "calendar.authorization_failed",
             Self::ProviderUnavailable => "calendar.provider_unavailable",
             Self::Conflict => "calendar.event_conflict",
+            Self::EventNotFound => "calendar.event_not_found",
+            Self::EventRejected => "calendar.event_rejected",
             Self::IdentityMismatch => "calendar.account_mismatch",
         }
     }
@@ -498,6 +598,8 @@ impl CalendarOAuthError {
             GoogleAuthError::ProviderUnavailable => Self::ProviderUnavailable,
             GoogleAuthError::CalendarSyncTokenExpired => Self::ProviderRejected,
             GoogleAuthError::CalendarEventConflict => Self::Conflict,
+            GoogleAuthError::CalendarEventNotFound => Self::EventNotFound,
+            GoogleAuthError::CalendarEventRejected => Self::EventRejected,
             GoogleAuthError::InvalidRequest | GoogleAuthError::ProviderRejected => {
                 Self::ProviderRejected
             }
@@ -716,6 +818,19 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[test]
+    fn event_level_provider_failures_do_not_invalidate_the_account() {
+        let missing = CalendarOAuthError::from_google(GoogleAuthError::CalendarEventNotFound);
+        let rejected = CalendarOAuthError::from_google(GoogleAuthError::CalendarEventRejected);
+
+        assert_eq!(missing, CalendarOAuthError::EventNotFound);
+        assert_eq!(missing.failure_code(), "calendar.event_not_found");
+        assert_eq!(rejected, CalendarOAuthError::EventRejected);
+        assert_eq!(rejected.failure_code(), "calendar.event_rejected");
+        assert!(!missing.retryable());
+        assert!(!rejected.retryable());
+    }
 
     #[test]
     fn state_verifier_is_keyed_and_does_not_echo_state() {

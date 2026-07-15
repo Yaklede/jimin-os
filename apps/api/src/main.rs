@@ -9,7 +9,8 @@ use jimin_api::{
         SecretSetting,
     },
     probe::{ProbeTarget, run_probe},
-    router, serve_with_shutdown, spawn_calendar_sync_worker, spawn_webhook_delivery_worker,
+    router, serve_with_shutdown, spawn_calendar_mutation_worker, spawn_calendar_sync_worker,
+    spawn_webhook_delivery_worker,
     webhook::WebhookRuntime,
 };
 use jimin_application::{PairingLifetime, SessionLifetime, SessionService};
@@ -170,6 +171,7 @@ async fn run_server() -> Result<(), &'static str> {
         .as_ref()
         .map(|database| tokio::spawn(reconcile_migrations(database.clone())));
     let calendar_sync_task = spawn_calendar_sync_worker(&state);
+    let calendar_mutation_task = spawn_calendar_mutation_worker(&state);
     let webhook_delivery_task = spawn_webhook_delivery_worker(&state);
     let result = serve_with_shutdown(listener, router(state), shutdown_signal())
         .await
@@ -182,6 +184,10 @@ async fn run_server() -> Result<(), &'static str> {
     if let Some(calendar_sync_task) = calendar_sync_task {
         calendar_sync_task.abort();
         let _ = calendar_sync_task.await;
+    }
+    if let Some(calendar_mutation_task) = calendar_mutation_task {
+        calendar_mutation_task.abort();
+        let _ = calendar_mutation_task.await;
     }
     if let Some(webhook_delivery_task) = webhook_delivery_task {
         webhook_delivery_task.abort();

@@ -20,4 +20,15 @@ Calendar account, OAuth transaction, normalized event, sync, staging, and
 mutation records. It does not add a Google credential to the repository or
 make any outbound provider call by itself.
 
+Migration `0020_schedule_calendar_outbox.sql` links Jimin OS schedules to the
+writable primary Google Calendar and extends the durable mutation journal. Run
+it first against an empty database and then a restored staging backup. Verify
+that the link ownership joins are valid, the journal's single-source check is
+valid, and `jimin_schema_metadata.schema_version = 20` before release. It is
+forward-only: before any version-20 rows are accepted, rollback may use the
+previous image after dropping the new trigger, table, indexes, constraint, and
+column on a disposable copy. After writes begin, drain or archive pending
+mutations and restore a verified pre-migration backup instead of downgrading in
+place.
+
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.

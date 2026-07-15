@@ -10,7 +10,10 @@ use sqlx::{Postgres, Transaction};
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::{Database, StorageError};
+use crate::{
+    Database, StorageError, auth::append_delete_change,
+    calendar_mutation::resolve_unavailable_schedule_calendar_mutations,
+};
 
 const STATE_VERIFIER_BYTES: usize = 32;
 const XCHACHA_NONCE_BYTES: usize = 24;
@@ -23,6 +26,7 @@ const MAX_EVENT_DESCRIPTION_BYTES: usize = 8_192;
 const MAX_EVENT_LOCATION_BYTES: usize = 1_024;
 const MAX_EVENT_URL_BYTES: usize = 4_096;
 const MAX_RECURRENCE_RULES: usize = 128;
+const MUTATION_DISPATCH_LEASE_SECONDS: i64 = 60;
 
 /// Safe state of the single Google Calendar account linked to a personal user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +116,74 @@ impl Database {
         .map_err(|_| StorageError::PersistenceUnavailable)?;
 
         row.map(CalendarAccount::try_from).transpose()
+    }
+
+    /// Atomically detaches one version-checked Google connection and purges
+    /// every locally cached provider record. The encrypted refresh credential
+    /// is returned only so the API can attempt provider revocation after the
+    /// local transaction commits; provider availability never blocks purge.
+    ///
+    /// Pending OAuth transactions and Gmail metadata share the same Google
+    /// connection boundary and are cryptographically deleted in the same
+    /// transaction. Manual Jimin OS schedules are intentionally preserved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for unsafe identifiers or
+    /// versions and [`StorageError::PersistenceUnavailable`] when the purge
+    /// transaction cannot complete.
+    pub async fn disconnect_calendar_account(
+        &self,
+        user_id: Uuid,
+        expected_version: i64,
+    ) -> Result<DisconnectCalendarAccountOutcome, StorageError> {
+        if user_id.get_version_num() != 7 || expected_version <= 0 {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|_| StorageError::PersistenceUnavailable)?;
+        let state = lock_calendar_connection_for_disconnect(&mut transaction, user_id).await?;
+        let Some((current_version, status, has_active_mutation)) = state else {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| StorageError::PersistenceUnavailable)?;
+            return Ok(DisconnectCalendarAccountOutcome::AlreadyDisconnected);
+        };
+        if current_version != expected_version || status == "revoking" {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| StorageError::PersistenceUnavailable)?;
+            return Ok(DisconnectCalendarAccountOutcome::VersionConflict);
+        }
+        if has_active_mutation {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| StorageError::PersistenceUnavailable)?;
+            return Ok(DisconnectCalendarAccountOutcome::MutationInProgress);
+        }
+        let detached =
+            mark_calendar_connection_revoking(&mut transaction, user_id, expected_version)
+                .await?
+                .ok_or(StorageError::PersistenceUnavailable)?;
+        // A malformed or incomplete legacy credential must never prevent the
+        // owner from cryptographically deleting the local connection.
+        let connection = detached.connection().ok();
+        let cached_events =
+            purge_calendar_provider_rows(&mut transaction, user_id, detached.id).await?;
+        purge_linked_google_cache(&mut transaction, user_id).await?;
+        append_calendar_disconnect_changes(&mut transaction, user_id, &detached, &cached_events)
+            .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StorageError::PersistenceUnavailable)?;
+        Ok(DisconnectCalendarAccountOutcome::Disconnected(connection))
     }
 
     /// Lists active owner connections eligible for the server's periodic
@@ -417,6 +489,102 @@ impl Database {
         row.map(CalendarSyncConnection::try_from).transpose()
     }
 
+    /// Revalidates a claimed mutation immediately before provider I/O and
+    /// transitions it to `sending` while holding the account row lock. A
+    /// concurrent disconnect therefore either observes an in-flight mutation
+    /// and returns a retryable conflict, or wins first and prevents dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid configuration for malformed claim metadata and a
+    /// classified persistence error for an invalid credential or SQL failure.
+    pub async fn begin_schedule_calendar_mutation_dispatch(
+        &self,
+        mutation_id: Uuid,
+        attempt_count: i32,
+        worker_id: &str,
+    ) -> Result<Option<CalendarSyncConnection>, StorageError> {
+        if mutation_id.get_version_num() != 7
+            || attempt_count <= 0
+            || worker_id.is_empty()
+            || worker_id.len() > 200
+            || worker_id.chars().any(char::is_control)
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|_| StorageError::PersistenceUnavailable)?;
+        let row = sqlx::query_as::<_, CalendarSyncConnectionRow>(
+            "\
+            SELECT account.id, account.user_id, account.refresh_token_ciphertext,
+                account.refresh_token_nonce, account.encryption_key_version,
+                account.granted_scopes
+            FROM calendar_mutations AS mutation
+            INNER JOIN schedule_calendar_links AS link
+                ON link.schedule_entry_id = mutation.schedule_entry_id
+            INNER JOIN calendar_accounts AS account ON account.id = link.account_id
+            INNER JOIN calendars AS calendar ON calendar.id = link.calendar_id
+            WHERE mutation.id = $1
+              AND mutation.attempt_count = $2
+              AND mutation.lease_owner = $3
+              AND mutation.status = 'claimed'
+              AND mutation.lease_expires_at > NOW()
+              AND mutation.user_id = account.user_id
+              AND link.user_id = account.user_id
+              AND account.status = 'active'
+              AND calendar.account_id = account.id
+              AND calendar.sync_enabled = TRUE
+              AND calendar.provider_deleted_at IS NULL
+              AND calendar.access_role IN ('owner', 'writer')
+            FOR UPDATE OF account",
+        )
+        .bind(mutation_id)
+        .bind(attempt_count)
+        .bind(worker_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| StorageError::PersistenceUnavailable)?;
+        let Some(connection) = row.map(CalendarSyncConnection::try_from).transpose()? else {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| StorageError::PersistenceUnavailable)?;
+            return Ok(None);
+        };
+        let sending = sqlx::query(
+            "\
+            UPDATE calendar_mutations
+            SET status = 'sending',
+                lease_expires_at = NOW() + ($4 * INTERVAL '1 second')
+            WHERE id = $1
+              AND attempt_count = $2
+              AND lease_owner = $3
+              AND status = 'claimed'",
+        )
+        .bind(mutation_id)
+        .bind(attempt_count)
+        .bind(worker_id)
+        .bind(MUTATION_DISPATCH_LEASE_SECONDS)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| StorageError::PersistenceUnavailable)?;
+        if sending.rows_affected() != 1 {
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| StorageError::PersistenceUnavailable)?;
+            return Ok(None);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StorageError::PersistenceUnavailable)?;
+        Ok(Some(connection))
+    }
+
     /// Returns the currently selected provider calendars after the Calendar
     /// list has been applied. Credentials never leave the matching account
     /// connection record.
@@ -712,6 +880,7 @@ impl Database {
         .execute(&mut *transaction)
         .await
         .map_err(|_| StorageError::PersistenceUnavailable)?;
+        resolve_unavailable_schedule_calendar_mutations(&mut transaction, Some(account_id)).await?;
         transaction
             .commit()
             .await
@@ -1077,6 +1246,22 @@ pub struct CalendarSyncConnection {
     pub granted_scopes: Vec<String>,
 }
 
+/// Result of a version-checked owner disconnect. A missing connection is
+/// idempotent, while a still-present row with another version requires the
+/// client to reload before deleting it.
+pub enum DisconnectCalendarAccountOutcome {
+    /// The local connection was purged and the detached encrypted credential
+    /// may now be revoked at the provider on a best-effort basis.
+    Disconnected(Option<CalendarSyncConnection>),
+    /// No local Google connection remains, so a repeated request is complete.
+    AlreadyDisconnected,
+    /// A connection still exists, but its version differs from the request.
+    VersionConflict,
+    /// A provider mutation has already started. Retrying after it settles
+    /// prevents a provider event from being orphaned by local deletion.
+    MutationInProgress,
+}
+
 /// Safe identifiers used by the periodic synchronization scheduler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::FromRow)]
 pub struct CalendarSyncIdentity {
@@ -1193,6 +1378,199 @@ struct CalendarSyncConnectionRow {
     refresh_token_nonce: Option<Vec<u8>>,
     encryption_key_version: Option<i32>,
     granted_scopes: Vec<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct CalendarDisconnectRow {
+    id: Uuid,
+    user_id: Uuid,
+    refresh_token_ciphertext: Option<Vec<u8>>,
+    refresh_token_nonce: Option<Vec<u8>>,
+    encryption_key_version: Option<i32>,
+    granted_scopes: Vec<String>,
+    version: i64,
+}
+
+async fn mark_calendar_connection_revoking(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    expected_version: i64,
+) -> Result<Option<CalendarDisconnectRow>, StorageError> {
+    sqlx::query_as::<_, CalendarDisconnectRow>(
+        "\
+        UPDATE calendar_accounts
+        SET status = 'revoking', last_error_code = NULL
+        WHERE user_id = $1
+          AND version = $2
+          AND status <> 'revoking'
+        RETURNING id, user_id, refresh_token_ciphertext,
+            refresh_token_nonce, encryption_key_version, granted_scopes,
+            version",
+    )
+    .bind(user_id)
+    .bind(expected_version)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|_| StorageError::PersistenceUnavailable)
+}
+
+async fn lock_calendar_connection_for_disconnect(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+) -> Result<Option<(i64, String, bool)>, StorageError> {
+    sqlx::query_as(
+        "\
+        SELECT account.version, account.status,
+            EXISTS (
+                SELECT 1
+                FROM calendar_mutations AS mutation
+                INNER JOIN schedule_calendar_links AS link
+                    ON link.schedule_entry_id = mutation.schedule_entry_id
+                WHERE link.account_id = account.id
+                  AND link.user_id = account.user_id
+                  AND mutation.user_id = account.user_id
+                  AND mutation.status IN ('claimed', 'sending')
+                  AND mutation.lease_expires_at > NOW()
+            ) AS has_active_mutation
+        FROM calendar_accounts AS account
+        WHERE account.user_id = $1
+        FOR UPDATE OF account",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|_| StorageError::PersistenceUnavailable)
+}
+
+async fn purge_calendar_provider_rows(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    account_id: Uuid,
+) -> Result<Vec<(Uuid, i64)>, StorageError> {
+    let cached_events = sqlx::query_as::<_, (Uuid, i64)>(
+        "\
+        SELECT event.id, event.version
+        FROM calendar_events AS event
+        INNER JOIN calendars AS calendar ON calendar.id = event.calendar_id
+        WHERE calendar.account_id = $1 AND event.user_id = $2",
+    )
+    .bind(account_id)
+    .bind(user_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|_| StorageError::PersistenceUnavailable)?;
+    let idempotency_ids = sqlx::query_scalar::<_, Uuid>(
+        "\
+        DELETE FROM calendar_mutations
+        WHERE user_id = $1
+          AND (
+              event_id IN (
+                  SELECT event.id
+                  FROM calendar_events AS event
+                  INNER JOIN calendars AS calendar ON calendar.id = event.calendar_id
+                  WHERE calendar.account_id = $2 AND event.user_id = $1
+              )
+              OR schedule_entry_id IN (
+                  SELECT link.schedule_entry_id
+                  FROM schedule_calendar_links AS link
+                  WHERE link.account_id = $2 AND link.user_id = $1
+              )
+          )
+        RETURNING idempotency_record_id",
+    )
+    .bind(user_id)
+    .bind(account_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|_| StorageError::PersistenceUnavailable)?;
+    sqlx::query("DELETE FROM idempotency_records WHERE id = ANY($1)")
+        .bind(&idempotency_ids)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| StorageError::PersistenceUnavailable)?;
+    let deleted = sqlx::query(
+        "DELETE FROM calendar_accounts WHERE id = $1 AND user_id = $2 AND status = 'revoking'",
+    )
+    .bind(account_id)
+    .bind(user_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| StorageError::PersistenceUnavailable)?;
+    if deleted.rows_affected() != 1 {
+        return Err(StorageError::PersistenceUnavailable);
+    }
+    Ok(cached_events)
+}
+
+async fn purge_linked_google_cache(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "\
+        UPDATE calendar_oauth_authorizations
+        SET status = 'cancelled',
+            failure_code = 'calendar.connection_disconnected',
+            pkce_verifier_ciphertext = NULL,
+            pkce_nonce = NULL,
+            encryption_key_version = NULL
+        WHERE user_id = $1 AND status IN ('pending', 'exchanging')",
+    )
+    .bind(user_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| StorageError::PersistenceUnavailable)?;
+    sqlx::query("DELETE FROM gmail_messages WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| StorageError::PersistenceUnavailable)?;
+    sqlx::query("DELETE FROM gmail_sync_states WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| StorageError::PersistenceUnavailable)?;
+    Ok(())
+}
+
+async fn append_calendar_disconnect_changes(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    detached: &CalendarDisconnectRow,
+    cached_events: &[(Uuid, i64)],
+) -> Result<(), StorageError> {
+    for &(event_id, event_version) in cached_events {
+        append_delete_change(
+            transaction,
+            user_id,
+            "calendar_event",
+            event_id,
+            event_version,
+        )
+        .await?;
+    }
+    append_delete_change(
+        transaction,
+        user_id,
+        "calendar_account",
+        detached.id,
+        detached.version,
+    )
+    .await?;
+    Ok(())
+}
+
+impl CalendarDisconnectRow {
+    fn connection(&self) -> Result<CalendarSyncConnection, StorageError> {
+        CalendarSyncConnection::try_from(CalendarSyncConnectionRow {
+            id: self.id,
+            user_id: self.user_id,
+            refresh_token_ciphertext: self.refresh_token_ciphertext.clone(),
+            refresh_token_nonce: self.refresh_token_nonce.clone(),
+            encryption_key_version: self.encryption_key_version,
+            granted_scopes: self.granted_scopes.clone(),
+        })
+    }
 }
 
 impl TryFrom<CalendarSyncConnectionRow> for CalendarSyncConnection {
