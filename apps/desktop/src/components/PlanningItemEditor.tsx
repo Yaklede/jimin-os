@@ -27,6 +27,7 @@ type PlanningItemEditorProps = {
   onClose(): void;
   onSaveTask(task: Task, input: TaskEditInput): Promise<void>;
   onSaveSchedule(entry: ScheduleEntry, input: ScheduleEditInput): Promise<void>;
+  onDeleteTask(task: Task): Promise<void>;
   onDeleteSchedule(entry: ScheduleEntry): Promise<void>;
 };
 
@@ -35,11 +36,15 @@ export function PlanningItemEditor({
   onClose,
   onSaveTask,
   onSaveSchedule,
+  onDeleteTask,
   onDeleteSchedule,
 }: PlanningItemEditorProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
+  const deleteTriggerRef = useRef<HTMLButtonElement>(null);
+  const deleteSafeActionRef = useRef<HTMLButtonElement>(null);
+  const restoreDeleteTriggerRef = useRef(false);
   const [title, setTitle] = useState("");
   const [notes, setNotes] = useState("");
   const [priority, setPriority] = useState(1);
@@ -69,6 +74,7 @@ export function PlanningItemEditor({
     );
     setSaving(false);
     setConfirmingDelete(false);
+    restoreDeleteTriggerRef.current = false;
     setError(undefined);
     const dialog = dialogRef.current;
     if (dialog && !dialog.open) {
@@ -81,6 +87,20 @@ export function PlanningItemEditor({
       if (focusFrame !== undefined) window.cancelAnimationFrame(focusFrame);
     };
   }, [target]);
+
+  useEffect(() => {
+    const focusTarget = confirmingDelete
+      ? deleteSafeActionRef.current
+      : restoreDeleteTriggerRef.current
+        ? deleteTriggerRef.current
+        : undefined;
+    if (!focusTarget) return;
+    const frame = window.requestAnimationFrame(() => {
+      focusTarget.focus();
+      if (!confirmingDelete) restoreDeleteTriggerRef.current = false;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [confirmingDelete]);
 
   if (!target) return null;
   const activeTarget = target;
@@ -157,16 +177,25 @@ export function PlanningItemEditor({
     }
   }
 
-  async function deleteSchedule() {
-    if (saving || activeTarget.kind !== "schedule") return;
+  async function deleteItem() {
+    if (saving) return;
     setSaving(true);
     setError(undefined);
     try {
-      await onDeleteSchedule(activeTarget.item);
+      if (activeTarget.kind === "task") {
+        await onDeleteTask(activeTarget.item);
+      } else {
+        await onDeleteSchedule(activeTarget.item);
+      }
       dialogRef.current?.close();
     } catch {
-      setError(copy.messages.scheduleDeleteNotice);
+      setError(
+        activeTarget.kind === "task"
+          ? copy.messages.taskDeleteNotice
+          : copy.messages.scheduleDeleteNotice,
+      );
       setSaving(false);
+      restoreDeleteTriggerRef.current = true;
       setConfirmingDelete(false);
     }
   }
@@ -188,7 +217,7 @@ export function PlanningItemEditor({
       }}
       onClose={handleClose}
     >
-      <form onSubmit={(event) => void submit(event)}>
+      <form aria-busy={saving} onSubmit={(event) => void submit(event)}>
         <header className="planning-editor__heading">
           <span aria-hidden="true">
             {taskTarget ? <ListTodo /> : <CalendarClock />}
@@ -305,28 +334,45 @@ export function PlanningItemEditor({
           </p>
         )}
 
-        {confirmingDelete && activeTarget.kind === "schedule" ? (
+        {confirmingDelete ? (
           <section
             className="planning-editor__delete-confirmation"
-            role="alert"
+            role="group"
+            aria-label={
+              taskTarget
+                ? copy.forms.deleteTaskTitle
+                : copy.forms.deleteScheduleTitle
+            }
           >
             <div>
-              <strong>{copy.forms.deleteScheduleTitle}</strong>
-              <p>{copy.forms.deleteScheduleDescription}</p>
+              <strong>
+                {taskTarget
+                  ? copy.forms.deleteTaskTitle
+                  : copy.forms.deleteScheduleTitle}
+              </strong>
+              <p>
+                {taskTarget
+                  ? copy.forms.deleteTaskDescription
+                  : copy.forms.deleteScheduleDescription}
+              </p>
             </div>
             <div>
               <button
+                ref={deleteSafeActionRef}
                 className="secondary-button focus-visible-control"
                 type="button"
-                onClick={() => setConfirmingDelete(false)}
+                onClick={() => {
+                  restoreDeleteTriggerRef.current = true;
+                  setConfirmingDelete(false);
+                }}
                 disabled={saving}
               >
-                {copy.actions.keepSchedule}
+                {taskTarget ? copy.actions.keepTask : copy.actions.keepSchedule}
               </button>
               <button
                 className="danger-button focus-visible-control"
                 type="button"
-                onClick={() => void deleteSchedule()}
+                onClick={() => void deleteItem()}
                 disabled={saving}
               >
                 {saving ? (
@@ -334,23 +380,28 @@ export function PlanningItemEditor({
                 ) : (
                   <Trash2 aria-hidden="true" />
                 )}
-                {saving ? copy.actions.deleting : copy.actions.deleteSchedule}
+                {saving
+                  ? copy.actions.deleting
+                  : taskTarget
+                    ? copy.actions.deleteTask
+                    : copy.actions.deleteSchedule}
               </button>
             </div>
           </section>
         ) : (
           <footer className="planning-editor__actions">
-            {activeTarget.kind === "schedule" && (
-              <button
-                className="text-button text-button--danger focus-visible-control"
-                type="button"
-                onClick={() => setConfirmingDelete(true)}
-                disabled={saving}
-              >
-                <Trash2 aria-hidden="true" />
-                {copy.actions.deleteSchedule}
-              </button>
-            )}
+            <button
+              ref={deleteTriggerRef}
+              className="text-button text-button--danger focus-visible-control"
+              type="button"
+              onClick={() => setConfirmingDelete(true)}
+              disabled={saving}
+            >
+              <Trash2 aria-hidden="true" />
+              {taskTarget
+                ? copy.actions.deleteTask
+                : copy.actions.deleteSchedule}
+            </button>
             <span className="planning-editor__action-spacer" />
             <button
               className="secondary-button focus-visible-control"

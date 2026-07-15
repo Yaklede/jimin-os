@@ -8,6 +8,7 @@ members = [
   "crates/codex-client",
   "crates/domain",
   "crates/google",
+  "crates/local-notifications-plugin",
   "crates/observability",
   "crates/storage",
   "crates/voice-recognition-plugin",

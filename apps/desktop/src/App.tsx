@@ -1,8 +1,16 @@
 import { Server, Sparkles } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import {
+  disconnectGoogleCalendar,
   fetchGoogleCalendarConnection,
   startGoogleCalendarAuthorization,
   synchronizeGoogleCalendar,
@@ -11,7 +19,9 @@ import {
 import {
   bootstrapTrustedNetworkSession,
   completeTask,
+  createScheduleEntry,
   createTask,
+  deleteTask,
   deleteScheduleEntry,
   refreshDeviceSession,
   updateTask,
@@ -24,6 +34,7 @@ import {
 } from "./api/planning";
 import {
   createProject,
+  deleteProject,
   fetchProjects,
   fetchProjectTasks,
   fetchWorkspaces,
@@ -36,9 +47,12 @@ import {
   deleteProjectWebhook,
   fetchProjectWebhooks,
   fetchWebhookDeliveries,
+  retryWebhookDelivery,
   testProjectWebhook,
+  updateProjectWebhook,
   type ProjectWebhook,
   type ProjectWebhookEvent,
+  type WebhookAuthorizationMode,
   type WebhookDelivery,
 } from "./api/webhooks";
 import { type HomeSnapshot, fetchHomeSnapshot } from "./api/home";
@@ -91,8 +105,21 @@ import {
   retryUnauthorizedRequest,
 } from "./session-retry";
 import { createUuidV7 } from "./uuid";
-import { planningViewRange, type PlanningViewRange } from "./planningRange";
+import {
+  planningViewRange,
+  samePlanningViewRange,
+  type PlanningViewRange,
+} from "./planningRange";
 import { localDayKey, millisecondsUntilNextLocalDay } from "./homeSchedule";
+import {
+  acknowledgePendingReminderNavigation,
+  cancelLocalReminder,
+  localNotificationsSupported,
+  peekPendingReminderNavigation,
+  reconcilePlanningReminders,
+  reminderFallbackDestination,
+  type ReminderSyncStatus,
+} from "./local-notifications";
 
 type AppMode =
   "configuration" | "server-unreachable" | "loading" | "ready" | "error";
@@ -142,6 +169,7 @@ export default function App() {
   const [webhooksLoading, setWebhooksLoading] = useState(false);
   const [projectsSaving, setProjectsSaving] = useState(false);
   const [projectsError, setProjectsError] = useState<string>();
+  const [workspacesReady, setWorkspacesReady] = useState(false);
   const [selectedConversationId, setSelectedConversationId] = useState<
     string | undefined
   >(undefined);
@@ -177,16 +205,23 @@ export default function App() {
   >();
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [calendarAction, setCalendarAction] = useState<
-    "authorizing" | "syncing" | undefined
+    "authorizing" | "syncing" | "disconnecting" | undefined
   >();
   const [calendarAuthorizationExpiresAt, setCalendarAuthorizationExpiresAt] =
     useState<string>();
   const [calendarError, setCalendarError] = useState<string>();
+  const [reminderSyncStatus, setReminderSyncStatus] =
+    useState<ReminderSyncStatus>("idle");
+  const [reminderSyncError, setReminderSyncError] = useState<string>();
   const pendingConversationId = useRef<string | undefined>(undefined);
   const activeSessionRef = useRef<SessionTokens | undefined>(undefined);
   const refreshInFlightRef = useRef<Promise<SessionTokens> | undefined>(
     undefined,
   );
+  const reminderSyncInFlightRef = useRef<Promise<boolean> | undefined>(
+    undefined,
+  );
+  const pendingReminderInFlightRef = useRef(false);
   const [message, setMessage] = useState<string | undefined>(undefined);
 
   const applyActiveSession = useCallback((session: SessionTokens) => {
@@ -303,7 +338,9 @@ export default function App() {
           (targetDate && !Number.isNaN(targetDate.getTime())
             ? planningViewRange("month", targetDate)
             : planningRange);
-        if (nextRange !== planningRange) setPlanningRange(nextRange);
+        setPlanningRange((current) =>
+          samePlanningViewRange(current, nextRange) ? current : nextRange,
+        );
         const snapshot = await withAuthenticatedSession((accessToken) =>
           fetchPlanning(apiBaseUrl, accessToken, nextRange.from, nextRange.to),
         );
@@ -325,6 +362,39 @@ export default function App() {
     },
     [loadPlanningSnapshot],
   );
+
+  const synchronizePlanningReminders =
+    useCallback(async (): Promise<boolean> => {
+      if (!tokens || !localNotificationsSupported()) return false;
+      if (reminderSyncInFlightRef.current) {
+        return reminderSyncInFlightRef.current;
+      }
+      const operation = (async () => {
+        setReminderSyncStatus("syncing");
+        setReminderSyncError(undefined);
+        try {
+          const [from, to] = currentReminderRange();
+          const snapshot = await withAuthenticatedSession((accessToken) =>
+            fetchPlanning(apiBaseUrl, accessToken, from, to),
+          );
+          await reconcilePlanningReminders(snapshot);
+          setReminderSyncStatus("ready");
+          return true;
+        } catch {
+          setReminderSyncStatus("error");
+          setReminderSyncError(copy.settings.notificationsSyncNotice);
+          return false;
+        }
+      })();
+      reminderSyncInFlightRef.current = operation;
+      try {
+        return await operation;
+      } finally {
+        if (reminderSyncInFlightRef.current === operation) {
+          reminderSyncInFlightRef.current = undefined;
+        }
+      }
+    }, [apiBaseUrl, tokens, withAuthenticatedSession]);
 
   const loadAgentModelSettings = useCallback(async () => {
     if (!tokens) return;
@@ -447,8 +517,50 @@ export default function App() {
     withAuthenticatedSession,
   ]);
 
+  const disconnectGoogleCalendarConnection =
+    useCallback(async (): Promise<boolean> => {
+      const expectedVersion = calendarConnection?.version;
+      if (
+        !tokens ||
+        calendarAction ||
+        expectedVersion === null ||
+        expectedVersion === undefined
+      ) {
+        return false;
+      }
+      setCalendarAction("disconnecting");
+      setCalendarError(undefined);
+      try {
+        await withAuthenticatedSession((accessToken) =>
+          disconnectGoogleCalendar(apiBaseUrl, accessToken, expectedVersion),
+        );
+        setCalendarAuthorizationExpiresAt(undefined);
+        await Promise.all([
+          loadGoogleCalendarConnection(),
+          loadHomeSnapshot(),
+          loadPlanningSnapshot(),
+        ]);
+        return true;
+      } catch {
+        setCalendarError(copy.settings.calendarDisconnectProblem);
+        return false;
+      } finally {
+        setCalendarAction(undefined);
+      }
+    }, [
+      apiBaseUrl,
+      calendarAction,
+      calendarConnection?.version,
+      loadGoogleCalendarConnection,
+      loadHomeSnapshot,
+      loadPlanningSnapshot,
+      tokens,
+      withAuthenticatedSession,
+    ]);
+
   const loadWorkspaces = useCallback(async () => {
     if (!tokens) return;
+    setWorkspacesReady(false);
     setProjectsLoading(true);
     setProjectsError(undefined);
     try {
@@ -461,7 +573,9 @@ export default function App() {
           ? current
           : items[0]?.id,
       );
+      setWorkspacesReady(true);
     } catch {
+      setWorkspacesReady(false);
       setProjectsError(copy.messages.projectsLoadNotice);
     } finally {
       setProjectsLoading(false);
@@ -622,6 +736,7 @@ export default function App() {
       setPlanningSnapshot(undefined);
       setPlanningError(undefined);
       setWorkspaces([]);
+      setWorkspacesReady(false);
       setProjects([]);
       setProjectTasks([]);
       setSelectedWorkspaceId(undefined);
@@ -643,6 +758,8 @@ export default function App() {
       setCalendarError(undefined);
       setCalendarAuthorizationExpiresAt(undefined);
       setCalendarAction(undefined);
+      setReminderSyncStatus("idle");
+      setReminderSyncError(undefined);
       pendingConversationId.current = undefined;
       await bootstrapTrustedNetworkDevice();
     }
@@ -686,6 +803,87 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useLayoutEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      window.scrollTo({
+        top: 0,
+        left: 0,
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ? "auto"
+          : "smooth",
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [destination]);
+
+  useEffect(() => {
+    void synchronizePlanningReminders();
+  }, [planningSnapshot, synchronizePlanningReminders]);
+
+  useEffect(() => {
+    if (!tokens) return;
+    let active = true;
+    const openPendingReminder = () => {
+      if (pendingReminderInFlightRef.current) return;
+      pendingReminderInFlightRef.current = true;
+      void peekPendingReminderNavigation()
+        .then(async (navigation) => {
+          if (!active || !navigation) return;
+          if (
+            navigation.destination === "projects" &&
+            navigation.itemType === "task" &&
+            navigation.projectId
+          ) {
+            if (!workspacesReady) return;
+            await openTaskFromAssistant({
+              id: navigation.itemId,
+              projectId: navigation.projectId,
+            });
+            if (!active) return;
+            await acknowledgePendingReminderNavigation(navigation);
+            return;
+          }
+          const snapshot = await loadPlanningSnapshot(
+            undefined,
+            planningViewRange(
+              "month",
+              navigation.targetAtEpochMillis
+                ? new Date(navigation.targetAtEpochMillis)
+                : new Date(),
+            ),
+          );
+          if (!active || !snapshot) return;
+          setDestination(reminderFallbackDestination(navigation));
+          if (navigation.itemType === "schedule") {
+            setHighlightedPlanningTaskId(undefined);
+            setHighlightedScheduleId(navigation.itemId);
+          } else {
+            setHighlightedScheduleId(undefined);
+            setHighlightedPlanningTaskId(navigation.itemId);
+          }
+          await acknowledgePendingReminderNavigation(navigation);
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          pendingReminderInFlightRef.current = false;
+        });
+    };
+    openPendingReminder();
+    window.addEventListener("focus", openPendingReminder);
+    const openPendingVisibleReminder = () => {
+      if (document.visibilityState === "visible") openPendingReminder();
+    };
+    document.addEventListener("visibilitychange", openPendingVisibleReminder);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", openPendingReminder);
+      document.removeEventListener(
+        "visibilitychange",
+        openPendingVisibleReminder,
+      );
+    };
+  }, [loadPlanningSnapshot, projects, tokens, workspaces, workspacesReady]);
 
   useEffect(() => {
     if (!tokens) return;
@@ -994,6 +1192,7 @@ export default function App() {
       const completed = await withAuthenticatedSession((accessToken) =>
         completeTask(apiBaseUrl, accessToken, task),
       );
+      await cancelLocalReminder("task", task.id).catch(() => false);
       setHomeSnapshot((current) =>
         current
           ? {
@@ -1086,6 +1285,53 @@ export default function App() {
     }
   }
 
+  async function createPlanningTask(input: {
+    title: string;
+    notes?: string;
+    priority: number;
+    dueAt?: string;
+  }): Promise<void> {
+    setPlanningError(undefined);
+    try {
+      const created = await withAuthenticatedSession((accessToken) =>
+        createTask(apiBaseUrl, accessToken, input),
+      );
+      setHighlightedScheduleId(undefined);
+      setHighlightedPlanningTaskId(created.id);
+      await Promise.all([loadHomeSnapshot(), loadPlanningSnapshot()]);
+    } catch (error) {
+      setPlanningError(copy.messages.taskCreateNotice);
+      throw error;
+    }
+  }
+
+  async function createPlanningSchedule(input: {
+    title: string;
+    notes?: string;
+    startsAt: string;
+    endsAt: string;
+  }): Promise<void> {
+    setPlanningError(undefined);
+    const clientMutationId = createUuidV7();
+    try {
+      const created = await withAuthenticatedSession((accessToken) =>
+        createScheduleEntry(apiBaseUrl, accessToken, {
+          ...input,
+          clientMutationId,
+        }),
+      );
+      setHighlightedPlanningTaskId(undefined);
+      setHighlightedScheduleId(created.id);
+      await Promise.all([
+        loadHomeSnapshot(),
+        loadPlanningSnapshot(created.startsAt),
+      ]);
+    } catch (error) {
+      setPlanningError(copy.messages.scheduleCreateNotice);
+      throw error;
+    }
+  }
+
   async function savePlanningTask(
     task: Task,
     input: {
@@ -1120,6 +1366,60 @@ export default function App() {
         ? loadProjectTasks(task.projectId)
         : Promise.resolve(undefined),
     ]);
+  }
+
+  async function deletePlanningTask(task: Task): Promise<void> {
+    setPlanningError(undefined);
+    try {
+      await withAuthenticatedSession((accessToken) =>
+        deleteTask(apiBaseUrl, accessToken, task),
+      );
+      await cancelLocalReminder("task", task.id).catch(() => false);
+      setHomeSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              tasks: current.tasks.filter((item) => item.id !== task.id),
+            }
+          : current,
+      );
+      setPlanningSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              tasks: current.tasks.filter((item) => item.id !== task.id),
+              completedTasks: current.completedTasks.filter(
+                (item) => item.id !== task.id,
+              ),
+            }
+          : current,
+      );
+      setProjectTasks((current) =>
+        current.filter((item) => item.id !== task.id),
+      );
+      if (task.projectId && task.status === "open") {
+        setProjects((current) =>
+          current.map((project) =>
+            project.id === task.projectId
+              ? {
+                  ...project,
+                  openTaskCount: Math.max(0, project.openTaskCount - 1),
+                }
+              : project,
+          ),
+        );
+      }
+      await Promise.all([
+        loadHomeSnapshot(),
+        loadPlanningSnapshot(),
+        task.projectId && task.projectId === selectedProjectId
+          ? loadProjectTasks(task.projectId)
+          : Promise.resolve(undefined),
+      ]);
+    } catch (error) {
+      setPlanningError(copy.messages.taskDeleteNotice);
+      throw error;
+    }
   }
 
   async function savePlanningSchedule(
@@ -1158,6 +1458,7 @@ export default function App() {
     await withAuthenticatedSession((accessToken) =>
       deleteScheduleEntry(apiBaseUrl, accessToken, entry),
     );
+    await cancelLocalReminder("schedule", entry.id).catch(() => false);
     setPlanningSnapshot((current) =>
       current
         ? {
@@ -1337,6 +1638,39 @@ export default function App() {
     }
   }
 
+  async function deleteWorkspaceProject(project: Project): Promise<void> {
+    setProjectsSaving(true);
+    setProjectsError(undefined);
+    try {
+      await withAuthenticatedSession((accessToken) =>
+        deleteProject(apiBaseUrl, accessToken, project),
+      );
+      setProjects((current) =>
+        current.filter((item) => item.id !== project.id),
+      );
+      setSelectedProjectId(undefined);
+      setHighlightedProjectTaskId(undefined);
+      setProjectTasks([]);
+      setProjectWebhooks([]);
+      setWebhookDeliveries([]);
+      await Promise.all([
+        selectedWorkspaceId
+          ? loadProjectsForWorkspace(selectedWorkspaceId)
+          : Promise.resolve(false),
+        loadHomeSnapshot(),
+        loadPlanningSnapshot(),
+      ]);
+    } catch (error) {
+      setProjectsError(copy.projects.projectDeleteNotice);
+      if (selectedWorkspaceId) {
+        void loadProjectsForWorkspace(selectedWorkspaceId, project.id);
+      }
+      throw error;
+    } finally {
+      setProjectsSaving(false);
+    }
+  }
+
   async function createProjectTask(title: string): Promise<void> {
     if (!selectedProjectId) throw new Error("project unavailable");
     setProjectsSaving(true);
@@ -1374,6 +1708,7 @@ export default function App() {
       const completed = await withAuthenticatedSession((accessToken) =>
         completeTask(apiBaseUrl, accessToken, task),
       );
+      await cancelLocalReminder("task", task.id).catch(() => false);
       setProjectTasks((current) =>
         current.map((item) => (item.id === completed.id ? completed : item)),
       );
@@ -1458,6 +1793,50 @@ export default function App() {
     }
   }
 
+  async function deleteProjectTask(task: Task): Promise<void> {
+    setProjectsSaving(true);
+    setProjectsError(undefined);
+    try {
+      await withAuthenticatedSession((accessToken) =>
+        deleteTask(apiBaseUrl, accessToken, task),
+      );
+      await cancelLocalReminder("task", task.id).catch(() => false);
+      setProjectTasks((current) =>
+        current.filter((item) => item.id !== task.id),
+      );
+      setPlanningSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              tasks: current.tasks.filter((item) => item.id !== task.id),
+              completedTasks: current.completedTasks.filter(
+                (item) => item.id !== task.id,
+              ),
+            }
+          : current,
+      );
+      if (task.status === "open" && task.projectId) {
+        setProjects((current) =>
+          current.map((project) =>
+            project.id === task.projectId
+              ? {
+                  ...project,
+                  openTaskCount: Math.max(0, project.openTaskCount - 1),
+                }
+              : project,
+          ),
+        );
+      }
+      await Promise.all([loadHomeSnapshot(), loadPlanningSnapshot()]);
+    } catch (error) {
+      setProjectsError(copy.projects.taskRemoveNotice);
+      if (selectedProjectId) void loadProjectTasks(selectedProjectId);
+      throw error;
+    } finally {
+      setProjectsSaving(false);
+    }
+  }
+
   async function createWorkspaceWebhook(input: {
     url: string;
     events: ProjectWebhookEvent[];
@@ -1473,6 +1852,34 @@ export default function App() {
       setProjectWebhooks((current) => [...current, webhook]);
     } catch (error) {
       setProjectsError(copy.projects.webhookSaveProblem);
+      throw error;
+    } finally {
+      setProjectsSaving(false);
+    }
+  }
+
+  async function updateWorkspaceWebhook(
+    webhook: ProjectWebhook,
+    input: {
+      url: string;
+      events: ProjectWebhookEvent[];
+      enabled: boolean;
+      authorizationMode: WebhookAuthorizationMode;
+      authorization?: string;
+    },
+  ): Promise<void> {
+    setProjectsSaving(true);
+    setProjectsError(undefined);
+    try {
+      const updated = await withAuthenticatedSession((accessToken) =>
+        updateProjectWebhook(apiBaseUrl, accessToken, webhook, input),
+      );
+      setProjectWebhooks((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item)),
+      );
+    } catch (error) {
+      setProjectsError(copy.projects.webhookUpdateProblem);
+      void loadProjectWebhooks(webhook.projectId);
       throw error;
     } finally {
       setProjectsSaving(false);
@@ -1510,6 +1917,31 @@ export default function App() {
       }
     } catch (error) {
       setProjectsError(copy.projects.webhookTestProblem);
+      throw error;
+    } finally {
+      setProjectsSaving(false);
+    }
+  }
+
+  async function retryWorkspaceWebhookDelivery(
+    delivery: WebhookDelivery,
+  ): Promise<void> {
+    if (!selectedProjectId) throw new Error("project unavailable");
+    setProjectsSaving(true);
+    setProjectsError(undefined);
+    try {
+      await withAuthenticatedSession((accessToken) =>
+        retryWebhookDelivery(
+          apiBaseUrl,
+          accessToken,
+          selectedProjectId,
+          delivery.id,
+        ),
+      );
+      await loadProjectWebhooks(selectedProjectId);
+    } catch (error) {
+      setProjectsError(copy.projects.webhookRetryProblem);
+      void loadProjectWebhooks(selectedProjectId);
       throw error;
     } finally {
       setProjectsSaving(false);
@@ -1557,9 +1989,10 @@ export default function App() {
         message: copy.voice.commandFailed,
       };
     }
+    const clientMutationId = createUuidV7();
     try {
       const result = await withAuthenticatedSession((accessToken) =>
-        processVoiceCommand(apiBaseUrl, accessToken, value),
+        processVoiceCommand(apiBaseUrl, accessToken, value, clientMutationId),
       );
       if (result.kind === "schedule_listed" || result.kind === "tasks_listed") {
         return {
@@ -1573,7 +2006,7 @@ export default function App() {
         result.kind === "schedule_created" ||
         result.kind === "task_created"
       ) {
-        await loadHomeSnapshot();
+        await Promise.all([loadHomeSnapshot(), loadPlanningSnapshot()]);
         return {
           kind: "handled",
           message: result.message,
@@ -1862,6 +2295,8 @@ export default function App() {
               highlightedTaskId={highlightedPlanningTaskId}
               onCompleteTask={completeHomeTask}
               onRestoreTask={restorePlanningTask}
+              onCreateTask={createPlanningTask}
+              onCreateSchedule={createPlanningSchedule}
               onEditTask={(task) =>
                 setPlanningEditTarget({ kind: "task", item: task })
               }
@@ -1897,12 +2332,16 @@ export default function App() {
               }}
               onCreateProject={createWorkspaceProject}
               onUpdateProject={updateWorkspaceProject}
+              onDeleteProject={deleteWorkspaceProject}
               onCreateTask={createProjectTask}
               onCompleteTask={completeProjectTask}
               onUpdateTask={updateProjectTask}
+              onDeleteTask={deleteProjectTask}
               onCreateWebhook={createWorkspaceWebhook}
+              onUpdateWebhook={updateWorkspaceWebhook}
               onTestWebhook={testWorkspaceWebhook}
               onDeleteWebhook={deleteWorkspaceWebhook}
+              onRetryWebhookDelivery={retryWorkspaceWebhookDelivery}
             />
           )}
           {destination === "memory" && (
@@ -1923,12 +2362,16 @@ export default function App() {
                 calendarAuthorizationExpiresAt,
               )}
               calendarError={calendarError}
+              reminderSyncStatus={reminderSyncStatus}
+              reminderSyncError={reminderSyncError}
               onStartAuthentication={beginAgentAuthentication}
               onReloadModels={loadAgentModelSettings}
               onSaveModel={saveAgentModelSettings}
               onStartCalendarConnection={beginGoogleCalendarConnection}
               onReloadCalendarConnection={loadGoogleCalendarConnection}
               onSyncCalendar={syncGoogleCalendar}
+              onDisconnectCalendar={disconnectGoogleCalendarConnection}
+              onRetryReminderSync={synchronizePlanningReminders}
             />
           )}
           {destination === "chat" && (
@@ -1968,6 +2411,7 @@ export default function App() {
             onClose={() => setPlanningEditTarget(undefined)}
             onSaveTask={savePlanningTask}
             onSaveSchedule={savePlanningSchedule}
+            onDeleteTask={deletePlanningTask}
             onDeleteSchedule={deletePlanningSchedule}
           />
         </OsShell>
@@ -2053,6 +2497,12 @@ function conversationTitle(value: string) {
 function currentLocalDayRange(now = new Date()): [Date, Date] {
   const from = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const to = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  return [from, to];
+}
+
+function currentReminderRange(now = new Date()): [Date, Date] {
+  const from = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const to = new Date(from.getFullYear(), from.getMonth(), from.getDate() + 91);
   return [from, to];
 }
 

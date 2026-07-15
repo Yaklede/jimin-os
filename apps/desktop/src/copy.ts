@@ -60,6 +60,8 @@ export const copy = {
     deleting: "삭제하는 중",
     deleteSchedule: "일정 삭제",
     keepSchedule: "일정 유지",
+    deleteTask: "할 일 지우기",
+    keepTask: "할 일 유지",
     complete: "완료하기",
     startConversation: "새 요청",
     sendRequest: "보내기",
@@ -266,6 +268,7 @@ export const copy = {
     nextRange: "다음 기간 보기",
     goToday: "오늘",
     syncNow: "Google Calendar 지금 동기화",
+    createActions: "일정과 할 일 추가",
     syncWaiting: "첫 동기화를 기다리고 있어요",
     lastSynced: (label: string) => `${label} 동기화`,
   },
@@ -388,11 +391,47 @@ export const copy = {
     calendarChecking: "확인하는 중",
     calendarSync: "일정 새로 가져오기",
     calendarSyncing: "일정 가져오는 중",
+    calendarDisconnect: "연결 해제하기",
+    calendarDisconnectingAction: "연결 해제 중",
+    calendarDisconnectTitle: "Google Calendar 연결을 해제할까요?",
+    calendarDisconnectDescription:
+      "가져온 일정과 메일 요약은 지워지고, 직접 만든 일정은 남아 있어요.",
+    calendarKeepConnected: "계속 연결하기",
+    calendarConfirmDisconnect: "연결 해제",
     calendarLoadFailed: "연결 상태를 못 불러왔어요. 다시 확인해 주세요.",
     calendarConnectFailed: "연결 화면을 못 열었어요. 다시 시도해 주세요.",
     calendarSyncFailed: "일정을 못 가져왔어요. 잠시 후 다시 시도해 주세요.",
+    calendarDisconnectProblem:
+      "연결을 해제하지 못했어요. 다시 확인한 뒤 시도해 주세요.",
     calendarAuthorizationExpired:
       "연결 시간이 지났어요. Google Calendar 연결을 다시 시작해 주세요.",
+    notificationsTitle: "휴대폰 알림",
+    notificationsChecking: "알림 권한을 확인하고 있어요.",
+    notificationsReady:
+      "일정 시작과 할 일 기한이 다가오면 휴대폰에서 알려드려요.",
+    notificationsNeedsPermission:
+      "일정과 할 일 알림을 받으려면 휴대폰에서 알림을 허용해 주세요.",
+    notificationsNeedsSettings:
+      "휴대폰 설정에서 Jimin OS 알림을 허용해 주세요.",
+    notificationsSyncing: "앞으로 90일의 일정과 할 일 알림을 준비하고 있어요.",
+    notificationsSyncProblem:
+      "알림 준비를 마치지 못했어요. 다시 준비하면 놓친 일정까지 확인해요.",
+    notificationsSyncNotice:
+      "알림을 준비하지 못했어요. 개인 서버 연결을 확인한 뒤 다시 시도해 주세요.",
+    notificationsSyncRetry: "알림 다시 준비하기",
+    notificationsSyncingAction: "알림 준비 중",
+    notificationsAllow: "알림 허용하기",
+    notificationsRequesting: "권한 확인 중",
+    notificationsEnabled: "알림 켜짐",
+    notificationsOpenSettings: "휴대폰 설정 열기",
+    notificationsOpeningSettings: "설정 여는 중",
+    notificationsRetry: "다시 확인하기",
+    notificationsLoadNotice:
+      "알림 권한을 확인하지 못했어요. 다시 시도해 주세요.",
+    notificationsRequestNotice:
+      "알림 권한을 요청하지 못했어요. 휴대폰 설정을 확인해 주세요.",
+    notificationsSettingsNotice:
+      "휴대폰 알림 설정을 열지 못했어요. 설정에서 Jimin OS를 찾아 주세요.",
   },
   conversations: {
     identity: "지민",
@@ -445,8 +484,11 @@ export const copy = {
   forms: {
     taskTitle: "할 일 추가",
     taskLabel: "할 일",
+    taskCreateDescription: "할 일의 내용과 우선순위, 기한을 정해요.",
     scheduleTitle: "일정 추가",
     scheduleLabel: "일정 이름",
+    scheduleCreateDescription: "일정 이름과 시작·종료 시간을 정해요.",
+    closeCreateDialog: (title: string) => `${title} 창 닫기`,
     startsAt: "시작 시간",
     endsAt: "종료 시간",
     editTaskTitle: "할 일 수정",
@@ -467,6 +509,9 @@ export const copy = {
     scheduleTimeOrder: "종료 시간은 시작 시간보다 늦어야 해요.",
     deleteScheduleTitle: "이 일정을 삭제할까요?",
     deleteScheduleDescription: "삭제하면 일정 화면에서 더 이상 보이지 않아요.",
+    deleteTaskTitle: "이 할 일을 지울까요?",
+    deleteTaskDescription:
+      "목록에서는 사라지지만 지금까지의 변경 기록은 안전하게 보관해요.",
   },
   messages: {
     serverOffline: "VPN 연결과 개인 서버 상태를 확인한 뒤 다시 시도해 주세요.",
@@ -477,10 +522,12 @@ export const copy = {
     projectSaveNotice:
       "프로젝트를 저장하지 못했어요. 입력한 내용을 확인한 뒤 다시 시도해 주세요.",
     projectTaskSaveNotice:
-      "프로젝트에 일을 추가하지 못했어요. 잠시 후 다시 시도해 주세요.",
+      "프로젝트의 일을 저장하지 못했어요. 최신 내용을 불러온 뒤 다시 시도해 주세요.",
     loadFailed: "계획을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
     saveFailed: "변경 내용을 저장하지 못했어요. 다시 시도해 주세요.",
     taskAdded: "할 일을 추가했어요.",
+    taskCreateNotice:
+      "할 일을 추가하지 못했어요. 입력한 내용을 확인한 뒤 다시 시도해 주세요.",
     taskCompleted: "할 일을 완료했어요.",
     taskCompletionNotice:
       "할 일을 완료하지 못했어요. 현재 상태를 다시 불러온 뒤 시도해 주세요.",
@@ -489,12 +536,16 @@ export const copy = {
     taskChanged:
       "할 일이 다른 기기에서 변경됐어요. 새로고침 후 다시 확인해 주세요.",
     scheduleAdded: "일정을 추가했어요.",
+    scheduleCreateNotice:
+      "일정을 추가하지 못했어요. 날짜와 시간을 확인한 뒤 다시 시도해 주세요.",
     scheduleChanged:
       "일정을 저장하지 못했어요. 최신 상태를 확인한 뒤 다시 시도해 주세요.",
     scheduleDeleteNotice:
       "일정을 삭제하지 못했어요. 최신 상태를 확인한 뒤 다시 시도해 주세요.",
     taskSaveNotice:
       "할 일을 저장하지 못했어요. 최신 상태를 확인한 뒤 다시 시도해 주세요.",
+    taskDeleteNotice:
+      "할 일을 지우지 못했어요. 최신 상태를 확인한 뒤 다시 시도해 주세요.",
     conversationLoadNotice:
       "대화를 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
     conversationSendNotice:

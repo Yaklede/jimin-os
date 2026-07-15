@@ -85,6 +85,7 @@ pub fn run() {
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(jimin_voice_recognition::init())
+        .plugin(jimin_local_notifications::init())
         .invoke_handler(tauri::generate_handler![
             read_device_session,
             save_device_session,
@@ -112,5 +113,22 @@ mod tests {
             "550e8400-e29b-41d4-a716-446655440000"
         ));
         assert!(!valid_installation_id("not-an-installation-id"));
+    }
+
+    #[test]
+    fn android_manifest_declares_notification_permission() {
+        const MANIFEST: &str = include_str!("../gen/android/app/src/main/AndroidManifest.xml");
+        assert!(MANIFEST.contains("android.permission.POST_NOTIFICATIONS"));
+    }
+
+    #[test]
+    fn android_notification_plugin_is_registered_with_navigation_support() {
+        const SOURCE: &str = include_str!("lib.rs");
+        const CAPABILITY: &str = include_str!("../capabilities/default.json");
+
+        assert!(SOURCE.contains("jimin_local_notifications::init()"));
+        assert!(CAPABILITY.contains("local-notifications:allow-permissionStatus"));
+        assert!(CAPABILITY.contains("local-notifications:allow-openSettings"));
+        assert!(CAPABILITY.contains("local-notifications:allow-takePendingNavigation"));
     }
 }

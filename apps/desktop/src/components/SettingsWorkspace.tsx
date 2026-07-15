@@ -1,4 +1,5 @@
 import {
+  BellRing,
   CalendarDays,
   CheckCircle2,
   ChevronRight,
@@ -6,8 +7,9 @@ import {
   Link2,
   LoaderCircle,
   RefreshCw,
+  Unlink,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   type AgentAuthentication,
@@ -15,6 +17,14 @@ import {
 } from "../api/agent";
 import { type GoogleCalendarConnection } from "../api/calendar";
 import { copy } from "../copy";
+import {
+  getNotificationPermissionStatus,
+  localNotificationsSupported,
+  openNotificationSettings,
+  type NotificationPermissionStatus,
+  type ReminderSyncStatus,
+  requestNotificationPermission,
+} from "../local-notifications";
 
 type SettingsWorkspaceProps = {
   authentication: AgentAuthentication | undefined;
@@ -25,9 +35,11 @@ type SettingsWorkspaceProps = {
   modelsError: string | undefined;
   calendarConnection: GoogleCalendarConnection | undefined;
   calendarLoading: boolean;
-  calendarAction: "authorizing" | "syncing" | undefined;
+  calendarAction: "authorizing" | "syncing" | "disconnecting" | undefined;
   calendarAuthorizationPending: boolean;
   calendarError: string | undefined;
+  reminderSyncStatus: ReminderSyncStatus;
+  reminderSyncError: string | undefined;
   onStartAuthentication(): Promise<void>;
   onReloadModels(): Promise<void>;
   onSaveModel(
@@ -37,6 +49,8 @@ type SettingsWorkspaceProps = {
   onStartCalendarConnection(): Promise<void>;
   onReloadCalendarConnection(): Promise<GoogleCalendarConnection | undefined>;
   onSyncCalendar(): Promise<void>;
+  onDisconnectCalendar(): Promise<boolean>;
+  onRetryReminderSync(): Promise<boolean>;
 };
 
 export function SettingsWorkspace({
@@ -51,12 +65,16 @@ export function SettingsWorkspace({
   calendarAction,
   calendarAuthorizationPending,
   calendarError,
+  reminderSyncStatus,
+  reminderSyncError,
   onStartAuthentication,
   onReloadModels,
   onSaveModel,
   onStartCalendarConnection,
   onReloadCalendarConnection,
   onSyncCalendar,
+  onDisconnectCalendar,
+  onRetryReminderSync,
 }: SettingsWorkspaceProps) {
   const savedModelId = modelSettings?.selectedModelId ?? "";
   const savedReasoningEffort = modelSettings?.selectedReasoningEffort ?? "";
@@ -64,6 +82,26 @@ export function SettingsWorkspace({
   const [draftReasoningEffort, setDraftReasoningEffort] =
     useState(savedReasoningEffort);
   const [modelSaved, setModelSaved] = useState(false);
+  const [calendarDisconnectConfirmation, setCalendarDisconnectConfirmation] =
+    useState(false);
+  const [notificationPermission, setNotificationPermission] =
+    useState<NotificationPermissionStatus>();
+  const [notificationPermissionLoading, setNotificationPermissionLoading] =
+    useState(localNotificationsSupported);
+  const [
+    notificationPermissionRequesting,
+    setNotificationPermissionRequesting,
+  ] = useState(false);
+  const [notificationPermissionError, setNotificationPermissionError] =
+    useState<string>();
+  const [notificationSettingsOpening, setNotificationSettingsOpening] =
+    useState(false);
+  const calendarDisconnectTrigger = useRef<HTMLButtonElement>(null);
+  const calendarDisconnectSafeAction = useRef<HTMLButtonElement>(null);
+  const calendarConnectionRow = useRef<HTMLDivElement>(null);
+  const calendarDisconnectFocusTarget = useRef<"trigger" | "row" | undefined>(
+    undefined,
+  );
   useEffect(() => {
     setDraftModelId(savedModelId);
     setDraftReasoningEffort(savedReasoningEffort);
@@ -102,6 +140,121 @@ export function SettingsWorkspace({
     calendarLoading,
     calendarAuthorizationPending,
   );
+
+  useEffect(() => {
+    if (!calendarReady) setCalendarDisconnectConfirmation(false);
+  }, [calendarReady]);
+
+  useEffect(() => {
+    if (!localNotificationsSupported()) return;
+    let active = true;
+    const refreshPermission = async () => {
+      setNotificationPermissionLoading(true);
+      try {
+        const status = await getNotificationPermissionStatus();
+        if (!active) return;
+        setNotificationPermission(status);
+        setNotificationPermissionError(undefined);
+        if (
+          status.status === "granted" &&
+          (reminderSyncStatus === "idle" || reminderSyncStatus === "error")
+        ) {
+          void onRetryReminderSync();
+        }
+      } catch {
+        if (!active) return;
+        setNotificationPermissionError(copy.settings.notificationsLoadNotice);
+      } finally {
+        if (active) setNotificationPermissionLoading(false);
+      }
+    };
+    const refreshPermissionWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        void refreshPermission();
+      }
+    };
+    void refreshPermission();
+    window.addEventListener("focus", refreshPermissionWhenVisible);
+    document.addEventListener("visibilitychange", refreshPermissionWhenVisible);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", refreshPermissionWhenVisible);
+      document.removeEventListener(
+        "visibilitychange",
+        refreshPermissionWhenVisible,
+      );
+    };
+  }, [onRetryReminderSync, reminderSyncStatus]);
+
+  useEffect(() => {
+    const target = calendarDisconnectConfirmation
+      ? calendarDisconnectSafeAction.current
+      : calendarDisconnectFocusTarget.current === "row"
+        ? calendarConnectionRow.current
+        : calendarDisconnectFocusTarget.current === "trigger"
+          ? calendarDisconnectTrigger.current
+          : undefined;
+    if (!target) return;
+    const frame = window.requestAnimationFrame(() => {
+      target.focus();
+      if (!calendarDisconnectConfirmation) {
+        calendarDisconnectFocusTarget.current = undefined;
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [calendarDisconnectConfirmation]);
+
+  function closeCalendarDisconnectConfirmation() {
+    calendarDisconnectFocusTarget.current = "trigger";
+    setCalendarDisconnectConfirmation(false);
+  }
+
+  async function askForNotificationPermission() {
+    if (notificationPermissionRequesting) return;
+    setNotificationPermissionRequesting(true);
+    setNotificationPermissionError(undefined);
+    try {
+      const status = await requestNotificationPermission();
+      setNotificationPermission(status);
+      if (status.status === "granted") void onRetryReminderSync();
+    } catch {
+      setNotificationPermissionError(copy.settings.notificationsRequestNotice);
+    } finally {
+      setNotificationPermissionRequesting(false);
+    }
+  }
+
+  async function refreshNotificationPermission() {
+    if (notificationPermissionLoading) return;
+    setNotificationPermissionLoading(true);
+    setNotificationPermissionError(undefined);
+    try {
+      setNotificationPermission(await getNotificationPermissionStatus());
+    } catch {
+      setNotificationPermissionError(copy.settings.notificationsLoadNotice);
+    } finally {
+      setNotificationPermissionLoading(false);
+    }
+  }
+
+  async function openPhoneNotificationSettings() {
+    if (notificationSettingsOpening) return;
+    setNotificationSettingsOpening(true);
+    setNotificationPermissionError(undefined);
+    try {
+      await openNotificationSettings();
+    } catch {
+      setNotificationPermissionError(copy.settings.notificationsSettingsNotice);
+    } finally {
+      setNotificationSettingsOpening(false);
+    }
+  }
+
+  async function confirmCalendarDisconnect() {
+    const disconnected = await onDisconnectCalendar();
+    calendarDisconnectFocusTarget.current = disconnected ? "row" : "trigger";
+    setCalendarDisconnectConfirmation(false);
+  }
 
   async function saveModel() {
     setModelSaved(false);
@@ -293,7 +446,10 @@ export function SettingsWorkspace({
           )}
         </div>
         <div
-          className="settings-row"
+          ref={calendarConnectionRow}
+          className="settings-row focus-visible-control"
+          tabIndex={-1}
+          aria-busy={calendarBusy}
           data-state={
             calendarUnavailable ? "unavailable" : calendarConnection?.status
           }
@@ -340,21 +496,71 @@ export function SettingsWorkspace({
                   : copy.settings.calendarRetry}
               </button>
             ) : calendarReady ? (
-              <button
-                className="text-button focus-visible-control"
-                type="button"
-                disabled={calendarBusy}
-                onClick={() => void onSyncCalendar()}
-              >
-                {calendarAction === "syncing" ? (
-                  <LoaderCircle className="spin" aria-hidden="true" />
+              <>
+                {!calendarDisconnectConfirmation ? (
+                  <button
+                    className="text-button focus-visible-control"
+                    type="button"
+                    disabled={calendarBusy}
+                    onClick={() => void onSyncCalendar()}
+                  >
+                    {calendarAction === "syncing" ? (
+                      <LoaderCircle className="spin" aria-hidden="true" />
+                    ) : (
+                      <RefreshCw aria-hidden="true" />
+                    )}
+                    {calendarAction === "syncing"
+                      ? copy.settings.calendarSyncing
+                      : copy.settings.calendarSync}
+                  </button>
+                ) : null}
+                {calendarDisconnectConfirmation ? (
+                  <div
+                    className="settings-row__disconnect-confirmation"
+                    role="group"
+                    aria-label={copy.settings.calendarDisconnectTitle}
+                  >
+                    <p>{copy.settings.calendarDisconnectDescription}</p>
+                    <div>
+                      <button
+                        ref={calendarDisconnectSafeAction}
+                        className="text-button focus-visible-control"
+                        type="button"
+                        disabled={calendarBusy}
+                        onClick={closeCalendarDisconnectConfirmation}
+                      >
+                        {copy.settings.calendarKeepConnected}
+                      </button>
+                      <button
+                        className="text-button text-button--danger focus-visible-control"
+                        type="button"
+                        disabled={calendarBusy}
+                        onClick={() => void confirmCalendarDisconnect()}
+                      >
+                        {calendarAction === "disconnecting" ? (
+                          <LoaderCircle className="spin" aria-hidden="true" />
+                        ) : (
+                          <Unlink aria-hidden="true" />
+                        )}
+                        {calendarAction === "disconnecting"
+                          ? copy.settings.calendarDisconnectingAction
+                          : copy.settings.calendarConfirmDisconnect}
+                      </button>
+                    </div>
+                  </div>
                 ) : (
-                  <RefreshCw aria-hidden="true" />
+                  <button
+                    ref={calendarDisconnectTrigger}
+                    className="text-button text-button--danger focus-visible-control"
+                    type="button"
+                    disabled={calendarBusy}
+                    onClick={() => setCalendarDisconnectConfirmation(true)}
+                  >
+                    <Unlink aria-hidden="true" />
+                    {copy.settings.calendarDisconnect}
+                  </button>
                 )}
-                {calendarAction === "syncing"
-                  ? copy.settings.calendarSyncing
-                  : copy.settings.calendarSync}
-              </button>
+              </>
             ) : calendarAuthorizationPending ? (
               <button
                 className="text-button focus-visible-control"
@@ -389,6 +595,137 @@ export function SettingsWorkspace({
             )}
           </div>
         </div>
+        {localNotificationsSupported() ? (
+          <div
+            className="settings-row"
+            aria-busy={
+              notificationPermissionLoading ||
+              notificationPermissionRequesting ||
+              notificationSettingsOpening ||
+              reminderSyncStatus === "syncing"
+            }
+            data-state={
+              notificationPermissionError || reminderSyncError
+                ? "error"
+                : notificationPermission?.status
+            }
+          >
+            <span className="settings-row__icon" aria-hidden="true">
+              {notificationPermissionLoading ||
+              notificationPermissionRequesting ? (
+                <LoaderCircle className="spin" />
+              ) : notificationPermissionError ||
+                reminderSyncError ||
+                notificationPermission?.status === "denied" ? (
+                <CircleAlert />
+              ) : notificationPermission?.status === "granted" ? (
+                <CheckCircle2 />
+              ) : (
+                <BellRing />
+              )}
+            </span>
+            <div className="settings-row__copy">
+              <strong>{copy.settings.notificationsTitle}</strong>
+              <p>
+                {notificationPermissionLoading
+                  ? copy.settings.notificationsChecking
+                  : notificationPermission?.status === "granted"
+                    ? reminderSyncStatus === "syncing" ||
+                      reminderSyncStatus === "idle"
+                      ? copy.settings.notificationsSyncing
+                      : reminderSyncStatus === "error"
+                        ? copy.settings.notificationsSyncProblem
+                        : copy.settings.notificationsReady
+                    : notificationPermission?.canRequest
+                      ? copy.settings.notificationsNeedsPermission
+                      : copy.settings.notificationsNeedsSettings}
+              </p>
+              {notificationPermissionError ? (
+                <p className="settings-row__error" role="alert">
+                  {notificationPermissionError}
+                </p>
+              ) : null}
+              {!notificationPermissionError && reminderSyncError ? (
+                <p className="settings-row__error" role="alert">
+                  {reminderSyncError}
+                </p>
+              ) : null}
+            </div>
+            <div className="settings-row__actions">
+              {notificationPermissionError ? (
+                <button
+                  className="text-button focus-visible-control"
+                  type="button"
+                  disabled={notificationPermissionLoading}
+                  onClick={() => void refreshNotificationPermission()}
+                >
+                  {notificationPermissionLoading ? (
+                    <LoaderCircle className="spin" aria-hidden="true" />
+                  ) : (
+                    <RefreshCw aria-hidden="true" />
+                  )}
+                  {copy.settings.notificationsRetry}
+                </button>
+              ) : notificationPermission?.status === "granted" ? (
+                reminderSyncStatus === "error" ? (
+                  <button
+                    className="text-button focus-visible-control"
+                    type="button"
+                    onClick={() => void onRetryReminderSync()}
+                  >
+                    <RefreshCw aria-hidden="true" />
+                    {copy.settings.notificationsSyncRetry}
+                  </button>
+                ) : (
+                  <span className="settings-row__state" role="status">
+                    {reminderSyncStatus === "syncing" ||
+                    reminderSyncStatus === "idle" ? (
+                      <LoaderCircle className="spin" aria-hidden="true" />
+                    ) : (
+                      <CheckCircle2 aria-hidden="true" />
+                    )}
+                    {reminderSyncStatus === "syncing" ||
+                    reminderSyncStatus === "idle"
+                      ? copy.settings.notificationsSyncingAction
+                      : copy.settings.notificationsEnabled}
+                  </span>
+                )
+              ) : notificationPermission?.canRequest ? (
+                <button
+                  className="text-button focus-visible-control"
+                  type="button"
+                  disabled={notificationPermissionRequesting}
+                  onClick={() => void askForNotificationPermission()}
+                >
+                  {notificationPermissionRequesting ? (
+                    <LoaderCircle className="spin" aria-hidden="true" />
+                  ) : (
+                    <BellRing aria-hidden="true" />
+                  )}
+                  {notificationPermissionRequesting
+                    ? copy.settings.notificationsRequesting
+                    : copy.settings.notificationsAllow}
+                </button>
+              ) : notificationPermission?.status === "denied" ? (
+                <button
+                  className="text-button focus-visible-control"
+                  type="button"
+                  disabled={notificationSettingsOpening}
+                  onClick={() => void openPhoneNotificationSettings()}
+                >
+                  {notificationSettingsOpening ? (
+                    <LoaderCircle className="spin" aria-hidden="true" />
+                  ) : (
+                    <BellRing aria-hidden="true" />
+                  )}
+                  {notificationSettingsOpening
+                    ? copy.settings.notificationsOpeningSettings
+                    : copy.settings.notificationsOpenSettings}
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
       </section>
     </section>
   );

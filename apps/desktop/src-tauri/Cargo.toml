@@ -19,6 +19,7 @@ keyring-core.workspace = true
 tauri.workspace = true
 tauri-plugin-opener.workspace = true
 jimin-voice-recognition = { package = "tauri-plugin-voice-recognition", path = "../../../crates/voice-recognition-plugin" }
+jimin-local-notifications = { package = "tauri-plugin-local-notifications", path = "../../../crates/local-notifications-plugin" }
 uuid.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]

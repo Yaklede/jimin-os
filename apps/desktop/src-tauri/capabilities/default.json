@@ -15,6 +15,15 @@
     },
     "voice-recognition:allow-start",
     "voice-recognition:allow-stop",
-    "voice-recognition:allow-cancel"
+    "voice-recognition:allow-cancel",
+    "local-notifications:allow-permissionStatus",
+    "local-notifications:allow-requestPermission",
+    "local-notifications:allow-openSettings",
+    "local-notifications:allow-schedule",
+    "local-notifications:allow-cancel",
+    "local-notifications:allow-reconcileScheduled",
+    "local-notifications:allow-takePendingNavigation",
+    "local-notifications:allow-peekPendingNavigation",
+    "local-notifications:allow-ackPendingNavigation"
   ]
 }

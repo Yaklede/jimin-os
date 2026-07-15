@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   currentPlanningRange,
   planningViewRange,
+  samePlanningViewRange,
   shiftPlanningViewRange,
 } from "./planningRange";
 
@@ -47,6 +48,23 @@ describe("planning view range", () => {
       from: new Date(2026, 6, 1),
       to: new Date(2026, 7, 1),
     });
+  });
+
+  it("treats separately-created ranges for the same view as equal", () => {
+    const anchor = new Date(2026, 6, 15, 14, 30);
+
+    expect(
+      samePlanningViewRange(
+        planningViewRange("month", anchor),
+        planningViewRange("month", new Date(anchor)),
+      ),
+    ).toBe(true);
+    expect(
+      samePlanningViewRange(
+        planningViewRange("month", anchor),
+        planningViewRange("month", new Date(2026, 7, 1)),
+      ),
+    ).toBe(false);
   });
 
   it("moves a month range without limiting older history", () => {

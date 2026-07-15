@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peekPendingNavigation"
+description = "Enables the peekPendingNavigation command without any pre-configured scope."
+commands.allow = ["peekPendingNavigation"]
+
+[[permission]]
+identifier = "deny-peekPendingNavigation"
+description = "Denies the peekPendingNavigation command without any pre-configured scope."
+commands.deny = ["peekPendingNavigation"]

@@ -3,8 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createProjectWebhook,
   deleteProjectWebhook,
+  retryWebhookDelivery,
   testProjectWebhook,
   type ProjectWebhook,
+  updateProjectWebhook,
 } from "./webhooks";
 
 afterEach(() => {
@@ -68,5 +70,54 @@ describe("project webhook client", () => {
     expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
       expectedVersion: 3,
     });
+  });
+
+  it("updates a webhook without echoing a stored secret", async () => {
+    const updated = { ...webhook, enabled: false, version: 4 };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(updated), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      updateProjectWebhook("https://jimin-os.example", "access", webhook, {
+        url: webhook.url,
+        events: webhook.events,
+        enabled: false,
+        authorizationMode: "keep",
+      }),
+    ).resolves.toEqual(updated);
+
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "PUT" });
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      url: webhook.url,
+      events: webhook.events,
+      enabled: false,
+      authorizationMode: "keep",
+      authorization: null,
+      expectedVersion: 3,
+    });
+  });
+
+  it("requeues a failed delivery with its stable delivery identifier", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await retryWebhookDelivery(
+      "https://jimin-os.example",
+      "access",
+      webhook.projectId,
+      "019f68cb-9400-7000-8000-000000000033",
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://jimin-os.example/v1/projects/019f68cb-9400-7000-8000-000000000032/webhook-deliveries/019f68cb-9400-7000-8000-000000000033/retry",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 });

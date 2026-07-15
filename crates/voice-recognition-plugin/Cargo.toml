@@ -12,7 +12,7 @@ repository.workspace = true
 tauri.workspace = true
 
 [build-dependencies]
-tauri-plugin.workspace = true
+tauri-plugin = { workspace = true, features = ["build"] }
 
 [lints]
 workspace = true

@@ -1,6 +1,7 @@
 import {
   CalendarClock,
   CalendarDays,
+  CalendarPlus,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -8,6 +9,7 @@ import {
   Cloud,
   History,
   Pencil,
+  Plus,
   RefreshCw,
   RotateCcw,
 } from "lucide-react";
@@ -33,6 +35,12 @@ import {
   useDelayedSkeleton,
 } from "./ContentSkeleton";
 import { EmptySurface } from "./HomeWorkspace";
+import {
+  PlanningCreateDialog,
+  type PlanningCreateKind,
+  type PlanningScheduleCreateInput,
+  type PlanningTaskCreateInput,
+} from "./PlanningCreateDialog";
 
 type PlanningWorkspaceProps = {
   snapshot: PlanningSnapshot | undefined;
@@ -44,6 +52,8 @@ type PlanningWorkspaceProps = {
   highlightedTaskId?: string;
   onCompleteTask(task: Task): Promise<void>;
   onRestoreTask(task: Task): Promise<void>;
+  onCreateTask(input: PlanningTaskCreateInput): Promise<void>;
+  onCreateSchedule(input: PlanningScheduleCreateInput): Promise<void>;
   onEditTask(task: Task): void;
   onEditSchedule(entry: ScheduleEntry): void;
   onRangeChange(range: PlanningViewRange): Promise<void>;
@@ -60,6 +70,8 @@ export function PlanningWorkspace({
   highlightedTaskId,
   onCompleteTask,
   onRestoreTask,
+  onCreateTask,
+  onCreateSchedule,
   onEditTask,
   onEditSchedule,
   onRangeChange,
@@ -69,6 +81,7 @@ export function PlanningWorkspace({
     id: string;
     action: "complete" | "restore";
   }>();
+  const [createKind, setCreateKind] = useState<PlanningCreateKind>();
   const highlightedScheduleRef = useRef<HTMLLIElement | null>(null);
   const highlightedTaskRef = useRef<HTMLLIElement | null>(null);
   const skeletonVisible = useDelayedSkeleton(loading);
@@ -89,7 +102,8 @@ export function PlanningWorkspace({
     const element = highlightedScheduleRef.current;
     if (!element) return;
     element.scrollIntoView({
-      block: "center",
+      block: "nearest",
+      inline: "nearest",
       behavior: preferredScrollBehavior(),
     });
     element.focus({ preventScroll: true });
@@ -100,7 +114,8 @@ export function PlanningWorkspace({
     const element = highlightedTaskRef.current;
     if (!element) return;
     element.scrollIntoView({
-      block: "center",
+      block: "nearest",
+      inline: "nearest",
       behavior: preferredScrollBehavior(),
     });
     element.focus({ preventScroll: true });
@@ -128,10 +143,33 @@ export function PlanningWorkspace({
 
   return (
     <section className="planning-page" aria-busy={showingSkeleton}>
-      <header className="page-heading">
+      <header className="page-heading planning-page__heading">
         <p>{todayLabel()}</p>
         <h1>{copy.schedule.title}</h1>
         <span>{copy.schedule.description}</span>
+        <div
+          className="planning-page__create-actions"
+          aria-label={copy.schedule.createActions}
+        >
+          <button
+            className="secondary-button focus-visible-control"
+            type="button"
+            disabled={loading}
+            onClick={() => setCreateKind("task")}
+          >
+            <Plus aria-hidden="true" />
+            {copy.actions.addTask}
+          </button>
+          <button
+            className="primary-button focus-visible-control"
+            type="button"
+            disabled={loading}
+            onClick={() => setCreateKind("schedule")}
+          >
+            <CalendarPlus aria-hidden="true" />
+            {copy.actions.addSchedule}
+          </button>
+        </div>
       </header>
       {error && (
         <p className="inline-alert" role="alert">
@@ -449,6 +487,12 @@ export function PlanningWorkspace({
           )}
         </div>
       </section>
+      <PlanningCreateDialog
+        kind={createKind}
+        onClose={() => setCreateKind(undefined)}
+        onCreateTask={onCreateTask}
+        onCreateSchedule={onCreateSchedule}
+      />
     </section>
   );
 }

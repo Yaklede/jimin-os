@@ -41,11 +41,15 @@ describe("voice command API", () => {
     );
     const request = fetchMock.mock.calls[0]?.[1];
     const requestBody = JSON.parse(String(request?.body)) as {
+      clientMutationId: string;
       referenceAt: string;
       text: string;
       timeZone: string;
     };
     expect(requestBody).toMatchObject({
+      clientMutationId: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      ),
       text: "내일 오후 3시에 치과 일정 등록해줘",
       timeZone: expect.any(String),
     });

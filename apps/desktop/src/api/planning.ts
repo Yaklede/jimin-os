@@ -1,4 +1,4 @@
-import { isUuidV7 } from "../uuid";
+import { createUuidV7, isUuidV7 } from "../uuid";
 
 export type SessionTokens = Record<"accessToken" | "refreshToken", string>;
 
@@ -234,17 +234,48 @@ export async function updateTask(
   });
 }
 
+export async function deleteTask(
+  baseUrl: string,
+  access: string,
+  task: Task,
+): Promise<void> {
+  const response = await fetch(
+    `${normalizeBaseUrl(baseUrl)}/v1/tasks/${encodeURIComponent(task.id)}`,
+    {
+      method: "DELETE",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${access}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ expectedVersion: task.version }),
+    },
+  );
+  if (!response.ok) throw errorFromStatus(response.status);
+}
+
 export async function createScheduleEntry(
   baseUrl: string,
   access: string,
-  input: { title: string; startsAt: string; endsAt: string; notes?: string },
+  input: {
+    clientMutationId?: string;
+    title: string;
+    startsAt: string;
+    endsAt: string;
+    notes?: string;
+  },
 ): Promise<ScheduleEntry> {
+  const clientMutationId = input.clientMutationId ?? createUuidV7();
+  if (!isUuidV7(clientMutationId)) {
+    throw new PlanningRequestError("invalid");
+  }
   return request<ScheduleEntry>(
     baseUrl,
     access,
     "/v1/schedule-entries",
     "POST",
     {
+      clientMutationId,
       title: input.title,
       notes: input.notes || null,
       startsAt: new Date(input.startsAt).toISOString(),

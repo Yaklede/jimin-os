@@ -19,6 +19,7 @@ import { type Task } from "../api/planning";
 import {
   type ProjectWebhook,
   type ProjectWebhookEvent,
+  type WebhookAuthorizationMode,
   type WebhookDelivery,
 } from "../api/webhooks";
 import { copy } from "../copy";
@@ -64,6 +65,7 @@ type ProjectsWorkspaceProps = {
       dueAt?: string;
     },
   ): Promise<void>;
+  onDeleteProject(project: Project): Promise<void>;
   onCreateTask(title: string): Promise<void>;
   onCompleteTask(task: Task): Promise<void>;
   onUpdateTask(
@@ -76,13 +78,25 @@ type ProjectsWorkspaceProps = {
       dueAt?: string;
     },
   ): Promise<void>;
+  onDeleteTask(task: Task): Promise<void>;
   onCreateWebhook(input: {
     url: string;
     events: ProjectWebhookEvent[];
     authorization?: string;
   }): Promise<void>;
+  onUpdateWebhook(
+    webhook: ProjectWebhook,
+    input: {
+      url: string;
+      events: ProjectWebhookEvent[];
+      enabled: boolean;
+      authorizationMode: WebhookAuthorizationMode;
+      authorization?: string;
+    },
+  ): Promise<void>;
   onTestWebhook(webhook: ProjectWebhook): Promise<void>;
   onDeleteWebhook(webhook: ProjectWebhook): Promise<void>;
+  onRetryWebhookDelivery(delivery: WebhookDelivery): Promise<void>;
 };
 
 export function ProjectsWorkspace({
@@ -103,12 +117,16 @@ export function ProjectsWorkspace({
   onClearProject,
   onCreateProject,
   onUpdateProject,
+  onDeleteProject,
   onCreateTask,
   onCompleteTask,
   onUpdateTask,
+  onDeleteTask,
   onCreateWebhook,
+  onUpdateWebhook,
   onTestWebhook,
   onDeleteWebhook,
+  onRetryWebhookDelivery,
 }: ProjectsWorkspaceProps) {
   const [formOpen, setFormOpen] = useState(false);
   const [title, setTitle] = useState("");
@@ -150,7 +168,10 @@ export function ProjectsWorkspace({
     if (!highlightedTaskId) return;
     const element = highlightedTaskRef.current;
     if (!element) return;
-    element.scrollIntoView({ block: "center", behavior: "smooth" });
+    element.scrollIntoView({
+      block: "center",
+      behavior: preferredScrollBehavior(),
+    });
     element.focus({ preventScroll: true });
   }, [highlightedTaskId, tasks]);
 
@@ -311,7 +332,7 @@ export function ProjectsWorkspace({
                 id="project-due-date"
                 type="date"
                 value={dueDate}
-                onChange={(event) => setDueDate(event.target.value)}
+                onInput={(event) => setDueDate(event.currentTarget.value)}
                 disabled={saving}
               />
             </label>
@@ -487,6 +508,10 @@ export function ProjectsWorkspace({
                         setFormError(copy.projects.projectUpdateNotice);
                       }
                     }}
+                    onDelete={async () => {
+                      await onDeleteProject(selectedProject);
+                      setRestoreListFocus(true);
+                    }}
                   />
                 ) : (
                   <div className="project-next-action">
@@ -509,8 +534,10 @@ export function ProjectsWorkspace({
                 loading={webhookLoading}
                 saving={saving}
                 onCreate={onCreateWebhook}
+                onUpdate={onUpdateWebhook}
                 onTest={onTestWebhook}
                 onDelete={onDeleteWebhook}
+                onRetry={onRetryWebhookDelivery}
               />
               <div className="project-detail__tasks">
                 <div className="projects-section-heading">
@@ -566,6 +593,7 @@ export function ProjectsWorkspace({
                               await onUpdateTask(task, input);
                               setEditingTaskId(undefined);
                             }}
+                            onDelete={() => onDeleteTask(task)}
                           />
                         )}
                       </li>
@@ -670,6 +698,7 @@ export function ProjectsWorkspace({
                                 await onUpdateTask(task, input);
                                 setEditingTaskId(undefined);
                               }}
+                              onDelete={() => onDeleteTask(task)}
                             />
                           )}
                         </li>
@@ -698,6 +727,7 @@ function ProjectEditForm({
   saving,
   onCancel,
   onSave,
+  onDelete,
 }: {
   project: Project;
   saving: boolean;
@@ -710,6 +740,7 @@ function ProjectEditForm({
     nextAction?: string;
     dueAt?: string;
   }): Promise<void>;
+  onDelete(): Promise<void>;
 }) {
   const [title, setTitle] = useState(project.title);
   const [objective, setObjective] = useState(project.objective ?? "");
@@ -717,10 +748,31 @@ function ProjectEditForm({
   const [riskLevel, setRiskLevel] = useState(String(project.riskLevel));
   const [nextAction, setNextAction] = useState(project.nextAction ?? "");
   const [dueDate, setDueDate] = useState(isoToDateInput(project.dueAt));
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string>();
+  const deleteTriggerRef = useRef<HTMLButtonElement>(null);
+  const deleteSafeActionRef = useRef<HTMLButtonElement>(null);
+  const restoreDeleteTriggerRef = useRef(false);
+  const busy = saving || deleting;
+
+  useEffect(() => {
+    const target = confirmingDelete
+      ? deleteSafeActionRef.current
+      : restoreDeleteTriggerRef.current
+        ? deleteTriggerRef.current
+        : undefined;
+    if (!target) return;
+    const frame = window.requestAnimationFrame(() => {
+      target.focus();
+      if (!confirmingDelete) restoreDeleteTriggerRef.current = false;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [confirmingDelete]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (busy) return;
     if (!title.trim()) {
       setError(copy.projects.titleRequired);
       return;
@@ -736,10 +788,25 @@ function ProjectEditForm({
     });
   }
 
+  async function removeProject() {
+    if (saving || deleting) return;
+    setDeleting(true);
+    setError(undefined);
+    try {
+      await onDelete();
+    } catch {
+      setError(copy.projects.projectDeleteNotice);
+      restoreDeleteTriggerRef.current = true;
+      setConfirmingDelete(false);
+      setDeleting(false);
+    }
+  }
+
   return (
     <form
       className="project-edit-form"
       aria-labelledby="project-edit-title"
+      aria-busy={busy}
       onSubmit={(event) => void submit(event)}
     >
       <div className="project-edit-form__heading">
@@ -759,7 +826,7 @@ function ProjectEditForm({
           id="project-edit-name"
           value={title}
           maxLength={200}
-          disabled={saving}
+          disabled={busy}
           onChange={(event) => setTitle(event.target.value)}
         />
       </label>
@@ -770,7 +837,7 @@ function ProjectEditForm({
           value={objective}
           maxLength={10_000}
           rows={3}
-          disabled={saving}
+          disabled={busy}
           onChange={(event) => setObjective(event.target.value)}
         />
       </label>
@@ -780,7 +847,7 @@ function ProjectEditForm({
           id="project-edit-next-action"
           value={nextAction}
           maxLength={500}
-          disabled={saving}
+          disabled={busy}
           onChange={(event) => setNextAction(event.target.value)}
         />
       </label>
@@ -790,7 +857,7 @@ function ProjectEditForm({
           <select
             id="project-edit-status"
             value={status}
-            disabled={saving}
+            disabled={busy}
             onChange={(event) =>
               setStatus(event.target.value as Project["status"])
             }
@@ -807,7 +874,7 @@ function ProjectEditForm({
           <select
             id="project-edit-risk"
             value={riskLevel}
-            disabled={saving}
+            disabled={busy}
             onChange={(event) => setRiskLevel(event.target.value)}
           >
             {copy.projects.riskLevels.map((label, level) => (
@@ -823,28 +890,79 @@ function ProjectEditForm({
             id="project-edit-due-date"
             type="date"
             value={dueDate}
-            disabled={saving}
-            onChange={(event) => setDueDate(event.target.value)}
+            disabled={busy}
+            onInput={(event) => setDueDate(event.currentTarget.value)}
           />
         </label>
       </div>
-      <div className="project-edit-form__actions">
-        <button
-          className="secondary-button focus-visible-control"
-          type="button"
-          disabled={saving}
-          onClick={onCancel}
+      {confirmingDelete ? (
+        <section
+          className="project-edit-form__delete-confirmation"
+          role="group"
+          aria-label={copy.projects.deleteProjectTitle}
         >
-          {copy.projects.stopEditing}
-        </button>
-        <button
-          className="primary-button focus-visible-control"
-          type="submit"
-          disabled={saving}
-        >
-          {saving ? copy.actions.saving : copy.projects.saveChanges}
-        </button>
-      </div>
+          <div>
+            <strong>{copy.projects.deleteProjectTitle}</strong>
+            <p>{copy.projects.deleteProjectDescription}</p>
+          </div>
+          <div>
+            <button
+              ref={deleteSafeActionRef}
+              className="secondary-button focus-visible-control"
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                restoreDeleteTriggerRef.current = true;
+                setConfirmingDelete(false);
+              }}
+            >
+              {copy.projects.keepProject}
+            </button>
+            <button
+              className="destructive-button focus-visible-control"
+              type="button"
+              disabled={busy}
+              onClick={() => void removeProject()}
+            >
+              {deleting ? (
+                <span className="button-spinner" aria-hidden="true" />
+              ) : (
+                <Trash2 aria-hidden="true" />
+              )}
+              {deleting ? copy.actions.deleting : copy.projects.deleteProject}
+            </button>
+          </div>
+        </section>
+      ) : (
+        <div className="project-edit-form__actions">
+          <button
+            ref={deleteTriggerRef}
+            className="destructive-quiet-button focus-visible-control"
+            type="button"
+            disabled={busy}
+            onClick={() => setConfirmingDelete(true)}
+          >
+            <Trash2 aria-hidden="true" />
+            {copy.projects.deleteProject}
+          </button>
+          <span />
+          <button
+            className="secondary-button focus-visible-control"
+            type="button"
+            disabled={busy}
+            onClick={onCancel}
+          >
+            {copy.projects.stopEditing}
+          </button>
+          <button
+            className="primary-button focus-visible-control"
+            type="submit"
+            disabled={busy}
+          >
+            {saving ? copy.actions.saving : copy.projects.saveChanges}
+          </button>
+        </div>
+      )}
     </form>
   );
 }
@@ -854,6 +972,7 @@ function TaskEditForm({
   saving,
   onCancel,
   onSave,
+  onDelete,
 }: {
   task: Task;
   saving: boolean;
@@ -865,16 +984,37 @@ function TaskEditForm({
     priority: number;
     dueAt?: string;
   }): Promise<void>;
+  onDelete(): Promise<void>;
 }) {
   const [title, setTitle] = useState(task.title);
   const [notes, setNotes] = useState(task.notes ?? "");
   const [priority, setPriority] = useState(String(task.priority));
   const [dueDate, setDueDate] = useState(isoToDateInput(task.dueAt));
   const [confirmingRemoval, setConfirmingRemoval] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string>();
+  const removeTriggerRef = useRef<HTMLButtonElement>(null);
+  const removeSafeActionRef = useRef<HTMLButtonElement>(null);
+  const restoreRemoveTriggerRef = useRef(false);
+  const busy = saving || deleting;
+
+  useEffect(() => {
+    const target = confirmingRemoval
+      ? removeSafeActionRef.current
+      : restoreRemoveTriggerRef.current
+        ? removeTriggerRef.current
+        : undefined;
+    if (!target) return;
+    const frame = window.requestAnimationFrame(() => {
+      target.focus();
+      if (!confirmingRemoval) restoreRemoveTriggerRef.current = false;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [confirmingRemoval]);
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (busy) return;
     if (!title.trim()) {
       setError(copy.projects.workItemTitleRequired);
       return;
@@ -894,17 +1034,16 @@ function TaskEditForm({
   }
 
   async function removeTask() {
+    if (busy) return;
+    setDeleting(true);
     setError(undefined);
     try {
-      await onSave({
-        title: title.trim() || task.title,
-        notes: notes.trim() || undefined,
-        status: "cancelled",
-        priority: Number(priority),
-        dueAt: dateInputToIso(dueDate),
-      });
+      await onDelete();
     } catch {
       setError(copy.projects.taskRemoveNotice);
+      restoreRemoveTriggerRef.current = true;
+      setConfirmingRemoval(false);
+      setDeleting(false);
     }
   }
 
@@ -912,6 +1051,7 @@ function TaskEditForm({
     <form
       className="project-task-edit-form"
       aria-label={copy.projects.editWorkItem(task.title)}
+      aria-busy={busy}
       onSubmit={(event) => void save(event)}
     >
       {error && (
@@ -925,7 +1065,7 @@ function TaskEditForm({
           id={`task-title-${task.id}`}
           value={title}
           maxLength={200}
-          disabled={saving}
+          disabled={busy}
           onChange={(event) => setTitle(event.target.value)}
         />
       </label>
@@ -936,7 +1076,7 @@ function TaskEditForm({
           value={notes}
           maxLength={10_000}
           rows={3}
-          disabled={saving}
+          disabled={busy}
           placeholder={copy.projects.workItemNotesHint}
           onChange={(event) => setNotes(event.target.value)}
         />
@@ -947,7 +1087,7 @@ function TaskEditForm({
           <select
             id={`task-priority-${task.id}`}
             value={priority}
-            disabled={saving}
+            disabled={busy}
             onChange={(event) => setPriority(event.target.value)}
           >
             {copy.projects.taskPriorities.map((label, level) => (
@@ -963,39 +1103,55 @@ function TaskEditForm({
             id={`task-due-${task.id}`}
             type="date"
             value={dueDate}
-            disabled={saving}
-            onChange={(event) => setDueDate(event.target.value)}
+            disabled={busy}
+            onInput={(event) => setDueDate(event.currentTarget.value)}
           />
         </label>
       </div>
       {confirmingRemoval ? (
-        <div className="project-task-edit-form__removal" role="alert">
+        <div
+          className="project-task-edit-form__removal"
+          role="group"
+          aria-label={copy.projects.removeWorkItemConfirm}
+        >
           <p>{copy.projects.removeWorkItemConfirm}</p>
           <div>
             <button
+              ref={removeSafeActionRef}
               className="secondary-button focus-visible-control"
               type="button"
-              disabled={saving}
-              onClick={() => setConfirmingRemoval(false)}
+              disabled={busy}
+              onClick={() => {
+                restoreRemoveTriggerRef.current = true;
+                setConfirmingRemoval(false);
+              }}
             >
               {copy.projects.keepWorkItem}
             </button>
             <button
               className="destructive-button focus-visible-control"
               type="button"
-              disabled={saving}
+              disabled={busy}
               onClick={() => void removeTask()}
             >
-              {copy.projects.removeWorkItem}
+              {deleting ? (
+                <span className="button-spinner" aria-hidden="true" />
+              ) : (
+                <Trash2 aria-hidden="true" />
+              )}
+              {deleting
+                ? copy.projects.removingWorkItem
+                : copy.projects.removeWorkItem}
             </button>
           </div>
         </div>
       ) : (
         <div className="project-task-edit-form__actions">
           <button
+            ref={removeTriggerRef}
             className="destructive-quiet-button focus-visible-control"
             type="button"
-            disabled={saving}
+            disabled={busy}
             onClick={() => setConfirmingRemoval(true)}
           >
             <Trash2 aria-hidden="true" />
@@ -1005,7 +1161,7 @@ function TaskEditForm({
           <button
             className="secondary-button focus-visible-control"
             type="button"
-            disabled={saving}
+            disabled={busy}
             onClick={onCancel}
           >
             {copy.projects.stopEditingWorkItem}
@@ -1013,7 +1169,7 @@ function TaskEditForm({
           <button
             className="primary-button focus-visible-control"
             type="submit"
-            disabled={saving}
+            disabled={busy}
           >
             {saving ? copy.actions.saving : copy.projects.saveWorkItem}
           </button>
@@ -1098,6 +1254,12 @@ function ProjectDetailSkeleton({ visible }: { visible: boolean }) {
       </span>
     </SkeletonGroup>
   );
+}
+
+function preferredScrollBehavior(): ScrollBehavior {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ? "auto"
+    : "smooth";
 }
 
 function riskLabel(level: number): string {

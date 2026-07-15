@@ -43,6 +43,13 @@ export const projectCopy = {
   projectUpdated: "프로젝트를 최신 내용으로 바꿨어요.",
   projectUpdateNotice:
     "프로젝트를 바꾸지 못했어요. 최신 상태를 불러온 뒤 다시 시도해 주세요.",
+  deleteProject: "프로젝트 삭제",
+  keepProject: "프로젝트 유지",
+  deleteProjectTitle: "이 프로젝트를 삭제할까요?",
+  deleteProjectDescription:
+    "할 일은 프로젝트 연결만 해제되고, 웹훅 연결은 함께 삭제돼요. 프로젝트는 화면에서 복구할 수 없어요.",
+  projectDeleteNotice:
+    "프로젝트를 삭제하지 못했어요. 최신 상태를 불러온 뒤 다시 시도해 주세요.",
   completedProjectNotice:
     "완료한 프로젝트에는 새 일을 추가하지 않아요. 다시 진행하려면 프로젝트 상태를 바꿔 주세요.",
   workItemsTitle: "지금 할 일",
@@ -63,6 +70,7 @@ export const projectCopy = {
   stopEditingWorkItem: "수정 그만두기",
   saveWorkItem: "일 내용 저장하기",
   removeWorkItem: "목록에서 지우기",
+  removingWorkItem: "지우는 중",
   keepWorkItem: "계속 보관하기",
   removeWorkItemConfirm:
     "이 일은 목록에서 사라지지만 변경 기록은 안전하게 보관해요. 지울까요?",
@@ -85,6 +93,29 @@ export const projectCopy = {
   webhookAuthorizationDescription:
     "서버에서 암호화해 보관하며 저장한 값은 다시 화면에 보여주지 않아요.",
   webhookAuthenticationStored: "인증값을 안전하게 보관 중",
+  webhookStatusActive: "변화 전송 중",
+  webhookStatusPaused: "변화 전송 멈춤",
+  webhookEnabledLabel: "프로젝트 변화 자동 전송",
+  webhookEdit: "설정 바꾸기",
+  webhookEditTitle: "웹훅 설정 바꾸기",
+  webhookEditDescription:
+    "받을 주소와 보낼 변화, 인증값 사용 방식을 바꿀 수 있어요.",
+  webhookPause: "전송 멈추기",
+  webhookPausing: "전송 멈추는 중",
+  webhookResume: "전송 다시 시작하기",
+  webhookResuming: "전송 다시 시작하는 중",
+  webhookUpdated: "웹훅 설정을 바꿨어요.",
+  webhookUpdateProblem:
+    "웹훅 설정을 바꾸지 못했어요. 최신 내용을 불러온 뒤 다시 시도해 주세요.",
+  webhookAuthorizationModeLabel: "저장된 인증값",
+  webhookAuthorizationKeep: "그대로 사용하기",
+  webhookAuthorizationNone: "인증값 없이 보내기",
+  webhookAuthorizationReplace: "새 값으로 바꾸기",
+  webhookAuthorizationRemove: "저장된 값 지우기",
+  webhookAuthorizationNewLabel: "새 인증 헤더",
+  webhookAuthorizationRequired: "새 인증 헤더를 입력해 주세요.",
+  webhookStopEditing: "수정 그만두기",
+  webhookSaveChanges: "변경 내용 저장하기",
   webhookSave: "웹훅 저장하기",
   webhookRequired: "받을 주소와 하나 이상의 변화를 선택해 주세요.",
   webhookSaved: "웹훅을 연결했어요.",
@@ -95,6 +126,7 @@ export const projectCopy = {
     "웹훅 연결과 전송 기록을 불러오지 못했어요. 다시 시도해 주세요.",
   webhookEmpty: "아직 연결한 웹훅이 없어요.",
   webhookTest: "시험 전송",
+  webhookTesting: "시험 전송 중",
   webhookTestQueued:
     "시험 전송을 시작했어요. 아래 전송 기록에서 결과를 확인해 주세요.",
   webhookTestProblem:
@@ -104,6 +136,7 @@ export const projectCopy = {
     "이 주소로는 더 이상 프로젝트 변화를 보내지 않아요. 연결을 해제할까요?",
   webhookKeep: "계속 연결하기",
   webhookDeleteAction: "연결 해제하기",
+  webhookDeleting: "연결 해제하는 중",
   webhookDeleted: "웹훅 연결을 해제했어요.",
   webhookDeleteProblem:
     "웹훅 연결을 해제하지 못했어요. 새로고침한 뒤 다시 시도해 주세요.",
@@ -148,4 +181,10 @@ export const projectCopy = {
     responseCode
       ? `응답 ${responseCode} · ${attemptCount}회 시도`
       : `${attemptCount}회 시도`,
+  webhookRetry: "다시 보내기",
+  webhookRetrying: "다시 보내는 중",
+  webhookRetryQueued:
+    "다시 보내기 시작했어요. 전송 기록에서 결과를 확인해 주세요.",
+  webhookRetryProblem:
+    "다시 보내지 못했어요. 웹훅 설정과 최신 전송 상태를 확인해 주세요.",
 } as const;

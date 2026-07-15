@@ -84,6 +84,27 @@ export async function synchronizeGoogleCalendar(
   return body;
 }
 
+export async function disconnectGoogleCalendar(
+  baseUrl: string,
+  access: string,
+  expectedVersion: number,
+): Promise<void> {
+  if (!Number.isSafeInteger(expectedVersion) || expectedVersion <= 0) {
+    throw new PlanningRequestError("invalid");
+  }
+  const url = new URL(
+    `${normalizeBaseUrl(baseUrl)}/v1/calendar/connections/google`,
+  );
+  url.searchParams.set("expectedVersion", String(expectedVersion));
+  const response = await fetch(url.toString(), {
+    method: "DELETE",
+    headers: requestHeaders(access),
+  });
+  if (!response.ok) {
+    throw errorFromStatus(response.status);
+  }
+}
+
 function requestHeaders(access: string, json = false): Record<string, string> {
   return {
     Accept: "application/json",

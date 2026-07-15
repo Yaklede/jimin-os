@@ -1,0 +1,18 @@
+[package]
+name = "tauri-plugin-local-notifications"
+build = "build.rs"
+links = "tauri-plugin-local-notifications"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tauri.workspace = true
+
+[build-dependencies]
+tauri-plugin = { workspace = true, features = ["build"] }
+
+[lints]
+workspace = true

@@ -1,3 +1,5 @@
+import { createUuidV7, isUuidV7 } from "../uuid";
+
 export type VoiceCommandResult = {
   kind:
     | "schedule_listed"
@@ -35,7 +37,11 @@ export async function processVoiceCommand(
   baseUrl: string,
   access: string,
   text: string,
+  clientMutationId = createUuidV7(),
 ): Promise<VoiceCommandResult> {
+  if (!isUuidV7(clientMutationId)) {
+    throw new VoiceCommandRequestError("invalid");
+  }
   const response = await fetch(
     `${normalizeBaseUrl(baseUrl)}/v1/assistant/voice-commands`,
     {
@@ -46,6 +52,7 @@ export async function processVoiceCommand(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
+        clientMutationId,
         text,
         referenceAt: localReferenceAt(new Date()),
         timeZone:

@@ -111,6 +111,26 @@ export async function updateProject(
   );
 }
 
+export async function deleteProject(
+  baseUrl: string,
+  access: string,
+  project: Project,
+): Promise<void> {
+  const response = await fetch(
+    `${normalizeBaseUrl(baseUrl)}/v1/projects/${encodeURIComponent(project.id)}`,
+    {
+      method: "DELETE",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${access}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ expectedVersion: project.version }),
+    },
+  );
+  if (!response.ok) throw errorFromStatus(response.status);
+}
+
 async function requestList<T>(
   baseUrl: string,
   access: string,

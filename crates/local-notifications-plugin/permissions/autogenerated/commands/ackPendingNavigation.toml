@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-ackPendingNavigation"
+description = "Enables the ackPendingNavigation command without any pre-configured scope."
+commands.allow = ["ackPendingNavigation"]
+
+[[permission]]
+identifier = "deny-ackPendingNavigation"
+description = "Denies the ackPendingNavigation command without any pre-configured scope."
+commands.deny = ["ackPendingNavigation"]

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { type Project, updateProject } from "./projects";
+import { deleteProject, type Project, updateProject } from "./projects";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -55,5 +55,34 @@ describe("project client", () => {
       dueAt: updated.dueAt,
       expectedVersion: 3,
     });
+  });
+
+  it("deletes a project with optimistic version matching", async () => {
+    const project: Project = {
+      id: "019f68cb-9400-7000-8000-000000000001",
+      workspaceId: "019f68cb-9400-7000-8000-000000000002",
+      title: "개인 AI 비서",
+      objective: null,
+      status: "active",
+      riskLevel: 0,
+      nextAction: null,
+      dueAt: null,
+      openTaskCount: 2,
+      version: 4,
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      deleteProject("https://jimin-os.example/", "access", project),
+    ).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith(
+      `https://jimin-os.example/v1/projects/${project.id}`,
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    const request = fetchMock.mock.calls[0]?.[1];
+    expect(JSON.parse(String(request?.body))).toEqual({ expectedVersion: 4 });
   });
 });

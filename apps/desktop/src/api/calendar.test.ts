@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  disconnectGoogleCalendar,
   fetchGoogleCalendarConnection,
   startGoogleCalendarAuthorization,
   synchronizeGoogleCalendar,
@@ -107,5 +108,33 @@ describe("Google Calendar client", () => {
       "https://jimin-os.example/v1/calendar/connections/google/sync",
       expect.objectContaining({ method: "POST" }),
     );
+  });
+
+  it("disconnects the version currently shown to the owner", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      disconnectGoogleCalendar("https://jimin-os.example/", "access", 2),
+    ).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://jimin-os.example/v1/calendar/connections/google?expectedVersion=2",
+      expect.objectContaining({
+        method: "DELETE",
+        headers: expect.objectContaining({ Authorization: "Bearer access" }),
+      }),
+    );
+  });
+
+  it("rejects an invalid disconnect version before sending a request", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      disconnectGoogleCalendar("https://jimin-os.example", "access", 0),
+    ).rejects.toMatchObject({ code: "invalid" });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

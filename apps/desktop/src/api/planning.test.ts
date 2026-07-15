@@ -4,7 +4,10 @@ import {
   PlanningRequestError,
   bootstrapTrustedNetworkSession,
   clientPlatformForUserAgent,
+  createScheduleEntry,
+  createTask,
   deleteScheduleEntry,
+  deleteTask,
   fetchPlanning,
   refreshDeviceSession,
   updateScheduleEntry,
@@ -126,6 +129,45 @@ describe("device session client", () => {
 });
 
 describe("task client", () => {
+  it("creates an unassigned task with optional planning details", async () => {
+    const created = {
+      id: "019f68cb-9400-7000-8000-000000000010",
+      projectId: null,
+      title: "계약서 검토",
+      notes: "수정본 확인",
+      status: "open" as const,
+      priority: 2,
+      dueAt: "2026-07-15T09:00:00.000Z",
+      completedAt: null,
+      version: 1,
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(created), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      createTask("https://jimin-os.example/", "access", {
+        title: created.title,
+        notes: created.notes,
+        priority: created.priority,
+        dueAt: created.dueAt,
+      }),
+    ).resolves.toEqual(created);
+
+    const request = fetchMock.mock.calls[0]?.[1];
+    expect(JSON.parse(String(request?.body))).toEqual({
+      projectId: null,
+      title: created.title,
+      notes: created.notes,
+      priority: created.priority,
+      dueAt: created.dueAt,
+    });
+  });
+
   it("loads open and completed tasks as separate planning collections", async () => {
     const completedTask = {
       id: "019f68cb-9400-7000-8000-000000000012",
@@ -231,9 +273,79 @@ describe("task client", () => {
       expectedVersion: 4,
     });
   });
+
+  it("sends a version-checked task deletion", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const task = {
+      id: "019f68cb-9400-7000-8000-000000000010",
+      projectId: null,
+      title: "계약서 검토",
+      notes: null,
+      status: "open" as const,
+      priority: 1,
+      dueAt: null,
+      completedAt: null,
+      version: 4,
+    };
+
+    await expect(
+      deleteTask("https://jimin-os.example/", "access", task),
+    ).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith(
+      `https://jimin-os.example/v1/tasks/${task.id}`,
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    const request = fetchMock.mock.calls[0]?.[1];
+    expect(JSON.parse(String(request?.body))).toEqual({ expectedVersion: 4 });
+  });
 });
 
 describe("schedule client", () => {
+  it("creates a manual schedule with the local time zone", async () => {
+    const created = {
+      id: "019f68cb-9400-7000-8000-000000000020",
+      title: "치과 방문",
+      notes: null,
+      startsAt: "2026-07-15T08:00:00.000Z",
+      endsAt: "2026-07-15T09:00:00.000Z",
+      timeZone: "Asia/Seoul",
+      status: "confirmed" as const,
+      source: "manual" as const,
+      editable: true,
+      version: 1,
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(created), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      createScheduleEntry("https://jimin-os.example/", "access", {
+        title: created.title,
+        startsAt: created.startsAt,
+        endsAt: created.endsAt,
+      }),
+    ).resolves.toEqual(created);
+
+    const request = fetchMock.mock.calls[0]?.[1];
+    expect(JSON.parse(String(request?.body))).toMatchObject({
+      clientMutationId: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      ),
+      title: created.title,
+      notes: null,
+      startsAt: created.startsAt,
+      endsAt: created.endsAt,
+      timeZone: expect.any(String),
+    });
+  });
+
   it("sends a version-checked manual schedule update", async () => {
     const updated = {
       id: "019f68cb-9400-7000-8000-000000000020",

@@ -31,6 +31,8 @@ export interface WebhookDelivery {
   deliveredAt: string | null;
 }
 
+export type WebhookAuthorizationMode = "keep" | "replace" | "remove";
+
 type ListResponse<T> = { items: T[]; nextCursor: string | null };
 
 export async function fetchProjectWebhooks(
@@ -80,6 +82,37 @@ export async function createProjectWebhook(
   );
 }
 
+export async function updateProjectWebhook(
+  baseUrl: string,
+  access: string,
+  webhook: ProjectWebhook,
+  input: {
+    url: string;
+    events: ProjectWebhookEvent[];
+    enabled: boolean;
+    authorizationMode: WebhookAuthorizationMode;
+    authorization?: string;
+  },
+): Promise<ProjectWebhook> {
+  return requestJson<ProjectWebhook>(
+    baseUrl,
+    access,
+    `/v1/projects/${encodeURIComponent(webhook.projectId)}/webhooks/${encodeURIComponent(webhook.id)}`,
+    "PUT",
+    {
+      url: input.url,
+      events: input.events,
+      enabled: input.enabled,
+      authorizationMode: input.authorizationMode,
+      authorization:
+        input.authorizationMode === "replace"
+          ? input.authorization || null
+          : null,
+      expectedVersion: webhook.version,
+    },
+  );
+}
+
 export async function deleteProjectWebhook(
   baseUrl: string,
   access: string,
@@ -107,6 +140,20 @@ export async function testProjectWebhook(
   );
 }
 
+export async function retryWebhookDelivery(
+  baseUrl: string,
+  access: string,
+  projectId: string,
+  deliveryId: string,
+): Promise<void> {
+  await requestEmpty(
+    baseUrl,
+    access,
+    `/v1/projects/${encodeURIComponent(projectId)}/webhook-deliveries/${encodeURIComponent(deliveryId)}/retry`,
+    "POST",
+  );
+}
+
 async function requestList<T>(
   baseUrl: string,
   access: string,
@@ -126,7 +173,7 @@ async function requestJson<T>(
   baseUrl: string,
   access: string,
   path: string,
-  method: "POST",
+  method: "POST" | "PUT",
   body?: unknown,
 ): Promise<T> {
   const response = await fetch(`${normalizeBaseUrl(baseUrl)}${path}`, {

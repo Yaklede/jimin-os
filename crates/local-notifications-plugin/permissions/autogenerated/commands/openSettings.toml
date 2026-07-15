@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-openSettings"
+description = "Enables the openSettings command without any pre-configured scope."
+commands.allow = ["openSettings"]
+
+[[permission]]
+identifier = "deny-openSettings"
+description = "Denies the openSettings command without any pre-configured scope."
+commands.deny = ["openSettings"]

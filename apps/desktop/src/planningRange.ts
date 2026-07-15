@@ -10,6 +10,18 @@ export interface PlanningViewRange {
   to: Date;
 }
 
+export function samePlanningViewRange(
+  left: PlanningViewRange,
+  right: PlanningViewRange,
+): boolean {
+  return (
+    left.mode === right.mode &&
+    left.anchor.getTime() === right.anchor.getTime() &&
+    left.from.getTime() === right.from.getTime() &&
+    left.to.getTime() === right.to.getTime()
+  );
+}
+
 export function planningViewRange(
   mode: PlanningRangeMode,
   anchor = new Date(),
