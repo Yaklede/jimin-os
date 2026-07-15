@@ -74,6 +74,15 @@ Android에 개발 CA 인증서를 설치할 필요도 없다.
 ./scripts/install-local-phone-test.sh /tmp/jimin-os-phone-test.env
 ```
 
+에뮬레이터와 실기기가 함께 연결되어 있거나 실기기가 여러 대라면 두 번째 인자로
+대상 serial을 지정한다. 스크립트는 설치가 끝난 뒤 해당 기기의 `adb reverse`를
+다시 설정하고 연결 여부를 검증한다.
+
+```bash
+./scripts/install-local-phone-test.sh \
+  /tmp/jimin-os-phone-test.env R5KL20581QR
+```
+
 USB 또는 wireless debugging 연결이 끊기면 이 테스트 APK는 서버에 연결할 수
 없다. 이는 배포본의 동작이 아니라 맥 loopback을 쓰는 테스트 경계다.
 

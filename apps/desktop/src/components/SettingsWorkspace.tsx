@@ -148,32 +148,35 @@ export function SettingsWorkspace({
   useEffect(() => {
     if (!localNotificationsSupported()) return;
     let active = true;
-    const refreshPermission = async () => {
-      setNotificationPermissionLoading(true);
+    let refreshInFlight = false;
+    const refreshPermission = async (showLoading: boolean) => {
+      if (refreshInFlight) return;
+      refreshInFlight = true;
+      if (showLoading) setNotificationPermissionLoading(true);
       try {
         const status = await getNotificationPermissionStatus();
         if (!active) return;
-        setNotificationPermission(status);
+        setNotificationPermission((current) =>
+          current?.status === status.status &&
+          current.canRequest === status.canRequest
+            ? current
+            : status,
+        );
         setNotificationPermissionError(undefined);
-        if (
-          status.status === "granted" &&
-          (reminderSyncStatus === "idle" || reminderSyncStatus === "error")
-        ) {
-          void onRetryReminderSync();
-        }
       } catch {
         if (!active) return;
         setNotificationPermissionError(copy.settings.notificationsLoadNotice);
       } finally {
-        if (active) setNotificationPermissionLoading(false);
+        refreshInFlight = false;
+        if (active && showLoading) setNotificationPermissionLoading(false);
       }
     };
     const refreshPermissionWhenVisible = () => {
       if (document.visibilityState === "visible") {
-        void refreshPermission();
+        void refreshPermission(false);
       }
     };
-    void refreshPermission();
+    void refreshPermission(true);
     window.addEventListener("focus", refreshPermissionWhenVisible);
     document.addEventListener("visibilitychange", refreshPermissionWhenVisible);
     return () => {
@@ -184,7 +187,7 @@ export function SettingsWorkspace({
         refreshPermissionWhenVisible,
       );
     };
-  }, [onRetryReminderSync, reminderSyncStatus]);
+  }, []);
 
   useEffect(() => {
     const target = calendarDisconnectConfirmation

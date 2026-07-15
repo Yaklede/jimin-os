@@ -376,8 +376,8 @@ export const copy = {
       "연결하면 Google Calendar 일정을 함께 확인할 수 있어요.",
     calendarConnected: calendarConnectionSummary,
     calendarConfigurationMissing:
-      "개인 서버에 Google Calendar 연결 설정이 필요해요.",
-    calendarConfigurationRequired: "서버 준비 필요",
+      "개인 서버에 Google Calendar 연결 정보가 아직 등록되지 않았어요. 직접 만든 일정은 계속 사용할 수 있어요.",
+    calendarConfigurationRequired: "서버 연결 설정 필요",
     calendarAwaitingAuthorization:
       "브라우저에서 Google Calendar 연결을 완료해 주세요.",
     calendarReauthRequired: "Google Calendar 권한을 다시 확인해 주세요.",
