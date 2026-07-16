@@ -198,7 +198,11 @@ validate_secret_file() {
   fi
 
   local mode
-  mode="$(stat -f '%Lp' "${file}" 2>/dev/null || stat -c '%a' "${file}")"
+  if mode="$(stat -c '%a' "${file}" 2>/dev/null)" && [[ "${mode}" =~ ^[0-7]{3,4}$ ]]; then
+    :
+  else
+    mode="$(stat -f '%Lp' "${file}")"
+  fi
   case "${mode}" in
     400|600) ;;
     *) die "${label} must use mode 0400 or 0600; current mode is ${mode}" ;;
