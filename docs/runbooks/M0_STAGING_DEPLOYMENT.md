@@ -17,6 +17,9 @@
 `staging.env`는 `deploy/env/staging.env.example`을 바탕으로 만들되 다음을 실제 값으로 교체한다.
 
 - private hostname과 bind port
+- host Nginx가 TLS를 종료하는 구성에서는 gateway를 loopback port에만 bind하고,
+  `JIMIN_SMOKE_PORT=443`, `JIMIN_SMOKE_TLS_MODE=public`,
+  `JIMIN_SMOKE_RESOLVE_IP=127.0.0.1`로 외부 ingress를 검증한다.
 - API, Agent, gateway의 `@sha256:<64-hex>` registry reference
 - full 40-character source Git SHA
 - secret directory

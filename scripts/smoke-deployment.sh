@@ -19,21 +19,25 @@ init_deployment "${environment}" "${config_file}"
 require_command curl
 
 hostname="$(effective_value JIMIN_OS_HOSTNAME)"
-port="$(effective_value JIMIN_GATEWAY_HOST_PORT)"
+port="$(effective_value JIMIN_SMOKE_PORT)"
+port="${port:-$(effective_value JIMIN_GATEWAY_HOST_PORT)}"
+smoke_tls_mode="$(effective_value JIMIN_SMOKE_TLS_MODE)"
+smoke_tls_mode="${smoke_tls_mode:-${DEPLOY_TLS_MODE}}"
 resolve_ip="$(effective_value JIMIN_SMOKE_RESOLVE_IP)"
 [[ "${hostname}" =~ ^[a-zA-Z0-9.-]+$ ]] || die "invalid smoke hostname"
 [[ "${port}" =~ ^[0-9]+$ ]] || die "invalid gateway port"
+[[ "${smoke_tls_mode}" =~ ^(internal|files|public)$ ]] || die "invalid smoke TLS mode"
 
 curl_args=(--fail --silent --show-error --connect-timeout 5 --max-time 15)
 if [[ -n "${resolve_ip}" ]]; then
   curl_args+=(--resolve "${hostname}:${port}:${resolve_ip}")
 fi
 
-if [[ "${DEPLOY_TLS_MODE}" == "internal" ]]; then
+if [[ "${smoke_tls_mode}" == "internal" ]]; then
   ca_file="${JIMIN_TLS_CA_FILE:-${DEPLOY_STATE_ROOT}/ca/root.crt}"
   [[ -f "${ca_file}" ]] || die "internal CA root not found: ${ca_file}"
   curl_args+=(--cacert "${ca_file}")
-elif [[ -n "${JIMIN_TLS_CA_FILE:-}" ]]; then
+elif [[ "${smoke_tls_mode}" == "files" && -n "${JIMIN_TLS_CA_FILE:-}" ]]; then
   [[ -f "${JIMIN_TLS_CA_FILE}" ]] || die "CA file not found: ${JIMIN_TLS_CA_FILE}"
   curl_args+=(--cacert "${JIMIN_TLS_CA_FILE}")
 fi

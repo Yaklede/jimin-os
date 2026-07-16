@@ -721,15 +721,17 @@ fn sync_token_aad(calendar_id: Uuid) -> Vec<u8> {
 fn calendar_scopes(scopes: &[String]) -> Result<Vec<String>, CalendarOAuthError> {
     if !scopes.iter().any(|scope| scope == CALENDAR_EVENTS_SCOPE)
         || !scopes.iter().any(|scope| scope == CALENDAR_LIST_SCOPE)
-        || !scopes.iter().any(|scope| scope == GMAIL_READONLY_SCOPE)
     {
         return Err(CalendarOAuthError::RequiredScopeMissing);
     }
-    Ok(vec![
+    let mut granted_scopes = vec![
         CALENDAR_EVENTS_SCOPE.to_owned(),
         CALENDAR_LIST_SCOPE.to_owned(),
-        GMAIL_READONLY_SCOPE.to_owned(),
-    ])
+    ];
+    if scopes.iter().any(|scope| scope == GMAIL_READONLY_SCOPE) {
+        granted_scopes.push(GMAIL_READONLY_SCOPE.to_owned());
+    }
+    Ok(granted_scopes)
 }
 
 fn provider_calendar(entry: GoogleCalendarListEntry) -> ProviderCalendar {
@@ -862,22 +864,26 @@ mod tests {
     }
 
     #[test]
-    fn calendar_scope_filter_requires_all_requested_google_scopes() {
-        let scopes = vec![
+    fn calendar_scope_filter_requires_calendar_and_keeps_optional_gmail_scope() {
+        let calendar_scopes_only = vec![
+            CALENDAR_EVENTS_SCOPE.to_owned(),
+            CALENDAR_LIST_SCOPE.to_owned(),
+        ];
+        assert_eq!(
+            calendar_scopes(&calendar_scopes_only).expect("Calendar scopes should be accepted"),
+            calendar_scopes_only
+        );
+
+        let calendar_and_gmail_scopes = vec![
             CALENDAR_EVENTS_SCOPE.to_owned(),
             CALENDAR_LIST_SCOPE.to_owned(),
             GMAIL_READONLY_SCOPE.to_owned(),
         ];
         assert_eq!(
-            calendar_scopes(&scopes).expect("scopes should be accepted"),
-            scopes
+            calendar_scopes(&calendar_and_gmail_scopes)
+                .expect("optional Gmail scope should be preserved"),
+            calendar_and_gmail_scopes
         );
-        assert!(
-            calendar_scopes(&[
-                CALENDAR_EVENTS_SCOPE.to_owned(),
-                CALENDAR_LIST_SCOPE.to_owned(),
-            ])
-            .is_err()
-        );
+        assert!(calendar_scopes(&[CALENDAR_EVENTS_SCOPE.to_owned()]).is_err());
     }
 }

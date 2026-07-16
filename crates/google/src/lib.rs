@@ -1057,7 +1057,7 @@ impl GoogleIdentityAdapter {
             query.append_pair("response_type", "code");
             query.append_pair(
                 "scope",
-                "openid email https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly https://www.googleapis.com/auth/gmail.readonly",
+                "openid email https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly",
             );
             query.append_pair("state", state);
             query.append_pair("code_challenge", code_challenge);
@@ -1908,6 +1908,38 @@ fn classify_calendar_mutation_status(status: u16) -> GoogleAuthError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calendar_authorization_requests_calendar_scopes_without_gmail() {
+        let profile = GoogleOAuthProfile::new_with_client_secret(
+            ClientPlatform::Android,
+            "calendar-client-id",
+            SecretString::from("calendar-client-secret"),
+            ["https://os.jimin.ai.kr/oauth/google/calendar/callback".to_owned()],
+            true,
+        )
+        .expect("test OAuth profile should be valid");
+        let adapter = GoogleIdentityAdapter::new([profile])
+            .expect("test Google identity adapter should build");
+
+        let authorization_url = adapter
+            .calendar_authorization_url(
+                ClientPlatform::Android,
+                "state-value",
+                "challenge-value",
+                false,
+            )
+            .expect("authorization URL should be generated");
+        let url = reqwest::Url::parse(&authorization_url).expect("authorization URL should parse");
+        let scope = url
+            .query_pairs()
+            .find_map(|(key, value)| (key == "scope").then(|| value.into_owned()))
+            .expect("scope query parameter should exist");
+
+        assert!(scope.contains("https://www.googleapis.com/auth/calendar.events"));
+        assert!(scope.contains("https://www.googleapis.com/auth/calendar.calendarlist.readonly"));
+        assert!(!scope.contains("https://www.googleapis.com/auth/gmail.readonly"));
+    }
 
     #[test]
     fn calendar_event_status_requires_full_reset_only_for_incremental_http_410() {
