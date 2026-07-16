@@ -31,4 +31,12 @@ column on a disposable copy. After writes begin, drain or archive pending
 mutations and restore a verified pre-migration backup instead of downgrading in
 place.
 
+Migration `0021_work_intelligence.sql` adds the P1 decision loop without
+changing existing planning rows. Goals, signals, recommendations, decisions,
+verified action results, and brief runs are separate records so recommendation
+approval cannot be confused with task completion. Apply it to an empty database
+and a restored staging backup before release. A pre-version-21 image can be used
+only before these tables receive writes; after that point rollback requires the
+verified pre-migration backup rather than dropping decision history.
+
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.

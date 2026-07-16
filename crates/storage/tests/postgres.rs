@@ -21,6 +21,10 @@ use jimin_storage::{
         ProviderCalendarVisibility,
     },
     calendar_mutation::{ScheduleCalendarMutationOperation, provider_event_id_for_schedule},
+    intelligence::{
+        DecideRecommendation, DecideRecommendationOutcome, NewRecommendation,
+        RecommendationDecision, RecommendationStatus, SuggestedActionKind,
+    },
     planning::{
         DeleteTaskOutcome, NewScheduleEntry, NewTask, ScheduleEntryUpdate, TaskStatus, TaskUpdate,
     },
@@ -4106,6 +4110,154 @@ async fn calendar_disconnect_is_versioned_idempotent_and_preserves_manual_schedu
     );
 
     pool.close().await;
+    database.close().await;
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep the complete create, isolate, decide, and replay lifecycle visible.
+async fn recommendation_decisions_are_scoped_versioned_and_idempotent() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let other_owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("second fixture owner should exist");
+    let recommendation_id = Uuid::now_v7();
+    let recommendation = database
+        .create_recommendation(&NewRecommendation {
+            id: recommendation_id,
+            user_id: owner.profile.id,
+            workspace_id: None,
+            project_id: None,
+            goal_id: None,
+            signal_id: None,
+            title: "마감이 가까운 일을 먼저 정리하세요".to_owned(),
+            rationale: "오늘이 기한인 열린 일이 있습니다.".to_owned(),
+            expected_effect: "마감 지연 위험을 줄입니다.".to_owned(),
+            risk_summary: Some("다른 일의 시작이 늦어질 수 있습니다.".to_owned()),
+            confidence: 94,
+            urgency: 3,
+            impact: 2,
+            risk_level: 1,
+            effort_minutes: Some(20),
+            suggested_action_kind: Some(SuggestedActionKind::Review),
+            suggested_entity_id: None,
+            valid_until: Some(OffsetDateTime::now_utc() + TimeDuration::days(1)),
+        })
+        .await
+        .expect("recommendation should persist");
+    assert_eq!(recommendation.status, RecommendationStatus::Pending);
+
+    let active = database
+        .active_recommendations_for_user(owner.profile.id, OffsetDateTime::now_utc(), 10)
+        .await
+        .expect("owner recommendations should load");
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].id, recommendation_id);
+    assert!(
+        database
+            .active_recommendations_for_user(other_owner.profile.id, OffsetDateTime::now_utc(), 10,)
+            .await
+            .expect("other owner recommendations should load")
+            .is_empty()
+    );
+
+    let revisit_at = OffsetDateTime::now_utc() + TimeDuration::hours(1);
+    let DecideRecommendationOutcome::Applied(deferred) = database
+        .decide_recommendation(&DecideRecommendation {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            recommendation_id,
+            decision: RecommendationDecision::Defer,
+            reason: Some("점심 이후 다시 확인합니다.".to_owned()),
+            revisit_at: Some(revisit_at),
+            expected_version: recommendation.version,
+        })
+        .await
+        .expect("defer decision should persist")
+    else {
+        panic!("defer decision should be applied");
+    };
+    assert!(
+        database
+            .active_recommendations_for_user(owner.profile.id, OffsetDateTime::now_utc(), 10)
+            .await
+            .expect("deferred inbox should load")
+            .is_empty()
+    );
+    let revisited = database
+        .active_recommendations_for_user(
+            owner.profile.id,
+            revisit_at + TimeDuration::seconds(1),
+            10,
+        )
+        .await
+        .expect("due deferred recommendation should load");
+    assert_eq!(revisited[0].status, RecommendationStatus::Deferred);
+
+    let decision_id = Uuid::now_v7();
+    let command = DecideRecommendation {
+        id: decision_id,
+        user_id: owner.profile.id,
+        recommendation_id,
+        decision: RecommendationDecision::Approve,
+        reason: Some("오늘 먼저 확인합니다.".to_owned()),
+        revisit_at: None,
+        expected_version: deferred.version,
+    };
+    let DecideRecommendationOutcome::Applied(approved) = database
+        .decide_recommendation(&command)
+        .await
+        .expect("decision should persist")
+    else {
+        panic!("first decision should be applied");
+    };
+    assert_eq!(approved.status, RecommendationStatus::Approved);
+    assert_eq!(approved.version, deferred.version + 1);
+
+    assert!(matches!(
+        database
+            .decide_recommendation(&command)
+            .await
+            .expect("identical decision should replay"),
+        DecideRecommendationOutcome::Replayed(replayed)
+            if replayed.status == RecommendationStatus::Approved
+    ));
+    assert!(matches!(
+        database
+            .decide_recommendation(&DecideRecommendation {
+                decision: RecommendationDecision::Reject,
+                ..command
+            })
+            .await
+            .expect("conflicting replay should be classified"),
+        DecideRecommendationOutcome::VersionConflict
+    ));
+    assert!(matches!(
+        database
+            .decide_recommendation(&DecideRecommendation {
+                id: Uuid::now_v7(),
+                user_id: other_owner.profile.id,
+                recommendation_id,
+                decision: RecommendationDecision::Approve,
+                reason: None,
+                revisit_at: None,
+                expected_version: 1,
+            })
+            .await
+            .expect("cross-owner lookup should not leak existence"),
+        DecideRecommendationOutcome::NotFound
+    ));
+
     database.close().await;
 }
 

@@ -4,10 +4,53 @@ import {
   type Task,
 } from "./planning";
 
+export interface Recommendation {
+  id: string;
+  workspaceId: string | null;
+  projectId: string | null;
+  goalId: string | null;
+  signalId: string | null;
+  title: string;
+  rationale: string;
+  expectedEffect: string;
+  riskSummary: string | null;
+  confidence: number;
+  urgency: number;
+  impact: number;
+  riskLevel: number;
+  effortMinutes: number | null;
+  suggestedActionKind:
+    | "review"
+    | "create_task"
+    | "update_task"
+    | "create_schedule"
+    | "update_project"
+    | "run_webhook"
+    | "request_analysis"
+    | null;
+  suggestedEntityId: string | null;
+  status:
+    | "pending"
+    | "approved"
+    | "rejected"
+    | "deferred"
+    | "analysis_requested"
+    | "executing"
+    | "executed"
+    | "failed"
+    | "expired";
+  validUntil: string | null;
+  revisitAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  version: number;
+}
+
 export interface HomeSnapshot {
   schedule: ScheduleEntry[];
   tasks: Task[];
   dueTasks: Task[];
+  recommendations: Recommendation[];
 }
 
 export async function fetchHomeSnapshot(
@@ -34,6 +77,9 @@ export async function fetchHomeSnapshot(
     schedule: body.schedule,
     tasks: body.tasks,
     dueTasks: Array.isArray(body.dueTasks) ? body.dueTasks : [],
+    recommendations: Array.isArray(body.recommendations)
+      ? body.recommendations
+      : [],
   };
 }
 

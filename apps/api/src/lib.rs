@@ -38,6 +38,10 @@ use jimin_storage::{
         CalendarAccount, CalendarAccountStatus, CreateCalendarOAuthAuthorization,
         DisconnectCalendarAccountOutcome,
     },
+    intelligence::{
+        DecideRecommendation, DecideRecommendationOutcome, Recommendation, RecommendationDecision,
+        RecommendationStatus, SuggestedActionKind,
+    },
     planning::{
         DeleteTaskOutcome, NewScheduleEntry, NewTask, ScheduleEntry, ScheduleEntryUpdate,
         ScheduleSource, ScheduleStatus, Task, TaskStatus, TaskUpdate,
@@ -421,6 +425,61 @@ pub struct HomeSnapshotResponse {
     schedule: Vec<ScheduleEntryResponse>,
     tasks: Vec<TaskResponse>,
     due_tasks: Vec<TaskResponse>,
+    recommendations: Vec<RecommendationResponse>,
+}
+
+/// One prioritized action proposal generated from the owner's current context.
+/// A recommendation is read-only until the owner records an explicit decision.
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecommendationResponse {
+    id: uuid::Uuid,
+    workspace_id: Option<uuid::Uuid>,
+    project_id: Option<uuid::Uuid>,
+    goal_id: Option<uuid::Uuid>,
+    signal_id: Option<uuid::Uuid>,
+    title: String,
+    rationale: String,
+    expected_effect: String,
+    risk_summary: Option<String>,
+    confidence: i16,
+    urgency: i16,
+    impact: i16,
+    risk_level: i16,
+    effort_minutes: Option<i32>,
+    suggested_action_kind: Option<String>,
+    suggested_entity_id: Option<uuid::Uuid>,
+    status: String,
+    valid_until: Option<String>,
+    revisit_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+    version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecommendationListResponse {
+    items: Vec<RecommendationResponse>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecommendationDecisionKind {
+    Approve,
+    Reject,
+    Defer,
+    RequestAnalysis,
+}
+
+#[derive(Debug, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RecommendationDecisionRequest {
+    client_mutation_id: uuid::Uuid,
+    decision: RecommendationDecisionKind,
+    reason: Option<String>,
+    revisit_at: Option<String>,
+    expected_version: i64,
 }
 
 /// Safe Google Calendar connection state. Provider credentials and identifiers
@@ -711,6 +770,12 @@ struct ScheduleRangeQuery {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecommendationListQuery {
+    limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct DisconnectGoogleCalendarQuery {
     expected_version: i64,
@@ -939,6 +1004,8 @@ pub(crate) fn error_response(
         complete_google_calendar_authorization,
         sync_google_calendar,
         get_home_snapshot,
+        list_recommendations,
+        decide_recommendation,
         create_schedule_entry,
         update_schedule_entry,
         delete_schedule_entry,
@@ -1011,6 +1078,10 @@ pub(crate) fn error_response(
         VoiceCommandItemResponse,
         VoiceCommandResponse,
         HomeSnapshotResponse,
+        RecommendationResponse,
+        RecommendationListResponse,
+        RecommendationDecisionKind,
+        RecommendationDecisionRequest,
         ConversationResponse,
         ConversationListResponse,
         QueuedAgentTurnResponse,
@@ -1074,6 +1145,11 @@ pub fn router(state: ApiState) -> Router {
             axum::routing::put(update_schedule_entry).delete(delete_schedule_entry),
         )
         .route("/v1/home", get(get_home_snapshot))
+        .route("/v1/recommendations", get(list_recommendations))
+        .route(
+            "/v1/recommendations/{recommendation_id}/decisions",
+            post(decide_recommendation),
+        )
         .route("/v1/workspaces", get(list_workspaces))
         .route("/v1/projects", get(list_projects).post(create_project))
         .route(
@@ -1679,10 +1755,11 @@ async fn get_home_snapshot(
         return invalid_request_response(request_id);
     };
     let user_id = principal.identity().user_id();
-    let (schedule, tasks, due_tasks) = match tokio::try_join!(
+    let (schedule, tasks, due_tasks, recommendations) = match tokio::try_join!(
         planning.schedule_entries_in_range(user_id, from, to),
         planning.home_tasks_for_user(user_id, to),
         planning.deadline_tasks_for_user(user_id, deadline_boundary),
+        planning.active_recommendations_for_user(user_id, OffsetDateTime::now_utc(), 5),
     ) {
         Ok(values) => values,
         Err(error) => return storage_error_response(&error, request_id),
@@ -1708,13 +1785,128 @@ async fn get_home_snapshot(
     else {
         return unavailable_response(request_id);
     };
+    let Ok(recommendations) = recommendations
+        .into_iter()
+        .map(recommendation_response)
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return unavailable_response(request_id);
+    };
 
     Json(HomeSnapshotResponse {
         schedule,
         tasks,
         due_tasks,
+        recommendations,
     })
     .into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/recommendations",
+    tag = "intelligence",
+    params(("limit" = Option<i64>, Query, description = "Maximum active recommendations, 1 to 50")),
+    responses((status = 200, body = RecommendationListResponse), (status = 400), (status = 401), (status = 503))
+)]
+async fn list_recommendations(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    Query(query): Query<RecommendationListQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let recommendations = match planning
+        .active_recommendations_for_user(
+            principal.identity().user_id(),
+            OffsetDateTime::now_utc(),
+            query.limit.unwrap_or(20),
+        )
+        .await
+    {
+        Ok(recommendations) => recommendations,
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    let Ok(items) = recommendations
+        .into_iter()
+        .map(recommendation_response)
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return unavailable_response(request_id);
+    };
+    Json(RecommendationListResponse { items }).into_response()
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/recommendations/{recommendation_id}/decisions",
+    tag = "intelligence",
+    params(("recommendation_id" = uuid::Uuid, Path)),
+    request_body = RecommendationDecisionRequest,
+    responses((status = 200, body = RecommendationResponse), (status = 400), (status = 401), (status = 404), (status = 409), (status = 503))
+)]
+async fn decide_recommendation(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    Path(recommendation_id): Path<uuid::Uuid>,
+    headers: HeaderMap,
+    Json(body): Json<RecommendationDecisionRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let revisit_at = match body.revisit_at.as_deref() {
+        Some(value) => match OffsetDateTime::parse(value, &Rfc3339) {
+            Ok(value) => Some(value),
+            Err(_) => return invalid_request_response(request_id),
+        },
+        None => None,
+    };
+    let outcome = planning
+        .decide_recommendation(&DecideRecommendation {
+            id: body.client_mutation_id,
+            user_id: principal.identity().user_id(),
+            recommendation_id,
+            decision: match body.decision {
+                RecommendationDecisionKind::Approve => RecommendationDecision::Approve,
+                RecommendationDecisionKind::Reject => RecommendationDecision::Reject,
+                RecommendationDecisionKind::Defer => RecommendationDecision::Defer,
+                RecommendationDecisionKind::RequestAnalysis => {
+                    RecommendationDecision::RequestAnalysis
+                }
+            },
+            reason: body.reason,
+            revisit_at,
+            expected_version: body.expected_version,
+        })
+        .await;
+    let recommendation = match outcome {
+        Ok(
+            DecideRecommendationOutcome::Applied(recommendation)
+            | DecideRecommendationOutcome::Replayed(recommendation),
+        ) => recommendation,
+        Ok(DecideRecommendationOutcome::NotFound) => {
+            return recommendation_not_found_response(request_id);
+        }
+        Ok(DecideRecommendationOutcome::VersionConflict) => {
+            return recommendation_conflict_response(request_id);
+        }
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    match recommendation_response(recommendation) {
+        Ok(response) => Json(response).into_response(),
+        Err(()) => unavailable_response(request_id),
+    }
 }
 
 #[utoipa::path(
@@ -2004,6 +2196,26 @@ fn schedule_conflict_response(request_id: RequestId) -> Response {
         StatusCode::CONFLICT,
         "schedule.version_conflict",
         "일정이 다른 곳에서 변경됐어요. 최신 상태를 확인한 뒤 다시 시도해 주세요.",
+        request_id,
+        false,
+    )
+}
+
+fn recommendation_not_found_response(request_id: RequestId) -> Response {
+    error_response(
+        StatusCode::NOT_FOUND,
+        "recommendation.not_found",
+        "제안을 찾을 수 없어요. 최신 브리핑을 다시 확인해 주세요.",
+        request_id,
+        false,
+    )
+}
+
+fn recommendation_conflict_response(request_id: RequestId) -> Response {
+    error_response(
+        StatusCode::CONFLICT,
+        "recommendation.version_conflict",
+        "제안 상태가 이미 변경됐어요. 최신 브리핑을 다시 확인해 주세요.",
         request_id,
         false,
     )
@@ -4576,6 +4788,68 @@ fn task_response(task: Task) -> Result<TaskResponse, ()> {
     })
 }
 
+fn recommendation_response(recommendation: Recommendation) -> Result<RecommendationResponse, ()> {
+    Ok(RecommendationResponse {
+        id: recommendation.id,
+        workspace_id: recommendation.workspace_id,
+        project_id: recommendation.project_id,
+        goal_id: recommendation.goal_id,
+        signal_id: recommendation.signal_id,
+        title: recommendation.title,
+        rationale: recommendation.rationale,
+        expected_effect: recommendation.expected_effect,
+        risk_summary: recommendation.risk_summary,
+        confidence: recommendation.confidence,
+        urgency: recommendation.urgency,
+        impact: recommendation.impact,
+        risk_level: recommendation.risk_level,
+        effort_minutes: recommendation.effort_minutes,
+        suggested_action_kind: recommendation
+            .suggested_action_kind
+            .map(suggested_action_kind_name)
+            .map(str::to_owned),
+        suggested_entity_id: recommendation.suggested_entity_id,
+        status: recommendation_status_name(recommendation.status).to_owned(),
+        valid_until: recommendation
+            .valid_until
+            .map(|value| value.format(&Rfc3339).map_err(|_| ()))
+            .transpose()?,
+        revisit_at: recommendation
+            .revisit_at
+            .map(|value| value.format(&Rfc3339).map_err(|_| ()))
+            .transpose()?,
+        created_at: recommendation.created_at.format(&Rfc3339).map_err(|_| ())?,
+        updated_at: recommendation.updated_at.format(&Rfc3339).map_err(|_| ())?,
+        version: recommendation.version,
+    })
+}
+
+const fn recommendation_status_name(status: RecommendationStatus) -> &'static str {
+    match status {
+        RecommendationStatus::Pending => "pending",
+        RecommendationStatus::Approved => "approved",
+        RecommendationStatus::Rejected => "rejected",
+        RecommendationStatus::Deferred => "deferred",
+        RecommendationStatus::AnalysisRequested => "analysis_requested",
+        RecommendationStatus::Executing => "executing",
+        RecommendationStatus::Executed => "executed",
+        RecommendationStatus::Failed => "failed",
+        RecommendationStatus::Expired => "expired",
+    }
+}
+
+const fn suggested_action_kind_name(kind: SuggestedActionKind) -> &'static str {
+    match kind {
+        SuggestedActionKind::Review => "review",
+        SuggestedActionKind::CreateTask => "create_task",
+        SuggestedActionKind::UpdateTask => "update_task",
+        SuggestedActionKind::CreateSchedule => "create_schedule",
+        SuggestedActionKind::UpdateProject => "update_project",
+        SuggestedActionKind::RunWebhook => "run_webhook",
+        SuggestedActionKind::RequestAnalysis => "request_analysis",
+    }
+}
+
 fn workspace_response(workspace: Workspace) -> WorkspaceResponse {
     WorkspaceResponse {
         id: workspace.id,
@@ -5315,6 +5589,8 @@ mod tests {
                 "/v1/projects/{project_id}/webhooks",
                 "/v1/projects/{project_id}/webhooks/{webhook_id}",
                 "/v1/projects/{project_id}/webhooks/{webhook_id}/test",
+                "/v1/recommendations",
+                "/v1/recommendations/{recommendation_id}/decisions",
                 "/v1/schedule-entries",
                 "/v1/schedule-entries/{schedule_entry_id}",
                 "/v1/tasks",
@@ -5344,6 +5620,7 @@ mod tests {
             "/v1/schedule-entries",
             "/v1/tasks",
             "/v1/tasks/{task_id}/complete",
+            "/v1/recommendations/{recommendation_id}/decisions",
         ] {
             assert!(
                 document.paths.paths[path]
@@ -5390,6 +5667,40 @@ mod tests {
             .expect("handler should respond");
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn recommendation_endpoints_require_a_live_signed_session() {
+        let (state, _, _) = signed_auth_state(true);
+        let list_response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/recommendations")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+        assert_eq!(list_response.status(), StatusCode::UNAUTHORIZED);
+
+        let decision_response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/recommendations/{}/decisions",
+                        uuid::Uuid::now_v7()
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"clientMutationId":"{}","decision":"approve","reason":null,"expectedVersion":1}}"#,
+                        uuid::Uuid::now_v7()
+                    )))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+        assert_eq!(decision_response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

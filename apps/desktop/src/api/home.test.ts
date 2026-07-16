@@ -10,7 +10,7 @@ afterEach(() => {
 describe("home snapshot API", () => {
   it("loads the daily server snapshot with the requested local-day range", async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
-      new Response('{"schedule":[],"tasks":[]}', {
+      new Response('{"schedule":[],"tasks":[],"recommendations":[]}', {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }),
@@ -24,7 +24,12 @@ describe("home snapshot API", () => {
         new Date("2026-07-12T00:00:00+09:00"),
         new Date("2026-07-13T00:00:00+09:00"),
       ),
-    ).resolves.toEqual({ schedule: [], tasks: [], dueTasks: [] });
+    ).resolves.toEqual({
+      schedule: [],
+      tasks: [],
+      dueTasks: [],
+      recommendations: [],
+    });
 
     const [url, options] = fetchMock.mock.calls[0] ?? [];
     expect(url).toContain("https://jimin-os.example/v1/home?");
