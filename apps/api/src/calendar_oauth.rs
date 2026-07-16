@@ -591,6 +591,24 @@ impl CalendarOAuthError {
         }
     }
 
+    /// Returns a callback-only diagnostic code that identifies the failed
+    /// OAuth stage without retaining provider payloads or credentials.
+    #[must_use]
+    pub const fn authorization_failure_code(self) -> &'static str {
+        match self {
+            Self::Configuration => "calendar.configuration_invalid",
+            Self::InvalidCallback => "calendar.invalid_callback",
+            Self::ProviderRejected => "calendar.token_exchange_rejected",
+            Self::ProviderUnavailable => "calendar.provider_unavailable",
+            Self::Conflict => "calendar.event_conflict",
+            Self::EventNotFound => "calendar.event_not_found",
+            Self::EventRejected => "calendar.event_rejected",
+            Self::IdentityMismatch => "calendar.account_mismatch",
+            Self::RequiredScopeMissing => "calendar.required_scope_missing",
+            Self::Encryption => "calendar.credential_encryption_failed",
+        }
+    }
+
     #[must_use]
     pub const fn retryable(self) -> bool {
         matches!(self, Self::ProviderUnavailable)
@@ -858,6 +876,18 @@ mod tests {
         assert_eq!(rejected.failure_code(), "calendar.event_rejected");
         assert!(!missing.retryable());
         assert!(!rejected.retryable());
+    }
+
+    #[test]
+    fn callback_failures_preserve_the_failed_oauth_stage() {
+        assert_eq!(
+            CalendarOAuthError::ProviderRejected.authorization_failure_code(),
+            "calendar.token_exchange_rejected"
+        );
+        assert_eq!(
+            CalendarOAuthError::RequiredScopeMissing.authorization_failure_code(),
+            "calendar.required_scope_missing"
+        );
     }
 
     #[test]

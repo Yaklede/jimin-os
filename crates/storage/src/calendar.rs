@@ -2099,9 +2099,9 @@ fn valid_access_role(value: &str) -> bool {
 fn valid_failure_code(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_FAILURE_CODE_BYTES
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'.')
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_')
+        })
 }
 
 #[cfg(test)]
@@ -2109,7 +2109,7 @@ mod tests {
     use super::{
         CalendarAccountStatus, ProviderCalendar, ProviderCalendarEvent,
         ProviderCalendarEventStatus, ProviderCalendarEventTime, ProviderCalendarVisibility,
-        valid_provider_calendars, valid_provider_events,
+        valid_failure_code, valid_provider_calendars, valid_provider_events,
     };
     use time::{Date, Month};
 
@@ -2117,6 +2117,14 @@ mod tests {
     fn calendar_account_status_rejects_unknown_values() {
         assert!(CalendarAccountStatus::parse("active").is_ok());
         assert!(CalendarAccountStatus::parse("unexpected").is_err());
+    }
+
+    #[test]
+    fn calendar_failure_codes_accept_the_service_contract_format() {
+        assert!(valid_failure_code("calendar.authorization_failed"));
+        assert!(valid_failure_code("calendar.provider_unavailable"));
+        assert!(!valid_failure_code("calendar.AuthorizationFailed"));
+        assert!(!valid_failure_code("calendar.failure-with-dash"));
     }
 
     #[test]

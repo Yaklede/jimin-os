@@ -4020,8 +4020,13 @@ async fn complete_google_calendar_authorization(
     let command = match completion {
         Ok(command) => command,
         Err(error) => {
+            let failure_code = error.authorization_failure_code();
+            warn!(
+                error_code = failure_code,
+                "Google Calendar OAuth callback failed before account persistence"
+            );
             let _ = planning
-                .fail_calendar_oauth_authorization(authorization_id, error.failure_code())
+                .fail_calendar_oauth_authorization(authorization_id, failure_code)
                 .await;
             return calendar_callback_error_page(error);
         }
@@ -4034,6 +4039,10 @@ async fn complete_google_calendar_authorization(
         Ok(account) => account,
         Err(error) => {
             let failure_code = storage_failure_code(&error);
+            warn!(
+                error_code = failure_code,
+                "Google Calendar OAuth callback failed during account persistence"
+            );
             let _ = planning
                 .fail_calendar_oauth_authorization(authorization_id, failure_code)
                 .await;
