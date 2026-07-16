@@ -15,7 +15,9 @@ use jimin_storage::{
         RefreshRotation, RotateRefreshToken,
     },
     calendar::{
-        DisconnectCalendarAccountOutcome, PrimaryCalendarMutationTarget, ProviderCalendar,
+        CalendarAccountStatus, CompleteCalendarOAuthAuthorization,
+        CreateCalendarOAuthAuthorization, DisconnectCalendarAccountOutcome,
+        EncryptedCalendarSecret, PrimaryCalendarMutationTarget, ProviderCalendar,
         ProviderCalendarVisibility,
     },
     calendar_mutation::{ScheduleCalendarMutationOperation, provider_event_id_for_schedule},
@@ -59,6 +61,95 @@ struct ExhaustedCalendarMutationRow {
     response_status: Option<i16>,
     locked_until: Option<OffsetDateTime>,
     response_body: serde_json::Value,
+}
+
+#[tokio::test]
+async fn first_calendar_oauth_connection_persists_the_account_and_consumes_the_authorization() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        1,
+        Duration::from_secs(2),
+    )
+    .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("test database should accept direct checks");
+    let provisioned = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let authorization_id = Uuid::now_v7();
+    let mut state_verifier = authorization_id.as_bytes().to_vec();
+    state_verifier.extend_from_slice(authorization_id.as_bytes());
+    database
+        .create_calendar_oauth_authorization(&CreateCalendarOAuthAuthorization {
+            id: authorization_id,
+            user_id: provisioned.profile.id,
+            session_id: provisioned.session_id,
+            device_id: provisioned.device.id,
+            state_verifier: state_verifier.clone(),
+            pkce_verifier: EncryptedCalendarSecret {
+                ciphertext: vec![42_u8; 48],
+                nonce: vec![43_u8; 24],
+                key_version: 1,
+            },
+            client_kind: ClientPlatform::Android,
+            expires_at: OffsetDateTime::now_utc() + TimeDuration::minutes(10),
+        })
+        .await
+        .expect("OAuth authorization should persist");
+    let claimed = database
+        .claim_calendar_oauth_authorization(&state_verifier)
+        .await
+        .expect("OAuth authorization claim should succeed")
+        .expect("OAuth authorization should be claimable");
+    let provider_subject = claimed
+        .expected_google_subject
+        .expect("the provisioned owner should have a Google subject");
+    let account = database
+        .complete_calendar_oauth_authorization(&CompleteCalendarOAuthAuthorization {
+            authorization_id,
+            account_id: Uuid::now_v7(),
+            user_id: provisioned.profile.id,
+            provider_subject,
+            email: EmailAddress::parse(format!("calendar-{}@example.test", provisioned.profile.id))
+                .expect("fixture email should be valid"),
+            granted_scopes: vec![
+                "https://www.googleapis.com/auth/calendar.events".to_owned(),
+                "https://www.googleapis.com/auth/calendar.calendarlist.readonly".to_owned(),
+            ],
+            refresh_token: Some(EncryptedCalendarSecret {
+                ciphertext: vec![44_u8; 64],
+                nonce: vec![45_u8; 24],
+                key_version: 1,
+            }),
+        })
+        .await
+        .expect("first Calendar account should persist");
+
+    assert_eq!(account.status, CalendarAccountStatus::Connecting);
+    assert!(account.last_error_code.is_none());
+    let authorization_state: (String, bool) = sqlx::query_as(
+        "SELECT status,
+            pkce_verifier_ciphertext IS NULL
+                AND pkce_nonce IS NULL
+                AND encryption_key_version IS NULL
+         FROM calendar_oauth_authorizations
+         WHERE id = $1",
+    )
+    .bind(authorization_id)
+    .fetch_one(&pool)
+    .await
+    .expect("completed authorization should load");
+    assert_eq!(authorization_state.0, "completed");
+    assert!(authorization_state.1);
+
+    pool.close().await;
+    database.close().await;
 }
 
 fn assert_automatic_webhook_delivery(

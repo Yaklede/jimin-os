@@ -432,7 +432,8 @@ impl Database {
                     calendar_accounts.encryption_key_version
                 ),
                 last_error_code = NULL
-            RETURNING id, email, status, granted_scopes, last_successful_sync_at, version",
+            RETURNING id, email, status, granted_scopes, last_successful_sync_at,
+                last_error_code, version",
         )
         .bind(command.account_id)
         .bind(command.user_id)
