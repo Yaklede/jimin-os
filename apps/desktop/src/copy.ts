@@ -384,6 +384,8 @@ export const copy = {
     calendarReauthRequired: "Google Calendar 권한을 다시 확인해 주세요.",
     calendarDisconnecting: "Google Calendar 연결을 정리하고 있어요.",
     calendarNeedsReconnect: "연결을 다시 진행해 주세요.",
+    calendarSyncProblem:
+      "Google Calendar는 연결되어 있지만 일부 일정을 가져오지 못했어요. 다시 가져와 주세요.",
     calendarConnect: "Google Calendar 연결하기",
     calendarRetry: "다시 확인하기",
     calendarReconnect: "다시 연결하기",

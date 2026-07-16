@@ -3915,9 +3915,7 @@ async fn start_google_calendar_authorization(
         Ok(None) => true,
         Ok(Some(account)) => matches!(
             account.status,
-            CalendarAccountStatus::ReauthRequired
-                | CalendarAccountStatus::Revoked
-                | CalendarAccountStatus::Error
+            CalendarAccountStatus::ReauthRequired | CalendarAccountStatus::Revoked
         ),
         Err(error) => return storage_error_response(&error, request_id),
     };
@@ -4079,7 +4077,15 @@ async fn finish_initial_calendar_sync(
             let _ = planning
                 .mark_calendar_sync_failure(account_id, user_id, error.failure_code())
                 .await;
-            calendar_callback_error_page(error)
+            if error.is_connection_sync_failure() {
+                calendar_callback_page(
+                    StatusCode::OK,
+                    "Google Calendar를 연결했어요",
+                    "연결은 마쳤지만 일정을 아직 불러오지 못했어요. 앱에서 다시 가져와 주세요.",
+                )
+            } else {
+                calendar_callback_error_page(error)
+            }
         }
     }
 }
@@ -4112,7 +4118,14 @@ async fn sync_google_calendar(
     };
     let user_id = principal.identity().user_id();
     let account = match planning.calendar_account_for_user(user_id).await {
-        Ok(Some(account)) if account.status == CalendarAccountStatus::Active => account,
+        Ok(Some(account))
+            if matches!(
+                account.status,
+                CalendarAccountStatus::Active | CalendarAccountStatus::Error
+            ) =>
+        {
+            account
+        }
         Ok(Some(_)) => {
             return error_response(
                 StatusCode::CONFLICT,
@@ -4231,6 +4244,11 @@ fn calendar_oauth_error_response(error: CalendarOAuthError, request_id: RequestI
             "calendar.provider_unavailable",
             "Google Calendar에 연결할 수 없어요. 잠시 후 다시 시도해 주세요.",
         ),
+        CalendarOAuthError::SyncDataInvalid => (
+            StatusCode::BAD_GATEWAY,
+            "calendar.sync_data_invalid",
+            "일부 Google Calendar 일정을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
+        ),
         CalendarOAuthError::Conflict => (
             StatusCode::CONFLICT,
             "calendar.event_conflict",
@@ -4267,6 +4285,9 @@ fn calendar_callback_error_page(error: CalendarOAuthError) -> Response {
     let message = match error {
         CalendarOAuthError::ProviderUnavailable => {
             "Google Calendar에 연결할 수 없어요. 잠시 후 앱에서 다시 시도해 주세요."
+        }
+        CalendarOAuthError::SyncDataInvalid => {
+            "일부 Google Calendar 일정을 불러오지 못했어요. 앱에서 다시 가져와 주세요."
         }
         CalendarOAuthError::Conflict => {
             "Google Calendar에서 일정이 변경됐어요. 앱에서 새로고침한 뒤 다시 시도해 주세요."

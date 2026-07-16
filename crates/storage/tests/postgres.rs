@@ -148,6 +148,92 @@ async fn first_calendar_oauth_connection_persists_the_account_and_consumes_the_a
     assert_eq!(authorization_state.0, "completed");
     assert!(authorization_state.1);
 
+    database
+        .mark_calendar_sync_failure(
+            account.id,
+            provisioned.profile.id,
+            "calendar.sync_data_invalid",
+        )
+        .await
+        .expect("sync failure should be recorded without invalidating OAuth");
+    let sync_warning = database
+        .calendar_account_for_user(provisioned.profile.id)
+        .await
+        .expect("Calendar account should load")
+        .expect("Calendar account should remain connected");
+    assert_eq!(sync_warning.status, CalendarAccountStatus::Active);
+    assert_eq!(
+        sync_warning.last_error_code.as_deref(),
+        Some("calendar.sync_data_invalid")
+    );
+
+    sqlx::query("UPDATE calendar_accounts SET status = 'error' WHERE id = $1")
+        .bind(account.id)
+        .execute(&pool)
+        .await
+        .expect("legacy error state should persist for recovery fixture");
+    assert!(
+        database
+            .active_calendar_sync_identities()
+            .await
+            .expect("eligible Calendar accounts should load")
+            .iter()
+            .any(|identity| identity.account_id == account.id)
+    );
+    assert!(
+        database
+            .calendar_sync_connection(account.id, provisioned.profile.id)
+            .await
+            .expect("legacy connection lookup should succeed")
+            .is_some()
+    );
+    database
+        .apply_calendar_list_sync(
+            account.id,
+            provisioned.profile.id,
+            &[ProviderCalendar {
+                provider_calendar_id: "primary".to_owned(),
+                name: "기본 캘린더".to_owned(),
+                description: Some("개인 일정\nGoogle Calendar".to_owned()),
+                time_zone: "Asia/Seoul".to_owned(),
+                color_id: None,
+                access_role: "owner".to_owned(),
+                is_primary: true,
+                provider_selected: true,
+                visibility: ProviderCalendarVisibility::Visible,
+                provider_etag: None,
+            }],
+        )
+        .await
+        .expect("legacy sync error should recover without OAuth");
+    assert_eq!(
+        database
+            .calendar_account_for_user(provisioned.profile.id)
+            .await
+            .expect("recovered account should load")
+            .expect("recovered account should exist")
+            .status,
+        CalendarAccountStatus::Active
+    );
+
+    database
+        .mark_calendar_sync_failure(
+            account.id,
+            provisioned.profile.id,
+            "calendar.authorization_failed",
+        )
+        .await
+        .expect("credential failure should be recorded");
+    assert_eq!(
+        database
+            .calendar_account_for_user(provisioned.profile.id)
+            .await
+            .expect("reauth account should load")
+            .expect("reauth account should exist")
+            .status,
+        CalendarAccountStatus::ReauthRequired
+    );
+
     pool.close().await;
     database.close().await;
 }

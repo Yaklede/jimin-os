@@ -187,8 +187,10 @@ impl Database {
     }
 
     /// Lists active owner connections eligible for the server's periodic
-    /// synchronization loop. Only identifiers are returned; encrypted
-    /// credentials are loaded later for one account at a time.
+    /// synchronization loop. Legacy `error` rows are retried once so a
+    /// previously misclassified sync failure can recover without OAuth.
+    /// Only identifiers are returned; encrypted credentials are loaded later
+    /// for one account at a time.
     ///
     /// # Errors
     ///
@@ -200,7 +202,7 @@ impl Database {
             "\
             SELECT id AS account_id, user_id
             FROM calendar_accounts
-            WHERE status = 'active'
+            WHERE status IN ('active', 'error')
             ORDER BY id ASC",
         )
         .fetch_all(self.pool())
@@ -489,7 +491,7 @@ impl Database {
             FROM calendar_accounts
             WHERE id = $1
               AND user_id = $2
-              AND status IN ('connecting', 'active')",
+              AND status IN ('connecting', 'active', 'error')",
         )
         .bind(account_id)
         .bind(user_id)
@@ -783,7 +785,7 @@ impl Database {
             SELECT id FROM calendar_accounts
             WHERE id = $1
               AND user_id = $2
-              AND status IN ('connecting', 'active')
+              AND status IN ('connecting', 'active', 'error')
             FOR UPDATE",
         )
         .bind(account_id)
@@ -1199,7 +1201,9 @@ impl Database {
     }
 
     /// Preserves the last successfully synchronized Calendar read model while
-    /// recording a classified provider error for reconnect or retry UI.
+    /// recording a classified provider error. Only a credential failure moves
+    /// the account to `reauth_required`; ordinary sync failures keep the
+    /// connection active so the owner can retry without OAuth.
     ///
     /// # Errors
     ///
@@ -1222,13 +1226,13 @@ impl Database {
             "\
             UPDATE calendar_accounts
             SET status = CASE
-                    WHEN $3 = 'calendar.provider_unavailable' THEN status
-                    ELSE 'error'
+                    WHEN $3 = 'calendar.authorization_failed' THEN 'reauth_required'
+                    ELSE 'active'
                 END,
                 last_error_code = $3
             WHERE id = $1
               AND user_id = $2
-              AND status IN ('connecting', 'active')",
+              AND status IN ('connecting', 'active', 'error')",
         )
         .bind(account_id)
         .bind(user_id)
@@ -1844,7 +1848,7 @@ fn valid_provider_calendars(entries: &[ProviderCalendar]) -> bool {
             && entry
                 .description
                 .as_deref()
-                .is_none_or(|value| valid_required_text(value, 8_192))
+                .is_none_or(|value| valid_provider_free_text(value, 8_192))
             && entry
                 .color_id
                 .as_deref()
@@ -1876,11 +1880,11 @@ fn valid_provider_events(events: &[ProviderCalendarEvent]) -> bool {
             && event
                 .description
                 .as_deref()
-                .is_none_or(|value| valid_required_text(value, MAX_EVENT_DESCRIPTION_BYTES))
+                .is_none_or(|value| valid_provider_free_text(value, MAX_EVENT_DESCRIPTION_BYTES))
             && event
                 .location
                 .as_deref()
-                .is_none_or(|value| valid_required_text(value, MAX_EVENT_LOCATION_BYTES))
+                .is_none_or(|value| valid_provider_free_text(value, MAX_EVENT_LOCATION_BYTES))
             && event
                 .recurrence
                 .as_ref()
@@ -2093,6 +2097,14 @@ fn valid_required_text(value: &str, maximum_bytes: usize) -> bool {
     !value.trim().is_empty() && value.len() <= maximum_bytes && !value.chars().any(char::is_control)
 }
 
+fn valid_provider_free_text(value: &str, maximum_bytes: usize) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= maximum_bytes
+        && !value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+}
+
 fn valid_access_role(value: &str) -> bool {
     matches!(value, "free_busy_reader" | "reader" | "writer" | "owner")
 }
@@ -2169,8 +2181,8 @@ mod tests {
             status: ProviderCalendarEventStatus::Confirmed,
             event_type: "default".to_owned(),
             title: Some("연차".to_owned()),
-            description: None,
-            location: None,
+            description: Some("첫 번째 안건\n두 번째 안건\r\n\t확인".to_owned()),
+            location: Some("회의실 A\n3층".to_owned()),
             time: Some(ProviderCalendarEventTime::Date {
                 start: Date::from_calendar_date(2026, Month::July, 12)
                     .expect("fixture date should be valid"),

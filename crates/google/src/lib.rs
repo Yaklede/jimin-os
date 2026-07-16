@@ -1422,7 +1422,7 @@ fn normalize_calendar_list_item(
         .ok_or(GoogleAuthError::ProviderRejected)?;
     let description = item
         .description
-        .map(|value| validate_text(value, 8_192))
+        .map(|value| validate_provider_free_text(value, 8_192))
         .transpose()?;
     let time_zone = item
         .time_zone
@@ -1506,11 +1506,11 @@ fn normalize_calendar_event_item(
     }
     let description = item
         .description
-        .map(|value| validate_text(value, 8_192))
+        .map(|value| validate_provider_free_text(value, 8_192))
         .transpose()?;
     let location = item
         .location
-        .map(|value| validate_text(value, 1_024))
+        .map(|value| validate_provider_free_text(value, 1_024))
         .transpose()?;
     let recurrence = item
         .recurrence
@@ -1642,7 +1642,7 @@ fn validated_event_mutation_body(
     let description = mutation
         .description
         .clone()
-        .map(|value| validate_text(value, 8_192))
+        .map(|value| validate_provider_free_text(value, 8_192))
         .transpose()?;
     let time_zone = validate_text(mutation.time_zone.clone(), 80)?;
     if mutation.end <= mutation.start {
@@ -1878,6 +1878,21 @@ fn validate_text(value: String, maximum_bytes: usize) -> Result<String, GoogleAu
     Ok(value)
 }
 
+fn validate_provider_free_text(
+    value: String,
+    maximum_bytes: usize,
+) -> Result<String, GoogleAuthError> {
+    if value.trim().is_empty()
+        || value.len() > maximum_bytes
+        || value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(GoogleAuthError::InvalidRequest);
+    }
+    Ok(value)
+}
+
 fn classify_provider_status(status: u16) -> GoogleAuthError {
     if status == 429 || status >= 500 {
         GoogleAuthError::ProviderUnavailable
@@ -2031,6 +2046,31 @@ mod tests {
             entry.time,
             Some(GoogleCalendarEventTime::DateTime { time_zone, .. }) if time_zone == "Asia/Seoul"
         ));
+    }
+
+    #[test]
+    fn calendar_event_accepts_multiline_provider_description() {
+        let item: GoogleCalendarEventItem = serde_json::from_str(
+            r#"{
+                "id": "event-1",
+                "status": "confirmed",
+                "summary": "회의",
+                "description": "첫 번째 안건\n두 번째 안건\r\n\t확인할 내용",
+                "location": "회의실 A\n3층",
+                "start": {"dateTime": "2026-07-12T09:00:00+09:00"},
+                "end": {"dateTime": "2026-07-12T10:00:00+09:00"}
+            }"#,
+        )
+        .expect("fixture should deserialize");
+
+        let entry =
+            normalize_calendar_event_item(item, "Asia/Seoul").expect("event should normalize");
+
+        assert_eq!(
+            entry.description.as_deref(),
+            Some("첫 번째 안건\n두 번째 안건\r\n\t확인할 내용")
+        );
+        assert_eq!(entry.location.as_deref(), Some("회의실 A\n3층"));
     }
 
     #[test]

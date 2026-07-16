@@ -226,7 +226,7 @@ impl CalendarOAuthRuntime {
             .calendar
             .list_calendars(&access_token)
             .await
-            .map_err(CalendarOAuthError::from_google)?;
+            .map_err(CalendarOAuthError::from_sync_google)?;
         Ok(entries.into_iter().map(provider_calendar).collect())
     }
 
@@ -282,10 +282,10 @@ impl CalendarOAuthRuntime {
                                 &target.time_zone,
                             )
                             .await
-                            .map_err(CalendarOAuthError::from_google)?,
+                            .map_err(CalendarOAuthError::from_sync_google)?,
                         true,
                     ),
-                    Err(error) => return Err(CalendarOAuthError::from_google(error)),
+                    Err(error) => return Err(CalendarOAuthError::from_sync_google(error)),
                 }
             } else {
                 (
@@ -296,7 +296,7 @@ impl CalendarOAuthRuntime {
                             &target.time_zone,
                         )
                         .await
-                        .map_err(CalendarOAuthError::from_google)?,
+                        .map_err(CalendarOAuthError::from_sync_google)?,
                     true,
                 )
             };
@@ -560,6 +560,8 @@ pub enum CalendarOAuthError {
     ProviderRejected,
     #[error("Google Calendar is temporarily unavailable")]
     ProviderUnavailable,
+    #[error("Google Calendar returned unsupported synchronization data")]
+    SyncDataInvalid,
     #[error("Google Calendar event changed before the requested mutation")]
     Conflict,
     #[error("Google Calendar event no longer exists")]
@@ -584,6 +586,7 @@ impl CalendarOAuthError {
             | Self::RequiredScopeMissing
             | Self::Encryption => "calendar.authorization_failed",
             Self::ProviderUnavailable => "calendar.provider_unavailable",
+            Self::SyncDataInvalid => "calendar.sync_data_invalid",
             Self::Conflict => "calendar.event_conflict",
             Self::EventNotFound => "calendar.event_not_found",
             Self::EventRejected => "calendar.event_rejected",
@@ -600,6 +603,7 @@ impl CalendarOAuthError {
             Self::InvalidCallback => "calendar.invalid_callback",
             Self::ProviderRejected => "calendar.token_exchange_rejected",
             Self::ProviderUnavailable => "calendar.provider_unavailable",
+            Self::SyncDataInvalid => "calendar.sync_data_invalid",
             Self::Conflict => "calendar.event_conflict",
             Self::EventNotFound => "calendar.event_not_found",
             Self::EventRejected => "calendar.event_rejected",
@@ -614,6 +618,11 @@ impl CalendarOAuthError {
         matches!(self, Self::ProviderUnavailable)
     }
 
+    #[must_use]
+    pub const fn is_connection_sync_failure(self) -> bool {
+        matches!(self, Self::ProviderUnavailable | Self::SyncDataInvalid)
+    }
+
     fn from_google(error: GoogleAuthError) -> Self {
         match error {
             GoogleAuthError::ProviderUnavailable => Self::ProviderUnavailable,
@@ -625,6 +634,15 @@ impl CalendarOAuthError {
                 Self::ProviderRejected
             }
             GoogleAuthError::IdentityRejected => Self::InvalidCallback,
+        }
+    }
+
+    fn from_sync_google(error: GoogleAuthError) -> Self {
+        match error {
+            GoogleAuthError::InvalidRequest
+            | GoogleAuthError::ProviderRejected
+            | GoogleAuthError::CalendarSyncTokenExpired => Self::SyncDataInvalid,
+            other => Self::from_google(other),
         }
     }
 }
@@ -876,6 +894,17 @@ mod tests {
         assert_eq!(rejected.failure_code(), "calendar.event_rejected");
         assert!(!missing.retryable());
         assert!(!rejected.retryable());
+    }
+
+    #[test]
+    fn provider_sync_payload_failures_do_not_request_reauthorization() {
+        let invalid = CalendarOAuthError::from_sync_google(GoogleAuthError::InvalidRequest);
+        let rejected = CalendarOAuthError::from_sync_google(GoogleAuthError::ProviderRejected);
+
+        assert_eq!(invalid, CalendarOAuthError::SyncDataInvalid);
+        assert_eq!(rejected, CalendarOAuthError::SyncDataInvalid);
+        assert_eq!(invalid.failure_code(), "calendar.sync_data_invalid");
+        assert!(invalid.is_connection_sync_failure());
     }
 
     #[test]

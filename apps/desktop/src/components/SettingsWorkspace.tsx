@@ -139,12 +139,17 @@ export function SettingsWorkspace({
   const settingsChanged =
     draftModelId !== savedModelId ||
     draftReasoningEffort !== savedReasoningEffort;
-  const calendarReady = calendarConnection?.status === "active";
+  const calendarReady =
+    calendarConnection?.status === "active" ||
+    calendarConnection?.status === "error";
   const calendarUnavailable = calendarConnection?.available === false;
   const calendarNeedsAttention =
     calendarConnection?.status === "reauth_required" ||
-    calendarConnection?.status === "revoked" ||
-    calendarConnection?.status === "error";
+    calendarConnection?.status === "revoked";
+  const calendarHasSyncProblem =
+    calendarConnection?.status === "error" ||
+    (calendarConnection?.status === "active" &&
+      Boolean(calendarConnection.lastErrorCode));
   const calendarBusy = calendarLoading || Boolean(calendarAction);
   const calendarDetail = calendarConnectionDetail(
     calendarConnection,
@@ -542,9 +547,11 @@ export function SettingsWorkspace({
           <span className="settings-row__icon" aria-hidden="true">
             {calendarBusy ? (
               <LoaderCircle className="spin" />
-            ) : calendarReady ? (
+            ) : calendarReady && !calendarHasSyncProblem ? (
               <CheckCircle2 />
-            ) : calendarUnavailable || calendarNeedsAttention ? (
+            ) : calendarUnavailable ||
+              calendarNeedsAttention ||
+              calendarHasSyncProblem ? (
               <CircleAlert />
             ) : (
               <CalendarDays />
@@ -828,6 +835,9 @@ function calendarConnectionDetail(
     return copy.settings.calendarAwaitingAuthorization;
   }
   if (connection.status === "active") {
+    if (connection.lastErrorCode) {
+      return copy.settings.calendarSyncProblem;
+    }
     return copy.settings.calendarConnected(
       connection.email ?? undefined,
       connection.lastSuccessfulSyncAt ?? undefined,
@@ -842,7 +852,10 @@ function calendarConnectionDetail(
   if (connection.status === "revoking") {
     return copy.settings.calendarDisconnecting;
   }
-  if (connection.status === "revoked" || connection.status === "error") {
+  if (connection.status === "error") {
+    return copy.settings.calendarSyncProblem;
+  }
+  if (connection.status === "revoked") {
     return copy.settings.calendarNeedsReconnect;
   }
   return copy.settings.calendarNotConnected;
