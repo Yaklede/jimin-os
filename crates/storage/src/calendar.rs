@@ -267,20 +267,23 @@ impl Database {
         }
         let row = sqlx::query_as::<_, ClaimedCalendarOAuthAuthorizationRow>(
             "\
-            UPDATE calendar_oauth_authorizations AS authorization
+            UPDATE calendar_oauth_authorizations AS oauth_authorization
             SET status = 'exchanging'
             FROM users AS user_account
-            WHERE authorization.state_verifier = $1
-              AND authorization.status = 'pending'
-              AND authorization.expires_at > NOW()
-              AND user_account.id = authorization.user_id
+            LEFT JOIN calendar_accounts AS calendar_account
+                ON calendar_account.user_id = user_account.id
+            WHERE oauth_authorization.state_verifier = $1
+              AND oauth_authorization.status = 'pending'
+              AND oauth_authorization.expires_at > NOW()
+              AND user_account.id = oauth_authorization.user_id
               AND user_account.status = 'active'
-            RETURNING authorization.id, authorization.user_id,
-                authorization.pkce_verifier_ciphertext,
-                authorization.pkce_nonce,
-                authorization.encryption_key_version,
-                authorization.client_kind,
-                user_account.google_sub",
+            RETURNING oauth_authorization.id, oauth_authorization.user_id,
+                oauth_authorization.pkce_verifier_ciphertext,
+                oauth_authorization.pkce_nonce,
+                oauth_authorization.encryption_key_version,
+                oauth_authorization.client_kind,
+                COALESCE(calendar_account.provider_subject, user_account.google_sub)
+                    AS expected_google_subject",
         )
         .bind(state_verifier)
         .fetch_optional(self.pool())
@@ -352,11 +355,15 @@ impl Database {
 
         let authorization = sqlx::query_as::<_, CompletionAuthorizationRow>(
             "\
-            SELECT authorization.user_id, authorization.status, user_account.google_sub
-            FROM calendar_oauth_authorizations AS authorization
-            JOIN users AS user_account ON user_account.id = authorization.user_id
-            WHERE authorization.id = $1
-            FOR UPDATE",
+            SELECT oauth_authorization.user_id, oauth_authorization.status,
+                COALESCE(calendar_account.provider_subject, user_account.google_sub)
+                    AS expected_google_subject
+            FROM calendar_oauth_authorizations AS oauth_authorization
+            JOIN users AS user_account ON user_account.id = oauth_authorization.user_id
+            LEFT JOIN calendar_accounts AS calendar_account
+                ON calendar_account.user_id = oauth_authorization.user_id
+            WHERE oauth_authorization.id = $1
+            FOR UPDATE OF oauth_authorization, user_account",
         )
         .bind(command.authorization_id)
         .fetch_optional(&mut *transaction)
@@ -366,7 +373,9 @@ impl Database {
         if authorization.user_id != command.user_id || authorization.status != "exchanging" {
             return Err(StorageError::InvalidConfiguration);
         }
-        if authorization.google_sub != command.provider_subject.as_str() {
+        if let Some(expected_google_subject) = authorization.expected_google_subject
+            && expected_google_subject != command.provider_subject.as_str()
+        {
             return Err(StorageError::IdentityConflict);
         }
 
@@ -1722,7 +1731,7 @@ pub struct CreatedCalendarOAuthAuthorization {
 pub struct ClaimedCalendarOAuthAuthorization {
     pub id: Uuid,
     pub user_id: Uuid,
-    pub expected_google_subject: GoogleSubject,
+    pub expected_google_subject: Option<GoogleSubject>,
     pub client_kind: ClientPlatform,
     pub pkce_verifier: EncryptedCalendarSecret,
 }
@@ -1735,7 +1744,7 @@ struct ClaimedCalendarOAuthAuthorizationRow {
     pkce_nonce: Option<Vec<u8>>,
     encryption_key_version: Option<i32>,
     client_kind: String,
-    google_sub: String,
+    expected_google_subject: Option<String>,
 }
 
 impl TryFrom<ClaimedCalendarOAuthAuthorizationRow> for ClaimedCalendarOAuthAuthorization {
@@ -1757,7 +1766,10 @@ impl TryFrom<ClaimedCalendarOAuthAuthorizationRow> for ClaimedCalendarOAuthAutho
         Ok(Self {
             id: row.id,
             user_id: row.user_id,
-            expected_google_subject: GoogleSubject::parse(row.google_sub)
+            expected_google_subject: row
+                .expected_google_subject
+                .map(GoogleSubject::parse)
+                .transpose()
                 .map_err(|_| StorageError::PersistenceUnavailable)?,
             client_kind: parse_client_platform(&row.client_kind)?,
             pkce_verifier,
@@ -1796,7 +1808,7 @@ impl CompleteCalendarOAuthAuthorization {
 struct CompletionAuthorizationRow {
     user_id: Uuid,
     status: String,
-    google_sub: String,
+    expected_google_subject: Option<String>,
 }
 
 fn all_version_seven(ids: &[Uuid]) -> bool {

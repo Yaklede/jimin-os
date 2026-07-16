@@ -4,11 +4,15 @@ import {
   CheckCircle2,
   ChevronRight,
   CircleAlert,
+  Clipboard,
+  ExternalLink,
   Link2,
   LoaderCircle,
   RefreshCw,
   Unlink,
 } from "lucide-react";
+import { isTauri } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 
 import {
@@ -82,6 +86,10 @@ export function SettingsWorkspace({
   const [draftReasoningEffort, setDraftReasoningEffort] =
     useState(savedReasoningEffort);
   const [modelSaved, setModelSaved] = useState(false);
+  const [authenticationCodeCopied, setAuthenticationCodeCopied] =
+    useState(false);
+  const [authenticationBrowserError, setAuthenticationBrowserError] =
+    useState(false);
   const [calendarDisconnectConfirmation, setCalendarDisconnectConfirmation] =
     useState(false);
   const [notificationPermission, setNotificationPermission] =
@@ -111,6 +119,9 @@ export function SettingsWorkspace({
   const ready = state === "ready";
   const waiting = state === "requested" || state === "awaiting_authorization";
   const failed = state === "failed";
+  const awaitingAuthorization =
+    state === "awaiting_authorization" &&
+    Boolean(authentication?.verificationUrl && authentication.userCode);
   const detail = ready
     ? copy.settings.chatgptReady
     : state === "awaiting_authorization"
@@ -263,6 +274,35 @@ export function SettingsWorkspace({
     setModelSaved(false);
     if (await onSaveModel(draftModelId || null, draftReasoningEffort || null)) {
       setModelSaved(true);
+    }
+  }
+
+  async function copyAuthenticationCode() {
+    if (!authentication?.userCode) return;
+    try {
+      await navigator.clipboard.writeText(authentication.userCode);
+      setAuthenticationCodeCopied(true);
+    } catch {
+      setAuthenticationCodeCopied(false);
+    }
+  }
+
+  async function openAuthenticationPage() {
+    if (!authentication?.verificationUrl) return;
+    setAuthenticationBrowserError(false);
+    try {
+      if (isTauri()) {
+        await openUrl(authentication.verificationUrl);
+      } else {
+        const opened = window.open(
+          authentication.verificationUrl,
+          "_blank",
+          "noopener,noreferrer",
+        );
+        if (!opened) throw new Error("external navigation unavailable");
+      }
+    } catch {
+      setAuthenticationBrowserError(true);
     }
   }
 
@@ -426,15 +466,48 @@ export function SettingsWorkspace({
               <Link2 />
             )}
           </span>
-          <div>
+          <div className="settings-row__copy">
             <strong>{copy.settings.chatgptTitle}</strong>
             <p>{detail}</p>
+            {awaitingAuthorization ? (
+              <div className="settings-authentication">
+                <div className="settings-authentication__code">
+                  <span>{copy.authentication.codeLabel}</span>
+                  <output>{authentication?.userCode}</output>
+                </div>
+                <div className="settings-authentication__actions">
+                  <button
+                    className="text-button focus-visible-control"
+                    type="button"
+                    onClick={() => void copyAuthenticationCode()}
+                  >
+                    <Clipboard aria-hidden="true" />
+                    {authenticationCodeCopied
+                      ? copy.authentication.copiedCode
+                      : copy.actions.copyAuthenticationCode}
+                  </button>
+                  <button
+                    className="text-button focus-visible-control"
+                    type="button"
+                    onClick={() => void openAuthenticationPage()}
+                  >
+                    <ExternalLink aria-hidden="true" />
+                    {copy.actions.openChatgpt}
+                  </button>
+                </div>
+                {authenticationBrowserError ? (
+                  <p className="settings-row__error" role="alert">
+                    {copy.authentication.browserOpenFailed}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
           </div>
           {ready ? (
             <span className="settings-row__state">
               {copy.settings.chatgptReady}
             </span>
-          ) : (
+          ) : awaitingAuthorization ? null : (
             <button
               className="text-button focus-visible-control"
               type="button"

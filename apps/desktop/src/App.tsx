@@ -214,6 +214,7 @@ export default function App() {
     useState<ReminderSyncStatus>("idle");
   const [reminderSyncError, setReminderSyncError] = useState<string>();
   const pendingConversationId = useRef<string | undefined>(undefined);
+  const openedAuthenticationUrl = useRef<string | undefined>(undefined);
   const activeSessionRef = useRef<SessionTokens | undefined>(undefined);
   const refreshInFlightRef = useRef<Promise<SessionTokens> | undefined>(
     undefined,
@@ -1018,6 +1019,21 @@ export default function App() {
       window.clearInterval(interval);
     };
   }, [agentAuthentication, apiBaseUrl, tokens, withAuthenticatedSession]);
+
+  useEffect(() => {
+    const verificationUrl = agentAuthentication?.verificationUrl;
+    if (
+      agentAuthentication?.state !== "awaiting_authorization" ||
+      !verificationUrl ||
+      openedAuthenticationUrl.current === verificationUrl
+    ) {
+      return;
+    }
+    openedAuthenticationUrl.current = verificationUrl;
+    void openExternalUrl(verificationUrl).catch(() => {
+      setConversationError(copy.authentication.browserOpenFailed);
+    });
+  }, [agentAuthentication]);
 
   const synchronizeAssistantDestinations = useCallback(
     async (messages: ConversationMessage[]): Promise<void> => {
@@ -2029,6 +2045,7 @@ export default function App() {
   async function beginAgentAuthentication(): Promise<void> {
     if (!tokens || authenticationRequesting) return;
     setAuthenticationRequesting(true);
+    openedAuthenticationUrl.current = undefined;
     setConversationError(undefined);
     try {
       setAgentAuthentication(

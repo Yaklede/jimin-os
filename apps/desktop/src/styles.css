@@ -3973,6 +3973,47 @@ svg {
   font-size: 13px;
 }
 
+.settings-authentication {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.settings-authentication__code {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-authentication__code output {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-strong);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.settings-authentication__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-row .settings-authentication__actions .text-button {
+  min-height: 40px;
+  margin: 0;
+}
+
+.settings-authentication__actions svg {
+  width: 16px;
+  height: 16px;
+}
+
 .settings-row .settings-row__error {
   color: var(--danger);
 }

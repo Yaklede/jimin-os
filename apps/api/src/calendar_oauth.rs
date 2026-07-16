@@ -10,7 +10,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit as AeadKeyInit, Payload},
 };
 use hmac::{Hmac, Mac, digest::KeyInit as HmacKeyInit};
-use jimin_domain::{ClientPlatform, PkceVerifier};
+use jimin_domain::{ClientPlatform, GoogleSubject, PkceVerifier};
 use jimin_google::{
     GoogleAuthError, GoogleAuthorizationCode, GoogleCalendarAdapter, GoogleCalendarEventEntry,
     GoogleCalendarEventMutation, GoogleCalendarEventStatus, GoogleCalendarEventTime,
@@ -174,7 +174,10 @@ impl CalendarOAuthRuntime {
         authorization: &ClaimedCalendarOAuthAuthorization,
         grant: &GoogleCalendarGrant,
     ) -> Result<CompleteCalendarOAuthAuthorization, CalendarOAuthError> {
-        if grant.identity().subject() != &authorization.expected_google_subject {
+        if !linked_google_identity_matches(
+            authorization.expected_google_subject.as_ref(),
+            grant.identity().subject(),
+        ) {
             return Err(CalendarOAuthError::IdentityMismatch);
         }
         let granted_scopes = calendar_scopes(grant.granted_scopes())?;
@@ -734,6 +737,13 @@ fn calendar_scopes(scopes: &[String]) -> Result<Vec<String>, CalendarOAuthError>
     Ok(granted_scopes)
 }
 
+fn linked_google_identity_matches(
+    expected: Option<&GoogleSubject>,
+    granted: &GoogleSubject,
+) -> bool {
+    expected.is_none_or(|subject| subject == granted)
+}
+
 fn provider_calendar(entry: GoogleCalendarListEntry) -> ProviderCalendar {
     ProviderCalendar {
         provider_calendar_id: entry.provider_calendar_id,
@@ -820,6 +830,22 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[test]
+    fn a_local_device_owner_can_link_the_first_google_account() {
+        let granted = GoogleSubject::parse("google-subject").expect("valid subject");
+
+        assert!(linked_google_identity_matches(None, &granted));
+    }
+
+    #[test]
+    fn a_reconnection_must_keep_the_linked_google_account() {
+        let linked = GoogleSubject::parse("linked-subject").expect("valid subject");
+        let other = GoogleSubject::parse("other-subject").expect("valid subject");
+
+        assert!(linked_google_identity_matches(Some(&linked), &linked));
+        assert!(!linked_google_identity_matches(Some(&linked), &other));
+    }
 
     #[test]
     fn event_level_provider_failures_do_not_invalidate_the_account() {
