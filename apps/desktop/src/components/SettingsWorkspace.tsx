@@ -494,6 +494,15 @@ export function SettingsWorkspace({
                     <ExternalLink aria-hidden="true" />
                     {copy.actions.openChatgpt}
                   </button>
+                  <button
+                    className="text-button focus-visible-control"
+                    type="button"
+                    disabled={requesting}
+                    onClick={() => void onStartAuthentication()}
+                  >
+                    <RefreshCw aria-hidden="true" />
+                    {copy.actions.restartChatgptConnection}
+                  </button>
                 </div>
                 {authenticationBrowserError ? (
                   <p className="settings-row__error" role="alert">

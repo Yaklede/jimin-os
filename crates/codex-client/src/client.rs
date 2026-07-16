@@ -219,6 +219,33 @@ where
         })
     }
 
+    /// Cancels one in-flight device-code login before issuing a replacement.
+    /// A missing login is treated as already cancelled so retry remains
+    /// idempotent across App Server notification races.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed protocol error when the login identifier is malformed
+    /// or App Server rejects the request.
+    pub async fn cancel_chatgpt_login(&mut self, login_id: &str) -> Result<()> {
+        self.require_initialized()?;
+        if !valid_login_field(login_id) {
+            return Err(Error::InvalidResponse {
+                method: "account/login/cancel",
+            });
+        }
+        let response: CancelLoginResponse = self
+            .connection
+            .request("account/login/cancel", json!({ "loginId": login_id }))
+            .await?;
+        if !matches!(response.status.as_str(), "canceled" | "notFound") {
+            return Err(Error::InvalidResponse {
+                method: "account/login/cancel",
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) async fn discard_next_notification(&mut self) -> Result<()> {
         self.require_initialized()?;
         let _notification = self.connection.next_notification().await?;
@@ -852,6 +879,11 @@ struct DeviceCodeLoginResponse {
 }
 
 #[derive(Deserialize)]
+struct CancelLoginResponse {
+    status: String,
+}
+
+#[derive(Deserialize)]
 struct ThreadStartResponse {
     thread: ThreadReference,
 }
@@ -1086,6 +1118,38 @@ mod tests {
             login.verification_url,
             "https://auth.openai.com/codex/device"
         );
+        server_task.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn device_code_login_can_be_cancelled_before_retry() {
+        let (client, server) = tokio::io::duplex(16 * 1024);
+        let (client_reader, client_writer) = split(client);
+        let mut client = AppServerClient::new(BufReader::new(client_reader), client_writer);
+
+        let server_task = tokio::spawn(async move {
+            let (server_reader, mut server_writer) = split(server);
+            let mut server_reader = BufReader::new(server_reader);
+            let _initialize = read_json_line(&mut server_reader).await;
+            server_writer
+                .write_all(b"{\"id\":1,\"result\":{\"userAgent\":\"fixture\",\"codexHome\":\"/tmp\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}\n")
+                .await
+                .expect("initialize response");
+            let _initialized = read_json_line(&mut server_reader).await;
+            let cancel_request = read_json_line(&mut server_reader).await;
+            assert_eq!(cancel_request["method"], "account/login/cancel");
+            assert_eq!(cancel_request["params"], json!({"loginId": "login-1"}));
+            server_writer
+                .write_all(b"{\"id\":2,\"result\":{\"status\":\"canceled\"}}\n")
+                .await
+                .expect("cancel response");
+        });
+
+        client.initialize().await.expect("initialize");
+        client
+            .cancel_chatgpt_login("login-1")
+            .await
+            .expect("device login should cancel");
         server_task.await.expect("server task");
     }
 

@@ -638,6 +638,14 @@ function AssistantAuthenticationGate({
             <ExternalLink aria-hidden="true" />
             {copy.actions.openChatgpt}
           </button>
+          <button
+            className="assistant-auth-gate__secondary focus-visible-control"
+            type="button"
+            onClick={() => void onStartAuthentication()}
+            disabled={requesting}
+          >
+            {copy.actions.restartChatgptConnection}
+          </button>
         </>
       ) : isPreparing || requesting ? (
         <>

@@ -69,6 +69,7 @@ export const copy = {
     retryRequest: "다시 보내기",
     connectChatgpt: "ChatGPT 연결하기",
     retryChatgptConnection: "다시 연결하기",
+    restartChatgptConnection: "새 코드 받기",
     openChatgpt: "브라우저에서 ChatGPT 열기",
     copyAuthenticationCode: "코드 복사하기",
     retryPersonalServer: "다시 연결하기",

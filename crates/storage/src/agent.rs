@@ -1389,9 +1389,9 @@ impl Database {
         row.map(AgentAuthentication::try_from).transpose()
     }
 
-    /// Starts or returns the current personal sign-in request. A successful
-    /// `ready` row is stable across agent restarts because Codex persists the
-    /// managed credential separately in `CODEX_HOME`.
+    /// Starts a personal sign-in request. A successful `ready` row is stable
+    /// across agent restarts. An explicit new request supersedes an unfinished
+    /// ceremony so a rejected or expired device code never traps the client.
     ///
     /// # Errors
     ///
@@ -1410,12 +1410,12 @@ impl Database {
             .begin()
             .await
             .map_err(|error| classify(&error))?;
-        let existing = sqlx::query_as::<_, AgentAuthenticationRow>(
+        let ready = sqlx::query_as::<_, AgentAuthenticationRow>(
             "\
             SELECT id, state, verification_url, user_code
             FROM agent_auth_attempts
             WHERE user_id = $1
-              AND state IN ('requested', 'awaiting_authorization', 'ready')
+              AND state = 'ready'
             ORDER BY created_at DESC, id DESC
             LIMIT 1
             FOR UPDATE",
@@ -1424,14 +1424,31 @@ impl Database {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|error| classify(&error))?;
-        if let Some(existing) = existing {
-            let authentication = AgentAuthentication::try_from(existing)?;
+        if let Some(ready) = ready {
+            let authentication = AgentAuthentication::try_from(ready)?;
             transaction
                 .rollback()
                 .await
                 .map_err(|error| classify(&error))?;
             return Ok(authentication);
         }
+
+        sqlx::query(
+            "\
+            UPDATE agent_auth_attempts
+            SET state = 'failed',
+                login_id = NULL,
+                verification_url = NULL,
+                user_code = NULL,
+                error_code = 'agent_authentication_restarted',
+                completed_at = NOW()
+            WHERE user_id = $1
+              AND state IN ('requested', 'awaiting_authorization')",
+        )
+        .bind(user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
 
         let row = sqlx::query_as::<_, AgentAuthenticationRow>(
             "\
@@ -1449,6 +1466,33 @@ impl Database {
             .await
             .map_err(|error| classify(&error))?;
         AgentAuthentication::try_from(row)
+    }
+
+    /// Reports whether one runtime-owned ceremony is still the active request.
+    /// The agent uses this to cancel an obsolete App Server login before
+    /// issuing the replacement code requested by the user.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for a malformed attempt
+    /// identifier and a classified storage error when persistence fails.
+    pub async fn agent_authentication_is_awaiting(
+        &self,
+        attempt_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        if !is_v7(attempt_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM agent_auth_attempts
+                WHERE id = $1 AND state = 'awaiting_authorization'
+            )",
+        )
+        .bind(attempt_id)
+        .fetch_one(self.pool())
+        .await
+        .map_err(|error| classify(&error))
     }
 
     /// Finds one requested ceremony for the single trusted agent process.

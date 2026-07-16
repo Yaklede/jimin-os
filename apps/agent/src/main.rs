@@ -652,10 +652,10 @@ async fn wait_for_chatgpt_authorization(
         .restart_pending_agent_authentication()
         .await
         .map_err(|_| AuthenticationWaitError::Storage)?;
-    let mut active_attempt_id = None;
+    let mut active_login: Option<(uuid::Uuid, String)> = None;
 
     loop {
-        if active_attempt_id.is_none() {
+        if active_login.is_none() {
             let request = database
                 .next_requested_agent_authentication()
                 .await
@@ -682,7 +682,7 @@ async fn wait_for_chatgpt_authorization(
                     .await
                     .map_err(|_| AuthenticationWaitError::Storage)?;
                 if started {
-                    active_attempt_id = Some(request.id);
+                    active_login = Some((request.id, login.login_id));
                     write_agent_authentication_event("awaiting_authorization");
                 }
             }
@@ -694,13 +694,29 @@ async fn wait_for_chatgpt_authorization(
         // database poll that notices a newly requested device-code ceremony.
         // The operational device-auth runbook restarts this process after an
         // out-of-band login, so readiness remains exact without this probe.
-        if active_attempt_id.is_none() {
+        if active_login.is_none() {
             let shutdown = wait_for_shutdown_or_delay(poll_interval)
                 .await
                 .map_err(|_| AuthenticationWaitError::Signal)?;
             if shutdown {
                 return Ok(AuthenticationWaitOutcome::ShutdownRequested);
             }
+            continue;
+        }
+
+        if let Some((attempt_id, login_id)) = active_login.as_ref()
+            && !database
+                .agent_authentication_is_awaiting(*attempt_id)
+                .await
+                .map_err(|_| AuthenticationWaitError::Storage)?
+        {
+            process
+                .client_mut()
+                .cancel_chatgpt_login(login_id)
+                .await
+                .map_err(AuthenticationWaitError::Codex)?;
+            active_login = None;
+            write_agent_authentication_event("restarted");
             continue;
         }
 
@@ -711,9 +727,9 @@ async fn wait_for_chatgpt_authorization(
             .map_err(AuthenticationWaitError::Codex)?;
         match health_state_for_account(&account).map_err(AuthenticationWaitError::Codex)? {
             HealthState::Ready => {
-                if let Some(attempt_id) = active_attempt_id {
+                if let Some((attempt_id, _)) = active_login.as_ref() {
                     let completed = database
-                        .complete_agent_authentication(attempt_id)
+                        .complete_agent_authentication(*attempt_id)
                         .await
                         .map_err(|_| AuthenticationWaitError::Storage)?;
                     if !completed {
