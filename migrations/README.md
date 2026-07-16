@@ -39,4 +39,10 @@ and a restored staging backup before release. A pre-version-21 image can be used
 only before these tables receive writes; after that point rollback requires the
 verified pre-migration backup rather than dropping decision history.
 
+Migration `0022_work_brief_refresh.sql` makes one active signal map to at most
+one recommendation. This prevents repeated home refreshes from recreating an
+already handled suggestion. The index is additive; rollback before writes may
+use the previous image, while rollback after recommendation writes uses the
+verified pre-migration backup.
+
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.

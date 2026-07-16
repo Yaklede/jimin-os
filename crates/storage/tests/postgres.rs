@@ -68,6 +68,10 @@ struct ExhaustedCalendarMutationRow {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The integration test keeps the full first-connection, recovery, and secret-consumption lifecycle visible."
+)]
 async fn first_calendar_oauth_connection_persists_the_account_and_consumes_the_authorization() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;
@@ -4257,6 +4261,72 @@ async fn recommendation_decisions_are_scoped_versioned_and_idempotent() {
             .expect("cross-owner lookup should not leak existence"),
         DecideRecommendationOutcome::NotFound
     ));
+
+    database.close().await;
+}
+
+#[tokio::test]
+async fn work_brief_refresh_generates_one_actionable_recommendation_per_active_signal() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let now = OffsetDateTime::now_utc();
+    let task = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            project_id: None,
+            title: "마감된 계약서 검토".to_owned(),
+            notes: None,
+            priority: 3,
+            due_at: Some(now - TimeDuration::hours(1)),
+        })
+        .await
+        .expect("overdue task should persist");
+
+    let generated = database
+        .refresh_work_brief(owner.profile.id, now)
+        .await
+        .expect("work brief should refresh");
+    assert_eq!(generated.len(), 1);
+    assert_eq!(generated[0].suggested_entity_id, Some(task.id));
+    assert_eq!(generated[0].status, RecommendationStatus::Pending);
+
+    let repeated = database
+        .refresh_work_brief(owner.profile.id, now + TimeDuration::minutes(1))
+        .await
+        .expect("repeated refresh should be idempotent");
+    assert_eq!(repeated.len(), 1);
+    assert_eq!(repeated[0].id, generated[0].id);
+
+    let outcome = database
+        .decide_recommendation(&DecideRecommendation {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            recommendation_id: generated[0].id,
+            decision: RecommendationDecision::Approve,
+            reason: None,
+            revisit_at: None,
+            expected_version: generated[0].version,
+        })
+        .await
+        .expect("recommendation decision should persist");
+    assert!(matches!(outcome, DecideRecommendationOutcome::Applied(_)));
+    assert!(
+        database
+            .refresh_work_brief(owner.profile.id, now + TimeDuration::minutes(2))
+            .await
+            .expect("handled advice should not be recreated")
+            .is_empty()
+    );
 
     database.close().await;
 }

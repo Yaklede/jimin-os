@@ -9,7 +9,12 @@ use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::{Database, StorageError, auth::append_change};
+use crate::{
+    Database, StorageError,
+    auth::append_change,
+    planning::Task,
+    work::{Project, ProjectStatus},
+};
 
 const MAX_TITLE_CHARS: usize = 200;
 const MAX_RATIONALE_CHARS: usize = 4_000;
@@ -200,6 +205,26 @@ struct DecisionReplayRow {
     reason: Option<String>,
     revisit_at: Option<OffsetDateTime>,
     recommendation_version: i64,
+}
+
+struct WorkObservation {
+    fingerprint: String,
+    workspace_id: Option<Uuid>,
+    project_id: Option<Uuid>,
+    severity: i16,
+    kind: &'static str,
+    source_type: &'static str,
+    source_entity_id: Option<Uuid>,
+    title: String,
+    summary: String,
+    expected_effect: String,
+    risk_summary: Option<String>,
+    confidence: i16,
+    urgency: i16,
+    impact: i16,
+    risk_level: i16,
+    effort_minutes: Option<i32>,
+    valid_until: OffsetDateTime,
 }
 
 impl NewRecommendation {
@@ -467,6 +492,335 @@ impl Database {
         Ok(DecideRecommendationOutcome::Applied(
             Recommendation::try_from(row)?,
         ))
+    }
+
+    /// Re-evaluates structured work state and refreshes the owner's active
+    /// decision inbox without relying on title keyword matching.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation or persistence error when owned work cannot be
+    /// evaluated and stored atomically.
+    pub async fn refresh_work_brief(
+        &self,
+        user_id: Uuid,
+        now: OffsetDateTime,
+    ) -> Result<Vec<Recommendation>, StorageError> {
+        if !is_v7(user_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let tasks = self.open_tasks_for_user(user_id).await?;
+        let projects = self.projects_for_user(user_id).await?;
+        let observations = work_observations(&tasks, &projects, now);
+        let fingerprints = observations
+            .iter()
+            .map(|observation| observation.fingerprint.clone())
+            .collect::<Vec<_>>();
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+
+        for observation in &observations {
+            let signal_id = upsert_work_signal(&mut transaction, user_id, observation, now).await?;
+            if let Some(row) =
+                insert_work_recommendation(&mut transaction, user_id, signal_id, observation)
+                    .await?
+            {
+                append_change(
+                    &mut transaction,
+                    user_id,
+                    "recommendation",
+                    row.id,
+                    row.version,
+                )
+                .await?;
+            }
+        }
+
+        sqlx::query(
+            "WITH resolved AS (
+                UPDATE intelligence_signals
+                SET status = 'resolved', resolved_at = $2
+                WHERE user_id = $1 AND status = 'active'
+                  AND fingerprint LIKE 'work:%'
+                  AND NOT (fingerprint = ANY($3::text[]))
+                RETURNING id
+             )
+             UPDATE recommendations
+             SET status = 'expired', revisit_at = NULL
+             WHERE signal_id IN (SELECT id FROM resolved)
+               AND status IN ('pending', 'deferred', 'analysis_requested')",
+        )
+        .bind(user_id)
+        .bind(now)
+        .bind(&fingerprints)
+        .execute(&mut *transaction)
+        .await
+        .map_err(classify)?;
+
+        let rows = sqlx::query_as::<_, RecommendationRow>(SELECT_ACTIVE_RECOMMENDATIONS_SQL)
+            .bind(user_id)
+            .bind(now)
+            .bind(5_i64)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(classify)?;
+        transaction.commit().await.map_err(classify)?;
+        rows.into_iter().map(Recommendation::try_from).collect()
+    }
+}
+
+async fn upsert_work_signal(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    observation: &WorkObservation,
+    now: OffsetDateTime,
+) -> Result<Uuid, StorageError> {
+    sqlx::query_scalar(
+        "INSERT INTO intelligence_signals (
+            id, user_id, workspace_id, project_id, goal_id, kind, severity,
+            title, summary, source_type, source_entity_id, fingerprint,
+            status, observed_at, valid_until
+         ) VALUES (
+            $1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11,
+            'active', $12, $13
+         )
+         ON CONFLICT (user_id, fingerprint) WHERE status = 'active'
+         DO UPDATE SET
+            workspace_id = EXCLUDED.workspace_id,
+            project_id = EXCLUDED.project_id,
+            kind = EXCLUDED.kind,
+            severity = EXCLUDED.severity,
+            title = EXCLUDED.title,
+            summary = EXCLUDED.summary,
+            source_type = EXCLUDED.source_type,
+            source_entity_id = EXCLUDED.source_entity_id,
+            observed_at = EXCLUDED.observed_at,
+            valid_until = EXCLUDED.valid_until
+         RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(user_id)
+    .bind(observation.workspace_id)
+    .bind(observation.project_id)
+    .bind(observation.kind)
+    .bind(observation.severity)
+    .bind(&observation.title)
+    .bind(&observation.summary)
+    .bind(observation.source_type)
+    .bind(observation.source_entity_id)
+    .bind(&observation.fingerprint)
+    .bind(now)
+    .bind(observation.valid_until)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(classify)
+}
+
+async fn insert_work_recommendation(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    signal_id: Uuid,
+    observation: &WorkObservation,
+) -> Result<Option<RecommendationRow>, StorageError> {
+    sqlx::query_as::<_, RecommendationRow>(
+        "INSERT INTO recommendations (
+            id, user_id, workspace_id, project_id, goal_id, signal_id,
+            title, rationale, expected_effect, risk_summary,
+            confidence, urgency, impact, risk_level, effort_minutes,
+            suggested_action_kind, suggested_entity_id, status, valid_until
+         ) VALUES (
+            $1, $2, $3, $4, NULL, $5, $6, $7, $8, $9,
+            $10, $11, $12, $13, $14, 'review', $15, 'pending', $16
+         )
+         ON CONFLICT (signal_id) WHERE signal_id IS NOT NULL DO NOTHING
+         RETURNING
+            id, workspace_id, project_id, goal_id, signal_id,
+            title, rationale, expected_effect, risk_summary,
+            confidence, urgency, impact, risk_level, effort_minutes,
+            suggested_action_kind, suggested_entity_id, status, valid_until,
+            revisit_at, created_at, updated_at, version",
+    )
+    .bind(Uuid::now_v7())
+    .bind(user_id)
+    .bind(observation.workspace_id)
+    .bind(observation.project_id)
+    .bind(signal_id)
+    .bind(&observation.title)
+    .bind(&observation.summary)
+    .bind(&observation.expected_effect)
+    .bind(observation.risk_summary.as_deref())
+    .bind(observation.confidence)
+    .bind(observation.urgency)
+    .bind(observation.impact)
+    .bind(observation.risk_level)
+    .bind(observation.effort_minutes)
+    .bind(observation.source_entity_id)
+    .bind(observation.valid_until)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(classify)
+}
+
+fn work_observations(
+    tasks: &[Task],
+    projects: &[Project],
+    now: OffsetDateTime,
+) -> Vec<WorkObservation> {
+    let mut observations = Vec::new();
+    if let Some(task) = priority_focus_task(tasks, now) {
+        observations.push(task_focus_observation(task, now));
+    }
+    observations.extend(
+        projects
+            .iter()
+            .filter(|project| project.status == ProjectStatus::Active)
+            .filter_map(|project| project_attention_observation(project, now)),
+    );
+    if tasks.len() >= 5 {
+        observations.push(workload_observation(tasks.len(), now));
+    }
+    observations
+}
+
+fn priority_focus_task(tasks: &[Task], now: OffsetDateTime) -> Option<&Task> {
+    tasks.iter().min_by_key(|task| {
+        let overdue = task.due_at.is_some_and(|due_at| due_at < now);
+        (
+            !overdue,
+            std::cmp::Reverse(task.priority),
+            task.due_at.map_or(i64::MAX, OffsetDateTime::unix_timestamp),
+            task.id,
+        )
+    })
+}
+
+fn task_focus_observation(task: &Task, now: OffsetDateTime) -> WorkObservation {
+    let overdue = task.due_at.is_some_and(|due_at| due_at < now);
+    let due_soon = task
+        .due_at
+        .is_some_and(|due_at| due_at >= now && due_at <= now + time::Duration::days(1));
+    let (title, summary, urgency, risk_level, risk_summary) = if overdue {
+        (
+            "기한이 지난 할 일을 먼저 확인하세요".to_owned(),
+            format!("‘{}’의 기한이 지났어요.", task.title),
+            3,
+            2,
+            Some("더 늦어지면 연결된 프로젝트 일정에도 영향을 줄 수 있어요.".to_owned()),
+        )
+    } else if due_soon {
+        (
+            "마감이 가까운 할 일을 먼저 확인하세요".to_owned(),
+            format!("‘{}’의 마감이 하루 안으로 다가왔어요.", task.title),
+            2,
+            1,
+            None,
+        )
+    } else {
+        (
+            "우선순위가 높은 할 일부터 시작하세요".to_owned(),
+            format!(
+                "현재 열린 할 일 중 ‘{}’의 우선순위가 가장 높아요.",
+                task.title
+            ),
+            1,
+            0,
+            None,
+        )
+    };
+    WorkObservation {
+        fingerprint: format!("work:task-focus:{}", task.id),
+        workspace_id: None,
+        project_id: task.project_id,
+        severity: urgency,
+        kind: if overdue || due_soon {
+            "task_deadline"
+        } else {
+            "opportunity"
+        },
+        source_type: "task",
+        source_entity_id: Some(task.id),
+        title,
+        summary,
+        expected_effect: "가장 중요한 한 가지에 먼저 집중해 작업 전환 비용을 줄일 수 있어요."
+            .to_owned(),
+        risk_summary,
+        confidence: 96,
+        urgency,
+        impact: task.priority.max(1),
+        risk_level,
+        effort_minutes: None,
+        valid_until: now + time::Duration::days(2),
+    }
+}
+
+fn project_attention_observation(
+    project: &Project,
+    now: OffsetDateTime,
+) -> Option<WorkObservation> {
+    let (title, summary, severity, risk_level, risk_summary) = if project.risk_level >= 2 {
+        (
+            format!("{}의 위험 요소를 먼저 확인하세요", project.title),
+            "프로젝트 위험도가 높게 설정되어 있어 진행 상태를 다시 확인할 필요가 있어요."
+                .to_owned(),
+            project.risk_level,
+            project.risk_level,
+            Some("확인하지 않으면 일정이나 범위 조정이 늦어질 수 있어요.".to_owned()),
+        )
+    } else if project.open_task_count > 0 && project.next_action.is_none() {
+        (
+            format!("{}의 다음 행동을 정하세요", project.title),
+            format!(
+                "열린 할 일 {}개가 있지만 다음 행동이 정해지지 않았어요.",
+                project.open_task_count
+            ),
+            1,
+            0,
+            None,
+        )
+    } else {
+        return None;
+    };
+    Some(WorkObservation {
+        fingerprint: format!("work:project-attention:{}", project.id),
+        workspace_id: Some(project.workspace_id),
+        project_id: Some(project.id),
+        severity,
+        kind: "project_risk",
+        source_type: "project",
+        source_entity_id: Some(project.id),
+        title,
+        summary,
+        expected_effect: "다음 행동을 분명히 해 프로젝트가 멈춰 있는 시간을 줄일 수 있어요."
+            .to_owned(),
+        risk_summary,
+        confidence: 94,
+        urgency: severity,
+        impact: project.risk_level.max(1),
+        risk_level,
+        effort_minutes: Some(10),
+        valid_until: now + time::Duration::days(7),
+    })
+}
+
+fn workload_observation(task_count: usize, now: OffsetDateTime) -> WorkObservation {
+    WorkObservation {
+        fingerprint: "work:workload:open-tasks".to_owned(),
+        workspace_id: None,
+        project_id: None,
+        severity: 2,
+        kind: "workload",
+        source_type: "system",
+        source_entity_id: None,
+        title: "열린 할 일의 범위를 줄여 보세요".to_owned(),
+        summary: format!("현재 열린 할 일이 {task_count}개 있어 우선순위를 다시 정할 시점이에요."),
+        expected_effect: "오늘 처리할 범위를 줄이면 중요한 일의 완료 가능성을 높일 수 있어요."
+            .to_owned(),
+        risk_summary: Some("모든 일을 동시에 시작하면 완료가 늦어질 수 있어요.".to_owned()),
+        confidence: 92,
+        urgency: 2,
+        impact: 2,
+        risk_level: 1,
+        effort_minutes: Some(10),
+        valid_until: now + time::Duration::days(2),
     }
 }
 

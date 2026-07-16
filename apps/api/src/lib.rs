@@ -1004,6 +1004,7 @@ pub(crate) fn error_response(
         complete_google_calendar_authorization,
         sync_google_calendar,
         get_home_snapshot,
+        refresh_work_brief,
         list_recommendations,
         decide_recommendation,
         create_schedule_entry,
@@ -1145,6 +1146,7 @@ pub fn router(state: ApiState) -> Router {
             axum::routing::put(update_schedule_entry).delete(delete_schedule_entry),
         )
         .route("/v1/home", get(get_home_snapshot))
+        .route("/v1/briefs/work/refresh", post(refresh_work_brief))
         .route("/v1/recommendations", get(list_recommendations))
         .route(
             "/v1/recommendations/{recommendation_id}/decisions",
@@ -1643,6 +1645,41 @@ async fn devices(
         next_cursor: None,
     })
     .into_response()
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/briefs/work/refresh",
+    tag = "intelligence",
+    responses((status = 200, body = RecommendationListResponse), (status = 401), (status = 503))
+)]
+async fn refresh_work_brief(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let recommendations = match planning
+        .refresh_work_brief(principal.identity().user_id(), OffsetDateTime::now_utc())
+        .await
+    {
+        Ok(recommendations) => recommendations,
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    let Ok(items) = recommendations
+        .into_iter()
+        .map(recommendation_response)
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return unavailable_response(request_id);
+    };
+    Json(RecommendationListResponse { items }).into_response()
 }
 
 #[utoipa::path(
@@ -5571,6 +5608,7 @@ mod tests {
                 "/v1/agent/models",
                 "/v1/assistant/voice-commands",
                 "/v1/auth/refresh",
+                "/v1/briefs/work/refresh",
                 "/v1/calendar/connections/google",
                 "/v1/calendar/connections/google/authorizations",
                 "/v1/calendar/connections/google/sync",
@@ -5672,6 +5710,18 @@ mod tests {
     #[tokio::test]
     async fn recommendation_endpoints_require_a_live_signed_session() {
         let (state, _, _) = signed_auth_state(true);
+        let refresh_response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/briefs/work/refresh")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+        assert_eq!(refresh_response.status(), StatusCode::UNAUTHORIZED);
+
         let list_response = router(state.clone())
             .oneshot(
                 Request::builder()
