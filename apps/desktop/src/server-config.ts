@@ -4,6 +4,8 @@ interface ClientEnvironment {
   readonly VITE_LOCAL_PHONE_TEST?: string;
 }
 
+const PERSONAL_SERVER_URL = "https://os.jimin.ai.kr";
+
 export const personalServerBaseUrl = serverBaseUrlFromEnvironment(
   import.meta.env,
 );
@@ -18,7 +20,7 @@ export function serverBaseUrlFromEnvironment(
       environment.VITE_LOCAL_PHONE_TEST === "1",
     );
   }
-  return environment.DEV ? "/server" : undefined;
+  return environment.DEV ? "/server" : PERSONAL_SERVER_URL;
 }
 
 function normalizeConfiguredServerUrl(

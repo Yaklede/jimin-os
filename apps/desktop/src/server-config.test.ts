@@ -15,6 +15,10 @@ describe("serverBaseUrlFromEnvironment", () => {
     expect(serverBaseUrlFromEnvironment({ DEV: true })).toBe("/server");
   });
 
+  it("uses the private personal server in packaged apps", () => {
+    expect(serverBaseUrlFromEnvironment({})).toBe("https://os.jimin.ai.kr");
+  });
+
   it("does not accept an insecure or malformed production origin", () => {
     expect(
       serverBaseUrlFromEnvironment({
@@ -34,7 +38,6 @@ describe("serverBaseUrlFromEnvironment", () => {
         VITE_API_BASE_URL: "https://jimin-os.example/api",
       }),
     ).toBeUndefined();
-    expect(serverBaseUrlFromEnvironment({})).toBeUndefined();
   });
 
   it("allows HTTP only for the explicit USB loopback test build", () => {
