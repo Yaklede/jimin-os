@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ScheduleEntry, Task } from "./api/planning";
 import {
@@ -114,6 +114,15 @@ describe("local notification runtime", () => {
 });
 
 describe("local notification bridge", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("reads and requests Android permission in user context", async () => {
     const nativeInvoke = vi
       .fn()
