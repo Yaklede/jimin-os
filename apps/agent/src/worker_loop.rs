@@ -37,6 +37,7 @@ const MAX_PRESENTATION_ITEMS: usize = 32;
 const MAX_PRESENTATION_SECTIONS: usize = 3;
 const MAX_PRESENTATION_DETAIL_CHARS: usize = 500;
 const MAX_AGENT_ACTIONS: usize = 32;
+const MINIMUM_MUTATION_INTENT_CONFIDENCE: u8 = 80;
 
 struct TurnContext {
     prompt: String,
@@ -52,6 +53,7 @@ struct TurnContext {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StructuredAssistantTurn {
+    intent: StructuredTurnIntent,
     answer: String,
     presentation: StructuredPresentation,
     #[serde(default)]
@@ -60,6 +62,22 @@ struct StructuredAssistantTurn {
     // upgrades. The published output schema only emits `actions`.
     #[serde(default)]
     action: StructuredAssistantAction,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct StructuredTurnIntent {
+    mode: StructuredTurnMode,
+    confidence: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StructuredTurnMode {
+    Read,
+    Mutate,
+    Clarify,
+    Conversation,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -515,6 +533,10 @@ fn render_contextualized_turn(
          focusEntityId must be one selected entity ID or an empty string. Keep answers concise because the client renders \
          the server-validated selection as an interactive surface. \
          Do not claim that an external action was completed unless the conversation contains a confirmed result. \
+         Classify the current request in intent.mode before answering: read for questions, searches, lists, summaries, \
+         and status checks; mutate only when the user semantically asks to change stored state; clarify when the target \
+         or requested change is ambiguous; conversation for general discussion. intent.confidence is an integer from 0 \
+         to 100. A mutate intent below 80 confidence must become clarify and must not contain actions. \
          You may select up to 32 local planning actions in the actions array. Use an empty array for questions or ambiguous requests. \
          When the user asks to complete, cancel, or update several records, include one action for every matched record. \
          completed_tasks contains real completion history in newest-first order. For requests about work completed today, \
@@ -816,6 +838,22 @@ fn assistant_output_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
+            "intent": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["read", "mutate", "clarify", "conversation"]
+                    },
+                    "confidence": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100
+                    }
+                },
+                "required": ["mode", "confidence"],
+                "additionalProperties": false
+            },
             "answer": {
                 "type": "string"
             },
@@ -927,7 +965,7 @@ fn assistant_output_schema() -> Value {
                 }
             }
         },
-        "required": ["answer", "presentation", "actions"],
+        "required": ["intent", "answer", "presentation", "actions"],
         "additionalProperties": false
     })
 }
@@ -939,6 +977,7 @@ fn validated_assistant_response(
     let structured: StructuredAssistantTurn = serde_json::from_str(response).map_err(|_| ())?;
     let mut answer = structured.answer.trim().to_owned();
     let actions = validated_agent_actions(&structured, context)?;
+    validate_turn_intent(&structured.intent, !actions.is_empty())?;
     if !actions.is_empty() {
         if answer.is_empty() || answer.chars().count() > 24_000 {
             return Err(());
@@ -1021,6 +1060,23 @@ fn validated_assistant_response(
     };
     presentation.validate().map_err(|_| ())?;
     Ok((answer, presentation, actions))
+}
+
+fn validate_turn_intent(intent: &StructuredTurnIntent, has_actions: bool) -> Result<(), ()> {
+    match (intent.mode, has_actions) {
+        (StructuredTurnMode::Mutate, true)
+            if intent.confidence >= MINIMUM_MUTATION_INTENT_CONFIDENCE =>
+        {
+            Ok(())
+        }
+        (
+            StructuredTurnMode::Read
+            | StructuredTurnMode::Clarify
+            | StructuredTurnMode::Conversation,
+            false,
+        ) => Ok(()),
+        _ => Err(()),
+    }
 }
 
 fn validated_agent_actions(
@@ -2551,9 +2607,11 @@ mod tests {
 
     use super::{
         StructuredAnswerStream, StructuredAssistantAction, StructuredAssistantActionKind,
-        TurnContext, agent_action_results, is_daily_completion_request, is_daily_overview_request,
-        korea_day_end, render_contextualized_turn, requested_bulk_schedule_cancellation_ids,
-        requires_process_restart, validated_agent_action, validated_assistant_response,
+        StructuredTurnIntent, StructuredTurnMode, TurnContext, agent_action_results,
+        is_daily_completion_request, is_daily_overview_request, korea_day_end,
+        render_contextualized_turn, requested_bulk_schedule_cancellation_ids,
+        requires_process_restart, validate_turn_intent, validated_agent_action,
+        validated_assistant_response,
     };
 
     #[test]
@@ -2563,6 +2621,20 @@ mod tests {
         assert!(!requires_process_restart(&CodexError::TurnFailed {
             reason: "turn_usage_limit_exceeded",
         }));
+    }
+
+    #[test]
+    fn semantic_intent_must_agree_with_the_action_plan() {
+        let intent = |mode, confidence| StructuredTurnIntent { mode, confidence };
+
+        assert!(validate_turn_intent(&intent(StructuredTurnMode::Read, 99), false).is_ok());
+        assert!(validate_turn_intent(&intent(StructuredTurnMode::Conversation, 90), false).is_ok());
+        assert!(validate_turn_intent(&intent(StructuredTurnMode::Clarify, 45), false).is_ok());
+        assert!(validate_turn_intent(&intent(StructuredTurnMode::Mutate, 99), true).is_ok());
+
+        assert!(validate_turn_intent(&intent(StructuredTurnMode::Read, 99), true).is_err());
+        assert!(validate_turn_intent(&intent(StructuredTurnMode::Mutate, 99), false).is_err());
+        assert!(validate_turn_intent(&intent(StructuredTurnMode::Mutate, 79), true).is_err());
     }
 
     #[test]
@@ -2731,6 +2803,7 @@ mod tests {
             bulk_schedule_cancellation_ids: Vec::new(),
         };
         let response = serde_json::json!({
+            "intent": { "mode": "read", "confidence": 99 },
             "answer": "열린 일감을 정리했어요.",
             "presentation": {
                 "title": "오늘 할 일",
@@ -2789,6 +2862,7 @@ mod tests {
             bulk_schedule_cancellation_ids: Vec::new(),
         };
         let response = serde_json::json!({
+            "intent": { "mode": "read", "confidence": 99 },
             "answer": "오늘 업무와 일정을 함께 정리했어요.",
             "presentation": {
                 "title": "오늘의 실행 계획",
@@ -2873,6 +2947,7 @@ mod tests {
             bulk_schedule_cancellation_ids: Vec::new(),
         };
         let response = serde_json::json!({
+            "intent": { "mode": "read", "confidence": 99 },
             "answer": "오늘 완료한 일은 2개입니다.",
             "presentation": {
                 "title": "금일 완료 업무",
@@ -2927,6 +3002,7 @@ mod tests {
             bulk_schedule_cancellation_ids: Vec::new(),
         };
         let response = serde_json::json!({
+            "intent": { "mode": "read", "confidence": 99 },
             "answer": "오늘 예정된 일정은 없습니다.",
             "presentation": {
                 "title": "오늘 정리",
@@ -2983,6 +3059,7 @@ mod tests {
             bulk_schedule_cancellation_ids: Vec::new(),
         };
         let response = serde_json::json!({
+            "intent": { "mode": "read", "confidence": 99 },
             "answer": "열린 할 일을 정리했어요.",
             "presentation": {
                 "title": "오늘 할 일",
@@ -3176,6 +3253,7 @@ mod tests {
             bulk_schedule_cancellation_ids: Vec::new(),
         };
         let response = serde_json::json!({
+            "intent": { "mode": "mutate", "confidence": 99 },
             "answer": "요청을 처리 중입니다.",
             "presentation": {
                 "title": "",
@@ -3290,6 +3368,7 @@ mod tests {
             bulk_schedule_cancellation_ids: Vec::new(),
         };
         let response = serde_json::json!({
+            "intent": { "mode": "mutate", "confidence": 99 },
             "answer": "요청을 처리 중입니다.",
             "presentation": {
                 "title": "",
@@ -3351,6 +3430,7 @@ mod tests {
             bulk_schedule_cancellation_ids: Vec::new(),
         };
         let response = serde_json::json!({
+            "intent": { "mode": "mutate", "confidence": 99 },
             "answer": "요청을 처리 중입니다.",
             "presentation": {
                 "title": "",
@@ -3522,6 +3602,7 @@ mod tests {
             })
         };
         let response = serde_json::json!({
+            "intent": { "mode": "mutate", "confidence": 99 },
             "answer": "요청을 처리 중입니다.",
             "presentation": {
                 "title": "",
@@ -3581,6 +3662,7 @@ mod tests {
             bulk_schedule_cancellation_ids: Vec::new(),
         };
         let response = serde_json::json!({
+            "intent": { "mode": "mutate", "confidence": 99 },
             "answer": "요청을 처리 중입니다.",
             "presentation": {
                 "title": "",
@@ -3676,6 +3758,7 @@ mod tests {
             })
         };
         let response = serde_json::json!({
+            "intent": { "mode": "mutate", "confidence": 99 },
             "answer": "요청을 처리 중입니다.",
             "presentation": {
                 "title": "",
