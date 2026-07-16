@@ -211,6 +211,18 @@ export const copy = {
       overdue
         ? `기한이 지난 할 일 ${overdue}개${upcoming ? `와 곧 마감할 일 ${upcoming}개` : ""}가 있어요.`
         : `곧 마감할 할 일 ${upcoming}개가 있어요.`,
+    nowBriefEyebrow: "지금 확인하면 좋은 내용",
+    nowBriefTitle: "지민의 제안",
+    nowBriefCount: (count: number) => `${count}개`,
+    recommendationEffect: "기대 효과",
+    recommendationRisk: "확인할 점",
+    openRecommendationSource: "관련 내용 보기",
+    recommendationDefer: "나중에 보기",
+    recommendationConfirm: "확인했어요",
+    recommendationConfirmed: "확인한 제안을 정리했어요.",
+    recommendationDeferred: "4시간 뒤에 다시 알려드릴게요.",
+    recommendationDecisionNotice:
+      "제안을 정리하지 못했어요. 잠시 후 다시 시도해 주세요.",
     overdue: "기한 지남",
     dueToday: "오늘 마감",
     dueTomorrow: "내일 마감",
@@ -520,6 +532,8 @@ export const copy = {
     serverOffline: "VPN 연결과 개인 서버 상태를 확인한 뒤 다시 시도해 주세요.",
     homeLoadNotice:
       "오늘 정보를 불러오지 못했어요. 새로고침한 뒤 다시 확인해 주세요.",
+    recommendationDecisionNotice:
+      "제안을 정리하지 못했어요. 새로고침한 뒤 다시 시도해 주세요.",
     projectsLoadNotice:
       "프로젝트 정보를 불러오지 못했어요. 다시 시도해 주세요.",
     projectSaveNotice:

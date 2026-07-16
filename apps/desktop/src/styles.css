@@ -493,6 +493,7 @@ svg {
 .home-command,
 .home-briefing,
 .home-deadline-brief,
+.home-now-brief,
 .home-page > .inline-alert {
   grid-column: 1 / -1;
 }
@@ -562,6 +563,7 @@ svg {
 .home-briefing,
 .home-command,
 .home-deadline-brief,
+.home-now-brief,
 .home-voice-callout,
 .home-next-schedule,
 .home-task-surface,
@@ -1219,6 +1221,141 @@ svg {
 
 .home-deadline-brief {
   overflow: hidden;
+}
+
+.home-now-brief {
+  overflow: hidden;
+}
+
+.home-now-brief > header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.home-now-brief > header span,
+.home-now-brief > header strong {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.home-now-brief > header h2 {
+  margin: 3px 0 0;
+  color: var(--text-strong);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.home-now-brief__error {
+  margin: 0;
+  padding: 10px 20px;
+  border-bottom: 1px solid color-mix(in srgb, var(--danger) 24%, var(--border));
+  background: var(--danger-tint);
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.home-now-brief ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.home-now-brief li {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 14px;
+  padding: 18px 20px;
+}
+
+.home-now-brief li + li {
+  border-top: 1px solid var(--border);
+}
+
+.home-now-brief__marker {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: var(--radius-control);
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.home-now-brief__marker svg {
+  width: 19px;
+  height: 19px;
+}
+
+.home-now-brief__content {
+  min-width: 0;
+}
+
+.home-now-brief__content h3,
+.home-now-brief__content p,
+.home-now-brief__content dl,
+.home-now-brief__content dd {
+  margin: 0;
+}
+
+.home-now-brief__content h3 {
+  color: var(--text-strong);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.home-now-brief__content > p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.home-now-brief__content dl {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+}
+
+.home-now-brief__content dl > div {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.home-now-brief__content dt,
+.home-now-brief__content dd {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.home-now-brief__content dt {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.home-now-brief__content dd {
+  color: var(--muted);
+}
+
+.home-now-brief__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.home-now-brief__actions .primary-button,
+.home-now-brief__actions .secondary-button {
+  min-height: 44px;
+  padding: 0 14px;
+  white-space: nowrap;
 }
 
 .home-deadline-brief > header {
@@ -3994,7 +4131,7 @@ svg {
   color: var(--text-strong);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.08em;
 }
 
@@ -4983,6 +5120,7 @@ svg {
 
   .home-greeting,
   .home-briefing,
+  .home-now-brief,
   .home-page > .inline-alert,
   .home-next-schedule,
   .home-tasks {
@@ -5354,6 +5492,7 @@ svg {
   .home-greeting,
   .home-briefing,
   .home-deadline-brief,
+  .home-now-brief,
   .home-voice-callout,
   .home-next-schedule,
   .home-tasks,
@@ -5417,6 +5556,21 @@ svg {
   .planning-row-edit span,
   .schedule-highlight__edit span {
     display: none;
+  }
+
+  .home-now-brief li {
+    grid-template-columns: 40px minmax(0, 1fr);
+    padding: 16px;
+  }
+
+  .home-now-brief__actions {
+    grid-column: 1 / -1;
+    justify-content: stretch;
+  }
+
+  .home-now-brief__actions .primary-button,
+  .home-now-brief__actions .secondary-button {
+    flex: 1 1 auto;
   }
 
   .home-voice-callout {
@@ -6370,6 +6524,25 @@ svg {
   .settings-row__state {
     max-width: 100%;
     white-space: normal;
+  }
+}
+
+@media (max-width: 360px) {
+  .home-now-brief__actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .home-now-brief__actions .primary-button,
+  .home-now-brief__actions .secondary-button {
+    min-width: 0;
+    width: 100%;
+    padding-right: 10px;
+    padding-left: 10px;
+  }
+
+  .home-now-brief__source-action {
+    grid-column: 1 / -1;
   }
 }
 

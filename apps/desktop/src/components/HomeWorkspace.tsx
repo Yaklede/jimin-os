@@ -14,7 +14,7 @@ import {
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { type AgentJob, type ConversationMessage } from "../api/agent";
-import { type HomeSnapshot } from "../api/home";
+import { type HomeSnapshot, type Recommendation } from "../api/home";
 import { type ScheduleEntry, type Task } from "../api/planning";
 import { type Project } from "../api/projects";
 import { presentationForMessage } from "../assistantPresentation";
@@ -56,6 +56,10 @@ type HomeWorkspaceProps = {
   onOpenSchedule(
     entry: Pick<ScheduleEntry, "id" | "startsAt">,
   ): void | Promise<void>;
+  onDecideRecommendation(
+    recommendation: Recommendation,
+    decision: "approve" | "defer",
+  ): Promise<boolean>;
 };
 
 export function HomeWorkspace({
@@ -77,6 +81,7 @@ export function HomeWorkspace({
   onOpenTask,
   onOpenProject,
   onOpenSchedule,
+  onDecideRecommendation,
 }: HomeWorkspaceProps) {
   const [completingTaskId, setCompletingTaskId] = useState<string>();
   const [assistantFocused, setAssistantFocused] = useState(false);
@@ -85,6 +90,8 @@ export function HomeWorkspace({
     "schedule" | "tasks"
   >();
   const [scheduleNow, setScheduleNow] = useState(() => new Date());
+  const [recommendationAnnouncement, setRecommendationAnnouncement] =
+    useState("");
   const highlightedHomeTaskRef = useRef<HTMLLIElement | null>(null);
   const scheduleSectionRef = useRef<HTMLElement | null>(null);
   const taskSectionRef = useRef<HTMLElement | null>(null);
@@ -177,6 +184,9 @@ export function HomeWorkspace({
           {error}
         </p>
       )}
+      <p className="sr-only" aria-live="polite">
+        {recommendationAnnouncement}
+      </p>
 
       {assistantFocused && (
         <nav
@@ -262,6 +272,16 @@ export function HomeWorkspace({
               tasks={dueTasks}
               onEditTask={onEditTask}
               onOpenTask={onOpenPlanningTask}
+            />
+          )}
+
+          {!showingSkeleton && Boolean(snapshot?.recommendations.length) && (
+            <NowBrief
+              recommendations={snapshot?.recommendations ?? []}
+              onDecide={onDecideRecommendation}
+              onOpenTask={onOpenTask}
+              onOpenProject={onOpenProject}
+              onAnnounce={setRecommendationAnnouncement}
             />
           )}
 
@@ -430,6 +450,142 @@ export function HomeWorkspace({
           </section>
         </>
       )}
+    </section>
+  );
+}
+
+function NowBrief({
+  recommendations,
+  onDecide,
+  onOpenTask,
+  onOpenProject,
+  onAnnounce,
+}: {
+  recommendations: Recommendation[];
+  onDecide(
+    recommendation: Recommendation,
+    decision: "approve" | "defer",
+  ): Promise<boolean>;
+  onOpenTask(task: Pick<Task, "id" | "projectId">): void | Promise<void>;
+  onOpenProject(
+    project: Pick<Project, "id" | "workspaceId">,
+  ): void | Promise<void>;
+  onAnnounce(message: string): void;
+}) {
+  const [pendingId, setPendingId] = useState<string>();
+  const [error, setError] = useState<string>();
+
+  async function decide(
+    recommendation: Recommendation,
+    decision: "approve" | "defer",
+  ) {
+    if (pendingId) return;
+    setPendingId(recommendation.id);
+    setError(undefined);
+    const succeeded = await onDecide(recommendation, decision);
+    setPendingId(undefined);
+    if (!succeeded) {
+      setError(copy.home.recommendationDecisionNotice);
+      return;
+    }
+    onAnnounce(
+      decision === "defer"
+        ? copy.home.recommendationDeferred
+        : copy.home.recommendationConfirmed,
+    );
+  }
+
+  function openRelated(recommendation: Recommendation) {
+    if (!recommendation.suggestedEntityId) return;
+    if (
+      recommendation.projectId === recommendation.suggestedEntityId &&
+      recommendation.workspaceId
+    ) {
+      void onOpenProject({
+        id: recommendation.suggestedEntityId,
+        workspaceId: recommendation.workspaceId,
+      });
+      return;
+    }
+    void onOpenTask({
+      id: recommendation.suggestedEntityId,
+      projectId: recommendation.projectId,
+    });
+  }
+
+  return (
+    <section className="home-now-brief" aria-labelledby="home-now-brief-title">
+      <header>
+        <div>
+          <span>{copy.home.nowBriefEyebrow}</span>
+          <h2 id="home-now-brief-title">{copy.home.nowBriefTitle}</h2>
+        </div>
+        <strong>{copy.home.nowBriefCount(recommendations.length)}</strong>
+      </header>
+      {error && (
+        <p className="home-now-brief__error" role="alert">
+          {error}
+        </p>
+      )}
+      <ol>
+        {recommendations.map((recommendation) => {
+          const pending = pendingId === recommendation.id;
+          return (
+            <li key={recommendation.id}>
+              <span className="home-now-brief__marker" aria-hidden="true">
+                <Sparkles />
+              </span>
+              <div className="home-now-brief__content">
+                <h3>{recommendation.title}</h3>
+                <p>{recommendation.rationale}</p>
+                <dl>
+                  <div>
+                    <dt>{copy.home.recommendationEffect}</dt>
+                    <dd>{recommendation.expectedEffect}</dd>
+                  </div>
+                  {recommendation.riskSummary && (
+                    <div>
+                      <dt>{copy.home.recommendationRisk}</dt>
+                      <dd>{recommendation.riskSummary}</dd>
+                    </div>
+                  )}
+                </dl>
+              </div>
+              <div className="home-now-brief__actions">
+                {recommendation.suggestedEntityId && (
+                  <button
+                    className="home-now-brief__source-action secondary-button focus-visible-control"
+                    type="button"
+                    disabled={Boolean(pendingId)}
+                    onClick={() => openRelated(recommendation)}
+                  >
+                    {copy.home.openRecommendationSource}
+                  </button>
+                )}
+                <button
+                  className="secondary-button focus-visible-control"
+                  type="button"
+                  disabled={Boolean(pendingId)}
+                  onClick={() => void decide(recommendation, "defer")}
+                >
+                  {copy.home.recommendationDefer}
+                </button>
+                <button
+                  className="primary-button focus-visible-control"
+                  type="button"
+                  disabled={Boolean(pendingId)}
+                  onClick={() => void decide(recommendation, "approve")}
+                >
+                  {pending && (
+                    <span className="button-spinner" aria-hidden="true" />
+                  )}
+                  {copy.home.recommendationConfirm}
+                </button>
+              </div>
+            </li>
+          );
+        })}
+      </ol>
     </section>
   );
 }

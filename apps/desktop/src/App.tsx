@@ -55,7 +55,12 @@ import {
   type WebhookAuthorizationMode,
   type WebhookDelivery,
 } from "./api/webhooks";
-import { type HomeSnapshot, fetchHomeSnapshot } from "./api/home";
+import {
+  type HomeSnapshot,
+  type Recommendation,
+  fetchHomeSnapshot,
+} from "./api/home";
+import { decideRecommendation, refreshWorkBrief } from "./api/intelligence";
 import { processVoiceCommand } from "./api/voice";
 import {
   AgentRequestError,
@@ -312,6 +317,9 @@ export default function App() {
     setHomeError(undefined);
     try {
       const [from, to] = currentLocalDayRange();
+      await withAuthenticatedSession((accessToken) =>
+        refreshWorkBrief(apiBaseUrl, accessToken),
+      ).catch(() => undefined);
       const snapshot = await withAuthenticatedSession((accessToken) =>
         fetchHomeSnapshot(apiBaseUrl, accessToken, from, to),
       );
@@ -1199,6 +1207,43 @@ export default function App() {
       void loadConversationMessages(homeConversationId);
     }
     void restoreConversationJob(homeConversationId);
+  }
+
+  async function decideHomeRecommendation(
+    recommendation: Recommendation,
+    decision: "approve" | "defer",
+  ): Promise<boolean> {
+    if (!tokens) return false;
+    setHomeError(undefined);
+    try {
+      const revisitAt =
+        decision === "defer"
+          ? new Date(Date.now() + 4 * 60 * 60 * 1_000).toISOString()
+          : undefined;
+      await withAuthenticatedSession((accessToken) =>
+        decideRecommendation(
+          apiBaseUrl,
+          accessToken,
+          recommendation,
+          decision,
+          revisitAt,
+        ),
+      );
+      setHomeSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              recommendations: current.recommendations.filter(
+                (item) => item.id !== recommendation.id,
+              ),
+            }
+          : current,
+      );
+      return true;
+    } catch {
+      setHomeError(copy.messages.recommendationDecisionNotice);
+      return false;
+    }
   }
 
   async function completeHomeTask(task: Task): Promise<void> {
@@ -2299,6 +2344,7 @@ export default function App() {
               onOpenTask={openTaskFromAssistant}
               onOpenProject={openProjectFromAssistant}
               onOpenSchedule={openScheduleFromAssistant}
+              onDecideRecommendation={decideHomeRecommendation}
             />
           )}
           {destination === "calendar" && (
