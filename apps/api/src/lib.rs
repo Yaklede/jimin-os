@@ -48,7 +48,7 @@ use jimin_storage::{
     },
     webhook::{
         NewProjectWebhook, ProjectWebhook, ProjectWebhookUpdate, RetryWebhookDeliveryOutcome,
-        WebhookAuthenticationUpdate, WebhookDelivery, WebhookDestinationUpdate, WebhookProvider,
+        WebhookDelivery, WebhookDestinationUpdate, WebhookProvider,
     },
     work::{
         DeleteProjectOutcome, NewProject, Project, ProjectStatus, ProjectUpdate, Workspace,
@@ -382,7 +382,6 @@ pub struct ProjectWebhookResponse {
     provider: String,
     destination_label: String,
     events: Vec<String>,
-    has_authentication: bool,
     enabled: bool,
     version: i64,
 }
@@ -2588,7 +2587,6 @@ async fn create_project_webhook(
             destination,
             destination_hint: webhook_destination_label(provider),
             events: body.events,
-            authentication: None,
         })
         .await
     {
@@ -2663,7 +2661,6 @@ async fn update_project_webhook(
             events: body.events,
             enabled: body.enabled,
             destination,
-            authentication: WebhookAuthenticationUpdate::Keep,
             expected_version: body.expected_version,
         })
         .await
@@ -5007,7 +5004,6 @@ fn project_webhook_response(webhook: ProjectWebhook) -> ProjectWebhookResponse {
         provider: webhook.provider.as_str().to_owned(),
         destination_label: webhook.destination_hint,
         events: webhook.events,
-        has_authentication: webhook.has_authentication,
         enabled: webhook.enabled,
         version: webhook.version,
     }
@@ -5031,17 +5027,13 @@ fn webhook_delivery_response(delivery: WebhookDelivery) -> Result<WebhookDeliver
 }
 
 fn managed_webhook_provider(value: &str) -> Option<WebhookProvider> {
-    match WebhookProvider::parse(value) {
-        Some(provider @ (WebhookProvider::GoogleChat | WebhookProvider::Discord)) => Some(provider),
-        _ => None,
-    }
+    WebhookProvider::parse(value)
 }
 
 fn webhook_destination_label(provider: WebhookProvider) -> String {
     match provider {
         WebhookProvider::GoogleChat => "Google Chat 공간".to_owned(),
         WebhookProvider::Discord => "Discord 채널".to_owned(),
-        WebhookProvider::Legacy => "기존 웹훅".to_owned(),
     }
 }
 
@@ -6080,21 +6072,20 @@ mod tests {
     }
 
     #[test]
-    fn webhook_response_exposes_only_secret_presence() {
+    fn webhook_response_never_exposes_destination_secrets() {
         let value = serde_json::to_value(project_webhook_response(ProjectWebhook {
             id: uuid::Uuid::now_v7(),
             project_id: uuid::Uuid::now_v7(),
             provider: WebhookProvider::Discord,
             destination_hint: "Discord 채널".to_owned(),
             events: vec!["task.created".to_owned()],
-            has_authentication: true,
             enabled: true,
             version: 1,
         }))
         .expect("webhook response should serialize");
-        assert_eq!(value["hasAuthentication"], true);
         assert_eq!(value["provider"], "discord");
         assert_eq!(value["destinationLabel"], "Discord 채널");
+        assert!(value.get("hasAuthentication").is_none());
         assert!(value.get("url").is_none());
         assert!(value.get("authorization").is_none());
         assert!(value.get("authHeaderCiphertext").is_none());

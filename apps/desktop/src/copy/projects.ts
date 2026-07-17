@@ -105,7 +105,6 @@ export const projectCopy = {
   webhookSecretDescription:
     "주소는 서버에서 암호화해 보관하며 저장한 뒤에는 다시 보여주지 않아요.",
   webhookSecretStored: "웹훅 주소를 안전하게 보관 중",
-  webhookLegacyNotice: "Google Chat 또는 Discord 유형으로 다시 연결해 주세요.",
   webhookEventsLabel: "보낼 변화",
   webhookAuthorizationLabel: "인증 헤더 (선택)",
   webhookAuthorizationHint: "예: Bearer …",

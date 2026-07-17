@@ -8,14 +8,13 @@ use chacha20poly1305::{
 };
 use jimin_storage::webhook::{ClaimedWebhookDelivery, EncryptedWebhookSecret, WebhookProvider};
 use rand::RngExt;
-use reqwest::{Client, header::AUTHORIZATION, redirect::Policy};
+use reqwest::{Client, redirect::Policy};
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
 const NONCE_BYTES: usize = 24;
-const MAX_AUTH_HEADER_BYTES: usize = 8 * 1024;
 const MAX_DESTINATION_BYTES: usize = 4 * 1024;
 const MAX_CHAT_MESSAGE_CHARS: usize = 1_800;
 
@@ -74,43 +73,6 @@ impl WebhookRuntime {
         Ok(Self { key, client })
     }
 
-    /// Encrypts a bounded authorization header with webhook-specific AAD.
-    ///
-    /// # Errors
-    ///
-    /// Returns an invalid or authentication error for unsafe input.
-    pub fn encrypt_authentication(
-        &self,
-        webhook_id: Uuid,
-        value: &SecretString,
-    ) -> Result<EncryptedWebhookSecret, WebhookRuntimeError> {
-        let plaintext = value.expose_secret();
-        if webhook_id.get_version_num() != 7
-            || plaintext.is_empty()
-            || plaintext.len() > MAX_AUTH_HEADER_BYTES
-            || plaintext.contains(['\r', '\n'])
-        {
-            return Err(WebhookRuntimeError::Invalid);
-        }
-        let mut nonce = [0_u8; NONCE_BYTES];
-        rand::rng().fill(&mut nonce);
-        let cipher = XChaCha20Poly1305::new((&self.key).into());
-        let nonce_value = XNonce::from(nonce);
-        let ciphertext = cipher
-            .encrypt(
-                &nonce_value,
-                Payload {
-                    msg: plaintext.as_bytes(),
-                    aad: webhook_id.as_bytes(),
-                },
-            )
-            .map_err(|_| WebhookRuntimeError::Authentication)?;
-        Ok(EncryptedWebhookSecret {
-            ciphertext,
-            nonce: nonce.to_vec(),
-        })
-    }
-
     /// Validates and encrypts a Google Chat or Discord incoming-webhook URL.
     /// The plaintext is never returned from storage-facing API responses.
     ///
@@ -156,16 +118,13 @@ impl WebhookRuntime {
             return Err(WebhookRuntimeError::Invalid);
         }
         let outbound_payload = provider_payload(provider, &delivery.event_type, &delivery.payload)?;
-        let mut request = self
+        let request = self
             .client
             .post(url)
             .header("X-Jimin-Delivery", delivery.id.to_string())
             .header("X-Jimin-Event", &delivery.event_type)
             .header("Idempotency-Key", delivery.id.to_string())
             .json(&outbound_payload);
-        if let Some(authentication) = self.decrypt_authentication(delivery)? {
-            request = request.header(AUTHORIZATION, authentication.expose_secret());
-        }
         let response = request
             .send()
             .await
@@ -178,48 +137,6 @@ impl WebhookRuntime {
         } else {
             Err(WebhookRuntimeError::Rejected(status))
         }
-    }
-
-    fn decrypt_authentication(
-        &self,
-        delivery: &ClaimedWebhookDelivery,
-    ) -> Result<Option<SecretString>, WebhookRuntimeError> {
-        let (Some(ciphertext), Some(nonce)) = (
-            delivery.auth_header_ciphertext.as_ref(),
-            delivery.auth_header_nonce.as_ref(),
-        ) else {
-            if delivery.auth_header_ciphertext.is_none() && delivery.auth_header_nonce.is_none() {
-                return Ok(None);
-            }
-            return Err(WebhookRuntimeError::Authentication);
-        };
-        if nonce.len() != NONCE_BYTES
-            || ciphertext.is_empty()
-            || ciphertext.len() > MAX_AUTH_HEADER_BYTES + 32
-        {
-            return Err(WebhookRuntimeError::Authentication);
-        }
-        let cipher = XChaCha20Poly1305::new((&self.key).into());
-        let nonce_bytes: [u8; NONCE_BYTES] = nonce
-            .as_slice()
-            .try_into()
-            .map_err(|_| WebhookRuntimeError::Authentication)?;
-        let nonce_value = XNonce::from(nonce_bytes);
-        let plaintext = cipher
-            .decrypt(
-                &nonce_value,
-                Payload {
-                    msg: ciphertext,
-                    aad: delivery.webhook_id.as_bytes(),
-                },
-            )
-            .map_err(|_| WebhookRuntimeError::Authentication)?;
-        let value =
-            String::from_utf8(plaintext).map_err(|_| WebhookRuntimeError::Authentication)?;
-        if value.is_empty() || value.len() > MAX_AUTH_HEADER_BYTES || value.contains(['\r', '\n']) {
-            return Err(WebhookRuntimeError::Authentication);
-        }
-        Ok(Some(SecretString::from(value)))
     }
 
     fn encrypt_secret(
@@ -253,15 +170,8 @@ impl WebhookRuntime {
         delivery: &ClaimedWebhookDelivery,
         provider: WebhookProvider,
     ) -> Result<SecretString, WebhookRuntimeError> {
-        if provider == WebhookProvider::Legacy {
-            return Ok(SecretString::from(delivery.legacy_url.clone()));
-        }
-        let (Some(ciphertext), Some(nonce)) = (
-            delivery.destination_ciphertext.as_ref(),
-            delivery.destination_nonce.as_ref(),
-        ) else {
-            return Err(WebhookRuntimeError::Authentication);
-        };
+        let ciphertext = &delivery.destination_ciphertext;
+        let nonce = &delivery.destination_nonce;
         if nonce.len() != NONCE_BYTES
             || ciphertext.is_empty()
             || ciphertext.len() > MAX_DESTINATION_BYTES + 32
@@ -327,7 +237,6 @@ fn valid_provider_url(provider: WebhookProvider, value: &str) -> bool {
             matches!(url.host_str(), Some("discord.com" | "discordapp.com"))
                 && url.path().starts_with("/api/webhooks/")
         }
-        WebhookProvider::Legacy => matches!(url.scheme(), "http" | "https"),
     }
 }
 
@@ -336,9 +245,6 @@ fn provider_payload(
     event_type: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, WebhookRuntimeError> {
-    if provider == WebhookProvider::Legacy {
-        return Ok(payload.clone());
-    }
     let message = payload
         .get("message")
         .and_then(serde_json::Value::as_str)
@@ -354,7 +260,6 @@ fn provider_payload(
             "content": message,
             "allowed_mentions": { "parse": [] }
         }),
-        WebhookProvider::Legacy => unreachable!(),
     })
 }
 
@@ -377,37 +282,6 @@ fn default_event_message(event_type: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn authentication_ciphertext_is_bound_to_the_webhook_id() {
-        let runtime = WebhookRuntime::new(&SecretString::from("x".repeat(64))).unwrap();
-        let first = Uuid::now_v7();
-        let encrypted = runtime
-            .encrypt_authentication(first, &SecretString::from("Bearer private"))
-            .unwrap();
-        let delivery = ClaimedWebhookDelivery {
-            id: Uuid::now_v7(),
-            webhook_id: first,
-            project_id: Uuid::now_v7(),
-            event_type: "webhook.test".to_owned(),
-            payload: serde_json::json!({}),
-            attempt_count: 1,
-            provider: "legacy".to_owned(),
-            legacy_url: "https://example.com/hook".to_owned(),
-            destination_ciphertext: None,
-            destination_nonce: None,
-            auth_header_ciphertext: Some(encrypted.ciphertext),
-            auth_header_nonce: Some(encrypted.nonce),
-        };
-        assert_eq!(
-            runtime
-                .decrypt_authentication(&delivery)
-                .unwrap()
-                .unwrap()
-                .expose_secret(),
-            "Bearer private"
-        );
-    }
 
     #[test]
     fn typed_destination_is_encrypted_and_bound_to_the_webhook() {
@@ -433,11 +307,8 @@ mod tests {
             payload: serde_json::json!({ "message": "배포가 완료됐어요." }),
             attempt_count: 1,
             provider: "discord".to_owned(),
-            legacy_url: "encrypted://discord".to_owned(),
-            destination_ciphertext: Some(encrypted.ciphertext),
-            destination_nonce: Some(encrypted.nonce),
-            auth_header_ciphertext: None,
-            auth_header_nonce: None,
+            destination_ciphertext: encrypted.ciphertext,
+            destination_nonce: encrypted.nonce,
         };
         assert_eq!(
             runtime

@@ -472,7 +472,7 @@ async fn contextualized_turn_context(
         database.workspaces_for_user(job.user_id),
         database.projects_for_user(job.user_id),
         database.recent_gmail_messages_for_user(job.user_id),
-        database.typed_project_webhooks(job.user_id),
+        database.user_project_webhooks(job.user_id),
     )?;
     let daily_tasks = tasks
         .iter()

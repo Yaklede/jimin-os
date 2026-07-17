@@ -30,8 +30,7 @@ use jimin_storage::{
     },
     webhook::{
         EncryptedWebhookSecret, NewProjectWebhook, ProjectWebhookUpdate,
-        RetryWebhookDeliveryOutcome, WebhookAuthenticationUpdate, WebhookDestinationUpdate,
-        WebhookProvider,
+        RetryWebhookDeliveryOutcome, WebhookDestinationUpdate, WebhookProvider,
     },
     work::{DeleteProjectOutcome, NewProject, ProjectStatus, ProjectUpdate, WorkspaceScope},
 };
@@ -45,7 +44,9 @@ struct AutomaticWebhookDeliveryRow {
     user_id: Uuid,
     project_id: Uuid,
     webhook_id: Uuid,
-    destination_url: String,
+    provider: String,
+    destination_ciphertext: Vec<u8>,
+    destination_nonce: Vec<u8>,
     event_type: String,
     payload: serde_json::Value,
     status: String,
@@ -265,7 +266,9 @@ fn assert_automatic_webhook_delivery(
     assert_eq!(delivery.user_id, user_id);
     assert_eq!(delivery.project_id, project_id);
     assert_eq!(delivery.webhook_id, webhook_id);
-    assert_eq!(delivery.destination_url, "encrypted://discord");
+    assert_eq!(delivery.provider, "discord");
+    assert_eq!(delivery.destination_ciphertext, vec![13; 48]);
+    assert_eq!(delivery.destination_nonce, vec![14; 24]);
     assert_eq!(delivery.event_type, event_type);
     assert_eq!(delivery.status, "queued");
     assert_eq!(delivery.attempt_count, 0);
@@ -703,10 +706,6 @@ async fn project_webhook_queue_keeps_a_safe_delivery_snapshot() {
             destination: encrypted_test_destination(11),
             destination_hint: "Discord 채널".to_owned(),
             events: vec!["task.created".to_owned(), "task.updated".to_owned()],
-            authentication: Some(EncryptedWebhookSecret {
-                ciphertext: vec![7; 32],
-                nonce: vec![8; 24],
-            }),
         })
         .await
         .expect("webhook should persist");
@@ -744,17 +743,8 @@ async fn project_webhook_queue_keeps_a_safe_delivery_snapshot() {
     assert_eq!(claimed.len(), 2);
     assert!(claimed.iter().all(|delivery| {
         delivery.provider == "discord"
-            && delivery.legacy_url == "encrypted://discord"
-            && delivery.destination_ciphertext.as_deref() == Some(&[11; 48])
-            && delivery.destination_nonce.as_deref() == Some(&[12; 24])
-            && delivery
-                .auth_header_ciphertext
-                .as_deref()
-                .is_some_and(|value| value == [7; 32])
-            && delivery
-                .auth_header_nonce
-                .as_deref()
-                .is_some_and(|value| value == [8; 24])
+            && delivery.destination_ciphertext == [11; 48]
+            && delivery.destination_nonce == [12; 24]
     }));
     let pool = sqlx::PgPool::connect(&database_url)
         .await
@@ -894,10 +884,6 @@ async fn automatic_work_mutations_queue_safe_unique_webhook_deliveries() {
                 "task.restored".to_owned(),
                 "task.deleted".to_owned(),
             ],
-            authentication: Some(EncryptedWebhookSecret {
-                ciphertext: vec![3; 32],
-                nonce: vec![4; 24],
-            }),
         })
         .await
         .expect("automatic event webhook should persist");
@@ -976,7 +962,8 @@ async fn automatic_work_mutations_queue_safe_unique_webhook_deliveries() {
         .await
         .expect("test database should be reachable");
     let deliveries = sqlx::query_as::<_, AutomaticWebhookDeliveryRow>(
-        "SELECT id, user_id, project_id, webhook_id, destination_url, event_type, payload,
+        "SELECT id, user_id, project_id, webhook_id, provider, destination_ciphertext,
+            destination_nonce, event_type, payload,
             status, attempt_count, lease_owner, lease_expires_at
          FROM webhook_deliveries
          WHERE user_id = $1 AND project_id = $2 AND webhook_id = $3",
@@ -1046,9 +1033,9 @@ async fn automatic_work_mutations_queue_safe_unique_webhook_deliveries() {
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
-    reason = "The test verifies all explicit secret mutation modes and ownership/version isolation as one update contract."
+    reason = "The test verifies encrypted destination replacement, preservation, ownership, and version isolation as one update contract."
 )]
-async fn project_webhook_update_preserves_replaces_and_removes_secrets() {
+async fn project_webhook_update_replaces_and_preserves_destination_secrets() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;
     };
@@ -1096,10 +1083,6 @@ async fn project_webhook_update_preserves_replaces_and_removes_secrets() {
             destination: encrypted_test_destination(15),
             destination_hint: "Discord 채널".to_owned(),
             events: vec!["task.created".to_owned()],
-            authentication: Some(EncryptedWebhookSecret {
-                ciphertext: vec![7; 32],
-                nonce: vec![8; 24],
-            }),
         })
         .await
         .expect("webhook should persist");
@@ -1112,7 +1095,6 @@ async fn project_webhook_update_preserves_replaces_and_removes_secrets() {
                 destination: WebhookDestinationUpdate::Keep,
                 events: webhook.events.clone(),
                 enabled: true,
-                authentication: WebhookAuthenticationUpdate::Keep,
                 expected_version: webhook.version,
             })
             .await
@@ -1128,7 +1110,6 @@ async fn project_webhook_update_preserves_replaces_and_removes_secrets() {
                 destination: WebhookDestinationUpdate::Keep,
                 events: vec!["task.created".to_owned(), "task.created".to_owned()],
                 enabled: true,
-                authentication: WebhookAuthenticationUpdate::Keep,
                 expected_version: webhook.version,
             })
             .await,
@@ -1146,29 +1127,27 @@ async fn project_webhook_update_preserves_replaces_and_removes_secrets() {
             },
             events: vec!["task.updated".to_owned()],
             enabled: false,
-            authentication: WebhookAuthenticationUpdate::Keep,
             expected_version: webhook.version,
         })
         .await
         .expect("webhook update should succeed")
         .expect("current webhook should update");
-    assert!(kept.has_authentication);
     assert!(!kept.enabled);
     assert!(kept.version > webhook.version);
 
     let pool = sqlx::PgPool::connect(&database_url)
         .await
         .expect("test database should be reachable");
-    let kept_secret: (Option<Vec<u8>>, Option<Vec<u8>>) = sqlx::query_as(
-        "SELECT auth_header_ciphertext, auth_header_nonce FROM project_webhooks WHERE id = $1",
+    let replaced_destination: (Vec<u8>, Vec<u8>) = sqlx::query_as(
+        "SELECT destination_ciphertext, destination_nonce FROM project_webhooks WHERE id = $1",
     )
     .bind(webhook.id)
     .fetch_one(&pool)
     .await
-    .expect("kept secret should load");
-    assert_eq!(kept_secret, (Some(vec![7; 32]), Some(vec![8; 24])));
+    .expect("replaced destination should load");
+    assert_eq!(replaced_destination, (vec![21; 48], vec![22; 24]));
 
-    let replaced = database
+    let preserved = database
         .update_project_webhook(&ProjectWebhookUpdate {
             id: webhook.id,
             user_id: owner.profile.id,
@@ -1176,48 +1155,20 @@ async fn project_webhook_update_preserves_replaces_and_removes_secrets() {
             destination: WebhookDestinationUpdate::Keep,
             events: kept.events.clone(),
             enabled: true,
-            authentication: WebhookAuthenticationUpdate::Replace(EncryptedWebhookSecret {
-                ciphertext: vec![9; 48],
-                nonce: vec![10; 24],
-            }),
             expected_version: kept.version,
         })
         .await
-        .expect("secret replacement should succeed")
+        .expect("destination-preserving update should succeed")
         .expect("current webhook should update");
-    assert!(replaced.has_authentication);
-    let replaced_secret: (Option<Vec<u8>>, Option<Vec<u8>>) = sqlx::query_as(
-        "SELECT auth_header_ciphertext, auth_header_nonce FROM project_webhooks WHERE id = $1",
+    assert!(preserved.enabled);
+    let preserved_destination: (Vec<u8>, Vec<u8>) = sqlx::query_as(
+        "SELECT destination_ciphertext, destination_nonce FROM project_webhooks WHERE id = $1",
     )
     .bind(webhook.id)
     .fetch_one(&pool)
     .await
-    .expect("replaced secret should load");
-    assert_eq!(replaced_secret, (Some(vec![9; 48]), Some(vec![10; 24])));
-
-    let removed = database
-        .update_project_webhook(&ProjectWebhookUpdate {
-            id: webhook.id,
-            user_id: owner.profile.id,
-            project_id: project.id,
-            destination: WebhookDestinationUpdate::Keep,
-            events: replaced.events.clone(),
-            enabled: replaced.enabled,
-            authentication: WebhookAuthenticationUpdate::Remove,
-            expected_version: replaced.version,
-        })
-        .await
-        .expect("secret removal should succeed")
-        .expect("current webhook should update");
-    assert!(!removed.has_authentication);
-    let removed_secret: (Option<Vec<u8>>, Option<Vec<u8>>) = sqlx::query_as(
-        "SELECT auth_header_ciphertext, auth_header_nonce FROM project_webhooks WHERE id = $1",
-    )
-    .bind(webhook.id)
-    .fetch_one(&pool)
-    .await
-    .expect("removed secret state should load");
-    assert_eq!(removed_secret, (None, None));
+    .expect("preserved destination should load");
+    assert_eq!(preserved_destination, replaced_destination);
     assert!(
         database
             .update_project_webhook(&ProjectWebhookUpdate {
@@ -1225,10 +1176,9 @@ async fn project_webhook_update_preserves_replaces_and_removes_secrets() {
                 user_id: owner.profile.id,
                 project_id: project.id,
                 destination: WebhookDestinationUpdate::Keep,
-                events: removed.events.clone(),
-                enabled: removed.enabled,
-                authentication: WebhookAuthenticationUpdate::Keep,
-                expected_version: replaced.version,
+                events: preserved.events.clone(),
+                enabled: preserved.enabled,
+                expected_version: kept.version,
             })
             .await
             .expect("stale update should remain safe")
@@ -1292,7 +1242,6 @@ async fn failed_webhook_delivery_retries_with_the_same_id_idempotently() {
             destination: encrypted_test_destination(17),
             destination_hint: "Discord 채널".to_owned(),
             events: vec!["webhook.test".to_owned()],
-            authentication: None,
         })
         .await
         .expect("webhook should persist");
@@ -2320,7 +2269,6 @@ async fn project_and_task_deletions_are_scoped_versioned_and_idempotent() {
             destination: encrypted_test_destination(19),
             destination_hint: "Discord 채널".to_owned(),
             events: vec!["project.deleted".to_owned()],
-            authentication: None,
         })
         .await
         .expect("project deletion webhook should persist");
@@ -2438,8 +2386,8 @@ async fn project_and_task_deletions_are_scoped_versioned_and_idempotent() {
     .await
     .expect("project tombstone should exist");
     assert_eq!(project_operation, "delete");
-    let delivery_snapshot: (String, String, String) = sqlx::query_as(
-        "SELECT event_type, status, destination_url FROM webhook_deliveries WHERE user_id = $1 AND project_id = $2 AND webhook_id = $3 ORDER BY created_at DESC LIMIT 1",
+    let delivery_snapshot: (String, String, String, Vec<u8>, Vec<u8>) = sqlx::query_as(
+        "SELECT event_type, status, provider, destination_ciphertext, destination_nonce FROM webhook_deliveries WHERE user_id = $1 AND project_id = $2 AND webhook_id = $3 ORDER BY created_at DESC LIMIT 1",
     )
     .bind(owner.profile.id)
     .bind(project.id)
@@ -2452,7 +2400,9 @@ async fn project_and_task_deletions_are_scoped_versioned_and_idempotent() {
         (
             "project.deleted".to_owned(),
             "queued".to_owned(),
-            "encrypted://discord".to_owned(),
+            "discord".to_owned(),
+            vec![19; 48],
+            vec![20; 24],
         )
     );
     let live_webhook_count: i64 =

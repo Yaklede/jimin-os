@@ -341,80 +341,71 @@ export function ProjectWebhookPanel({
                     ? copy.projects.webhookStatusActive
                     : copy.projects.webhookStatusPaused}
                 </small>
-                <small>
-                  {webhook.provider === "legacy"
-                    ? copy.projects.webhookLegacyNotice
-                    : copy.projects.webhookSecretStored}
-                </small>
+                <small>{copy.projects.webhookSecretStored}</small>
               </div>
               <div className="project-webhook-list__actions">
-                {webhook.provider !== "legacy" && (
-                  <button
-                    ref={(node) => {
-                      editTriggerRefs.current[webhook.id] = node;
-                    }}
-                    className="secondary-button focus-visible-control"
-                    type="button"
-                    disabled={panelBusy}
-                    aria-expanded={editTarget === webhook.id}
-                    onClick={() => {
-                      setDeleteTarget(undefined);
-                      setEditTarget((current) => {
-                        if (current === webhook.id) {
-                          restoreEditTargetRef.current = webhook.id;
-                          return undefined;
-                        }
-                        return webhook.id;
-                      });
-                    }}
-                  >
-                    <Pencil aria-hidden="true" />
-                    {copy.projects.webhookEdit}
-                  </button>
-                )}
-                {webhook.provider !== "legacy" && (
-                  <button
-                    className="secondary-button focus-visible-control"
-                    type="button"
-                    disabled={panelBusy}
-                    onClick={async () => {
-                      setPendingAction({ kind: "toggle", id: webhook.id });
-                      setError(undefined);
-                      setNotice(undefined);
-                      try {
-                        await onUpdate(webhook, {
-                          provider:
-                            webhook.provider as ManagedWebhookProvider,
-                          destinationMode: "keep",
-                          events: webhook.events,
-                          enabled: !webhook.enabled,
-                        });
-                        setNotice(copy.projects.webhookUpdated);
-                      } catch {
-                        setError(copy.projects.webhookUpdateProblem);
-                      } finally {
-                        setPendingAction(undefined);
+                <button
+                  ref={(node) => {
+                    editTriggerRefs.current[webhook.id] = node;
+                  }}
+                  className="secondary-button focus-visible-control"
+                  type="button"
+                  disabled={panelBusy}
+                  aria-expanded={editTarget === webhook.id}
+                  onClick={() => {
+                    setDeleteTarget(undefined);
+                    setEditTarget((current) => {
+                      if (current === webhook.id) {
+                        restoreEditTargetRef.current = webhook.id;
+                        return undefined;
                       }
-                    }}
-                  >
-                    {pendingAction?.kind === "toggle" &&
-                    pendingAction.id === webhook.id ? (
-                      <span className="button-spinner" aria-hidden="true" />
-                    ) : webhook.enabled ? (
-                      <PauseCircle aria-hidden="true" />
-                    ) : (
-                      <PlayCircle aria-hidden="true" />
-                    )}
-                    {pendingAction?.kind === "toggle" &&
-                    pendingAction.id === webhook.id
-                      ? webhook.enabled
-                        ? copy.projects.webhookPausing
-                        : copy.projects.webhookResuming
-                      : webhook.enabled
-                        ? copy.projects.webhookPause
-                        : copy.projects.webhookResume}
-                  </button>
-                )}
+                      return webhook.id;
+                    });
+                  }}
+                >
+                  <Pencil aria-hidden="true" />
+                  {copy.projects.webhookEdit}
+                </button>
+                <button
+                  className="secondary-button focus-visible-control"
+                  type="button"
+                  disabled={panelBusy}
+                  onClick={async () => {
+                    setPendingAction({ kind: "toggle", id: webhook.id });
+                    setError(undefined);
+                    setNotice(undefined);
+                    try {
+                      await onUpdate(webhook, {
+                        provider: webhook.provider,
+                        destinationMode: "keep",
+                        events: webhook.events,
+                        enabled: !webhook.enabled,
+                      });
+                      setNotice(copy.projects.webhookUpdated);
+                    } catch {
+                      setError(copy.projects.webhookUpdateProblem);
+                    } finally {
+                      setPendingAction(undefined);
+                    }
+                  }}
+                >
+                  {pendingAction?.kind === "toggle" &&
+                  pendingAction.id === webhook.id ? (
+                    <span className="button-spinner" aria-hidden="true" />
+                  ) : webhook.enabled ? (
+                    <PauseCircle aria-hidden="true" />
+                  ) : (
+                    <PlayCircle aria-hidden="true" />
+                  )}
+                  {pendingAction?.kind === "toggle" &&
+                  pendingAction.id === webhook.id
+                    ? webhook.enabled
+                      ? copy.projects.webhookPausing
+                      : copy.projects.webhookResuming
+                    : webhook.enabled
+                      ? copy.projects.webhookPause
+                      : copy.projects.webhookResume}
+                </button>
                 <button
                   className="secondary-button focus-visible-control"
                   type="button"
@@ -461,7 +452,7 @@ export function ProjectWebhookPanel({
                   {copy.projects.webhookDelete}
                 </button>
               </div>
-              {editTarget === webhook.id && webhook.provider !== "legacy" && (
+              {editTarget === webhook.id && (
                 <WebhookEditForm
                   webhook={webhook}
                   saving={panelBusy}
@@ -631,7 +622,7 @@ function WebhookEditForm({
     enabled: boolean;
   }): Promise<void>;
 }) {
-  const provider = webhook.provider as ManagedWebhookProvider;
+  const provider = webhook.provider;
   const [destinationMode, setDestinationMode] =
     useState<WebhookDestinationMode>("keep");
   const [url, setUrl] = useState("");

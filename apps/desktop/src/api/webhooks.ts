@@ -9,8 +9,8 @@ export type ProjectWebhookEvent =
   | "task.restored"
   | "task.deleted";
 
-export type ProjectWebhookProvider = "google_chat" | "discord" | "legacy";
-export type ManagedWebhookProvider = Exclude<ProjectWebhookProvider, "legacy">;
+export type ProjectWebhookProvider = "google_chat" | "discord";
+export type ManagedWebhookProvider = ProjectWebhookProvider;
 
 export interface ProjectWebhook {
   id: string;
@@ -18,7 +18,6 @@ export interface ProjectWebhook {
   provider: ProjectWebhookProvider;
   destinationLabel: string;
   events: ProjectWebhookEvent[];
-  hasAuthentication: boolean;
   enabled: boolean;
   version: number;
 }

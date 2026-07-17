@@ -21,7 +21,6 @@ describe("project webhook client", () => {
     provider: "discord",
     destinationLabel: "Discord 채널",
     events: ["task.created", "task.completed"],
-    hasAuthentication: true,
     enabled: true,
     version: 3,
   };

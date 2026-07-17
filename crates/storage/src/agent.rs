@@ -3143,20 +3143,17 @@ async fn persist_agent_action(
             let queued = sqlx::query_scalar::<_, i64>(
                 "\
                 INSERT INTO webhook_deliveries (
-                    id, user_id, project_id, webhook_id, destination_url, provider,
+                    id, user_id, project_id, webhook_id, provider,
                     destination_ciphertext, destination_nonce,
-                    auth_header_ciphertext, auth_header_nonce,
                     event_type, payload, status
                 )
-                SELECT $1, $2, webhook.project_id, webhook.id, webhook.url, webhook.provider,
+                SELECT $1, $2, webhook.project_id, webhook.id, webhook.provider,
                     webhook.destination_ciphertext, webhook.destination_nonce,
-                    webhook.auth_header_ciphertext, webhook.auth_header_nonce,
                     'chat.message', $5, 'queued'
                 FROM project_webhooks AS webhook
                 INNER JOIN projects AS project ON project.id = webhook.project_id
                 WHERE webhook.id = $4 AND webhook.project_id = $3
                   AND project.user_id = $2 AND webhook.enabled = TRUE
-                  AND webhook.provider IN ('google_chat', 'discord')
                 RETURNING version",
             )
             .bind(id)

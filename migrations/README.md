@@ -54,4 +54,13 @@ legacy deliveries can still drain and `jimin_schema_metadata.schema_version =
 23`. Rollback after typed webhook writes requires the verified pre-migration
 backup because ciphertext cannot be reconstructed by the previous image.
 
+Migration `0024_retire_generic_webhooks.sql` permanently deletes the unused
+generic webhook configurations and their delivery history. It then removes the
+plaintext destination and authorization-header columns and constrains every
+remaining webhook to Google Chat or Discord with an encrypted destination.
+Apply it to an empty database and a restored staging backup, confirm that no
+generic rows remain, and verify `jimin_schema_metadata.schema_version = 24`.
+Rollback requires the verified pre-migration backup because deleted generic
+webhook data cannot be reconstructed.
+
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.
