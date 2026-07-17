@@ -11,6 +11,7 @@ use jimin_storage::{
     },
     gmail::GmailMessage,
     planning::{ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus},
+    webhook::ProjectWebhook,
     work::{Project, ProjectStatus, Workspace, WorkspaceScope},
 };
 use serde::Deserialize;
@@ -98,6 +99,7 @@ struct StructuredAssistantAction {
     risk_level: i16,
     objective: String,
     next_action: String,
+    message: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -116,6 +118,7 @@ enum StructuredAssistantActionKind {
     CreateProject,
     UpdateProject,
     DeleteProject,
+    SendWebhookMessage,
 }
 
 #[derive(Debug, Deserialize)]
@@ -458,7 +461,7 @@ async fn contextualized_turn_context(
 ) -> Result<TurnContext, StorageError> {
     let now = OffsetDateTime::now_utc();
     let daily_task_cutoff = korea_day_end(now)?;
-    let (schedule, mut tasks, completed_tasks, workspaces, projects, inbox) = tokio::try_join!(
+    let (schedule, mut tasks, completed_tasks, workspaces, projects, inbox, webhooks) = tokio::try_join!(
         database.schedule_entries_in_range(
             job.user_id,
             now - TimeDuration::days(1),
@@ -469,6 +472,7 @@ async fn contextualized_turn_context(
         database.workspaces_for_user(job.user_id),
         database.projects_for_user(job.user_id),
         database.recent_gmail_messages_for_user(job.user_id),
+        database.typed_project_webhooks(job.user_id),
     )?;
     let daily_tasks = tasks
         .iter()
@@ -485,6 +489,7 @@ async fn contextualized_turn_context(
         &workspaces,
         &projects,
         &inbox,
+        &webhooks,
         now,
         daily_task_cutoff,
     );
@@ -510,6 +515,7 @@ fn render_contextualized_turn(
     workspaces: &[Workspace],
     projects: &[Project],
     inbox: &[GmailMessage],
+    webhooks: &[ProjectWebhook],
     now: OffsetDateTime,
     daily_task_cutoff: OffsetDateTime,
 ) -> String {
@@ -550,6 +556,9 @@ fn render_contextualized_turn(
          Treat an explicit clock-time departure or leave instruction, such as 출발 시간을 4시로, as a schedule event. \
          Use create_schedule for a new departure time and never create_task for that instruction. \
          When the user explicitly asks to delete or remove an existing project, use delete_project; its linked tasks become unassigned. \
+         When the user explicitly asks to post or send a message to a configured project channel, use exactly one \
+         send_webhook_message action with that webhook ID, its project ID, and a concise message. Never send when the \
+         destination or intended message is ambiguous, and never mix a webhook message with other actions. \
          Use exact existing entity, workspace, and project IDs; the server creates IDs for new records. \
          Use RFC3339 timestamps with the current +09:00 offset. An empty optional string means no value. \
          Never modify a Google Calendar entry; ask the user to change it in Google Calendar. \
@@ -674,7 +683,23 @@ fn render_contextualized_turn(
             );
         }
     }
-    prompt.push_str("</projects>\n<inbox>\n");
+    prompt.push_str("</projects>\n<project_webhooks>\n");
+    if webhooks.is_empty() {
+        prompt.push_str("(no configured Google Chat or Discord webhooks)\n");
+    } else {
+        for webhook in webhooks.iter().take(CONTEXT_PROJECT_LIMIT) {
+            let _ = writeln!(
+                prompt,
+                "- [id {} | project {} | provider {} | enabled {}] {}",
+                webhook.id,
+                webhook.project_id,
+                webhook.provider.as_str(),
+                webhook.enabled,
+                webhook.destination_hint,
+            );
+        }
+    }
+    prompt.push_str("</project_webhooks>\n<inbox>\n");
     if inbox.is_empty() {
         prompt.push_str("(no synced inbox metadata)\n");
     } else {
@@ -918,7 +943,8 @@ fn assistant_output_schema() -> Value {
                                 "cancel_schedule",
                                 "create_project",
                                 "update_project",
-                                "delete_project"
+                                "delete_project",
+                                "send_webhook_message"
                             ]
                         },
                         "entityId": { "type": "string" },
@@ -943,6 +969,12 @@ fn assistant_output_schema() -> Value {
                         "riskLevel": { "type": "integer" },
                         "objective": { "type": "string" },
                         "nextAction": { "type": "string" }
+                        ,
+                        "message": {
+                            "type": "string",
+                            "description": "For send_webhook_message, the concise message to post to the selected configured channel.",
+                            "maxLength": 1800
+                        }
                     },
                     "required": [
                         "kind",
@@ -959,7 +991,8 @@ fn assistant_output_schema() -> Value {
                         "status",
                         "riskLevel",
                         "objective",
-                        "nextAction"
+                        "nextAction",
+                        "message"
                     ],
                     "additionalProperties": false
                 }
@@ -1096,6 +1129,14 @@ fn validated_agent_actions(
             return Err(());
         }
         actions.push(validated_agent_action(&structured.action, context)?.ok_or(())?);
+    }
+    if actions
+        .iter()
+        .any(|action| matches!(action, AgentActionCommand::SendWebhookMessage { .. }))
+        && (actions.len() != 1
+            || !matches!(actions[0], AgentActionCommand::SendWebhookMessage { .. }))
+    {
+        return Err(());
     }
     reconcile_bulk_schedule_cancellations(&mut actions, context)?;
     let mut action_entity_ids = HashSet::with_capacity(actions.len());
@@ -1395,6 +1436,19 @@ fn validated_agent_action(
                 expected_version: project.version,
             }
         }
+        StructuredAssistantActionKind::SendWebhookMessage => {
+            let project_id = parse_existing_id(&action.project_id)?;
+            let webhook_id = parse_existing_id(&action.entity_id)?;
+            if !context_contains_webhook(&context.prompt, webhook_id, project_id) {
+                return Err(());
+            }
+            AgentActionCommand::SendWebhookMessage {
+                id: Uuid::now_v7(),
+                project_id,
+                webhook_id,
+                message: required_action_text(&action.message, 1_800)?,
+            }
+        }
     };
     Ok(Some(command))
 }
@@ -1406,6 +1460,22 @@ fn required_action_text(value: &str, maximum: usize) -> Result<String, ()> {
     } else {
         Ok(value.to_owned())
     }
+}
+
+fn context_contains_webhook(prompt: &str, webhook_id: Uuid, project_id: Uuid) -> bool {
+    let Some(section) = prompt
+        .split_once("<project_webhooks>\n")
+        .and_then(|(_, remaining)| {
+            remaining
+                .split_once("</project_webhooks>")
+                .map(|(value, _)| value)
+        })
+    else {
+        return false;
+    };
+    section.contains(&format!(
+        "- [id {webhook_id} | project {project_id} | provider "
+    ))
 }
 
 fn optional_action_text(value: &str, maximum: usize) -> Result<Option<String>, ()> {
@@ -1531,7 +1601,8 @@ const fn agent_action_entity_id(action: &AgentActionCommand) -> Uuid {
         | AgentActionCommand::CancelSchedule { id, .. }
         | AgentActionCommand::CreateProject { id, .. }
         | AgentActionCommand::UpdateProject { id, .. }
-        | AgentActionCommand::DeleteProject { id, .. } => *id,
+        | AgentActionCommand::DeleteProject { id, .. }
+        | AgentActionCommand::SendWebhookMessage { id, .. } => *id,
     }
 }
 
@@ -1542,6 +1613,19 @@ fn agent_action_results(
 ) -> Result<(String, AssistantPresentation), ()> {
     if actions.is_empty() || actions.len() > MAX_AGENT_ACTIONS {
         return Err(());
+    }
+    if let [AgentActionCommand::SendWebhookMessage { .. }] = actions {
+        return Ok((
+            "연결된 채널로 메시지 전송을 시작했어요.".to_owned(),
+            AssistantPresentation {
+                kind: AssistantPresentationKind::Summary,
+                title: "메시지 전송을 시작했어요".to_owned(),
+                items: Vec::new(),
+                layout: AssistantPresentationLayout::Stack,
+                sections: Vec::new(),
+                focus_item_id: None,
+            },
+        ));
     }
     if let [action] = actions {
         return agent_action_result(action, context);
@@ -1995,6 +2079,7 @@ fn agent_action_result(
                 },
             )
         }
+        AgentActionCommand::SendWebhookMessage { .. } => return Err(()),
     };
     let item_id = presentation_item_id(&item);
     let presentation = AssistantPresentation {
@@ -2713,6 +2798,7 @@ mod tests {
             &[workspace],
             &[project],
             &[inbox],
+            &[],
             now,
             korea_day_end(now).expect("Korea day boundary"),
         );
@@ -2755,6 +2841,7 @@ mod tests {
             &[],
             &[],
             &[completed_task],
+            &[],
             &[],
             &[],
             &[],
@@ -3817,5 +3904,51 @@ mod tests {
         };
 
         assert!(validated_agent_action(&action, &context).is_err());
+    }
+
+    #[test]
+    fn structured_webhook_message_uses_only_a_configured_project_channel() {
+        let webhook_id = Uuid::now_v7();
+        let project_id = Uuid::now_v7();
+        let context = TurnContext {
+            prompt: format!(
+                "<project_webhooks>\n- [id {webhook_id} | project {project_id} | provider discord | enabled true] Discord 채널\n</project_webhooks>"
+            ),
+            schedule: Vec::new(),
+            tasks: Vec::new(),
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
+        };
+        let action = StructuredAssistantAction {
+            kind: StructuredAssistantActionKind::SendWebhookMessage,
+            entity_id: webhook_id.to_string(),
+            project_id: project_id.to_string(),
+            message: "배포가 완료됐어요.".to_owned(),
+            ..StructuredAssistantAction::default()
+        };
+
+        let command = validated_agent_action(&action, &context)
+            .expect("configured webhook action")
+            .expect("webhook command");
+        assert!(matches!(
+            command,
+            AgentActionCommand::SendWebhookMessage {
+                project_id: actual_project,
+                webhook_id: actual_webhook,
+                ref message,
+                ..
+            } if actual_project == project_id
+                && actual_webhook == webhook_id
+                && message == "배포가 완료됐어요."
+        ));
+
+        let unconfigured = StructuredAssistantAction {
+            entity_id: Uuid::now_v7().to_string(),
+            ..action
+        };
+        assert!(validated_agent_action(&unconfigured, &context).is_err());
     }
 }

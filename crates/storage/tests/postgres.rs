@@ -30,7 +30,8 @@ use jimin_storage::{
     },
     webhook::{
         EncryptedWebhookSecret, NewProjectWebhook, ProjectWebhookUpdate,
-        RetryWebhookDeliveryOutcome, WebhookAuthenticationUpdate,
+        RetryWebhookDeliveryOutcome, WebhookAuthenticationUpdate, WebhookDestinationUpdate,
+        WebhookProvider,
     },
     work::{DeleteProjectOutcome, NewProject, ProjectStatus, ProjectUpdate, WorkspaceScope},
 };
@@ -51,6 +52,13 @@ struct AutomaticWebhookDeliveryRow {
     attempt_count: i32,
     lease_owner: Option<String>,
     lease_expires_at: Option<OffsetDateTime>,
+}
+
+fn encrypted_test_destination(marker: u8) -> EncryptedWebhookSecret {
+    EncryptedWebhookSecret {
+        ciphertext: vec![marker; 48],
+        nonce: vec![marker.saturating_add(1); 24],
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -257,10 +265,7 @@ fn assert_automatic_webhook_delivery(
     assert_eq!(delivery.user_id, user_id);
     assert_eq!(delivery.project_id, project_id);
     assert_eq!(delivery.webhook_id, webhook_id);
-    assert_eq!(
-        delivery.destination_url,
-        "https://automation.example/events"
-    );
+    assert_eq!(delivery.destination_url, "encrypted://discord");
     assert_eq!(delivery.event_type, event_type);
     assert_eq!(delivery.status, "queued");
     assert_eq!(delivery.attempt_count, 0);
@@ -694,7 +699,9 @@ async fn project_webhook_queue_keeps_a_safe_delivery_snapshot() {
             id: Uuid::now_v7(),
             user_id: provisioned.profile.id,
             project_id: project.id,
-            url: "https://automation.example/webhook".to_owned(),
+            provider: WebhookProvider::Discord,
+            destination: encrypted_test_destination(11),
+            destination_hint: "Discord 채널".to_owned(),
             events: vec!["task.created".to_owned(), "task.updated".to_owned()],
             authentication: Some(EncryptedWebhookSecret {
                 ciphertext: vec![7; 32],
@@ -736,7 +743,10 @@ async fn project_webhook_queue_keeps_a_safe_delivery_snapshot() {
         .expect("snapshotted deliveries should remain claimable");
     assert_eq!(claimed.len(), 2);
     assert!(claimed.iter().all(|delivery| {
-        delivery.url == "https://automation.example/webhook"
+        delivery.provider == "discord"
+            && delivery.legacy_url == "encrypted://discord"
+            && delivery.destination_ciphertext.as_deref() == Some(&[11; 48])
+            && delivery.destination_nonce.as_deref() == Some(&[12; 24])
             && delivery
                 .auth_header_ciphertext
                 .as_deref()
@@ -873,7 +883,9 @@ async fn automatic_work_mutations_queue_safe_unique_webhook_deliveries() {
             id: Uuid::now_v7(),
             user_id,
             project_id: project.id,
-            url: "https://automation.example/events".to_owned(),
+            provider: WebhookProvider::Discord,
+            destination: encrypted_test_destination(13),
+            destination_hint: "Discord 채널".to_owned(),
             events: vec![
                 "project.updated".to_owned(),
                 "task.created".to_owned(),
@@ -1080,7 +1092,9 @@ async fn project_webhook_update_preserves_replaces_and_removes_secrets() {
             id: Uuid::now_v7(),
             user_id: owner.profile.id,
             project_id: project.id,
-            url: "https://automation.example/original".to_owned(),
+            provider: WebhookProvider::Discord,
+            destination: encrypted_test_destination(15),
+            destination_hint: "Discord 채널".to_owned(),
             events: vec!["task.created".to_owned()],
             authentication: Some(EncryptedWebhookSecret {
                 ciphertext: vec![7; 32],
@@ -1095,7 +1109,7 @@ async fn project_webhook_update_preserves_replaces_and_removes_secrets() {
                 id: webhook.id,
                 user_id: other.profile.id,
                 project_id: project.id,
-                url: webhook.url.clone(),
+                destination: WebhookDestinationUpdate::Keep,
                 events: webhook.events.clone(),
                 enabled: true,
                 authentication: WebhookAuthenticationUpdate::Keep,
@@ -1111,7 +1125,7 @@ async fn project_webhook_update_preserves_replaces_and_removes_secrets() {
                 id: webhook.id,
                 user_id: owner.profile.id,
                 project_id: project.id,
-                url: webhook.url.clone(),
+                destination: WebhookDestinationUpdate::Keep,
                 events: vec!["task.created".to_owned(), "task.created".to_owned()],
                 enabled: true,
                 authentication: WebhookAuthenticationUpdate::Keep,
@@ -1125,7 +1139,11 @@ async fn project_webhook_update_preserves_replaces_and_removes_secrets() {
             id: webhook.id,
             user_id: owner.profile.id,
             project_id: project.id,
-            url: "https://automation.example/kept".to_owned(),
+            destination: WebhookDestinationUpdate::Replace {
+                provider: WebhookProvider::Discord,
+                secret: encrypted_test_destination(21),
+                hint: "Discord 채널".to_owned(),
+            },
             events: vec!["task.updated".to_owned()],
             enabled: false,
             authentication: WebhookAuthenticationUpdate::Keep,
@@ -1155,7 +1173,7 @@ async fn project_webhook_update_preserves_replaces_and_removes_secrets() {
             id: webhook.id,
             user_id: owner.profile.id,
             project_id: project.id,
-            url: kept.url.clone(),
+            destination: WebhookDestinationUpdate::Keep,
             events: kept.events.clone(),
             enabled: true,
             authentication: WebhookAuthenticationUpdate::Replace(EncryptedWebhookSecret {
@@ -1182,7 +1200,7 @@ async fn project_webhook_update_preserves_replaces_and_removes_secrets() {
             id: webhook.id,
             user_id: owner.profile.id,
             project_id: project.id,
-            url: replaced.url.clone(),
+            destination: WebhookDestinationUpdate::Keep,
             events: replaced.events.clone(),
             enabled: replaced.enabled,
             authentication: WebhookAuthenticationUpdate::Remove,
@@ -1206,7 +1224,7 @@ async fn project_webhook_update_preserves_replaces_and_removes_secrets() {
                 id: webhook.id,
                 user_id: owner.profile.id,
                 project_id: project.id,
-                url: removed.url.clone(),
+                destination: WebhookDestinationUpdate::Keep,
                 events: removed.events.clone(),
                 enabled: removed.enabled,
                 authentication: WebhookAuthenticationUpdate::Keep,
@@ -1270,7 +1288,9 @@ async fn failed_webhook_delivery_retries_with_the_same_id_idempotently() {
             id: Uuid::now_v7(),
             user_id: owner.profile.id,
             project_id: project.id,
-            url: "https://automation.example/retry".to_owned(),
+            provider: WebhookProvider::Discord,
+            destination: encrypted_test_destination(17),
+            destination_hint: "Discord 채널".to_owned(),
             events: vec!["webhook.test".to_owned()],
             authentication: None,
         })
@@ -2296,7 +2316,9 @@ async fn project_and_task_deletions_are_scoped_versioned_and_idempotent() {
             id: Uuid::now_v7(),
             user_id: owner.profile.id,
             project_id: project.id,
-            url: "https://example.com/project-delete".to_owned(),
+            provider: WebhookProvider::Discord,
+            destination: encrypted_test_destination(19),
+            destination_hint: "Discord 채널".to_owned(),
             events: vec!["project.deleted".to_owned()],
             authentication: None,
         })
@@ -2430,7 +2452,7 @@ async fn project_and_task_deletions_are_scoped_versioned_and_idempotent() {
         (
             "project.deleted".to_owned(),
             "queued".to_owned(),
-            "https://example.com/project-delete".to_owned(),
+            "encrypted://discord".to_owned(),
         )
     );
     let live_webhook_count: i64 =

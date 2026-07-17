@@ -6,19 +6,46 @@ use uuid::Uuid;
 
 use crate::{Database, StorageError};
 
-const MAX_URL_BYTES: usize = 4_096;
 const MAX_EVENT_TYPES: usize = 16;
 // XChaCha20-Poly1305 adds an authentication tag to the bounded 8 KiB header.
 const MAX_SECRET_BYTES: usize = 8 * 1024 + 32;
 const MAX_DELIVERY_ATTEMPTS: i32 = 5;
 const WEBHOOK_DELIVERY_LEASE_SECONDS: i64 = 30;
 const MAX_WORKER_ID_BYTES: usize = 200;
+const MAX_MESSAGE_CHARS: usize = 1_800;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebhookProvider {
+    Legacy,
+    GoogleChat,
+    Discord,
+}
+
+impl WebhookProvider {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::GoogleChat => "google_chat",
+            Self::Discord => "discord",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "legacy" => Some(Self::Legacy),
+            "google_chat" => Some(Self::GoogleChat),
+            "discord" => Some(Self::Discord),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectWebhook {
     pub id: Uuid,
     pub project_id: Uuid,
-    pub url: String,
+    pub provider: WebhookProvider,
+    pub destination_hint: String,
     pub events: Vec<String>,
     pub has_authentication: bool,
     pub enabled: bool,
@@ -29,7 +56,8 @@ pub struct ProjectWebhook {
 struct ProjectWebhookRow {
     id: Uuid,
     project_id: Uuid,
-    url: String,
+    provider: String,
+    destination_hint: Option<String>,
     events: Vec<String>,
     has_authentication: bool,
     enabled: bool,
@@ -40,7 +68,9 @@ pub struct NewProjectWebhook {
     pub id: Uuid,
     pub user_id: Uuid,
     pub project_id: Uuid,
-    pub url: String,
+    pub provider: WebhookProvider,
+    pub destination: EncryptedWebhookSecret,
+    pub destination_hint: String,
     pub events: Vec<String>,
     pub authentication: Option<EncryptedWebhookSecret>,
 }
@@ -53,14 +83,23 @@ pub enum WebhookAuthenticationUpdate {
     Remove,
 }
 
+pub enum WebhookDestinationUpdate {
+    Keep,
+    Replace {
+        provider: WebhookProvider,
+        secret: EncryptedWebhookSecret,
+        hint: String,
+    },
+}
+
 /// Version-checked replacement of one owned webhook configuration.
 pub struct ProjectWebhookUpdate {
     pub id: Uuid,
     pub user_id: Uuid,
     pub project_id: Uuid,
-    pub url: String,
     pub events: Vec<String>,
     pub enabled: bool,
+    pub destination: WebhookDestinationUpdate,
     pub authentication: WebhookAuthenticationUpdate,
     pub expected_version: i64,
 }
@@ -88,7 +127,10 @@ pub struct ClaimedWebhookDelivery {
     pub event_type: String,
     pub payload: Value,
     pub attempt_count: i32,
-    pub url: String,
+    pub provider: String,
+    pub legacy_url: String,
+    pub destination_ciphertext: Option<Vec<u8>>,
+    pub destination_nonce: Option<Vec<u8>>,
     pub auth_header_ciphertext: Option<Vec<u8>>,
     pub auth_header_nonce: Option<Vec<u8>>,
 }
@@ -120,20 +162,25 @@ impl Database {
         let row = sqlx::query_as::<_, ProjectWebhookRow>(
             "\
             INSERT INTO project_webhooks (
-                id, user_id, project_id, url, events,
-                auth_header_ciphertext, auth_header_nonce
+                id, user_id, project_id, url, provider,
+                destination_ciphertext, destination_nonce, destination_hint,
+                events, auth_header_ciphertext, auth_header_nonce
             )
-            SELECT $1, $2, project.id, $4, $5, $6, $7
+            SELECT $1, $2, project.id, $4, $5, $6, $7, $8, $9, $10, $11
             FROM projects AS project
             WHERE project.id = $3 AND project.user_id = $2
-            RETURNING id, project_id, url, events,
+            RETURNING id, project_id, provider, destination_hint, events,
                 auth_header_ciphertext IS NOT NULL AS has_authentication,
                 enabled, version",
         )
         .bind(command.id)
         .bind(command.user_id)
         .bind(command.project_id)
-        .bind(command.url.trim())
+        .bind(format!("encrypted://{}", command.provider.as_str()))
+        .bind(command.provider.as_str())
+        .bind(command.destination.ciphertext.as_slice())
+        .bind(command.destination.nonce.as_slice())
+        .bind(command.destination_hint.trim())
         .bind(&command.events)
         .bind(
             command
@@ -169,7 +216,8 @@ impl Database {
         }
         let rows = sqlx::query_as::<_, ProjectWebhookRow>(
             "\
-            SELECT webhook.id, webhook.project_id, webhook.url, webhook.events,
+            SELECT webhook.id, webhook.project_id, webhook.provider,
+                webhook.destination_hint, webhook.events,
                 webhook.auth_header_ciphertext IS NOT NULL AS has_authentication,
                 webhook.enabled, webhook.version
             FROM project_webhooks AS webhook
@@ -178,6 +226,38 @@ impl Database {
             ORDER BY webhook.created_at, webhook.id",
         )
         .bind(project_id)
+        .bind(user_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(classify)?;
+        Ok(rows.into_iter().map(project_webhook).collect())
+    }
+
+    /// Lists safe typed webhook metadata across the current user's projects.
+    /// Destination secrets are intentionally omitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-input error or a classified persistence error.
+    pub async fn typed_project_webhooks(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<ProjectWebhook>, StorageError> {
+        if !is_v7(user_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let rows = sqlx::query_as::<_, ProjectWebhookRow>(
+            "\
+            SELECT webhook.id, webhook.project_id, webhook.provider,
+                webhook.destination_hint, webhook.events,
+                webhook.auth_header_ciphertext IS NOT NULL AS has_authentication,
+                webhook.enabled, webhook.version
+            FROM project_webhooks AS webhook
+            INNER JOIN projects AS project ON project.id = webhook.project_id
+            WHERE project.user_id = $1
+              AND webhook.provider IN ('google_chat', 'discord')
+            ORDER BY webhook.created_at, webhook.id",
+        )
         .bind(user_id)
         .fetch_all(self.pool())
         .await
@@ -196,6 +276,28 @@ impl Database {
         command: &ProjectWebhookUpdate,
     ) -> Result<Option<ProjectWebhook>, StorageError> {
         validate_webhook_update(command)?;
+        let (
+            destination_mode,
+            provider,
+            url_marker,
+            destination_ciphertext,
+            destination_nonce,
+            destination_hint,
+        ) = match &command.destination {
+            WebhookDestinationUpdate::Keep => ("keep", None, None, None, None, None),
+            WebhookDestinationUpdate::Replace {
+                provider,
+                secret,
+                hint,
+            } => (
+                "replace",
+                Some(provider.as_str()),
+                Some(format!("encrypted://{}", provider.as_str())),
+                Some(secret.ciphertext.as_slice()),
+                Some(secret.nonce.as_slice()),
+                Some(hint.trim()),
+            ),
+        };
         let (authentication_mode, ciphertext, nonce) = match &command.authentication {
             WebhookAuthenticationUpdate::Keep => ("keep", None, None),
             WebhookAuthenticationUpdate::Replace(secret) => (
@@ -208,17 +310,21 @@ impl Database {
         let row = sqlx::query_as::<_, ProjectWebhookRow>(
             "\
             UPDATE project_webhooks AS webhook
-            SET url = $4,
-                events = $5,
-                enabled = $6,
+            SET url = CASE WHEN $4 = 'keep' THEN webhook.url ELSE $6 END,
+                provider = CASE WHEN $4 = 'keep' THEN webhook.provider ELSE $5 END,
+                destination_ciphertext = CASE WHEN $4 = 'keep' THEN webhook.destination_ciphertext ELSE $7 END,
+                destination_nonce = CASE WHEN $4 = 'keep' THEN webhook.destination_nonce ELSE $8 END,
+                destination_hint = CASE WHEN $4 = 'keep' THEN webhook.destination_hint ELSE $9 END,
+                events = $10,
+                enabled = $11,
                 auth_header_ciphertext = CASE
-                    WHEN $7 = 'keep' THEN webhook.auth_header_ciphertext
-                    WHEN $7 = 'replace' THEN $8
+                    WHEN $12 = 'keep' THEN webhook.auth_header_ciphertext
+                    WHEN $12 = 'replace' THEN $13
                     ELSE NULL
                 END,
                 auth_header_nonce = CASE
-                    WHEN $7 = 'keep' THEN webhook.auth_header_nonce
-                    WHEN $7 = 'replace' THEN $9
+                    WHEN $12 = 'keep' THEN webhook.auth_header_nonce
+                    WHEN $12 = 'replace' THEN $14
                     ELSE NULL
                 END
             FROM projects AS project
@@ -226,15 +332,21 @@ impl Database {
               AND webhook.project_id = $2
               AND webhook.version = $3
               AND project.id = webhook.project_id
-              AND project.user_id = $10
-            RETURNING webhook.id, webhook.project_id, webhook.url, webhook.events,
+              AND project.user_id = $15
+            RETURNING webhook.id, webhook.project_id, webhook.provider,
+                webhook.destination_hint, webhook.events,
                 webhook.auth_header_ciphertext IS NOT NULL AS has_authentication,
                 webhook.enabled, webhook.version",
         )
         .bind(command.id)
         .bind(command.project_id)
         .bind(command.expected_version)
-        .bind(command.url.trim())
+        .bind(destination_mode)
+        .bind(provider)
+        .bind(url_marker)
+        .bind(destination_ciphertext)
+        .bind(destination_nonce)
+        .bind(destination_hint)
         .bind(&command.events)
         .bind(command.enabled)
         .bind(authentication_mode)
@@ -330,17 +442,76 @@ impl Database {
         sqlx::query_scalar(
             "\
             INSERT INTO webhook_deliveries (
-                id, user_id, project_id, webhook_id, destination_url,
+                id, user_id, project_id, webhook_id, destination_url, provider,
+                destination_ciphertext, destination_nonce,
                 auth_header_ciphertext, auth_header_nonce,
                 event_type, payload, status
             )
-            SELECT $4, $1, webhook.project_id, webhook.id, webhook.url,
+            SELECT $4, $1, webhook.project_id, webhook.id, webhook.url, webhook.provider,
+                webhook.destination_ciphertext, webhook.destination_nonce,
                 webhook.auth_header_ciphertext, webhook.auth_header_nonce,
                 'webhook.test', $5, 'queued'
             FROM project_webhooks AS webhook
             INNER JOIN projects AS project ON project.id = webhook.project_id
             WHERE webhook.id = $3 AND webhook.project_id = $2
               AND project.user_id = $1 AND webhook.enabled = TRUE
+            RETURNING id",
+        )
+        .bind(user_id)
+        .bind(project_id)
+        .bind(webhook_id)
+        .bind(Uuid::now_v7())
+        .bind(payload)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(classify)
+    }
+
+    /// Queues one user-requested chat message for an enabled typed webhook.
+    /// The destination remains an encrypted immutable snapshot on the delivery.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-input error or a classified persistence error.
+    pub async fn queue_webhook_message(
+        &self,
+        user_id: Uuid,
+        project_id: Uuid,
+        webhook_id: Uuid,
+        message: &str,
+    ) -> Result<Option<Uuid>, StorageError> {
+        let message = message.trim();
+        if !is_v7(user_id)
+            || !is_v7(project_id)
+            || !is_v7(webhook_id)
+            || message.is_empty()
+            || message.chars().count() > MAX_MESSAGE_CHARS
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let payload = serde_json::json!({
+            "event": "chat.message",
+            "projectId": project_id,
+            "message": message,
+            "occurredAt": OffsetDateTime::now_utc().format(&Rfc3339).ok(),
+        });
+        sqlx::query_scalar(
+            "\
+            INSERT INTO webhook_deliveries (
+                id, user_id, project_id, webhook_id, destination_url, provider,
+                destination_ciphertext, destination_nonce,
+                auth_header_ciphertext, auth_header_nonce,
+                event_type, payload, status
+            )
+            SELECT $4, $1, webhook.project_id, webhook.id, webhook.url, webhook.provider,
+                webhook.destination_ciphertext, webhook.destination_nonce,
+                webhook.auth_header_ciphertext, webhook.auth_header_nonce,
+                'chat.message', $5, 'queued'
+            FROM project_webhooks AS webhook
+            INNER JOIN projects AS project ON project.id = webhook.project_id
+            WHERE webhook.id = $3 AND webhook.project_id = $2
+              AND project.user_id = $1 AND webhook.enabled = TRUE
+              AND webhook.provider IN ('google_chat', 'discord')
             RETURNING id",
         )
         .bind(user_id)
@@ -411,7 +582,8 @@ impl Database {
             WHERE delivery.id = candidates.id
             RETURNING delivery.id, delivery.webhook_id, delivery.project_id,
                 delivery.event_type, delivery.payload, delivery.attempt_count,
-                delivery.destination_url AS url,
+                delivery.provider, delivery.destination_url AS legacy_url,
+                delivery.destination_ciphertext, delivery.destination_nonce,
                 delivery.auth_header_ciphertext, delivery.auth_header_nonce",
         )
         .bind(limit)
@@ -625,9 +797,21 @@ pub(crate) async fn queue_project_event_in_transaction(
     {
         return Err(StorageError::InvalidConfiguration);
     }
-    let webhooks = sqlx::query_as::<_, (Uuid, String, Option<Vec<u8>>, Option<Vec<u8>>)>(
+    let webhooks = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            String,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+        ),
+    >(
         "\
-        SELECT webhook.id, webhook.url,
+        SELECT webhook.id, webhook.url, webhook.provider,
+            webhook.destination_ciphertext, webhook.destination_nonce,
             webhook.auth_header_ciphertext, webhook.auth_header_nonce
         FROM project_webhooks AS webhook
         INNER JOIN projects AS project ON project.id = webhook.project_id
@@ -640,22 +824,35 @@ pub(crate) async fn queue_project_event_in_transaction(
     .fetch_all(&mut **transaction)
     .await
     .map_err(classify)?;
-    for (webhook_id, url, ciphertext, nonce) in &webhooks {
+    for (
+        webhook_id,
+        url,
+        provider,
+        destination_ciphertext,
+        destination_nonce,
+        auth_ciphertext,
+        auth_nonce,
+    ) in &webhooks
+    {
         sqlx::query(
             "\
             INSERT INTO webhook_deliveries (
-                id, user_id, project_id, webhook_id, destination_url,
+                id, user_id, project_id, webhook_id, destination_url, provider,
+                destination_ciphertext, destination_nonce,
                 auth_header_ciphertext, auth_header_nonce,
                 event_type, payload, status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued')",
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'queued')",
         )
         .bind(Uuid::now_v7())
         .bind(user_id)
         .bind(project_id)
         .bind(webhook_id)
         .bind(url)
-        .bind(ciphertext)
-        .bind(nonce)
+        .bind(provider)
+        .bind(destination_ciphertext)
+        .bind(destination_nonce)
+        .bind(auth_ciphertext)
+        .bind(auth_nonce)
         .bind(event_type)
         .bind(payload)
         .execute(&mut **transaction)
@@ -685,8 +882,9 @@ fn validate_new_webhook(command: &NewProjectWebhook) -> Result<(), StorageError>
     if !is_v7(command.id)
         || !is_v7(command.user_id)
         || !is_v7(command.project_id)
-        || command.url.trim().len() > MAX_URL_BYTES
-        || command.url.trim().len() < 8
+        || command.provider == WebhookProvider::Legacy
+        || invalid_encrypted_secret(&command.destination)
+        || !valid_destination_hint(&command.destination_hint)
         || command.events.is_empty()
         || command.events.len() > MAX_EVENT_TYPES
         || has_invalid_events(&command.events)
@@ -705,14 +903,25 @@ fn validate_webhook_update(command: &ProjectWebhookUpdate) -> Result<(), Storage
         WebhookAuthenticationUpdate::Keep | WebhookAuthenticationUpdate::Remove => false,
         WebhookAuthenticationUpdate::Replace(secret) => invalid_encrypted_secret(secret),
     };
+    let invalid_destination = match &command.destination {
+        WebhookDestinationUpdate::Keep => false,
+        WebhookDestinationUpdate::Replace {
+            provider,
+            secret,
+            hint,
+        } => {
+            *provider == WebhookProvider::Legacy
+                || invalid_encrypted_secret(secret)
+                || !valid_destination_hint(hint)
+        }
+    };
     if !is_v7(command.id)
         || !is_v7(command.user_id)
         || !is_v7(command.project_id)
-        || command.url.trim().len() > MAX_URL_BYTES
-        || command.url.trim().len() < 8
         || command.events.is_empty()
         || command.events.len() > MAX_EVENT_TYPES
         || has_invalid_events(&command.events)
+        || invalid_destination
         || invalid_authentication
         || command.expected_version <= 0
     {
@@ -733,11 +942,19 @@ fn invalid_encrypted_secret(secret: &EncryptedWebhookSecret) -> bool {
         || secret.nonce.len() != 24
 }
 
+fn valid_destination_hint(value: &str) -> bool {
+    let length = value.trim().chars().count();
+    (1..=120).contains(&length)
+}
+
 fn project_webhook(row: ProjectWebhookRow) -> ProjectWebhook {
     ProjectWebhook {
         id: row.id,
         project_id: row.project_id,
-        url: row.url,
+        provider: WebhookProvider::parse(&row.provider).unwrap_or(WebhookProvider::Legacy),
+        destination_hint: row
+            .destination_hint
+            .unwrap_or_else(|| "기존 웹훅".to_owned()),
         events: row.events,
         has_authentication: row.has_authentication,
         enabled: row.enabled,
@@ -757,6 +974,7 @@ fn valid_event_type(value: &str) -> bool {
             | "task.restored"
             | "task.deleted"
             | "webhook.test"
+            | "chat.message"
     )
 }
 

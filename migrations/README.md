@@ -45,4 +45,13 @@ already handled suggestion. The index is additive; rollback before writes may
 use the previous image, while rollback after recommendation writes uses the
 verified pre-migration backup.
 
+Migration `0023_typed_webhook_destinations.sql` limits newly managed webhook
+connections to Google Chat and Discord while preserving existing generic rows
+as read-only legacy data. New destination URLs are stored as encrypted secret
+material and delivery rows retain an encrypted snapshot for retry safety. Apply
+it to an empty database and a restored staging backup, then verify that existing
+legacy deliveries can still drain and `jimin_schema_metadata.schema_version =
+23`. Rollback after typed webhook writes requires the verified pre-migration
+backup because ciphertext cannot be reconstructed by the previous image.
+
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.

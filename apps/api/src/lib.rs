@@ -48,7 +48,7 @@ use jimin_storage::{
     },
     webhook::{
         NewProjectWebhook, ProjectWebhook, ProjectWebhookUpdate, RetryWebhookDeliveryOutcome,
-        WebhookAuthenticationUpdate, WebhookDelivery,
+        WebhookAuthenticationUpdate, WebhookDelivery, WebhookDestinationUpdate, WebhookProvider,
     },
     work::{
         DeleteProjectOutcome, NewProject, Project, ProjectStatus, ProjectUpdate, Workspace,
@@ -379,7 +379,8 @@ pub struct ProjectListResponse {
 pub struct ProjectWebhookResponse {
     id: uuid::Uuid,
     project_id: uuid::Uuid,
-    url: String,
+    provider: String,
+    destination_label: String,
     events: Vec<String>,
     has_authentication: bool,
     enabled: bool,
@@ -863,19 +864,19 @@ struct DeleteProjectRequest {
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CreateProjectWebhookRequest {
+    provider: String,
     url: String,
     events: Vec<String>,
-    authorization: Option<String>,
 }
 
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct UpdateProjectWebhookRequest {
-    url: String,
+    provider: String,
+    destination_mode: String,
+    url: Option<String>,
     events: Vec<String>,
     enabled: bool,
-    authorization_mode: String,
-    authorization: Option<String>,
     expected_version: i64,
 }
 
@@ -883,6 +884,12 @@ struct UpdateProjectWebhookRequest {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct DeleteProjectWebhookRequest {
     expected_version: i64,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SendWebhookMessageRequest {
+    message: String,
 }
 
 #[derive(serde::Deserialize, ToSchema)]
@@ -1020,6 +1027,7 @@ pub(crate) fn error_response(
         update_project_webhook,
         delete_project_webhook,
         test_project_webhook,
+        send_webhook_message,
         list_webhook_deliveries,
         retry_webhook_delivery,
         list_open_tasks,
@@ -1107,6 +1115,7 @@ pub(crate) fn error_response(
         CreateProjectWebhookRequest,
         UpdateProjectWebhookRequest,
         DeleteProjectWebhookRequest,
+        SendWebhookMessageRequest,
         UpdateTaskRequest,
         DeleteTaskRequest,
         CreateAgentTurnRequest,
@@ -1249,6 +1258,10 @@ fn webhook_router() -> Router<ApiState> {
         .route(
             "/v1/projects/{project_id}/webhooks/{webhook_id}/test",
             post(test_project_webhook),
+        )
+        .route(
+            "/v1/projects/{project_id}/webhooks/{webhook_id}/messages",
+            post(send_webhook_message),
         )
         .route(
             "/v1/projects/{project_id}/webhook-deliveries",
@@ -2539,15 +2552,15 @@ async fn create_project_webhook(
         Ok(principal) => principal,
         Err(failure) => return failure.into_response(request_id),
     };
-    if !valid_webhook_url(&body.url) {
+    let Some(provider) = managed_webhook_provider(&body.provider) else {
         return error_response(
             StatusCode::BAD_REQUEST,
-            "webhook.url_invalid",
-            "http 또는 https 웹훅 주소를 확인해 주세요.",
+            "webhook.provider_invalid",
+            "Google Chat 또는 Discord를 선택해 주세요.",
             request_id,
             false,
         );
-    }
+    };
     let Some(planning) = state.planning() else {
         return unavailable_response(request_id);
     };
@@ -2555,25 +2568,27 @@ async fn create_project_webhook(
         return unavailable_response(request_id);
     };
     let webhook_id = uuid::Uuid::now_v7();
-    let authentication = match body
-        .authorization
-        .filter(|value| !value.trim().is_empty())
-        .map(SecretString::from)
-    {
-        Some(value) => match runtime.encrypt_authentication(webhook_id, &value) {
-            Ok(value) => Some(value),
-            Err(_) => return invalid_request_response(request_id),
-        },
-        None => None,
+    let Ok(destination) =
+        runtime.encrypt_destination(webhook_id, provider, &SecretString::from(body.url))
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "webhook.url_invalid",
+            "선택한 서비스에서 발급한 웹훅 주소를 확인해 주세요.",
+            request_id,
+            false,
+        );
     };
     match planning
         .create_project_webhook(&NewProjectWebhook {
             id: webhook_id,
             user_id: principal.identity().user_id(),
             project_id,
-            url: body.url,
+            provider,
+            destination,
+            destination_hint: webhook_destination_label(provider),
             events: body.events,
-            authentication,
+            authentication: None,
         })
         .await
     {
@@ -2603,25 +2618,36 @@ async fn update_project_webhook(
         Ok(principal) => principal,
         Err(failure) => return failure.into_response(request_id),
     };
-    if !valid_webhook_url(&body.url) {
+    let Some(provider) = managed_webhook_provider(&body.provider) else {
         return error_response(
             StatusCode::BAD_REQUEST,
-            "webhook.url_invalid",
-            "http 또는 https 웹훅 주소를 확인해 주세요.",
+            "webhook.provider_invalid",
+            "Google Chat 또는 Discord를 선택해 주세요.",
             request_id,
             false,
         );
-    }
-    let authentication = match (body.authorization_mode.as_str(), body.authorization) {
-        ("keep", None) => WebhookAuthenticationUpdate::Keep,
-        ("remove", None) => WebhookAuthenticationUpdate::Remove,
+    };
+    let destination = match (body.destination_mode.as_str(), body.url) {
+        ("keep", None) => WebhookDestinationUpdate::Keep,
         ("replace", Some(value)) if !value.trim().is_empty() => {
             let Some(runtime) = state.webhook() else {
                 return unavailable_response(request_id);
             };
-            match runtime.encrypt_authentication(webhook_id, &SecretString::from(value)) {
-                Ok(value) => WebhookAuthenticationUpdate::Replace(value),
-                Err(_) => return invalid_request_response(request_id),
+            match runtime.encrypt_destination(webhook_id, provider, &SecretString::from(value)) {
+                Ok(secret) => WebhookDestinationUpdate::Replace {
+                    provider,
+                    secret,
+                    hint: webhook_destination_label(provider),
+                },
+                Err(_) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        "webhook.url_invalid",
+                        "선택한 서비스에서 발급한 웹훅 주소를 확인해 주세요.",
+                        request_id,
+                        false,
+                    );
+                }
             }
         }
         _ => return invalid_request_response(request_id),
@@ -2634,10 +2660,10 @@ async fn update_project_webhook(
             id: webhook_id,
             user_id: principal.identity().user_id(),
             project_id,
-            url: body.url,
             events: body.events,
             enabled: body.enabled,
-            authentication,
+            destination,
+            authentication: WebhookAuthenticationUpdate::Keep,
             expected_version: body.expected_version,
         })
         .await
@@ -2732,6 +2758,59 @@ async fn test_project_webhook(
             StatusCode::CONFLICT,
             "webhook.unavailable",
             "웹훅 설정을 다시 확인해 주세요.",
+            request_id,
+            false,
+        ),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/webhooks/{webhook_id}/messages",
+    tag = "work",
+    params(("project_id" = String, Path), ("webhook_id" = String, Path)),
+    request_body = SendWebhookMessageRequest,
+    responses((status = 202), (status = 400), (status = 401), (status = 409), (status = 503))
+)]
+async fn send_webhook_message(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path((project_id, webhook_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+    Json(body): Json<SendWebhookMessageRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let message = body.message.trim();
+    if message.is_empty() || message.chars().count() > 1_800 {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "webhook.message_invalid",
+            "보낼 메시지를 1,800자 이내로 적어 주세요.",
+            request_id,
+            false,
+        );
+    }
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .queue_webhook_message(
+            principal.identity().user_id(),
+            project_id,
+            webhook_id,
+            message,
+        )
+        .await
+    {
+        Ok(Some(_)) => StatusCode::ACCEPTED.into_response(),
+        Ok(None) => error_response(
+            StatusCode::CONFLICT,
+            "webhook.unavailable",
+            "연결을 사용할 수 없어요. 웹훅 설정과 전송 상태를 확인해 주세요.",
             request_id,
             false,
         ),
@@ -4925,7 +5004,8 @@ fn project_webhook_response(webhook: ProjectWebhook) -> ProjectWebhookResponse {
     ProjectWebhookResponse {
         id: webhook.id,
         project_id: webhook.project_id,
-        url: webhook.url,
+        provider: webhook.provider.as_str().to_owned(),
+        destination_label: webhook.destination_hint,
         events: webhook.events,
         has_authentication: webhook.has_authentication,
         enabled: webhook.enabled,
@@ -4950,16 +5030,19 @@ fn webhook_delivery_response(delivery: WebhookDelivery) -> Result<WebhookDeliver
     })
 }
 
-fn valid_webhook_url(value: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(value.trim()) else {
-        return false;
-    };
-    matches!(url.scheme(), "http" | "https")
-        && url.host_str().is_some()
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.fragment().is_none()
-        && value.len() <= 4_096
+fn managed_webhook_provider(value: &str) -> Option<WebhookProvider> {
+    match WebhookProvider::parse(value) {
+        Some(provider @ (WebhookProvider::GoogleChat | WebhookProvider::Discord)) => Some(provider),
+        _ => None,
+    }
+}
+
+fn webhook_destination_label(provider: WebhookProvider) -> String {
+    match provider {
+        WebhookProvider::GoogleChat => "Google Chat 공간".to_owned(),
+        WebhookProvider::Discord => "Discord 채널".to_owned(),
+        WebhookProvider::Legacy => "기존 웹훅".to_owned(),
+    }
 }
 
 fn webhook_payload(
@@ -5626,6 +5709,7 @@ mod tests {
                 "/v1/projects/{project_id}/webhook-deliveries/{delivery_id}/retry",
                 "/v1/projects/{project_id}/webhooks",
                 "/v1/projects/{project_id}/webhooks/{webhook_id}",
+                "/v1/projects/{project_id}/webhooks/{webhook_id}/messages",
                 "/v1/projects/{project_id}/webhooks/{webhook_id}/test",
                 "/v1/recommendations",
                 "/v1/recommendations/{recommendation_id}/decisions",
@@ -5892,9 +5976,9 @@ mod tests {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
-                        "url": "https://example.com/hook",
-                        "events": ["task.created"],
-                        "authorization": null
+                        "provider": "discord",
+                        "url": "https://discord.com/api/webhooks/123/private",
+                        "events": ["task.created"]
                     })
                     .to_string(),
                 ))
@@ -5905,11 +5989,11 @@ mod tests {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
-                        "url": "https://example.com/hook",
+                        "provider": "discord",
+                        "destinationMode": "keep",
+                        "url": null,
                         "events": ["task.created"],
                         "enabled": true,
-                        "authorizationMode": "keep",
-                        "authorization": null,
                         "expectedVersion": 1
                     })
                     .to_string(),
@@ -5920,6 +6004,14 @@ mod tests {
                 .uri(format!("/v1/projects/{project_id}/webhooks/{webhook_id}"))
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"expectedVersion":1}"#))
+                .expect("request should be valid"),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/v1/projects/{project_id}/webhooks/{webhook_id}/messages"
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"message":"배포가 완료됐어요."}"#))
                 .expect("request should be valid"),
             Request::builder()
                 .method("POST")
@@ -5949,13 +6041,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn webhook_update_rejects_ambiguous_secret_mutations_before_storage() {
+    async fn webhook_update_rejects_ambiguous_destination_mutations_before_storage() {
         let (state, token, _) = signed_auth_state(true);
-        for (authorization_mode, authorization) in [
-            ("replace", serde_json::Value::Null),
-            ("keep", serde_json::json!("Bearer must-not-be-accepted")),
-            ("remove", serde_json::json!("Bearer must-not-be-accepted")),
-            ("unknown", serde_json::Value::Null),
+        for (provider, destination_mode, url) in [
+            ("discord", "replace", serde_json::Value::Null),
+            (
+                "discord",
+                "keep",
+                serde_json::json!("https://discord.com/api/webhooks/123/private"),
+            ),
+            ("discord", "unknown", serde_json::Value::Null),
+            ("generic", "keep", serde_json::Value::Null),
         ] {
             let response = router(state.clone())
                 .oneshot(
@@ -5966,11 +6062,11 @@ mod tests {
                         .header("content-type", "application/json")
                         .body(Body::from(
                             serde_json::json!({
-                                "url": "https://example.com/hook",
+                                "provider": provider,
+                                "destinationMode": destination_mode,
+                                "url": url,
                                 "events": ["task.created"],
                                 "enabled": true,
-                                "authorizationMode": authorization_mode,
-                                "authorization": authorization,
                                 "expectedVersion": 1
                             })
                             .to_string(),
@@ -5988,7 +6084,8 @@ mod tests {
         let value = serde_json::to_value(project_webhook_response(ProjectWebhook {
             id: uuid::Uuid::now_v7(),
             project_id: uuid::Uuid::now_v7(),
-            url: "https://example.com/hook".to_owned(),
+            provider: WebhookProvider::Discord,
+            destination_hint: "Discord 채널".to_owned(),
             events: vec!["task.created".to_owned()],
             has_authentication: true,
             enabled: true,
@@ -5996,6 +6093,9 @@ mod tests {
         }))
         .expect("webhook response should serialize");
         assert_eq!(value["hasAuthentication"], true);
+        assert_eq!(value["provider"], "discord");
+        assert_eq!(value["destinationLabel"], "Discord 채널");
+        assert!(value.get("url").is_none());
         assert!(value.get("authorization").is_none());
         assert!(value.get("authHeaderCiphertext").is_none());
         assert!(value.get("authHeaderNonce").is_none());

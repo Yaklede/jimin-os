@@ -7,7 +7,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::{
@@ -167,6 +167,12 @@ pub enum AgentActionCommand {
         id: Uuid,
         expected_version: i64,
     },
+    SendWebhookMessage {
+        id: Uuid,
+        project_id: Uuid,
+        webhook_id: Uuid,
+        message: String,
+    },
 }
 
 impl AgentActionCommand {
@@ -317,6 +323,22 @@ impl AgentActionCommand {
                     Err(StorageError::InvalidConfiguration)
                 }
             }
+            Self::SendWebhookMessage {
+                id,
+                project_id,
+                webhook_id,
+                message,
+            } => {
+                if is_v7(*id)
+                    && is_v7(*project_id)
+                    && is_v7(*webhook_id)
+                    && valid_text(message, 1_800, false)
+                {
+                    Ok(())
+                } else {
+                    Err(StorageError::InvalidConfiguration)
+                }
+            }
         }
     }
 
@@ -342,6 +364,7 @@ impl AgentActionCommand {
             Self::CreateProject { .. } => "create_project",
             Self::UpdateProject { .. } => "update_project",
             Self::DeleteProject { .. } => "delete_project",
+            Self::SendWebhookMessage { .. } => "send_webhook_message",
         }
     }
 
@@ -355,7 +378,8 @@ impl AgentActionCommand {
             | Self::CancelSchedule { id, .. }
             | Self::CreateProject { id, .. }
             | Self::UpdateProject { id, .. }
-            | Self::DeleteProject { id, .. } => *id,
+            | Self::DeleteProject { id, .. }
+            | Self::SendWebhookMessage { id, .. } => *id,
         }
     }
 }
@@ -3102,6 +3126,49 @@ async fn persist_agent_action(
             .map_err(|error| classify(&error))?
             .ok_or(StorageError::IdentityConflict)?;
             append_delete_change(transaction, user_id, "project", *id, version).await?;
+            return Ok(());
+        }
+        AgentActionCommand::SendWebhookMessage {
+            id,
+            project_id,
+            webhook_id,
+            message,
+        } => {
+            let payload = serde_json::json!({
+                "event": "chat.message",
+                "projectId": project_id,
+                "message": message.trim(),
+                "occurredAt": OffsetDateTime::now_utc().format(&Rfc3339).ok(),
+            });
+            let queued = sqlx::query_scalar::<_, i64>(
+                "\
+                INSERT INTO webhook_deliveries (
+                    id, user_id, project_id, webhook_id, destination_url, provider,
+                    destination_ciphertext, destination_nonce,
+                    auth_header_ciphertext, auth_header_nonce,
+                    event_type, payload, status
+                )
+                SELECT $1, $2, webhook.project_id, webhook.id, webhook.url, webhook.provider,
+                    webhook.destination_ciphertext, webhook.destination_nonce,
+                    webhook.auth_header_ciphertext, webhook.auth_header_nonce,
+                    'chat.message', $5, 'queued'
+                FROM project_webhooks AS webhook
+                INNER JOIN projects AS project ON project.id = webhook.project_id
+                WHERE webhook.id = $4 AND webhook.project_id = $3
+                  AND project.user_id = $2 AND webhook.enabled = TRUE
+                  AND webhook.provider IN ('google_chat', 'discord')
+                RETURNING version",
+            )
+            .bind(id)
+            .bind(user_id)
+            .bind(project_id)
+            .bind(webhook_id)
+            .bind(payload)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|error| classify(&error))?
+            .ok_or(StorageError::IdentityConflict)?;
+            let _ = queued;
             return Ok(());
         }
     };
