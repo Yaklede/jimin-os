@@ -9,10 +9,14 @@ export type ProjectWebhookEvent =
   | "task.restored"
   | "task.deleted";
 
+export type ProjectWebhookProvider = "google_chat" | "discord" | "legacy";
+export type ManagedWebhookProvider = Exclude<ProjectWebhookProvider, "legacy">;
+
 export interface ProjectWebhook {
   id: string;
   projectId: string;
-  url: string;
+  provider: ProjectWebhookProvider;
+  destinationLabel: string;
   events: ProjectWebhookEvent[];
   hasAuthentication: boolean;
   enabled: boolean;
@@ -31,7 +35,7 @@ export interface WebhookDelivery {
   deliveredAt: string | null;
 }
 
-export type WebhookAuthorizationMode = "keep" | "replace" | "remove";
+export type WebhookDestinationMode = "keep" | "replace";
 
 type ListResponse<T> = { items: T[]; nextCursor: string | null };
 
@@ -64,9 +68,9 @@ export async function createProjectWebhook(
   access: string,
   projectId: string,
   input: {
+    provider: ManagedWebhookProvider;
     url: string;
     events: ProjectWebhookEvent[];
-    authorization?: string;
   },
 ): Promise<ProjectWebhook> {
   return requestJson<ProjectWebhook>(
@@ -75,9 +79,9 @@ export async function createProjectWebhook(
     `/v1/projects/${encodeURIComponent(projectId)}/webhooks`,
     "POST",
     {
+      provider: input.provider,
       url: input.url,
       events: input.events,
-      authorization: input.authorization || null,
     },
   );
 }
@@ -87,11 +91,11 @@ export async function updateProjectWebhook(
   access: string,
   webhook: ProjectWebhook,
   input: {
-    url: string;
+    provider: ManagedWebhookProvider;
+    destinationMode: WebhookDestinationMode;
+    url?: string;
     events: ProjectWebhookEvent[];
     enabled: boolean;
-    authorizationMode: WebhookAuthorizationMode;
-    authorization?: string;
   },
 ): Promise<ProjectWebhook> {
   return requestJson<ProjectWebhook>(
@@ -100,14 +104,11 @@ export async function updateProjectWebhook(
     `/v1/projects/${encodeURIComponent(webhook.projectId)}/webhooks/${encodeURIComponent(webhook.id)}`,
     "PUT",
     {
-      url: input.url,
+      provider: input.provider,
+      destinationMode: input.destinationMode,
+      url: input.destinationMode === "replace" ? input.url || null : null,
       events: input.events,
       enabled: input.enabled,
-      authorizationMode: input.authorizationMode,
-      authorization:
-        input.authorizationMode === "replace"
-          ? input.authorization || null
-          : null,
       expectedVersion: webhook.version,
     },
   );

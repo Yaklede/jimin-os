@@ -50,9 +50,10 @@ import {
   retryWebhookDelivery,
   testProjectWebhook,
   updateProjectWebhook,
+  type ManagedWebhookProvider,
   type ProjectWebhook,
   type ProjectWebhookEvent,
-  type WebhookAuthorizationMode,
+  type WebhookDestinationMode,
   type WebhookDelivery,
 } from "./api/webhooks";
 import {
@@ -1899,9 +1900,9 @@ export default function App() {
   }
 
   async function createWorkspaceWebhook(input: {
+    provider: ManagedWebhookProvider;
     url: string;
     events: ProjectWebhookEvent[];
-    authorization?: string;
   }): Promise<void> {
     if (!selectedProjectId) throw new Error("project unavailable");
     setProjectsSaving(true);
@@ -1922,11 +1923,11 @@ export default function App() {
   async function updateWorkspaceWebhook(
     webhook: ProjectWebhook,
     input: {
-      url: string;
+      provider: ManagedWebhookProvider;
+      destinationMode: WebhookDestinationMode;
+      url?: string;
       events: ProjectWebhookEvent[];
       enabled: boolean;
-      authorizationMode: WebhookAuthorizationMode;
-      authorization?: string;
     },
   ): Promise<void> {
     setProjectsSaving(true);

@@ -83,10 +83,29 @@ export const projectCopy = {
     "프로젝트를 저장하지 못했어요. 입력한 내용을 확인한 뒤 다시 시도해 주세요.",
   taskSaveNotice: "일을 추가하지 못했어요. 잠시 후 다시 시도해 주세요.",
   webhookTitle: "연결된 웹훅",
-  webhookDescription: "프로젝트와 일의 변화를 외부 자동화로 보내요.",
+  webhookDescription:
+    "프로젝트와 일의 변화를 Google Chat 또는 Discord로 보내요.",
   webhookAdd: "웹훅 연결",
+  webhookProviderLabel: "보낼 곳",
+  webhookProvider: (provider: string) => {
+    switch (provider) {
+      case "google_chat":
+        return "Google Chat";
+      case "discord":
+        return "Discord";
+      default:
+        return "기존 웹훅";
+    }
+  },
   webhookUrlLabel: "받을 주소",
-  webhookUrlHint: "https://automation.example/hooks/project",
+  webhookUrlHint: (provider: string) =>
+    provider === "discord"
+      ? "https://discord.com/api/webhooks/…"
+      : "https://chat.googleapis.com/v1/spaces/…/messages",
+  webhookSecretDescription:
+    "주소는 서버에서 암호화해 보관하며 저장한 뒤에는 다시 보여주지 않아요.",
+  webhookSecretStored: "웹훅 주소를 안전하게 보관 중",
+  webhookLegacyNotice: "Google Chat 또는 Discord 유형으로 다시 연결해 주세요.",
   webhookEventsLabel: "보낼 변화",
   webhookAuthorizationLabel: "인증 헤더 (선택)",
   webhookAuthorizationHint: "예: Bearer …",
@@ -99,7 +118,10 @@ export const projectCopy = {
   webhookEdit: "설정 바꾸기",
   webhookEditTitle: "웹훅 설정 바꾸기",
   webhookEditDescription:
-    "받을 주소와 보낼 변화, 인증값 사용 방식을 바꿀 수 있어요.",
+    "보낼 변화와 연결 상태를 바꾸거나 새 웹훅 주소로 교체할 수 있어요.",
+  webhookDestinationModeLabel: "웹훅 주소",
+  webhookDestinationKeep: "저장한 주소 그대로 사용하기",
+  webhookDestinationReplace: "새 주소로 바꾸기",
   webhookPause: "전송 멈추기",
   webhookPausing: "전송 멈추는 중",
   webhookResume: "전송 다시 시작하기",
@@ -117,7 +139,7 @@ export const projectCopy = {
   webhookStopEditing: "수정 그만두기",
   webhookSaveChanges: "변경 내용 저장하기",
   webhookSave: "웹훅 저장하기",
-  webhookRequired: "받을 주소와 하나 이상의 변화를 선택해 주세요.",
+  webhookRequired: "웹훅 주소와 하나 이상의 변화를 선택해 주세요.",
   webhookSaved: "웹훅을 연결했어요.",
   webhookSaveProblem:
     "웹훅을 연결하지 못했어요. 주소와 선택 항목을 확인해 주세요.",
@@ -159,6 +181,8 @@ export const projectCopy = {
         return "일 삭제";
       case "webhook.test":
         return "시험 전송";
+      case "chat.message":
+        return "비서 메시지";
       default:
         return "프로젝트 변화";
     }

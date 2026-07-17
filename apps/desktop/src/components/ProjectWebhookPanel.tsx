@@ -13,8 +13,9 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 
 import {
   type ProjectWebhook,
+  type ManagedWebhookProvider,
   type ProjectWebhookEvent,
-  type WebhookAuthorizationMode,
+  type WebhookDestinationMode,
   type WebhookDelivery,
 } from "../api/webhooks";
 import { copy } from "../copy";
@@ -38,18 +39,18 @@ type ProjectWebhookPanelProps = {
   loading: boolean;
   saving: boolean;
   onCreate(input: {
+    provider: ManagedWebhookProvider;
     url: string;
     events: ProjectWebhookEvent[];
-    authorization?: string;
   }): Promise<void>;
   onUpdate(
     webhook: ProjectWebhook,
     input: {
-      url: string;
+      provider: ManagedWebhookProvider;
+      destinationMode: WebhookDestinationMode;
+      url?: string;
       events: ProjectWebhookEvent[];
       enabled: boolean;
-      authorizationMode: WebhookAuthorizationMode;
-      authorization?: string;
     },
   ): Promise<void>;
   onTest(webhook: ProjectWebhook): Promise<void>;
@@ -70,8 +71,9 @@ export function ProjectWebhookPanel({
   onRetry,
 }: ProjectWebhookPanelProps) {
   const [formOpen, setFormOpen] = useState(false);
+  const [provider, setProvider] =
+    useState<ManagedWebhookProvider>("google_chat");
   const [url, setUrl] = useState("");
-  const [authorization, setAuthorization] = useState("");
   const [events, setEvents] = useState<ProjectWebhookEvent[]>([
     "project.updated",
     "project.deleted",
@@ -165,12 +167,11 @@ export function ProjectWebhookPanel({
     setPendingAction({ kind: "create", id: projectId });
     try {
       await onCreate({
+        provider,
         url: url.trim(),
         events,
-        authorization: authorization.trim() || undefined,
       });
       setUrl("");
-      setAuthorization("");
       restoreCreateFocusRef.current = true;
       setFormOpen(false);
       setNotice(copy.projects.webhookSaved);
@@ -238,6 +239,22 @@ export function ProjectWebhookPanel({
           aria-busy={pendingAction?.kind === "create"}
           onSubmit={(event) => void submit(event)}
         >
+          <label htmlFor="project-webhook-provider">
+            <span>{copy.projects.webhookProviderLabel}</span>
+            <select
+              id="project-webhook-provider"
+              name="project-webhook-provider"
+              value={provider}
+              disabled={panelBusy}
+              onChange={(event) => {
+                setProvider(event.target.value as ManagedWebhookProvider);
+                setUrl("");
+              }}
+            >
+              <option value="google_chat">Google Chat</option>
+              <option value="discord">Discord</option>
+            </select>
+          </label>
           <label htmlFor="project-webhook-url">
             <span>{copy.projects.webhookUrlLabel}</span>
             <input
@@ -251,7 +268,7 @@ export function ProjectWebhookPanel({
               maxLength={4096}
               value={url}
               disabled={panelBusy}
-              placeholder={copy.projects.webhookUrlHint}
+              placeholder={copy.projects.webhookUrlHint(provider)}
               onChange={(event) => setUrl(event.target.value)}
             />
           </label>
@@ -274,21 +291,7 @@ export function ProjectWebhookPanel({
               ))}
             </div>
           </fieldset>
-          <label htmlFor="project-webhook-authorization">
-            <span>{copy.projects.webhookAuthorizationLabel}</span>
-            <input
-              id="project-webhook-authorization"
-              name="project-webhook-authorization"
-              type="password"
-              autoComplete="new-password"
-              maxLength={8192}
-              value={authorization}
-              disabled={panelBusy}
-              placeholder={copy.projects.webhookAuthorizationHint}
-              onChange={(event) => setAuthorization(event.target.value)}
-            />
-            <small>{copy.projects.webhookAuthorizationDescription}</small>
-          </label>
+          <small>{copy.projects.webhookSecretDescription}</small>
           <div className="project-create-form__actions">
             <button
               className="secondary-button focus-visible-control"
@@ -326,7 +329,10 @@ export function ProjectWebhookPanel({
           {webhooks.map((webhook) => (
             <li key={webhook.id}>
               <div className="project-webhook-list__main">
-                <strong>{webhook.url}</strong>
+                <strong>
+                  {copy.projects.webhookProvider(webhook.provider)}
+                </strong>
+                <span>{webhook.destinationLabel}</span>
                 <span>
                   {webhook.events.map(copy.projects.webhookEvent).join(" · ")}
                 </span>
@@ -335,73 +341,80 @@ export function ProjectWebhookPanel({
                     ? copy.projects.webhookStatusActive
                     : copy.projects.webhookStatusPaused}
                 </small>
-                {webhook.hasAuthentication && (
-                  <small>{copy.projects.webhookAuthenticationStored}</small>
-                )}
+                <small>
+                  {webhook.provider === "legacy"
+                    ? copy.projects.webhookLegacyNotice
+                    : copy.projects.webhookSecretStored}
+                </small>
               </div>
               <div className="project-webhook-list__actions">
-                <button
-                  ref={(node) => {
-                    editTriggerRefs.current[webhook.id] = node;
-                  }}
-                  className="secondary-button focus-visible-control"
-                  type="button"
-                  disabled={panelBusy}
-                  aria-expanded={editTarget === webhook.id}
-                  onClick={() => {
-                    setDeleteTarget(undefined);
-                    setEditTarget((current) => {
-                      if (current === webhook.id) {
-                        restoreEditTargetRef.current = webhook.id;
-                        return undefined;
-                      }
-                      return webhook.id;
-                    });
-                  }}
-                >
-                  <Pencil aria-hidden="true" />
-                  {copy.projects.webhookEdit}
-                </button>
-                <button
-                  className="secondary-button focus-visible-control"
-                  type="button"
-                  disabled={panelBusy}
-                  onClick={async () => {
-                    setPendingAction({ kind: "toggle", id: webhook.id });
-                    setError(undefined);
-                    setNotice(undefined);
-                    try {
-                      await onUpdate(webhook, {
-                        url: webhook.url,
-                        events: webhook.events,
-                        enabled: !webhook.enabled,
-                        authorizationMode: "keep",
+                {webhook.provider !== "legacy" && (
+                  <button
+                    ref={(node) => {
+                      editTriggerRefs.current[webhook.id] = node;
+                    }}
+                    className="secondary-button focus-visible-control"
+                    type="button"
+                    disabled={panelBusy}
+                    aria-expanded={editTarget === webhook.id}
+                    onClick={() => {
+                      setDeleteTarget(undefined);
+                      setEditTarget((current) => {
+                        if (current === webhook.id) {
+                          restoreEditTargetRef.current = webhook.id;
+                          return undefined;
+                        }
+                        return webhook.id;
                       });
-                      setNotice(copy.projects.webhookUpdated);
-                    } catch {
-                      setError(copy.projects.webhookUpdateProblem);
-                    } finally {
-                      setPendingAction(undefined);
-                    }
-                  }}
-                >
-                  {pendingAction?.kind === "toggle" &&
-                  pendingAction.id === webhook.id ? (
-                    <span className="button-spinner" aria-hidden="true" />
-                  ) : webhook.enabled ? (
-                    <PauseCircle aria-hidden="true" />
-                  ) : (
-                    <PlayCircle aria-hidden="true" />
-                  )}
-                  {pendingAction?.kind === "toggle" &&
-                  pendingAction.id === webhook.id
-                    ? webhook.enabled
-                      ? copy.projects.webhookPausing
-                      : copy.projects.webhookResuming
-                    : webhook.enabled
-                      ? copy.projects.webhookPause
-                      : copy.projects.webhookResume}
-                </button>
+                    }}
+                  >
+                    <Pencil aria-hidden="true" />
+                    {copy.projects.webhookEdit}
+                  </button>
+                )}
+                {webhook.provider !== "legacy" && (
+                  <button
+                    className="secondary-button focus-visible-control"
+                    type="button"
+                    disabled={panelBusy}
+                    onClick={async () => {
+                      setPendingAction({ kind: "toggle", id: webhook.id });
+                      setError(undefined);
+                      setNotice(undefined);
+                      try {
+                        await onUpdate(webhook, {
+                          provider:
+                            webhook.provider as ManagedWebhookProvider,
+                          destinationMode: "keep",
+                          events: webhook.events,
+                          enabled: !webhook.enabled,
+                        });
+                        setNotice(copy.projects.webhookUpdated);
+                      } catch {
+                        setError(copy.projects.webhookUpdateProblem);
+                      } finally {
+                        setPendingAction(undefined);
+                      }
+                    }}
+                  >
+                    {pendingAction?.kind === "toggle" &&
+                    pendingAction.id === webhook.id ? (
+                      <span className="button-spinner" aria-hidden="true" />
+                    ) : webhook.enabled ? (
+                      <PauseCircle aria-hidden="true" />
+                    ) : (
+                      <PlayCircle aria-hidden="true" />
+                    )}
+                    {pendingAction?.kind === "toggle" &&
+                    pendingAction.id === webhook.id
+                      ? webhook.enabled
+                        ? copy.projects.webhookPausing
+                        : copy.projects.webhookResuming
+                      : webhook.enabled
+                        ? copy.projects.webhookPause
+                        : copy.projects.webhookResume}
+                  </button>
+                )}
                 <button
                   className="secondary-button focus-visible-control"
                   type="button"
@@ -448,7 +461,7 @@ export function ProjectWebhookPanel({
                   {copy.projects.webhookDelete}
                 </button>
               </div>
-              {editTarget === webhook.id && (
+              {editTarget === webhook.id && webhook.provider !== "legacy" && (
                 <WebhookEditForm
                   webhook={webhook}
                   saving={panelBusy}
@@ -611,19 +624,19 @@ function WebhookEditForm({
   saving: boolean;
   onCancel(): void;
   onSave(input: {
-    url: string;
+    provider: ManagedWebhookProvider;
+    destinationMode: WebhookDestinationMode;
+    url?: string;
     events: ProjectWebhookEvent[];
     enabled: boolean;
-    authorizationMode: WebhookAuthorizationMode;
-    authorization?: string;
   }): Promise<void>;
 }) {
-  const [url, setUrl] = useState(webhook.url);
+  const provider = webhook.provider as ManagedWebhookProvider;
+  const [destinationMode, setDestinationMode] =
+    useState<WebhookDestinationMode>("keep");
+  const [url, setUrl] = useState("");
   const [events, setEvents] = useState<ProjectWebhookEvent[]>(webhook.events);
   const [enabled, setEnabled] = useState(webhook.enabled);
-  const [authorizationMode, setAuthorizationMode] =
-    useState<WebhookAuthorizationMode>("keep");
-  const [authorization, setAuthorization] = useState("");
   const [validation, setValidation] = useState<string>();
   const id = `webhook-edit-${webhook.id}`;
 
@@ -637,22 +650,17 @@ function WebhookEditForm({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!url.trim() || events.length === 0) {
+    if (events.length === 0 || (destinationMode === "replace" && !url.trim())) {
       setValidation(copy.projects.webhookRequired);
-      return;
-    }
-    if (authorizationMode === "replace" && !authorization.trim()) {
-      setValidation(copy.projects.webhookAuthorizationRequired);
       return;
     }
     setValidation(undefined);
     await onSave({
-      url: url.trim(),
+      provider,
+      destinationMode,
+      url: destinationMode === "replace" ? url.trim() : undefined,
       events,
       enabled,
-      authorizationMode,
-      authorization:
-        authorizationMode === "replace" ? authorization.trim() : undefined,
     });
   }
 
@@ -669,25 +677,48 @@ function WebhookEditForm({
           <p>{copy.projects.webhookEditDescription}</p>
         </div>
       </div>
-      <label htmlFor={`${id}-url`}>
-        <span>{copy.projects.webhookUrlLabel}</span>
-        <input
-          id={`${id}-url`}
-          name={`${id}-url`}
-          type="url"
-          inputMode="url"
-          autoComplete="url"
-          autoFocus
-          required
-          maxLength={4096}
-          value={url}
+      <label htmlFor={`${id}-destination-mode`}>
+        <span>{copy.projects.webhookDestinationModeLabel}</span>
+        <select
+          id={`${id}-destination-mode`}
+          name={`${id}-destination-mode`}
+          value={destinationMode}
           disabled={saving}
           onChange={(event) => {
-            setUrl(event.target.value);
+            setDestinationMode(event.target.value as WebhookDestinationMode);
+            setUrl("");
             setValidation(undefined);
           }}
-        />
+        >
+          <option value="keep">{copy.projects.webhookDestinationKeep}</option>
+          <option value="replace">
+            {copy.projects.webhookDestinationReplace}
+          </option>
+        </select>
       </label>
+      {destinationMode === "replace" && (
+        <label htmlFor={`${id}-url`}>
+          <span>{copy.projects.webhookUrlLabel}</span>
+          <input
+            id={`${id}-url`}
+            name={`${id}-url`}
+            type="url"
+            inputMode="url"
+            autoComplete="url"
+            autoFocus
+            required
+            maxLength={4096}
+            value={url}
+            disabled={saving}
+            placeholder={copy.projects.webhookUrlHint(provider)}
+            onChange={(event) => {
+              setUrl(event.target.value);
+              setValidation(undefined);
+            }}
+          />
+          <small>{copy.projects.webhookSecretDescription}</small>
+        </label>
+      )}
       <fieldset>
         <legend>{copy.projects.webhookEventsLabel}</legend>
         <div className="project-webhook-events">
@@ -721,56 +752,6 @@ function WebhookEditForm({
         />
         <span>{copy.projects.webhookEnabledLabel}</span>
       </label>
-      <label htmlFor={`${id}-authorization-mode`}>
-        <span>{copy.projects.webhookAuthorizationModeLabel}</span>
-        <select
-          id={`${id}-authorization-mode`}
-          name={`${id}-authorization-mode`}
-          value={authorizationMode}
-          disabled={saving}
-          onChange={(event) => {
-            setAuthorizationMode(
-              event.target.value as WebhookAuthorizationMode,
-            );
-            setAuthorization("");
-            setValidation(undefined);
-          }}
-        >
-          <option value="keep">
-            {webhook.hasAuthentication
-              ? copy.projects.webhookAuthorizationKeep
-              : copy.projects.webhookAuthorizationNone}
-          </option>
-          <option value="replace">
-            {copy.projects.webhookAuthorizationReplace}
-          </option>
-          {webhook.hasAuthentication && (
-            <option value="remove">
-              {copy.projects.webhookAuthorizationRemove}
-            </option>
-          )}
-        </select>
-      </label>
-      {authorizationMode === "replace" && (
-        <label htmlFor={`${id}-authorization`}>
-          <span>{copy.projects.webhookAuthorizationNewLabel}</span>
-          <input
-            id={`${id}-authorization`}
-            name={`${id}-authorization`}
-            type="password"
-            autoComplete="new-password"
-            maxLength={8192}
-            required
-            value={authorization}
-            disabled={saving}
-            onChange={(event) => {
-              setAuthorization(event.target.value);
-              setValidation(undefined);
-            }}
-          />
-          <small>{copy.projects.webhookAuthorizationDescription}</small>
-        </label>
-      )}
       {validation && (
         <p className="inline-alert" role="alert">
           {validation}
@@ -790,9 +771,8 @@ function WebhookEditForm({
           type="submit"
           disabled={
             saving ||
-            !url.trim() ||
             events.length === 0 ||
-            (authorizationMode === "replace" && !authorization.trim())
+            (destinationMode === "replace" && !url.trim())
           }
         >
           {saving ? copy.actions.saving : copy.projects.webhookSaveChanges}

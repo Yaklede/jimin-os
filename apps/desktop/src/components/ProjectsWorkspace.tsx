@@ -17,9 +17,10 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import { type Project, type Workspace } from "../api/projects";
 import { type Task } from "../api/planning";
 import {
+  type ManagedWebhookProvider,
   type ProjectWebhook,
   type ProjectWebhookEvent,
-  type WebhookAuthorizationMode,
+  type WebhookDestinationMode,
   type WebhookDelivery,
 } from "../api/webhooks";
 import { copy } from "../copy";
@@ -80,18 +81,18 @@ type ProjectsWorkspaceProps = {
   ): Promise<void>;
   onDeleteTask(task: Task): Promise<void>;
   onCreateWebhook(input: {
+    provider: ManagedWebhookProvider;
     url: string;
     events: ProjectWebhookEvent[];
-    authorization?: string;
   }): Promise<void>;
   onUpdateWebhook(
     webhook: ProjectWebhook,
     input: {
-      url: string;
+      provider: ManagedWebhookProvider;
+      destinationMode: WebhookDestinationMode;
+      url?: string;
       events: ProjectWebhookEvent[];
       enabled: boolean;
-      authorizationMode: WebhookAuthorizationMode;
-      authorization?: string;
     },
   ): Promise<void>;
   onTestWebhook(webhook: ProjectWebhook): Promise<void>;

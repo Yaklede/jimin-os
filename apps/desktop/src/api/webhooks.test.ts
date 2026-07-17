@@ -18,7 +18,8 @@ describe("project webhook client", () => {
   const webhook: ProjectWebhook = {
     id: "019f68cb-9400-7000-8000-000000000031",
     projectId: "019f68cb-9400-7000-8000-000000000032",
-    url: "https://automation.example/hooks/jimin",
+    provider: "discord",
+    destinationLabel: "Discord 채널",
     events: ["task.created", "task.completed"],
     hasAuthentication: true,
     enabled: true,
@@ -40,18 +41,18 @@ describe("project webhook client", () => {
         "access",
         webhook.projectId,
         {
-          url: webhook.url,
+          url: "https://discord.com/api/webhooks/123/private",
+          provider: "discord",
           events: webhook.events,
-          authorization: "Bearer private",
         },
       ),
     ).resolves.toEqual(webhook);
 
     const request = fetchMock.mock.calls[0]?.[1];
     expect(JSON.parse(String(request?.body))).toEqual({
-      url: webhook.url,
+      provider: "discord",
+      url: "https://discord.com/api/webhooks/123/private",
       events: webhook.events,
-      authorization: "Bearer private",
     });
   });
 
@@ -84,20 +85,20 @@ describe("project webhook client", () => {
 
     await expect(
       updateProjectWebhook("https://jimin-os.example", "access", webhook, {
-        url: webhook.url,
+        provider: "discord",
+        destinationMode: "keep",
         events: webhook.events,
         enabled: false,
-        authorizationMode: "keep",
       }),
     ).resolves.toEqual(updated);
 
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "PUT" });
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
-      url: webhook.url,
+      provider: "discord",
+      destinationMode: "keep",
+      url: null,
       events: webhook.events,
       enabled: false,
-      authorizationMode: "keep",
-      authorization: null,
       expectedVersion: 3,
     });
   });
