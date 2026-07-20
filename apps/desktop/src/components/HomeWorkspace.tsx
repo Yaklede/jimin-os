@@ -4,6 +4,7 @@ import {
   ChevronRight,
   Circle,
   Clock3,
+  Inbox,
   ListTodo,
   MessageCircleMore,
   Mic,
@@ -56,6 +57,7 @@ type HomeWorkspaceProps = {
   onOpenSchedule(
     entry: Pick<ScheduleEntry, "id" | "startsAt">,
   ): void | Promise<void>;
+  onOpenDecisionInbox(): void;
   onDecideRecommendation(
     recommendation: Recommendation,
     decision: "approve" | "defer",
@@ -81,6 +83,7 @@ export function HomeWorkspace({
   onOpenTask,
   onOpenProject,
   onOpenSchedule,
+  onOpenDecisionInbox,
   onDecideRecommendation,
 }: HomeWorkspaceProps) {
   const [completingTaskId, setCompletingTaskId] = useState<string>();
@@ -169,14 +172,24 @@ export function HomeWorkspace({
           <h1>{greeting}</h1>
           <p>{copy.home.title}</p>
         </div>
-        <button
-          className="home-greeting__assistant focus-visible-control"
-          type="button"
-          onClick={onOpenAssistant}
-          aria-label={copy.actions.startAssistantConversation}
-        >
-          <Sparkles aria-hidden="true" />
-        </button>
+        <div className="home-greeting__actions">
+          <button
+            className="home-greeting__decisions focus-visible-control"
+            type="button"
+            onClick={onOpenDecisionInbox}
+          >
+            <Inbox aria-hidden="true" />
+            <span>{copy.home.openDecisionInbox}</span>
+          </button>
+          <button
+            className="home-greeting__assistant focus-visible-control"
+            type="button"
+            onClick={onOpenAssistant}
+            aria-label={copy.actions.startAssistantConversation}
+          >
+            <Sparkles aria-hidden="true" />
+          </button>
+        </div>
       </header>
 
       {error && (

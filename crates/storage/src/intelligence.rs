@@ -56,6 +56,17 @@ const SELECT_ACTIVE_RECOMMENDATIONS_SQL: &str = "
       AND (valid_until IS NULL OR valid_until > $2)
     ORDER BY urgency DESC, impact DESC, confidence DESC, created_at DESC, id DESC
     LIMIT $3";
+const SELECT_RECOMMENDATION_HISTORY_SQL: &str = "
+    SELECT
+        id, workspace_id, project_id, goal_id, signal_id,
+        title, rationale, expected_effect, risk_summary,
+        confidence, urgency, impact, risk_level, effort_minutes,
+        suggested_action_kind, suggested_entity_id, status, valid_until, revisit_at,
+        created_at, updated_at, version
+    FROM recommendations
+    WHERE user_id = $1
+    ORDER BY updated_at DESC, created_at DESC, id DESC
+    LIMIT $2";
 const UPDATE_RECOMMENDATION_DECISION_SQL: &str = "
     UPDATE recommendations
     SET status = $4, revisit_at = $5
@@ -405,6 +416,30 @@ impl Database {
         let rows = sqlx::query_as::<_, RecommendationRow>(SELECT_ACTIVE_RECOMMENDATIONS_SQL)
             .bind(user_id)
             .bind(now)
+            .bind(limit)
+            .fetch_all(self.pool())
+            .await
+            .map_err(classify)?;
+        rows.into_iter().map(Recommendation::try_from).collect()
+    }
+
+    /// Returns recent recommendation decisions and pending items together so
+    /// the owner can review what the assistant proposed and how it ended.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for an invalid owner or limit, or a
+    /// persistence error when history cannot be loaded.
+    pub async fn recommendation_history_for_user(
+        &self,
+        user_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<Recommendation>, StorageError> {
+        if !is_v7(user_id) || !(1..=MAX_RECOMMENDATION_LIST).contains(&limit) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let rows = sqlx::query_as::<_, RecommendationRow>(SELECT_RECOMMENDATION_HISTORY_SQL)
+            .bind(user_id)
             .bind(limit)
             .fetch_all(self.pool())
             .await

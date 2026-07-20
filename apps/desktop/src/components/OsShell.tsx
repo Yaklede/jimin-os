@@ -3,6 +3,7 @@ import {
   CalendarDays,
   FolderKanban,
   House,
+  Inbox,
   Mic,
   RefreshCw,
   Settings2,
@@ -17,7 +18,13 @@ import {
 } from "./VoiceCommandSheet";
 
 export type OsDestination =
-  "home" | "calendar" | "projects" | "chat" | "memory" | "settings";
+  | "home"
+  | "calendar"
+  | "projects"
+  | "decisions"
+  | "chat"
+  | "memory"
+  | "settings";
 
 type OsShellProps = {
   destination: OsDestination;
@@ -91,6 +98,12 @@ export function OsShell({
             icon={<FolderKanban aria-hidden="true" />}
             label={copy.navigation.projects}
             onClick={() => onNavigate("projects")}
+          />
+          <NavigationButton
+            active={destination === "decisions"}
+            icon={<Inbox aria-hidden="true" />}
+            label={copy.navigation.decisions}
+            onClick={() => onNavigate("decisions")}
           />
           <NavigationButton
             active={destination === "memory"}

@@ -797,6 +797,14 @@ struct ScheduleRangeQuery {
 #[serde(deny_unknown_fields)]
 struct RecommendationListQuery {
     limit: Option<i64>,
+    scope: Option<RecommendationListScope>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RecommendationListScope {
+    Active,
+    All,
 }
 
 #[derive(serde::Deserialize)]
@@ -1911,7 +1919,10 @@ async fn get_home_snapshot(
     get,
     path = "/v1/recommendations",
     tag = "intelligence",
-    params(("limit" = Option<i64>, Query, description = "Maximum active recommendations, 1 to 50")),
+    params(
+        ("limit" = Option<i64>, Query, description = "Maximum recommendations, 1 to 50"),
+        ("scope" = Option<String>, Query, description = "active or all")
+    ),
     responses((status = 200, body = RecommendationListResponse), (status = 400), (status = 401), (status = 503))
 )]
 async fn list_recommendations(
@@ -1927,14 +1938,21 @@ async fn list_recommendations(
     let Some(planning) = state.planning() else {
         return unavailable_response(request_id);
     };
-    let recommendations = match planning
-        .active_recommendations_for_user(
-            principal.identity().user_id(),
-            OffsetDateTime::now_utc(),
-            query.limit.unwrap_or(20),
-        )
-        .await
-    {
+    let user_id = principal.identity().user_id();
+    let limit = query.limit.unwrap_or(20);
+    let recommendations = match query.scope.unwrap_or(RecommendationListScope::Active) {
+        RecommendationListScope::Active => {
+            planning
+                .active_recommendations_for_user(user_id, OffsetDateTime::now_utc(), limit)
+                .await
+        }
+        RecommendationListScope::All => {
+            planning
+                .recommendation_history_for_user(user_id, limit)
+                .await
+        }
+    };
+    let recommendations = match recommendations {
         Ok(recommendations) => recommendations,
         Err(error) => return storage_error_response(&error, request_id),
     };

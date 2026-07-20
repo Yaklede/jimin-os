@@ -470,6 +470,7 @@ svg {
 .home-page,
 .planning-page,
 .projects-page,
+.decision-page,
 .memory-page,
 .settings-page {
   width: min(100%, 960px);
@@ -542,6 +543,36 @@ svg {
   border-radius: 50%;
   background: var(--accent-tint);
   color: var(--accent);
+}
+
+.home-greeting__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.home-greeting__decisions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.home-greeting__decisions:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.home-greeting__decisions svg {
+  width: 17px;
+  height: 17px;
 }
 
 .home-greeting__assistant:hover {
@@ -1356,6 +1387,233 @@ svg {
   min-height: 44px;
   padding: 0 14px;
   white-space: nowrap;
+}
+
+.decision-page {
+  display: grid;
+  gap: 20px;
+  align-content: start;
+}
+
+.decision-page__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.decision-page__heading p {
+  max-width: 620px;
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.decision-page__symbol {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  margin: 0;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.decision-page__symbol svg {
+  width: 21px;
+  height: 21px;
+}
+
+.decision-section {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  box-shadow: var(--shadow-panel);
+}
+
+.decision-section > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.decision-section > header h2,
+.decision-section > header span {
+  margin: 0;
+}
+
+.decision-section > header h2 {
+  color: var(--text-strong);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.decision-section > header span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.decision-section ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.decision-card {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 14px;
+  padding: 18px;
+}
+
+.decision-card + .decision-card {
+  border-top: 1px solid var(--border);
+}
+
+.decision-card__icon {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: var(--radius-control);
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.decision-card[data-status="rejected"] .decision-card__icon,
+.decision-card[data-status="expired"] .decision-card__icon,
+.decision-card[data-status="failed"] .decision-card__icon {
+  background: var(--surface-subtle);
+  color: var(--muted);
+}
+
+.decision-card__icon svg {
+  width: 19px;
+  height: 19px;
+}
+
+.decision-card__body {
+  min-width: 0;
+}
+
+.decision-card__title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.decision-card__title-row h3 {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.decision-card__title-row > span {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.decision-card__body > p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.decision-card__body dl {
+  display: grid;
+  gap: 5px;
+  margin: 10px 0 0;
+}
+
+.decision-card__body dl > div {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.decision-card__body dt,
+.decision-card__body dd {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.decision-card__body dt {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.decision-card__body dd,
+.decision-card__body time {
+  color: var(--muted);
+}
+
+.decision-card__body time {
+  display: block;
+  margin-top: 10px;
+  font-size: 11px;
+}
+
+.decision-card__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.decision-card__actions button {
+  min-height: 44px;
+  white-space: nowrap;
+}
+
+.decision-card__actions .text-button {
+  border: 0;
+  padding: 0 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.decision-card__actions .text-button:hover {
+  color: var(--text);
+}
+
+.decision-section .empty-surface {
+  min-height: 150px;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.decision-page__skeleton {
+  display: grid;
+  gap: 12px;
+}
+
+.decision-page__skeleton span {
+  height: 116px;
+  border-radius: var(--radius-panel);
+  background: var(--surface-subtle);
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
 }
 
 .home-deadline-brief > header {
@@ -6734,6 +6992,57 @@ svg {
   .voice-sheet__secondary:hover {
     border-color: var(--accent);
     color: var(--accent);
+  }
+
+  .home-greeting__decisions span {
+    display: none;
+  }
+
+  .home-greeting__decisions {
+    width: 44px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .decision-page {
+    gap: 14px;
+  }
+
+  .decision-page__heading {
+    align-items: flex-start;
+  }
+
+  .decision-page__symbol {
+    width: 44px;
+    height: 44px;
+  }
+
+  .decision-card {
+    grid-template-columns: 36px minmax(0, 1fr);
+    gap: 12px;
+    padding: 16px;
+  }
+
+  .decision-card__icon {
+    width: 36px;
+    height: 36px;
+  }
+
+  .decision-card__title-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .decision-card__actions {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .decision-card__actions .text-button {
+    grid-column: 1 / -1;
+    justify-self: start;
   }
 }
 

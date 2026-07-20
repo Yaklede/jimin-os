@@ -2,7 +2,7 @@ import { createUuidV7 } from "../uuid";
 import { type Recommendation } from "./home";
 import { PlanningRequestError } from "./planning";
 
-type RecommendationDecision = "approve" | "defer";
+export type RecommendationDecision = "approve" | "reject" | "defer";
 
 interface RecommendationListResponse {
   items: Recommendation[];
@@ -22,6 +22,30 @@ export async function refreshWorkBrief(
       },
     },
   );
+  const body = await readJson(response);
+  if (!response.ok || !isRecommendationListResponse(body)) {
+    throw errorFromStatus(response.status);
+  }
+  return body.items;
+}
+
+export async function fetchRecommendationHistory(
+  baseUrl: string,
+  access: string,
+  limit = 50,
+): Promise<Recommendation[]> {
+  const url = new URL(
+    `${normalizeBaseUrl(baseUrl)}/v1/recommendations`,
+    browserOrigin(),
+  );
+  url.searchParams.set("scope", "all");
+  url.searchParams.set("limit", String(limit));
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${access}`,
+    },
+  });
   const body = await readJson(response);
   if (!response.ok || !isRecommendationListResponse(body)) {
     throw errorFromStatus(response.status);
@@ -63,6 +87,12 @@ export async function decideRecommendation(
 
 function normalizeBaseUrl(value: string): string {
   return value.replace(/\/$/, "");
+}
+
+function browserOrigin(): string {
+  return typeof window === "undefined"
+    ? "https://jimin-os.local"
+    : window.location.origin;
 }
 
 async function readJson(response: Response): Promise<unknown> {

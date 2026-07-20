@@ -4585,6 +4585,13 @@ async fn work_brief_refresh_generates_one_actionable_recommendation_per_active_s
     .expect("action result should be queryable");
     assert_eq!(action_count, 1);
     pool.close().await;
+    let history = database
+        .recommendation_history_for_user(owner.profile.id, 20)
+        .await
+        .expect("recommendation history should load");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, generated[0].id);
+    assert_eq!(history[0].status, RecommendationStatus::Executed);
     assert!(
         database
             .refresh_work_brief(owner.profile.id, now + TimeDuration::minutes(2))

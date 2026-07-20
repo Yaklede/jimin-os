@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { decideRecommendation, refreshWorkBrief } from "./intelligence";
+import {
+  decideRecommendation,
+  fetchRecommendationHistory,
+  refreshWorkBrief,
+} from "./intelligence";
 import { type Recommendation } from "./home";
 
 const recommendation: Recommendation = {
@@ -87,6 +91,28 @@ describe("work intelligence API", () => {
     });
     expect(JSON.parse(String(request?.body)).clientMutationId).toMatch(
       /^[0-9a-f-]{36}$/,
+    );
+  });
+
+  it("loads the pending and completed decision history together", async () => {
+    const executed = {
+      ...recommendation,
+      status: "executed" as const,
+      version: 3,
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ items: [executed] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchRecommendationHistory("https://jimin-os.example/", "access"),
+    ).resolves.toEqual([executed]);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "https://jimin-os.example/v1/recommendations?scope=all&limit=50",
     );
   });
 });

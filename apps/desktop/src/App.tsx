@@ -62,7 +62,12 @@ import {
   type Recommendation,
   fetchHomeSnapshot,
 } from "./api/home";
-import { decideRecommendation, refreshWorkBrief } from "./api/intelligence";
+import {
+  decideRecommendation,
+  fetchRecommendationHistory,
+  refreshWorkBrief,
+  type RecommendationDecision,
+} from "./api/intelligence";
 import { processVoiceCommand } from "./api/voice";
 import {
   AgentRequestError,
@@ -84,6 +89,7 @@ import {
   type ConversationMessage,
 } from "./api/agent";
 import { ConversationWorkspace } from "./components/ConversationWorkspace";
+import { DecisionInboxWorkspace } from "./components/DecisionInboxWorkspace";
 import { AssistantRail, HomeWorkspace } from "./components/HomeWorkspace";
 import { MemoryWorkspace } from "./components/MemoryWorkspace";
 import { OsShell, type OsDestination } from "./components/OsShell";
@@ -147,6 +153,11 @@ export default function App() {
   const [homeSnapshot, setHomeSnapshot] = useState<HomeSnapshot | undefined>();
   const [homeLoading, setHomeLoading] = useState(false);
   const [homeError, setHomeError] = useState<string | undefined>();
+  const [decisionRecommendations, setDecisionRecommendations] = useState<
+    Recommendation[]
+  >([]);
+  const [decisionsLoading, setDecisionsLoading] = useState(false);
+  const [decisionsError, setDecisionsError] = useState<string>();
   const [planningSnapshot, setPlanningSnapshot] = useState<
     PlanningSnapshot | undefined
   >();
@@ -336,6 +347,22 @@ export default function App() {
       return undefined;
     } finally {
       setHomeLoading(false);
+    }
+  }, [apiBaseUrl, tokens, withAuthenticatedSession]);
+
+  const loadDecisionInbox = useCallback(async () => {
+    if (!tokens) return;
+    setDecisionsLoading(true);
+    setDecisionsError(undefined);
+    try {
+      const items = await withAuthenticatedSession((accessToken) =>
+        fetchRecommendationHistory(apiBaseUrl, accessToken),
+      );
+      setDecisionRecommendations(items);
+    } catch {
+      setDecisionsError(copy.decisions.loadNotice);
+    } finally {
+      setDecisionsLoading(false);
     }
   }, [apiBaseUrl, tokens, withAuthenticatedSession]);
 
@@ -1240,7 +1267,7 @@ export default function App() {
 
   async function decideHomeRecommendation(
     recommendation: Recommendation,
-    decision: "approve" | "defer",
+    decision: RecommendationDecision,
   ): Promise<boolean> {
     if (!tokens) return false;
     setHomeError(undefined);
@@ -1249,7 +1276,7 @@ export default function App() {
         decision === "defer"
           ? new Date(Date.now() + 4 * 60 * 60 * 1_000).toISOString()
           : undefined;
-      await withAuthenticatedSession((accessToken) =>
+      const updated = await withAuthenticatedSession((accessToken) =>
         decideRecommendation(
           apiBaseUrl,
           accessToken,
@@ -1267,6 +1294,9 @@ export default function App() {
               ),
             }
           : current,
+      );
+      setDecisionRecommendations((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item)),
       );
       return true;
     } catch {
@@ -2353,6 +2383,9 @@ export default function App() {
         void loadProjectsForWorkspace(selectedWorkspaceId);
       }
     }
+    if (nextDestination === "decisions") {
+      void loadDecisionInbox();
+    }
   }
 
   return (
@@ -2379,8 +2412,13 @@ export default function App() {
           onNavigate={navigate}
           onVoiceTranscript={handleVoiceTranscript}
           onVoiceCommand={handleVoiceCommand}
-          onRefresh={() => void refresh()}
-          refreshing={mode === "loading"}
+          onRefresh={() =>
+            void (destination === "decisions" ? loadDecisionInbox() : refresh())
+          }
+          refreshing={
+            mode === "loading" ||
+            (destination === "decisions" && decisionsLoading)
+          }
           rail={
             destination !== "chat" ? (
               <AssistantRail
@@ -2432,6 +2470,7 @@ export default function App() {
               onOpenTask={openTaskFromAssistant}
               onOpenProject={openProjectFromAssistant}
               onOpenSchedule={openScheduleFromAssistant}
+              onOpenDecisionInbox={() => navigate("decisions")}
               onDecideRecommendation={decideHomeRecommendation}
             />
           )}
@@ -2496,6 +2535,14 @@ export default function App() {
               onTestWebhook={testWorkspaceWebhook}
               onDeleteWebhook={deleteWorkspaceWebhook}
               onRetryWebhookDelivery={retryWorkspaceWebhookDelivery}
+            />
+          )}
+          {destination === "decisions" && (
+            <DecisionInboxWorkspace
+              recommendations={decisionRecommendations}
+              loading={decisionsLoading || mode === "loading"}
+              error={decisionsError}
+              onDecide={decideHomeRecommendation}
             />
           )}
           {destination === "memory" && (
