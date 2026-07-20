@@ -1350,6 +1350,7 @@ export default function App() {
           ),
         );
       }
+      void loadGoals();
     } catch {
       setHomeError(copy.messages.taskCompletionNotice);
       setPlanningError(copy.messages.taskCompletionNotice);
@@ -1398,6 +1399,7 @@ export default function App() {
         );
       }
       void loadHomeSnapshot();
+      void loadGoals();
     } catch {
       setPlanningError(copy.messages.taskRestoreNotice);
       void loadPlanningSnapshot();
@@ -1482,6 +1484,7 @@ export default function App() {
     await Promise.all([
       loadHomeSnapshot(),
       loadPlanningSnapshot(),
+      loadGoals(),
       task.projectId && task.projectId === selectedProjectId
         ? loadProjectTasks(task.projectId)
         : Promise.resolve(undefined),
@@ -1532,6 +1535,7 @@ export default function App() {
       await Promise.all([
         loadHomeSnapshot(),
         loadPlanningSnapshot(),
+        loadGoals(),
         task.projectId && task.projectId === selectedProjectId
           ? loadProjectTasks(task.projectId)
           : Promise.resolve(undefined),
@@ -1805,6 +1809,7 @@ export default function App() {
       setProjects((current) =>
         current.map((item) => (item.id === updated.id ? updated : item)),
       );
+      void loadGoals();
     } catch (error) {
       setProjectsError(copy.projects.projectUpdateNotice);
       if (selectedWorkspaceId) {
@@ -1837,6 +1842,7 @@ export default function App() {
           : Promise.resolve(false),
         loadHomeSnapshot(),
         loadPlanningSnapshot(),
+        loadGoals(),
       ]);
     } catch (error) {
       setProjectsError(copy.projects.projectDeleteNotice);
@@ -1870,6 +1876,7 @@ export default function App() {
         ),
       );
       void loadHomeSnapshot();
+      void loadGoals();
     } catch (error) {
       setProjectsError(copy.messages.projectTaskSaveNotice);
       throw error;
@@ -1917,6 +1924,7 @@ export default function App() {
         );
       }
       void loadHomeSnapshot();
+      void loadGoals();
     } catch {
       setProjectsError(copy.messages.taskCompletionNotice);
       if (selectedProjectId) void loadProjectTasks(selectedProjectId);
@@ -1962,6 +1970,7 @@ export default function App() {
       }
       void loadHomeSnapshot();
       void loadPlanningSnapshot();
+      void loadGoals();
     } catch {
       setProjectsError(copy.messages.projectTaskSaveNotice);
       if (selectedProjectId) void loadProjectTasks(selectedProjectId);
@@ -2005,7 +2014,11 @@ export default function App() {
           ),
         );
       }
-      await Promise.all([loadHomeSnapshot(), loadPlanningSnapshot()]);
+      await Promise.all([
+        loadHomeSnapshot(),
+        loadPlanningSnapshot(),
+        loadGoals(),
+      ]);
     } catch (error) {
       setProjectsError(copy.projects.taskRemoveNotice);
       if (selectedProjectId) void loadProjectTasks(selectedProjectId);
@@ -2514,6 +2527,9 @@ export default function App() {
               error={goalsError ?? projectsError}
               onSelectWorkspace={selectWorkspace}
               onSelectProject={selectProject}
+              onOpenGoalTask={(taskId, projectId) =>
+                void openTaskFromAssistant({ id: taskId, projectId })
+              }
               onClearProject={() => {
                 setHighlightedProjectTaskId(undefined);
                 setSelectedProjectId(undefined);

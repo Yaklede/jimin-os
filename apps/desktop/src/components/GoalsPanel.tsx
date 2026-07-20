@@ -1,4 +1,13 @@
-import { Check, Flag, Pause, Pencil, Plus, RotateCcw, X } from "lucide-react";
+import {
+  Check,
+  ChevronRight,
+  Flag,
+  Pause,
+  Pencil,
+  Plus,
+  RotateCcw,
+  X,
+} from "lucide-react";
 import { FormEvent, useMemo, useState } from "react";
 
 import { type Goal } from "../api/goals";
@@ -19,6 +28,8 @@ export function GoalsPanel({
   saving,
   onCreate,
   onUpdate,
+  onOpenTask,
+  onOpenProject,
 }: {
   goals: Goal[];
   projects: Project[];
@@ -29,6 +40,8 @@ export function GoalsPanel({
     goal: Goal,
     input: GoalInput & { status: Goal["status"] },
   ): Promise<void>;
+  onOpenTask(taskId: string, projectId: string): void;
+  onOpenProject(projectId: string): void;
 }) {
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string>();
@@ -223,6 +236,8 @@ export function GoalsPanel({
               onEdit={() => openEdit(goal)}
               onPause={() => void changeStatus(goal, "paused")}
               onAchieve={() => void changeStatus(goal, "achieved")}
+              onOpenTask={onOpenTask}
+              onOpenProject={onOpenProject}
               key={goal.id}
             />
           ))
@@ -266,6 +281,8 @@ function GoalRow({
   onEdit,
   onPause,
   onAchieve,
+  onOpenTask,
+  onOpenProject,
 }: {
   goal: Goal;
   projects: Project[];
@@ -273,18 +290,85 @@ function GoalRow({
   onEdit(): void;
   onPause(): void;
   onAchieve(): void;
+  onOpenTask(taskId: string, projectId: string): void;
+  onOpenProject(projectId: string): void;
 }) {
   const project = projects.find((item) => item.id === goal.projectId);
+  const linkedProjectTitle = goal.projectTitle ?? project?.title;
+  const canOpenNextAction = Boolean(
+    goal.nextAction?.id &&
+    (goal.nextAction.kind === "project" || goal.projectId),
+  );
+
+  function openNextAction() {
+    const action = goal.nextAction;
+    if (!action?.id) return;
+    if (action.kind === "task" && goal.projectId) {
+      onOpenTask(action.id, goal.projectId);
+      return;
+    }
+    onOpenProject(action.id);
+  }
+
   return (
-    <article className="goal-row">
+    <article className="goal-row" data-health={goal.health}>
       <span className="goal-row__marker" aria-hidden="true" />
       <div className="goal-row__content">
-        <strong>{goal.title}</strong>
+        <div className="goal-row__title-line">
+          <strong>{goal.title}</strong>
+          <span className="goal-row__health">
+            {goalHealthLabel(goal.health)}
+          </span>
+        </div>
         <p>{goal.desiredOutcome}</p>
-        <span>
-          {project?.title ?? copy.goals.noProject}
+        <span className="goal-row__scope">
+          {linkedProjectTitle ?? copy.goals.noProject}
           {goal.targetAt ? ` · ${formatTarget(goal.targetAt)}` : ""}
         </span>
+        <div className="goal-row__progress">
+          <div>
+            <span>{copy.goals.progress}</span>
+            <strong>{goal.progressPercent}%</strong>
+          </div>
+          <span
+            className="goal-row__progress-track"
+            role="progressbar"
+            aria-label={copy.goals.progressFor(goal.title)}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={goal.progressPercent}
+          >
+            <span style={{ width: `${goal.progressPercent}%` }} />
+          </span>
+        </div>
+        <div className="goal-row__evidence" aria-label={copy.goals.evidence}>
+          <span>
+            {copy.goals.completedEvidence(
+              goal.completedTaskCount,
+              goal.totalTaskCount,
+            )}
+          </span>
+          <span>{copy.goals.weeklyEvidence(goal.completedLastSevenDays)}</span>
+          {goal.overdueTaskCount > 0 && (
+            <span data-risk="true">
+              {copy.goals.overdueEvidence(goal.overdueTaskCount)}
+            </span>
+          )}
+        </div>
+        {goal.nextAction && (
+          <button
+            className="goal-row__next focus-visible-control"
+            type="button"
+            disabled={!canOpenNextAction}
+            onClick={openNextAction}
+          >
+            <span>
+              <small>{copy.goals.nextAction}</small>
+              <strong>{goal.nextAction.title}</strong>
+            </span>
+            {canOpenNextAction && <ChevronRight aria-hidden="true" />}
+          </button>
+        )}
       </div>
       <div className="goal-row__actions">
         <button
@@ -317,6 +401,15 @@ function GoalRow({
       </div>
     </article>
   );
+}
+
+function goalHealthLabel(health: Goal["health"]): string {
+  if (health === "at_risk") return copy.goals.healthAtRisk;
+  if (health === "needs_plan") return copy.goals.healthNeedsPlan;
+  if (health === "ready_to_complete") return copy.goals.healthReady;
+  if (health === "paused") return copy.goals.paused;
+  if (health === "achieved") return copy.goals.achieved;
+  return copy.goals.healthOnTrack;
 }
 
 function dateInputToIso(value: string): string | undefined {

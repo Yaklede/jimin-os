@@ -357,6 +357,18 @@ export const copy = {
     paused: "잠시 멈춤",
     achieved: "달성",
     cancelled: "취소",
+    progress: "진행률",
+    progressFor: (title: string) => `${title} 목표 진행률`,
+    evidence: "목표 진행 근거",
+    completedEvidence: (completed: number, total: number) =>
+      `연결된 할 일 ${completed}/${total}개 완료`,
+    weeklyEvidence: (count: number) => `최근 7일 ${count}개 완료`,
+    overdueEvidence: (count: number) => `기한 지난 일 ${count}개`,
+    nextAction: "다음 행동",
+    healthOnTrack: "순조로워요",
+    healthAtRisk: "점검이 필요해요",
+    healthNeedsPlan: "계획이 필요해요",
+    healthReady: "달성 확인이 필요해요",
   },
   memory: {
     title: "기억",

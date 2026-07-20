@@ -8,6 +8,26 @@ export interface Goal {
   desiredOutcome: string;
   status: "active" | "paused" | "achieved" | "cancelled";
   targetAt: string | null;
+  projectTitle: string | null;
+  progressPercent: number;
+  totalTaskCount: number;
+  openTaskCount: number;
+  completedTaskCount: number;
+  completedLastSevenDays: number;
+  overdueTaskCount: number;
+  health:
+    | "on_track"
+    | "at_risk"
+    | "needs_plan"
+    | "ready_to_complete"
+    | "paused"
+    | "achieved";
+  nextAction: {
+    kind: "task" | "project";
+    id: string | null;
+    title: string;
+    dueAt: string | null;
+  } | null;
   createdAt: string;
   updatedAt: string;
   version: number;
@@ -127,6 +147,13 @@ function isGoal(value: unknown): value is Goal {
     typeof value.title === "string" &&
     typeof value.desiredOutcome === "string" &&
     typeof value.status === "string" &&
+    typeof value.progressPercent === "number" &&
+    typeof value.totalTaskCount === "number" &&
+    typeof value.openTaskCount === "number" &&
+    typeof value.completedTaskCount === "number" &&
+    typeof value.completedLastSevenDays === "number" &&
+    typeof value.overdueTaskCount === "number" &&
+    typeof value.health === "string" &&
     typeof value.version === "number"
   );
 }

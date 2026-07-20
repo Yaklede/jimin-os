@@ -50,6 +50,7 @@ type ProjectsWorkspaceProps = {
   error: string | undefined;
   onSelectWorkspace(workspaceId: string): void;
   onSelectProject(projectId: string): void;
+  onOpenGoalTask(taskId: string, projectId: string): void;
   onClearProject(): void;
   onCreateProject(input: {
     title: string;
@@ -135,6 +136,7 @@ export function ProjectsWorkspace({
   error,
   onSelectWorkspace,
   onSelectProject,
+  onOpenGoalTask,
   onClearProject,
   onCreateProject,
   onCreateGoal,
@@ -289,6 +291,8 @@ export function ProjectsWorkspace({
         saving={saving}
         onCreate={onCreateGoal}
         onUpdate={onUpdateGoal}
+        onOpenTask={onOpenGoalTask}
+        onOpenProject={onSelectProject}
       />
 
       {(error || formError) && (
