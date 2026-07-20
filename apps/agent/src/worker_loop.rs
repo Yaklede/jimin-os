@@ -10,6 +10,7 @@ use jimin_storage::{
         ClaimedAgentJob, ConversationMessage, ConversationMessageRole, ConversationMessageStatus,
     },
     gmail::GmailMessage,
+    goals::{GoalHealth, GoalOverview, GoalStatus},
     intelligence::NewScheduleRequestConflict,
     planning::{ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus},
     webhook::ProjectWebhook,
@@ -32,6 +33,7 @@ use uuid::Uuid;
 const CONTEXT_SCHEDULE_LIMIT: usize = 32;
 const CONTEXT_TASK_LIMIT: usize = 32;
 const CONTEXT_PROJECT_LIMIT: usize = 32;
+const CONTEXT_GOAL_LIMIT: usize = 16;
 const CONTEXT_INBOX_LIMIT: usize = 16;
 const CONTEXT_MAX_BYTES: usize = 20 * 1024;
 const MAX_STREAMED_STRUCTURED_BYTES: usize = 512 * 1024;
@@ -858,6 +860,7 @@ async fn contextualized_turn_context(
         completed_tasks,
         workspaces,
         projects,
+        goals,
         inbox,
         webhooks,
         conversation_messages,
@@ -871,6 +874,7 @@ async fn contextualized_turn_context(
         database.completed_tasks_for_user(job.user_id),
         database.workspaces_for_user(job.user_id),
         database.projects_for_user(job.user_id),
+        database.goal_overviews_for_user(job.user_id, now),
         database.recent_gmail_messages_for_user(job.user_id),
         database.user_project_webhooks(job.user_id),
         database.conversation_messages_for_user(job.user_id, job.conversation_id),
@@ -887,11 +891,12 @@ async fn contextualized_turn_context(
                 )
         })
         .collect::<Vec<_>>();
-    let daily_tasks = tasks
+    let mut daily_tasks = tasks
         .iter()
         .filter(|task| task.due_at.is_none_or(|due_at| due_at < daily_task_cutoff))
         .cloned()
         .collect::<Vec<_>>();
+    sort_tasks_for_execution(&mut daily_tasks, &goals, now);
     let bulk_schedule_cancellation_ids =
         requested_bulk_schedule_cancellation_ids(&job.input_content, &schedule, now);
     let prompt = render_contextualized_turn(
@@ -901,6 +906,7 @@ async fn contextualized_turn_context(
         &completed_tasks,
         &workspaces,
         &projects,
+        &goals,
         &inbox,
         &webhooks,
         &conversation_messages,
@@ -920,6 +926,37 @@ async fn contextualized_turn_context(
     })
 }
 
+fn sort_tasks_for_execution(tasks: &mut [Task], goals: &[GoalOverview], now: OffsetDateTime) {
+    tasks.sort_by_key(|task| {
+        let goal = task.project_id.and_then(|project_id| {
+            goals.iter().find(|overview| {
+                overview.goal.status == GoalStatus::Active
+                    && overview.goal.project_id == Some(project_id)
+            })
+        });
+        let deadline_rank = if task.due_at.is_some_and(|due_at| due_at < now) {
+            0
+        } else if task
+            .due_at
+            .is_some_and(|due_at| due_at <= now + TimeDuration::days(1))
+        {
+            1
+        } else if goal.is_some() {
+            2
+        } else {
+            3
+        };
+        (
+            deadline_rank,
+            goal.and_then(|overview| overview.goal.target_at)
+                .map_or(i64::MAX, OffsetDateTime::unix_timestamp),
+            std::cmp::Reverse(task.priority),
+            task.due_at.map_or(i64::MAX, OffsetDateTime::unix_timestamp),
+            task.id,
+        )
+    });
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // The prompt builder names every bounded authenticated context collection explicitly.
 fn render_contextualized_turn(
     input: &str,
@@ -928,6 +965,7 @@ fn render_contextualized_turn(
     completed_tasks: &[Task],
     workspaces: &[Workspace],
     projects: &[Project],
+    goals: &[GoalOverview],
     inbox: &[GmailMessage],
     webhooks: &[ProjectWebhook],
     conversation_messages: &[ConversationMessage],
@@ -947,7 +985,10 @@ fn render_contextualized_turn(
          include every relevant record across the useful sections. open_tasks contains all open work, including future work. \
          For a broad Korean request about 오늘 일정, 오늘 할 일, or 오늘 계획, treat it as a daily briefing and cover \
          today's schedule plus tasks with no due date or a due date before daily_task_cutoff. Exclude future-dated tasks \
-         unless the user asks for them, and respect an explicit request for only schedule or only tasks. \
+         unless the user asks for them, and respect an explicit request for only schedule or only tasks. goals contains \
+         server-calculated progress from connected project tasks. When deadlines do not conflict, put work connected to an \
+         active goal before unlinked work and explain which goal the first action advances. For weekly goal questions, use \
+         completedLast7Days, progress, overdue work, and next action as evidence; never invent a probability. \
          For general conversation, use no sections and leave presentation.title and focusEntityId empty. \
          Choose stack for one simple group, split when list-to-detail exploration helps, and focus when one record is primary. \
          Tasks support list or checklist, schedule supports list or timeline, and projects support list or cards. \
@@ -1101,7 +1142,49 @@ fn render_contextualized_turn(
             );
         }
     }
-    prompt.push_str("</projects>\n<project_webhooks>\n");
+    prompt.push_str("</projects>\n<goals>\n");
+    if goals.is_empty() {
+        prompt.push_str("(no goals)\n");
+    } else {
+        for overview in goals.iter().take(CONTEXT_GOAL_LIMIT) {
+            let goal = &overview.goal;
+            let status = match goal.status {
+                GoalStatus::Active => "active",
+                GoalStatus::Paused => "paused",
+                GoalStatus::Achieved => "achieved",
+                GoalStatus::Cancelled => "cancelled",
+            };
+            let health = match overview.health {
+                GoalHealth::OnTrack => "on_track",
+                GoalHealth::AtRisk => "at_risk",
+                GoalHealth::NeedsPlan => "needs_plan",
+                GoalHealth::ReadyToComplete => "ready_to_complete",
+                GoalHealth::Paused => "paused",
+                GoalHealth::Achieved => "achieved",
+            };
+            let next_action = overview
+                .next_action
+                .as_ref()
+                .map_or("none", |action| action.title.as_str());
+            let _ = writeln!(
+                prompt,
+                "- [id {} | {status} | health {health} | project {} | progress {}% | tasks {} completed / {} open | overdue {} | completedLast7Days {} | target {}] {} | outcome: {} | next: {next_action}",
+                goal.id,
+                goal.project_id
+                    .map_or_else(|| "none".to_owned(), |id| id.to_string()),
+                overview.progress_percent,
+                overview.completed_task_count,
+                overview.open_task_count,
+                overview.overdue_task_count,
+                overview.completed_last_seven_days,
+                goal.target_at
+                    .map_or_else(|| "none".to_owned(), korea_timestamp),
+                goal.title,
+                goal.desired_outcome,
+            );
+        }
+    }
+    prompt.push_str("</goals>\n<project_webhooks>\n");
     if webhooks.is_empty() {
         prompt.push_str("(no configured Google Chat or Discord webhooks)\n");
     } else {
@@ -3154,6 +3237,7 @@ mod tests {
             ConversationMessage, ConversationMessageRole, ConversationMessageStatus,
         },
         gmail::GmailMessage,
+        goals::{Goal, GoalHealth, GoalOverview, GoalStatus},
         planning::{ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus},
         work::{Project, ProjectStatus, Workspace, WorkspaceScope},
     };
@@ -3167,7 +3251,8 @@ mod tests {
         is_daily_overview_request, korea_day_end, nearest_available_schedule_starts,
         render_contextualized_turn, requested_bulk_schedule_cancellation_ids,
         requires_process_restart, schedule_conflict_result, schedule_windows_overlap,
-        validate_turn_intent, validated_agent_action, validated_assistant_response,
+        sort_tasks_for_execution, validate_turn_intent, validated_agent_action,
+        validated_assistant_response,
     };
 
     #[test]
@@ -3279,6 +3364,7 @@ mod tests {
             &[completed_task],
             &[workspace],
             &[project],
+            &[],
             &[inbox],
             &[],
             &[confirmed_conflict],
@@ -3332,6 +3418,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             now,
             korea_day_end(now).expect("Korea day boundary"),
         );
@@ -3340,6 +3427,75 @@ mod tests {
         assert!(prompt.contains("current_time=\"2026-07-14T10:00:00+09:00\""));
         assert!(prompt.contains("current_date=\"2026-07-14\""));
         assert!(prompt.contains("completed 2026-07-14T06:20:00+09:00"));
+    }
+
+    #[test]
+    fn execution_order_prefers_active_goal_work_without_hiding_deadlines() {
+        let now = OffsetDateTime::now_utc();
+        let goal_project_id = Uuid::now_v7();
+        let urgent = Task {
+            id: Uuid::now_v7(),
+            project_id: None,
+            title: "오늘 마감 확인".to_owned(),
+            notes: None,
+            status: TaskStatus::Open,
+            priority: 1,
+            due_at: Some(now + Duration::hours(2)),
+            completed_at: None,
+            version: 1,
+        };
+        let goal_task = Task {
+            id: Uuid::now_v7(),
+            project_id: Some(goal_project_id),
+            title: "목표 다음 행동".to_owned(),
+            notes: None,
+            status: TaskStatus::Open,
+            priority: 1,
+            due_at: None,
+            completed_at: None,
+            version: 1,
+        };
+        let unrelated = Task {
+            id: Uuid::now_v7(),
+            project_id: None,
+            title: "연결되지 않은 일".to_owned(),
+            notes: None,
+            status: TaskStatus::Open,
+            priority: 3,
+            due_at: None,
+            completed_at: None,
+            version: 1,
+        };
+        let goal = GoalOverview {
+            goal: Goal {
+                id: Uuid::now_v7(),
+                workspace_id: Some(Uuid::now_v7()),
+                project_id: Some(goal_project_id),
+                title: "MVP 배포".to_owned(),
+                desired_outcome: "이번 달 안에 MVP를 배포한다.".to_owned(),
+                status: GoalStatus::Active,
+                target_at: Some(now + Duration::days(10)),
+                created_at: now,
+                updated_at: now,
+                version: 1,
+            },
+            project_title: Some("개인 운영체제".to_owned()),
+            progress_percent: 50,
+            total_task_count: 2,
+            open_task_count: 1,
+            completed_task_count: 1,
+            completed_last_seven_days: 1,
+            overdue_task_count: 0,
+            health: GoalHealth::OnTrack,
+            next_action: None,
+        };
+        let mut tasks = vec![unrelated.clone(), goal_task.clone(), urgent.clone()];
+
+        sort_tasks_for_execution(&mut tasks, &[goal], now);
+
+        assert_eq!(tasks[0].id, urgent.id);
+        assert_eq!(tasks[1].id, goal_task.id);
+        assert_eq!(tasks[2].id, unrelated.id);
     }
 
     #[test]

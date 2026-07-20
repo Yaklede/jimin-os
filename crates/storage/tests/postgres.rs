@@ -22,7 +22,7 @@ use jimin_storage::{
     },
     calendar_mutation::{ScheduleCalendarMutationOperation, provider_event_id_for_schedule},
     gmail::ProviderGmailMessage,
-    goals::{GoalStatus, GoalUpdate, NewGoal},
+    goals::{GoalHealth, GoalNextActionKind, GoalStatus, GoalUpdate, NewGoal},
     intelligence::{
         DecideRecommendation, DecideRecommendationOutcome, NewRecommendation,
         NewScheduleRequestConflict, RecommendationDecision, RecommendationStatus,
@@ -2367,6 +2367,10 @@ async fn project_update_is_scoped_versioned_and_emits_current_state() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The goal contract verifies ownership, optimistic updates, task-derived progress, risk, next action, and achieved state together."
+)]
 async fn goal_crud_is_owner_scoped_and_versioned() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;
@@ -2419,6 +2423,56 @@ async fn goal_crud_is_owner_scoped_and_versioned() {
     assert_eq!(created.status, GoalStatus::Active);
     assert_eq!(created.project_id, Some(project.id));
 
+    let completed_task = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            project_id: Some(project.id),
+            title: "반복 업무 목록 정리".to_owned(),
+            notes: None,
+            priority: 1,
+            due_at: None,
+        })
+        .await
+        .expect("completed task fixture should persist");
+    database
+        .complete_task(owner.profile.id, completed_task.id, completed_task.version)
+        .await
+        .expect("task completion should persist")
+        .expect("open task should complete");
+    let overdue_task = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            project_id: Some(project.id),
+            title: "자동화 후보 구현".to_owned(),
+            notes: None,
+            priority: 3,
+            due_at: Some(OffsetDateTime::now_utc() - TimeDuration::hours(1)),
+        })
+        .await
+        .expect("overdue task fixture should persist");
+
+    let overview = database
+        .goal_overview_for_user(owner.profile.id, created.id, OffsetDateTime::now_utc())
+        .await
+        .expect("goal overview should load")
+        .expect("owned goal should have an overview");
+    assert_eq!(overview.progress_percent, 50);
+    assert_eq!(overview.total_task_count, 2);
+    assert_eq!(overview.completed_task_count, 1);
+    assert_eq!(overview.completed_last_seven_days, 1);
+    assert_eq!(overview.overdue_task_count, 1);
+    assert_eq!(overview.health, GoalHealth::AtRisk);
+    assert_eq!(
+        overview.next_action.as_ref().map(|action| action.kind),
+        Some(GoalNextActionKind::Task)
+    );
+    assert_eq!(
+        overview.next_action.as_ref().and_then(|action| action.id),
+        Some(overdue_task.id)
+    );
+
     let listed = database
         .goals_for_user(owner.profile.id)
         .await
@@ -2466,6 +2520,15 @@ async fn goal_crud_is_owner_scoped_and_versioned() {
             .expect("stale goal update should not fail")
             .is_none()
     );
+
+    let achieved = database
+        .goal_overview_for_user(owner.profile.id, updated.id, OffsetDateTime::now_utc())
+        .await
+        .expect("achieved overview should load")
+        .expect("achieved goal should remain queryable");
+    assert_eq!(achieved.progress_percent, 100);
+    assert_eq!(achieved.health, GoalHealth::Achieved);
+    assert!(achieved.next_action.is_none());
 
     database.close().await;
 }

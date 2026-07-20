@@ -16,6 +16,30 @@ pub enum GoalStatus {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalHealth {
+    OnTrack,
+    AtRisk,
+    NeedsPlan,
+    ReadyToComplete,
+    Paused,
+    Achieved,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalNextActionKind {
+    Task,
+    Project,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalNextAction {
+    pub kind: GoalNextActionKind,
+    pub id: Option<Uuid>,
+    pub title: String,
+    pub due_at: Option<OffsetDateTime>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Goal {
     pub id: Uuid,
@@ -28,6 +52,21 @@ pub struct Goal {
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
     pub version: i64,
+}
+
+/// Server-derived evidence that explains how connected work advances a goal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalOverview {
+    pub goal: Goal,
+    pub project_title: Option<String>,
+    pub progress_percent: i16,
+    pub total_task_count: i64,
+    pub open_task_count: i64,
+    pub completed_task_count: i64,
+    pub completed_last_seven_days: i64,
+    pub overdue_task_count: i64,
+    pub health: GoalHealth,
+    pub next_action: Option<GoalNextAction>,
 }
 
 pub struct NewGoal {
@@ -64,6 +103,31 @@ struct GoalRow {
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
     version: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct GoalOverviewRow {
+    id: Uuid,
+    workspace_id: Option<Uuid>,
+    project_id: Option<Uuid>,
+    title: String,
+    desired_outcome: String,
+    status: String,
+    target_at: Option<OffsetDateTime>,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+    version: i64,
+    project_title: Option<String>,
+    project_status: Option<String>,
+    project_next_action: Option<String>,
+    total_task_count: i64,
+    open_task_count: i64,
+    completed_task_count: i64,
+    completed_last_seven_days: i64,
+    overdue_task_count: i64,
+    next_task_id: Option<Uuid>,
+    next_task_title: Option<String>,
+    next_task_due_at: Option<OffsetDateTime>,
 }
 
 impl NewGoal {
@@ -202,6 +266,124 @@ impl Database {
         rows.into_iter().map(Goal::try_from).collect()
     }
 
+    /// Lists goals together with progress and the next executable action
+    /// derived from their connected project tasks.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation or persistence error.
+    pub async fn goal_overviews_for_user(
+        &self,
+        user_id: Uuid,
+        now: OffsetDateTime,
+    ) -> Result<Vec<GoalOverview>, StorageError> {
+        if !is_v7(user_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let rows = sqlx::query_as::<_, GoalOverviewRow>(
+            "SELECT
+                goals.id, goals.workspace_id, goals.project_id, goals.title,
+                goals.desired_outcome, goals.status, goals.target_at,
+                goals.created_at, goals.updated_at, goals.version,
+                projects.title AS project_title,
+                projects.status AS project_status,
+                projects.next_action AS project_next_action,
+                COALESCE((
+                    SELECT COUNT(*) FROM tasks
+                    WHERE tasks.user_id = goals.user_id
+                      AND tasks.project_id = goals.project_id
+                      AND tasks.status IN ('open', 'completed')
+                ), 0)::BIGINT AS total_task_count,
+                COALESCE((
+                    SELECT COUNT(*) FROM tasks
+                    WHERE tasks.user_id = goals.user_id
+                      AND tasks.project_id = goals.project_id
+                      AND tasks.status = 'open'
+                ), 0)::BIGINT AS open_task_count,
+                COALESCE((
+                    SELECT COUNT(*) FROM tasks
+                    WHERE tasks.user_id = goals.user_id
+                      AND tasks.project_id = goals.project_id
+                      AND tasks.status = 'completed'
+                ), 0)::BIGINT AS completed_task_count,
+                COALESCE((
+                    SELECT COUNT(*) FROM tasks
+                    WHERE tasks.user_id = goals.user_id
+                      AND tasks.project_id = goals.project_id
+                      AND tasks.status = 'completed'
+                      AND tasks.completed_at >= $2 - INTERVAL '7 days'
+                ), 0)::BIGINT AS completed_last_seven_days,
+                COALESCE((
+                    SELECT COUNT(*) FROM tasks
+                    WHERE tasks.user_id = goals.user_id
+                      AND tasks.project_id = goals.project_id
+                      AND tasks.status = 'open'
+                      AND tasks.due_at < $2
+                ), 0)::BIGINT AS overdue_task_count,
+                next_task.id AS next_task_id,
+                next_task.title AS next_task_title,
+                next_task.due_at AS next_task_due_at
+             FROM goals
+             LEFT JOIN projects
+               ON projects.id = goals.project_id
+              AND projects.user_id = goals.user_id
+             LEFT JOIN LATERAL (
+                SELECT tasks.id, tasks.title, tasks.due_at
+                FROM tasks
+                WHERE tasks.user_id = goals.user_id
+                  AND tasks.project_id = goals.project_id
+                  AND tasks.status = 'open'
+                ORDER BY
+                  (tasks.due_at IS NOT NULL AND tasks.due_at < $2) DESC,
+                  tasks.priority DESC,
+                  tasks.due_at ASC NULLS LAST,
+                  tasks.created_at ASC,
+                  tasks.id ASC
+                LIMIT 1
+             ) AS next_task ON TRUE
+             WHERE goals.user_id = $1
+             ORDER BY
+                CASE goals.status
+                    WHEN 'active' THEN 0
+                    WHEN 'paused' THEN 1
+                    WHEN 'achieved' THEN 2
+                    ELSE 3
+                END,
+                goals.target_at ASC NULLS LAST,
+                goals.updated_at DESC,
+                goals.id DESC",
+        )
+        .bind(user_id)
+        .bind(now)
+        .fetch_all(self.pool())
+        .await
+        .map_err(classify)?;
+        rows.into_iter()
+            .map(|row| goal_overview(row, now))
+            .collect()
+    }
+
+    /// Loads one owned goal with the same progress evidence used by the list.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation or persistence error.
+    pub async fn goal_overview_for_user(
+        &self,
+        user_id: Uuid,
+        goal_id: Uuid,
+        now: OffsetDateTime,
+    ) -> Result<Option<GoalOverview>, StorageError> {
+        if !is_v7(goal_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        Ok(self
+            .goal_overviews_for_user(user_id, now)
+            .await?
+            .into_iter()
+            .find(|overview| overview.goal.id == goal_id))
+    }
+
     /// Replaces mutable goal fields using optimistic concurrency.
     ///
     /// # Errors
@@ -256,6 +438,101 @@ impl Database {
         .await?;
         transaction.commit().await.map_err(classify)?;
         Goal::try_from(row).map(Some)
+    }
+}
+
+fn goal_overview(row: GoalOverviewRow, now: OffsetDateTime) -> Result<GoalOverview, StorageError> {
+    let goal = Goal {
+        id: row.id,
+        workspace_id: row.workspace_id,
+        project_id: row.project_id,
+        title: row.title,
+        desired_outcome: row.desired_outcome,
+        status: parse_status(&row.status)?,
+        target_at: row.target_at,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        version: row.version,
+    };
+    let project_completed = row.project_status.as_deref() == Some("completed");
+    let progress_percent = if goal.status == GoalStatus::Achieved || project_completed {
+        100
+    } else if row.total_task_count == 0 {
+        0
+    } else {
+        i16::try_from(row.completed_task_count.saturating_mul(100) / row.total_task_count)
+            .map_err(|_| StorageError::PersistenceUnavailable)?
+    };
+    let health = goal_health(
+        &goal,
+        project_completed,
+        row.total_task_count,
+        row.open_task_count,
+        row.overdue_task_count,
+        progress_percent,
+        now,
+    );
+    let next_action = if matches!(health, GoalHealth::Achieved | GoalHealth::Paused) {
+        None
+    } else if let Some(title) = row.next_task_title {
+        Some(GoalNextAction {
+            kind: GoalNextActionKind::Task,
+            id: row.next_task_id,
+            title,
+            due_at: row.next_task_due_at,
+        })
+    } else {
+        row.project_next_action.map(|title| GoalNextAction {
+            kind: GoalNextActionKind::Project,
+            id: goal.project_id,
+            title,
+            due_at: None,
+        })
+    };
+    Ok(GoalOverview {
+        goal,
+        project_title: row.project_title,
+        progress_percent,
+        total_task_count: row.total_task_count,
+        open_task_count: row.open_task_count,
+        completed_task_count: row.completed_task_count,
+        completed_last_seven_days: row.completed_last_seven_days,
+        overdue_task_count: row.overdue_task_count,
+        health,
+        next_action,
+    })
+}
+
+fn goal_health(
+    goal: &Goal,
+    project_completed: bool,
+    total_task_count: i64,
+    open_task_count: i64,
+    overdue_task_count: i64,
+    progress_percent: i16,
+    now: OffsetDateTime,
+) -> GoalHealth {
+    match goal.status {
+        GoalStatus::Achieved => GoalHealth::Achieved,
+        GoalStatus::Paused | GoalStatus::Cancelled => GoalHealth::Paused,
+        GoalStatus::Active if goal.project_id.is_none() => GoalHealth::NeedsPlan,
+        GoalStatus::Active
+            if project_completed || (total_task_count > 0 && progress_percent == 100) =>
+        {
+            GoalHealth::ReadyToComplete
+        }
+        GoalStatus::Active
+            if overdue_task_count > 0
+                || goal.target_at.is_some_and(|target_at| target_at < now)
+                || (open_task_count > 0
+                    && goal
+                        .target_at
+                        .is_some_and(|target_at| target_at <= now + time::Duration::days(7))) =>
+        {
+            GoalHealth::AtRisk
+        }
+        GoalStatus::Active if total_task_count == 0 => GoalHealth::NeedsPlan,
+        GoalStatus::Active => GoalHealth::OnTrack,
     }
 }
 

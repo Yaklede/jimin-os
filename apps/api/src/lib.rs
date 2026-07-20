@@ -38,7 +38,7 @@ use jimin_storage::{
         CalendarAccount, CalendarAccountStatus, CreateCalendarOAuthAuthorization,
         DisconnectCalendarAccountOutcome,
     },
-    goals::{Goal, GoalStatus, GoalUpdate, NewGoal},
+    goals::{GoalHealth, GoalNextActionKind, GoalOverview, GoalStatus, GoalUpdate, NewGoal},
     intelligence::{
         DecideRecommendation, DecideRecommendationOutcome, Recommendation, RecommendationDecision,
         RecommendationStatus, SuggestedActionKind,
@@ -386,9 +386,27 @@ pub struct GoalResponse {
     desired_outcome: String,
     status: String,
     target_at: Option<String>,
+    project_title: Option<String>,
+    progress_percent: i16,
+    total_task_count: i64,
+    open_task_count: i64,
+    completed_task_count: i64,
+    completed_last_seven_days: i64,
+    overdue_task_count: i64,
+    health: String,
+    next_action: Option<GoalNextActionResponse>,
     created_at: String,
     updated_at: String,
     version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalNextActionResponse {
+    kind: String,
+    id: Option<uuid::Uuid>,
+    title: String,
+    due_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
@@ -2363,7 +2381,10 @@ async fn list_goals(
         return unavailable_response(request_id);
     };
     match planning
-        .goals_for_user(principal.identity().user_id())
+        .goal_overviews_for_user(
+            principal.identity().user_id(),
+            time::OffsetDateTime::now_utc(),
+        )
         .await
     {
         Ok(goals) => match goals
@@ -2417,9 +2438,19 @@ async fn create_goal(
         })
         .await
     {
-        Ok(goal) => match goal_response(goal) {
-            Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
-            Err(()) => unavailable_response(request_id),
+        Ok(goal) => match planning
+            .goal_overview_for_user(
+                principal.identity().user_id(),
+                goal.id,
+                time::OffsetDateTime::now_utc(),
+            )
+            .await
+        {
+            Ok(Some(overview)) => match goal_response(overview) {
+                Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+                Err(()) => unavailable_response(request_id),
+            },
+            Ok(None) | Err(_) => unavailable_response(request_id),
         },
         Err(error) => storage_error_response(&error, request_id),
     }
@@ -2471,9 +2502,19 @@ async fn update_goal(
         })
         .await
     {
-        Ok(Some(goal)) => match goal_response(goal) {
-            Ok(response) => Json(response).into_response(),
-            Err(()) => unavailable_response(request_id),
+        Ok(Some(goal)) => match planning
+            .goal_overview_for_user(
+                principal.identity().user_id(),
+                goal.id,
+                time::OffsetDateTime::now_utc(),
+            )
+            .await
+        {
+            Ok(Some(overview)) => match goal_response(overview) {
+                Ok(response) => Json(response).into_response(),
+                Err(()) => unavailable_response(request_id),
+            },
+            Ok(None) | Err(_) => unavailable_response(request_id),
         },
         Ok(None) => error_response(
             StatusCode::CONFLICT,
@@ -5197,7 +5238,8 @@ fn workspace_response(workspace: Workspace) -> WorkspaceResponse {
     }
 }
 
-fn goal_response(goal: Goal) -> Result<GoalResponse, ()> {
+fn goal_response(overview: GoalOverview) -> Result<GoalResponse, ()> {
+    let goal = overview.goal;
     Ok(GoalResponse {
         id: goal.id,
         workspace_id: goal.workspace_id,
@@ -5213,6 +5255,40 @@ fn goal_response(goal: Goal) -> Result<GoalResponse, ()> {
         target_at: goal
             .target_at
             .map(|value| value.format(&Rfc3339).map_err(|_| ()))
+            .transpose()?,
+        project_title: overview.project_title,
+        progress_percent: overview.progress_percent,
+        total_task_count: overview.total_task_count,
+        open_task_count: overview.open_task_count,
+        completed_task_count: overview.completed_task_count,
+        completed_last_seven_days: overview.completed_last_seven_days,
+        overdue_task_count: overview.overdue_task_count,
+        health: match overview.health {
+            GoalHealth::OnTrack => "on_track",
+            GoalHealth::AtRisk => "at_risk",
+            GoalHealth::NeedsPlan => "needs_plan",
+            GoalHealth::ReadyToComplete => "ready_to_complete",
+            GoalHealth::Paused => "paused",
+            GoalHealth::Achieved => "achieved",
+        }
+        .to_owned(),
+        next_action: overview
+            .next_action
+            .map(|action| {
+                Ok::<GoalNextActionResponse, ()>(GoalNextActionResponse {
+                    kind: match action.kind {
+                        GoalNextActionKind::Task => "task",
+                        GoalNextActionKind::Project => "project",
+                    }
+                    .to_owned(),
+                    id: action.id,
+                    title: action.title,
+                    due_at: action
+                        .due_at
+                        .map(|value| value.format(&Rfc3339).map_err(|_| ()))
+                        .transpose()?,
+                })
+            })
             .transpose()?,
         created_at: goal.created_at.format(&Rfc3339).map_err(|_| ())?,
         updated_at: goal.updated_at.format(&Rfc3339).map_err(|_| ())?,

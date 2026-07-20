@@ -13,7 +13,7 @@ use crate::{
     Database, StorageError,
     auth::append_change,
     gmail::GmailMessage,
-    goals::{Goal, GoalStatus},
+    goals::{GoalHealth, GoalOverview, GoalStatus},
     planning::{ScheduleEntry, Task},
     work::{Project, ProjectStatus},
 };
@@ -706,7 +706,7 @@ impl Database {
         let schedules = self
             .schedule_entries_in_range(user_id, now, horizon)
             .await?;
-        let goals = self.goals_for_user(user_id).await?;
+        let goals = self.goal_overviews_for_user(user_id, now).await?;
         let inbox = self.recent_gmail_messages_for_user(user_id).await?;
         let observations = work_observations(&tasks, &projects, &schedules, &goals, &inbox, now);
         let fingerprints = observations
@@ -930,13 +930,14 @@ fn work_observations(
     tasks: &[Task],
     projects: &[Project],
     schedules: &[ScheduleEntry],
-    goals: &[Goal],
+    goals: &[GoalOverview],
     inbox: &[GmailMessage],
     now: OffsetDateTime,
 ) -> Vec<WorkObservation> {
     let mut observations = Vec::new();
-    if let Some(task) = priority_focus_task(tasks, now) {
-        observations.push(task_focus_observation(task, now));
+    if let Some(task) = priority_focus_task(tasks, goals, now) {
+        let goal = active_goal_for_task(task, goals);
+        observations.push(task_focus_observation(task, goal, now));
     }
     observations.extend(
         projects
@@ -951,8 +952,8 @@ fn work_observations(
     observations.extend(
         goals
             .iter()
-            .filter(|goal| goal.status == GoalStatus::Active)
-            .filter_map(|goal| goal_observation(goal, projects, now)),
+            .filter(|overview| overview.goal.status == GoalStatus::Active)
+            .filter_map(|goal| goal_observation(goal, now)),
     );
     if let Some(observation) = inbox_observation(inbox, now) {
         observations.push(observation);
@@ -960,11 +961,30 @@ fn work_observations(
     observations
 }
 
-fn priority_focus_task(tasks: &[Task], now: OffsetDateTime) -> Option<&Task> {
+fn priority_focus_task<'a>(
+    tasks: &'a [Task],
+    goals: &[GoalOverview],
+    now: OffsetDateTime,
+) -> Option<&'a Task> {
     tasks.iter().min_by_key(|task| {
         let overdue = task.due_at.is_some_and(|due_at| due_at < now);
+        let due_soon = task
+            .due_at
+            .is_some_and(|due_at| due_at <= now + time::Duration::days(1));
+        let goal = active_goal_for_task(task, goals);
+        let attention_rank = if overdue {
+            0
+        } else if due_soon {
+            1
+        } else if goal.is_some() {
+            2
+        } else {
+            3
+        };
         (
-            !overdue,
+            attention_rank,
+            goal.and_then(|overview| overview.goal.target_at)
+                .map_or(i64::MAX, OffsetDateTime::unix_timestamp),
             std::cmp::Reverse(task.priority),
             task.due_at.map_or(i64::MAX, OffsetDateTime::unix_timestamp),
             task.id,
@@ -972,7 +992,20 @@ fn priority_focus_task(tasks: &[Task], now: OffsetDateTime) -> Option<&Task> {
     })
 }
 
-fn task_focus_observation(task: &Task, now: OffsetDateTime) -> WorkObservation {
+fn active_goal_for_task<'a>(task: &Task, goals: &'a [GoalOverview]) -> Option<&'a GoalOverview> {
+    task.project_id.and_then(|project_id| {
+        goals.iter().find(|overview| {
+            overview.goal.status == GoalStatus::Active
+                && overview.goal.project_id == Some(project_id)
+        })
+    })
+}
+
+fn task_focus_observation(
+    task: &Task,
+    goal: Option<&GoalOverview>,
+    now: OffsetDateTime,
+) -> WorkObservation {
     let overdue = task.due_at.is_some_and(|due_at| due_at < now);
     let due_soon = task
         .due_at
@@ -993,6 +1026,17 @@ fn task_focus_observation(task: &Task, now: OffsetDateTime) -> WorkObservation {
             1,
             None,
         )
+    } else if let Some(goal) = goal {
+        (
+            "목표에 연결된 할 일부터 시작하세요".to_owned(),
+            format!(
+                "‘{}’는 ‘{}’ 목표를 앞으로 진행시키는 다음 할 일이에요.",
+                task.title, goal.goal.title
+            ),
+            1,
+            0,
+            None,
+        )
     } else {
         (
             "우선순위가 높은 할 일부터 시작하세요".to_owned(),
@@ -1007,9 +1051,9 @@ fn task_focus_observation(task: &Task, now: OffsetDateTime) -> WorkObservation {
     };
     WorkObservation {
         fingerprint: format!("work:task-focus:{}", task.id),
-        workspace_id: None,
+        workspace_id: goal.and_then(|overview| overview.goal.workspace_id),
         project_id: task.project_id,
-        goal_id: None,
+        goal_id: goal.map(|overview| overview.goal.id),
         severity: urgency,
         kind: if overdue || due_soon {
             "task_deadline"
@@ -1022,12 +1066,23 @@ fn task_focus_observation(task: &Task, now: OffsetDateTime) -> WorkObservation {
         suggested_entity_id: Some(task.id),
         title,
         summary,
-        expected_effect: "가장 중요한 한 가지에 먼저 집중해 작업 전환 비용을 줄일 수 있어요."
-            .to_owned(),
+        expected_effect: goal.map_or_else(
+            || "가장 중요한 한 가지에 먼저 집중해 작업 전환 비용을 줄일 수 있어요.".to_owned(),
+            |overview| {
+                format!(
+                    "이 일을 끝내면 ‘{}’ 목표의 진행 근거가 바로 갱신돼요.",
+                    overview.goal.title
+                )
+            },
+        ),
         risk_summary,
         confidence: 96,
         urgency,
-        impact: task.priority.max(1),
+        impact: if goal.is_some() {
+            task.priority.max(2)
+        } else {
+            task.priority.max(1)
+        },
         risk_level,
         effort_minutes: None,
         valid_until: now + time::Duration::days(2),
@@ -1176,57 +1231,63 @@ fn schedule_observations(schedules: &[ScheduleEntry], now: OffsetDateTime) -> Ve
     observations
 }
 
-fn goal_observation(
-    goal: &Goal,
-    projects: &[Project],
-    now: OffsetDateTime,
-) -> Option<WorkObservation> {
-    let project = goal
-        .project_id
-        .and_then(|project_id| projects.iter().find(|project| project.id == project_id));
-    let (title, summary, severity, risk_level, risk_summary) =
-        if goal.target_at.is_some_and(|target_at| target_at < now) {
-            (
-                format!("{} 목표의 계획을 다시 확인하세요", goal.title),
-                "목표 날짜가 지났지만 아직 진행 중이에요.".to_owned(),
-                3,
-                2,
-                Some("현재 범위나 목표 날짜를 그대로 둘지 결정해야 해요.".to_owned()),
-            )
-        } else if goal
-            .target_at
-            .is_some_and(|target_at| target_at <= now + time::Duration::days(7))
-        {
-            (
-                format!("{} 목표가 일주일 안으로 다가왔어요", goal.title),
-                "남은 일과 완료 조건을 확인할 시점이에요.".to_owned(),
-                2,
-                1,
-                None,
-            )
-        } else if goal.project_id.is_none() {
-            (
-                format!("{} 목표를 실행할 프로젝트를 연결하세요", goal.title),
-                "목표는 진행 중이지만 연결된 프로젝트가 없어요.".to_owned(),
-                1,
-                0,
-                None,
-            )
-        } else if project.is_some_and(|project| {
-            project.status == ProjectStatus::Active
-                && project.open_task_count == 0
-                && project.next_action.is_none()
-        }) {
-            (
-                format!("{} 목표의 다음 행동을 정하세요", goal.title),
-                "연결된 프로젝트에 열린 할 일이나 다음 행동이 없어요.".to_owned(),
-                1,
-                0,
-                None,
-            )
-        } else {
-            return None;
-        };
+fn goal_observation(overview: &GoalOverview, now: OffsetDateTime) -> Option<WorkObservation> {
+    let goal = &overview.goal;
+    let goal_title = truncate_chars(&goal.title, 140);
+    let (title, summary, severity, risk_level, risk_summary) = match overview.health {
+        GoalHealth::AtRisk if goal.target_at.is_some_and(|target_at| target_at < now) => (
+            format!("{goal_title} 목표의 계획을 다시 확인하세요"),
+            format!(
+                "현재 진행률은 {}%이고, 목표 날짜가 지났어요.",
+                overview.progress_percent
+            ),
+            3,
+            2,
+            Some("현재 범위나 목표 날짜를 그대로 둘지 결정해야 해요.".to_owned()),
+        ),
+        GoalHealth::AtRisk if overview.overdue_task_count > 0 => (
+            format!("{goal_title} 목표의 늦어진 일을 확인하세요"),
+            format!(
+                "현재 진행률은 {}%이고, 기한이 지난 할 일이 {}개 있어요.",
+                overview.progress_percent, overview.overdue_task_count
+            ),
+            2,
+            1,
+            Some("늦어진 일이 목표 날짜에 영향을 주는지 확인해 주세요.".to_owned()),
+        ),
+        GoalHealth::AtRisk => (
+            format!("{goal_title} 목표의 남은 일을 확인하세요"),
+            format!(
+                "목표 날짜가 일주일 안으로 다가왔고 진행률은 {}%예요.",
+                overview.progress_percent
+            ),
+            2,
+            1,
+            None,
+        ),
+        GoalHealth::NeedsPlan if goal.project_id.is_none() => (
+            format!("{goal_title} 목표를 실행할 프로젝트를 연결하세요"),
+            "목표는 진행 중이지만 연결된 프로젝트가 없어요.".to_owned(),
+            1,
+            0,
+            None,
+        ),
+        GoalHealth::NeedsPlan => (
+            format!("{goal_title} 목표의 다음 행동을 정하세요"),
+            "연결된 프로젝트에 열린 할 일이나 다음 행동이 없어요.".to_owned(),
+            1,
+            0,
+            None,
+        ),
+        GoalHealth::ReadyToComplete => (
+            format!("{goal_title} 목표의 달성 여부를 확인하세요"),
+            "연결된 할 일을 모두 마쳤어요. 원하는 결과까지 달성했는지 확인할 차례예요.".to_owned(),
+            1,
+            0,
+            None,
+        ),
+        GoalHealth::OnTrack | GoalHealth::Paused | GoalHealth::Achieved => return None,
+    };
 
     Some(WorkObservation {
         fingerprint: format!("work:goal-attention:{}", goal.id),
@@ -1251,6 +1312,18 @@ fn goal_observation(
         effort_minutes: Some(10),
         valid_until: now + time::Duration::days(7),
     })
+}
+
+fn truncate_chars(value: &str, maximum: usize) -> String {
+    if value.chars().count() <= maximum {
+        return value.to_owned();
+    }
+    let mut truncated = value
+        .chars()
+        .take(maximum.saturating_sub(1))
+        .collect::<String>();
+    truncated.push('…');
+    truncated
 }
 
 fn inbox_observation(inbox: &[GmailMessage], now: OffsetDateTime) -> Option<WorkObservation> {
