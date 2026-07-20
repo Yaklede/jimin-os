@@ -12,7 +12,9 @@ use uuid::Uuid;
 use crate::{
     Database, StorageError,
     auth::append_change,
-    planning::Task,
+    gmail::GmailMessage,
+    goals::{Goal, GoalStatus},
+    planning::{ScheduleEntry, Task},
     work::{Project, ProjectStatus},
 };
 
@@ -211,10 +213,13 @@ struct WorkObservation {
     fingerprint: String,
     workspace_id: Option<Uuid>,
     project_id: Option<Uuid>,
+    goal_id: Option<Uuid>,
     severity: i16,
     kind: &'static str,
     source_type: &'static str,
     source_entity_id: Option<Uuid>,
+    suggested_action_kind: SuggestedActionKind,
+    suggested_entity_id: Option<Uuid>,
     title: String,
     summary: String,
     expected_effect: String,
@@ -509,9 +514,17 @@ impl Database {
         if !is_v7(user_id) {
             return Err(StorageError::InvalidConfiguration);
         }
+        let horizon = now
+            .checked_add(time::Duration::days(2))
+            .ok_or(StorageError::InvalidConfiguration)?;
         let tasks = self.open_tasks_for_user(user_id).await?;
         let projects = self.projects_for_user(user_id).await?;
-        let observations = work_observations(&tasks, &projects, now);
+        let schedules = self
+            .schedule_entries_in_range(user_id, now, horizon)
+            .await?;
+        let goals = self.goals_for_user(user_id).await?;
+        let inbox = self.recent_gmail_messages_for_user(user_id).await?;
+        let observations = work_observations(&tasks, &projects, &schedules, &goals, &inbox, now);
         let fingerprints = observations
             .iter()
             .map(|observation| observation.fingerprint.clone())
@@ -580,13 +593,14 @@ async fn upsert_work_signal(
             title, summary, source_type, source_entity_id, fingerprint,
             status, observed_at, valid_until
          ) VALUES (
-            $1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11,
-            'active', $12, $13
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+            'active', $13, $14
          )
          ON CONFLICT (user_id, fingerprint) WHERE status = 'active'
          DO UPDATE SET
             workspace_id = EXCLUDED.workspace_id,
             project_id = EXCLUDED.project_id,
+            goal_id = EXCLUDED.goal_id,
             kind = EXCLUDED.kind,
             severity = EXCLUDED.severity,
             title = EXCLUDED.title,
@@ -601,6 +615,7 @@ async fn upsert_work_signal(
     .bind(user_id)
     .bind(observation.workspace_id)
     .bind(observation.project_id)
+    .bind(observation.goal_id)
     .bind(observation.kind)
     .bind(observation.severity)
     .bind(&observation.title)
@@ -628,8 +643,8 @@ async fn insert_work_recommendation(
             confidence, urgency, impact, risk_level, effort_minutes,
             suggested_action_kind, suggested_entity_id, status, valid_until
          ) VALUES (
-            $1, $2, $3, $4, NULL, $5, $6, $7, $8, $9,
-            $10, $11, $12, $13, $14, 'review', $15, 'pending', $16
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+            $11, $12, $13, $14, $15, $16, $17, 'pending', $18
          )
          ON CONFLICT (signal_id) WHERE signal_id IS NOT NULL DO NOTHING
          RETURNING
@@ -643,6 +658,7 @@ async fn insert_work_recommendation(
     .bind(user_id)
     .bind(observation.workspace_id)
     .bind(observation.project_id)
+    .bind(observation.goal_id)
     .bind(signal_id)
     .bind(&observation.title)
     .bind(&observation.summary)
@@ -653,7 +669,10 @@ async fn insert_work_recommendation(
     .bind(observation.impact)
     .bind(observation.risk_level)
     .bind(observation.effort_minutes)
-    .bind(observation.source_entity_id)
+    .bind(suggested_action_kind_value(
+        observation.suggested_action_kind,
+    ))
+    .bind(observation.suggested_entity_id)
     .bind(observation.valid_until)
     .fetch_optional(&mut **transaction)
     .await
@@ -663,6 +682,9 @@ async fn insert_work_recommendation(
 fn work_observations(
     tasks: &[Task],
     projects: &[Project],
+    schedules: &[ScheduleEntry],
+    goals: &[Goal],
+    inbox: &[GmailMessage],
     now: OffsetDateTime,
 ) -> Vec<WorkObservation> {
     let mut observations = Vec::new();
@@ -677,6 +699,16 @@ fn work_observations(
     );
     if tasks.len() >= 5 {
         observations.push(workload_observation(tasks.len(), now));
+    }
+    observations.extend(schedule_observations(schedules, now));
+    observations.extend(
+        goals
+            .iter()
+            .filter(|goal| goal.status == GoalStatus::Active)
+            .filter_map(|goal| goal_observation(goal, projects, now)),
+    );
+    if let Some(observation) = inbox_observation(inbox, now) {
+        observations.push(observation);
     }
     observations
 }
@@ -730,6 +762,7 @@ fn task_focus_observation(task: &Task, now: OffsetDateTime) -> WorkObservation {
         fingerprint: format!("work:task-focus:{}", task.id),
         workspace_id: None,
         project_id: task.project_id,
+        goal_id: None,
         severity: urgency,
         kind: if overdue || due_soon {
             "task_deadline"
@@ -738,6 +771,8 @@ fn task_focus_observation(task: &Task, now: OffsetDateTime) -> WorkObservation {
         },
         source_type: "task",
         source_entity_id: Some(task.id),
+        suggested_action_kind: SuggestedActionKind::Review,
+        suggested_entity_id: Some(task.id),
         title,
         summary,
         expected_effect: "가장 중요한 한 가지에 먼저 집중해 작업 전환 비용을 줄일 수 있어요."
@@ -783,10 +818,13 @@ fn project_attention_observation(
         fingerprint: format!("work:project-attention:{}", project.id),
         workspace_id: Some(project.workspace_id),
         project_id: Some(project.id),
+        goal_id: None,
         severity,
         kind: "project_risk",
         source_type: "project",
         source_entity_id: Some(project.id),
+        suggested_action_kind: SuggestedActionKind::Review,
+        suggested_entity_id: Some(project.id),
         title,
         summary,
         expected_effect: "다음 행동을 분명히 해 프로젝트가 멈춰 있는 시간을 줄일 수 있어요."
@@ -806,10 +844,13 @@ fn workload_observation(task_count: usize, now: OffsetDateTime) -> WorkObservati
         fingerprint: "work:workload:open-tasks".to_owned(),
         workspace_id: None,
         project_id: None,
+        goal_id: None,
         severity: 2,
         kind: "workload",
         source_type: "system",
         source_entity_id: None,
+        suggested_action_kind: SuggestedActionKind::Review,
+        suggested_entity_id: None,
         title: "열린 할 일의 범위를 줄여 보세요".to_owned(),
         summary: format!("현재 열린 할 일이 {task_count}개 있어 우선순위를 다시 정할 시점이에요."),
         expected_effect: "오늘 처리할 범위를 줄이면 중요한 일의 완료 가능성을 높일 수 있어요."
@@ -822,6 +863,177 @@ fn workload_observation(task_count: usize, now: OffsetDateTime) -> WorkObservati
         effort_minutes: Some(10),
         valid_until: now + time::Duration::days(2),
     }
+}
+
+fn schedule_observations(schedules: &[ScheduleEntry], now: OffsetDateTime) -> Vec<WorkObservation> {
+    let mut observations = Vec::new();
+    if let Some((first, second)) = schedules
+        .windows(2)
+        .find_map(|pair| (pair[1].starts_at < pair[0].ends_at).then_some((&pair[0], &pair[1])))
+    {
+        observations.push(WorkObservation {
+            fingerprint: format!("work:schedule-conflict:{}:{}", first.id, second.id),
+            workspace_id: None,
+            project_id: None,
+            goal_id: None,
+            severity: 3,
+            kind: "schedule_conflict",
+            source_type: "schedule",
+            source_entity_id: Some(first.id),
+            suggested_action_kind: SuggestedActionKind::Review,
+            suggested_entity_id: None,
+            title: "겹치는 일정을 먼저 확인하세요".to_owned(),
+            summary: format!("‘{}’와 ‘{}’ 일정이 겹쳐 있어요.", first.title, second.title),
+            expected_effect: "겹친 시간을 미리 조정하면 다음 일정이 늦어지는 일을 줄일 수 있어요."
+                .to_owned(),
+            risk_summary: Some("이동 시간과 준비 시간을 함께 확인해 주세요.".to_owned()),
+            confidence: 99,
+            urgency: 3,
+            impact: 2,
+            risk_level: 2,
+            effort_minutes: Some(5),
+            valid_until: first.ends_at.max(second.ends_at),
+        });
+    }
+
+    if let Some(next) = schedules
+        .iter()
+        .filter(|entry| entry.starts_at >= now)
+        .min_by_key(|entry| (entry.starts_at, entry.id))
+        .filter(|entry| entry.starts_at <= now + time::Duration::hours(2))
+    {
+        observations.push(WorkObservation {
+            fingerprint: format!("work:schedule-upcoming:{}", next.id),
+            workspace_id: None,
+            project_id: None,
+            goal_id: None,
+            severity: 2,
+            kind: "opportunity",
+            source_type: "schedule",
+            source_entity_id: Some(next.id),
+            suggested_action_kind: SuggestedActionKind::Review,
+            suggested_entity_id: None,
+            title: format!("{} 일정을 준비할 시간이에요", next.title),
+            summary: "두 시간 안에 시작하는 일정이 있어요.".to_owned(),
+            expected_effect: "필요한 자료와 이동 시간을 지금 확인하면 여유 있게 시작할 수 있어요."
+                .to_owned(),
+            risk_summary: None,
+            confidence: 98,
+            urgency: 2,
+            impact: 1,
+            risk_level: 0,
+            effort_minutes: Some(5),
+            valid_until: next.ends_at,
+        });
+    }
+    observations
+}
+
+fn goal_observation(
+    goal: &Goal,
+    projects: &[Project],
+    now: OffsetDateTime,
+) -> Option<WorkObservation> {
+    let project = goal
+        .project_id
+        .and_then(|project_id| projects.iter().find(|project| project.id == project_id));
+    let (title, summary, severity, risk_level, risk_summary) =
+        if goal.target_at.is_some_and(|target_at| target_at < now) {
+            (
+                format!("{} 목표의 계획을 다시 확인하세요", goal.title),
+                "목표 날짜가 지났지만 아직 진행 중이에요.".to_owned(),
+                3,
+                2,
+                Some("현재 범위나 목표 날짜를 그대로 둘지 결정해야 해요.".to_owned()),
+            )
+        } else if goal
+            .target_at
+            .is_some_and(|target_at| target_at <= now + time::Duration::days(7))
+        {
+            (
+                format!("{} 목표가 일주일 안으로 다가왔어요", goal.title),
+                "남은 일과 완료 조건을 확인할 시점이에요.".to_owned(),
+                2,
+                1,
+                None,
+            )
+        } else if goal.project_id.is_none() {
+            (
+                format!("{} 목표를 실행할 프로젝트를 연결하세요", goal.title),
+                "목표는 진행 중이지만 연결된 프로젝트가 없어요.".to_owned(),
+                1,
+                0,
+                None,
+            )
+        } else if project.is_some_and(|project| {
+            project.status == ProjectStatus::Active
+                && project.open_task_count == 0
+                && project.next_action.is_none()
+        }) {
+            (
+                format!("{} 목표의 다음 행동을 정하세요", goal.title),
+                "연결된 프로젝트에 열린 할 일이나 다음 행동이 없어요.".to_owned(),
+                1,
+                0,
+                None,
+            )
+        } else {
+            return None;
+        };
+
+    Some(WorkObservation {
+        fingerprint: format!("work:goal-attention:{}", goal.id),
+        workspace_id: goal.workspace_id,
+        project_id: goal.project_id,
+        goal_id: Some(goal.id),
+        severity,
+        kind: "project_risk",
+        source_type: "manual",
+        source_entity_id: Some(goal.id),
+        suggested_action_kind: SuggestedActionKind::Review,
+        suggested_entity_id: goal.project_id,
+        title,
+        summary,
+        expected_effect: "목표와 실제 행동을 다시 맞추면 중요한 결과에 집중할 수 있어요."
+            .to_owned(),
+        risk_summary,
+        confidence: 95,
+        urgency: severity,
+        impact: 2,
+        risk_level,
+        effort_minutes: Some(10),
+        valid_until: now + time::Duration::days(7),
+    })
+}
+
+fn inbox_observation(inbox: &[GmailMessage], now: OffsetDateTime) -> Option<WorkObservation> {
+    let unread_count = inbox.iter().filter(|message| message.is_unread).count();
+    if unread_count == 0 {
+        return None;
+    }
+    let severity = if unread_count >= 5 { 2 } else { 1 };
+    Some(WorkObservation {
+        fingerprint: "work:inbox:unread".to_owned(),
+        workspace_id: None,
+        project_id: None,
+        goal_id: None,
+        severity,
+        kind: "opportunity",
+        source_type: "inbox",
+        source_entity_id: None,
+        suggested_action_kind: SuggestedActionKind::Review,
+        suggested_entity_id: None,
+        title: "읽지 않은 메일을 확인하세요".to_owned(),
+        summary: format!("최근 받은 메일 중 읽지 않은 메일이 {unread_count}개 있어요."),
+        expected_effect: "일정이나 프로젝트에 영향을 주는 요청을 놓치지 않을 수 있어요.".to_owned(),
+        risk_summary: None,
+        confidence: 90,
+        urgency: severity,
+        impact: 1,
+        risk_level: 0,
+        effort_minutes: Some(10),
+        valid_until: now + time::Duration::days(1),
+    })
 }
 
 async fn recommendation_scope_is_owned(

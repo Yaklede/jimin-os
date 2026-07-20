@@ -21,6 +21,7 @@ use jimin_storage::{
         ProviderCalendarVisibility,
     },
     calendar_mutation::{ScheduleCalendarMutationOperation, provider_event_id_for_schedule},
+    gmail::ProviderGmailMessage,
     goals::{GoalStatus, GoalUpdate, NewGoal},
     intelligence::{
         DecideRecommendation, DecideRecommendationOutcome, NewRecommendation,
@@ -4562,6 +4563,83 @@ async fn work_brief_refresh_generates_one_actionable_recommendation_per_active_s
             .await
             .expect("handled advice should not be recreated")
             .is_empty()
+    );
+
+    database.close().await;
+}
+
+#[tokio::test]
+async fn work_brief_connects_schedule_goal_and_inbox_context() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let now = OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .expect("whole-second fixture time");
+    database
+        .create_schedule_entry(&NewScheduleEntry {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            title: "주간 계획 검토".to_owned(),
+            notes: None,
+            starts_at: now + TimeDuration::hours(1),
+            ends_at: now + TimeDuration::hours(2),
+            time_zone: "Asia/Seoul".to_owned(),
+        })
+        .await
+        .expect("upcoming schedule should persist");
+    let goal = database
+        .create_goal(&NewGoal {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            workspace_id: None,
+            project_id: None,
+            title: "이번 주 핵심 업무 마무리".to_owned(),
+            desired_outcome: "우선순위가 높은 업무를 끝낸다.".to_owned(),
+            target_at: Some(now + TimeDuration::days(3)),
+        })
+        .await
+        .expect("goal should persist");
+    database
+        .apply_gmail_inbox_sync(
+            owner.profile.id,
+            &[ProviderGmailMessage {
+                provider_message_id: format!("brief-message-{}", owner.profile.id),
+                provider_thread_id: format!("brief-thread-{}", owner.profile.id),
+                received_at: Some(now),
+                sender: Some("업무 담당자 <owner@example.test>".to_owned()),
+                subject: Some("확인이 필요한 요청".to_owned()),
+                snippet: Some("오늘 안에 확인해 주세요.".to_owned()),
+                is_unread: true,
+            }],
+        )
+        .await
+        .expect("inbox metadata should persist");
+
+    let generated = database
+        .refresh_work_brief(owner.profile.id, now)
+        .await
+        .expect("context-aware work brief should refresh");
+
+    assert_eq!(generated.len(), 3);
+    assert!(generated.iter().any(|item| item.goal_id == Some(goal.id)));
+    assert!(
+        generated
+            .iter()
+            .any(|item| item.title.contains("주간 계획 검토"))
+    );
+    assert!(
+        generated
+            .iter()
+            .any(|item| item.title == "읽지 않은 메일을 확인하세요")
     );
 
     database.close().await;
