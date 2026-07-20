@@ -63,4 +63,15 @@ generic rows remain, and verify `jimin_schema_metadata.schema_version = 24`.
 Rollback requires the verified pre-migration backup because deleted generic
 webhook data cannot be reconstructed.
 
+Migration `0025_agent_webhook_action_audit.sql` extends the existing Agent
+action audit allowlists with `send_webhook_message`. It does not rewrite jobs,
+messages, webhook configuration, or delivery history. Apply it to an empty
+database and a restored version-24 backup, then execute one Agent-requested
+webhook message and verify that the job, ordered action audit, and queued
+delivery commit together with `jimin_schema_metadata.schema_version = 25`.
+Before version-25 writes begin, rollback may use the previous image after
+restoring the two version-24 check constraints on a disposable copy. After a
+version-25 audit row is written, use the verified pre-migration backup rather
+than downgrading in place.
+
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.

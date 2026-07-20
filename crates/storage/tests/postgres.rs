@@ -1192,6 +1192,165 @@ async fn project_webhook_update_replaces_and_preserves_destination_secrets() {
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
+    reason = "The test verifies that an Agent webhook action, its audit rows, and its delivery commit atomically."
+)]
+async fn agent_webhook_message_commits_with_its_action_audit() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        1,
+        Duration::from_secs(2),
+    )
+    .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let personal = database
+        .workspaces_for_user(owner.profile.id)
+        .await
+        .expect("workspace query should succeed")
+        .into_iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Personal)
+        .expect("personal workspace should exist");
+    let project = database
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            workspace_id: personal.id,
+            title: "Agent 웹훅 전송".to_owned(),
+            objective: None,
+            risk_level: 0,
+            next_action: None,
+            due_at: None,
+        })
+        .await
+        .expect("project should persist");
+    let webhook = database
+        .create_project_webhook(&NewProjectWebhook {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            project_id: project.id,
+            provider: WebhookProvider::Discord,
+            destination: encrypted_test_destination(31),
+            destination_hint: "Discord 채널".to_owned(),
+            events: vec!["chat.message".to_owned()],
+        })
+        .await
+        .expect("webhook should persist");
+    let conversation_id = Uuid::now_v7();
+    database
+        .create_conversation(&NewConversation {
+            id: conversation_id,
+            user_id: owner.profile.id,
+            title: Some("Discord 전송".to_owned()),
+        })
+        .await
+        .expect("conversation should persist");
+    let queued = database
+        .enqueue_agent_turn(&NewAgentTurn {
+            job_id: Uuid::now_v7(),
+            message_id: Uuid::now_v7(),
+            client_message_id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            conversation_id,
+            content: "확인해야 할 일감을 Discord로 보내 줘".to_owned(),
+        })
+        .await
+        .expect("turn should queue");
+    let runner_id = "agent-webhook-audit-test";
+    let job = database
+        .claim_next_agent_job(runner_id, Duration::from_secs(30))
+        .await
+        .expect("agent job should claim")
+        .expect("queued job should exist");
+    assert_eq!(job.id, queued.job_id);
+    assert!(
+        database
+            .start_agent_job(
+                job.id,
+                runner_id,
+                "thread-agent-webhook-audit",
+                Duration::from_secs(30),
+            )
+            .await
+            .expect("job should start")
+    );
+    let delivery_id = Uuid::now_v7();
+    assert!(
+        database
+            .complete_agent_job_with_actions(
+                job.id,
+                runner_id,
+                Uuid::now_v7(),
+                "연결된 Discord 채널로 메시지 전송을 시작했어요.",
+                None,
+                &[AgentActionCommand::SendWebhookMessage {
+                    id: delivery_id,
+                    project_id: project.id,
+                    webhook_id: webhook.id,
+                    message: "확인해야 할 일감을 검토해 주세요.".to_owned(),
+                }],
+            )
+            .await
+            .expect("Agent webhook action should commit")
+    );
+
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("test database should be reachable");
+    let job_audit: (String, i16, Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT state, executed_action_count, executed_action_type, executed_entity_id
+         FROM agent_jobs WHERE id = $1",
+    )
+    .bind(job.id)
+    .fetch_one(&pool)
+    .await
+    .expect("job action audit should load");
+    assert_eq!(
+        job_audit,
+        (
+            "completed".to_owned(),
+            1,
+            Some("send_webhook_message".to_owned()),
+            Some(delivery_id),
+        )
+    );
+    let ordered_audit: (i16, String, Uuid) = sqlx::query_as(
+        "SELECT action_index, action_type, entity_id
+         FROM agent_job_action_executions WHERE job_id = $1",
+    )
+    .bind(job.id)
+    .fetch_one(&pool)
+    .await
+    .expect("ordered Agent action audit should load");
+    assert_eq!(
+        ordered_audit,
+        (0, "send_webhook_message".to_owned(), delivery_id)
+    );
+    let delivery: (String, String, serde_json::Value) =
+        sqlx::query_as("SELECT status, event_type, payload FROM webhook_deliveries WHERE id = $1")
+            .bind(delivery_id)
+            .fetch_one(&pool)
+            .await
+            .expect("queued Agent webhook delivery should load");
+    assert_eq!(delivery.0, "queued");
+    assert_eq!(delivery.1, "chat.message");
+    assert_eq!(
+        delivery.2["message"],
+        serde_json::Value::String("확인해야 할 일감을 검토해 주세요.".to_owned())
+    );
+
+    pool.close().await;
+    database.close().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
     reason = "The test verifies owner isolation and every retry state transition while retaining one delivery ID."
 )]
 async fn failed_webhook_delivery_retries_with_the_same_id_idempotently() {
