@@ -12,6 +12,10 @@
     "frontend:lint": "pnpm --filter @jimin-os/desktop typecheck",
     "frontend:test": "pnpm --filter @jimin-os/desktop test",
     "frontend:build": "pnpm --filter @jimin-os/desktop build",
+    "client:config:test": "bash scripts/test-client-build-config.sh",
+    "client:build:web": "bash scripts/build-private-client.sh web",
+    "client:build:macos": "bash scripts/build-private-client.sh macos",
+    "client:build:android": "bash scripts/build-private-client.sh android",
     "format": "cargo fmt --all --check",
     "lint": "cargo clippy --workspace --all-targets -- -D warnings",
     "test": "cargo test --workspace",
@@ -21,6 +25,6 @@
     "backend:test": "cargo test --workspace",
     "backend:build": "cargo build --workspace --release",
     "security:scan": "bash scripts/scan-secrets.sh",
-    "check": "pnpm backend:format && pnpm backend:lint && pnpm backend:test && pnpm frontend:format && pnpm frontend:lint && pnpm frontend:test && pnpm frontend:build && pnpm security:scan"
+    "check": "pnpm backend:format && pnpm backend:lint && pnpm backend:test && pnpm frontend:format && pnpm frontend:lint && pnpm frontend:test && pnpm frontend:build && pnpm client:config:test && pnpm security:scan"
   }
 }
