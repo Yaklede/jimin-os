@@ -416,7 +416,7 @@ where
                         runner_id,
                         assistant_message_id,
                         &answer,
-                        Some(&presentation),
+                        presentation.as_ref(),
                     )
                     .await
             } else {
@@ -424,14 +424,15 @@ where
                     fail_claim(database, &job, runner_id, "agent_invalid_action_result").await?;
                     return Ok(());
                 };
-                (answer, presentation) = result;
+                answer = result.0;
+                presentation = Some(result.1);
                 database
                     .complete_agent_job_with_actions(
                         job.id,
                         runner_id,
                         assistant_message_id,
                         &answer,
-                        Some(&presentation),
+                        presentation.as_ref(),
                         &actions,
                     )
                     .await
@@ -533,7 +534,7 @@ fn render_contextualized_turn(
          For a broad Korean request about 오늘 일정, 오늘 할 일, or 오늘 계획, treat it as a daily briefing and cover \
          today's schedule plus tasks with no due date or a due date before daily_task_cutoff. Exclude future-dated tasks \
          unless the user asks for them, and respect an explicit request for only schedule or only tasks. \
-         Use no sections for general conversation. \
+         For general conversation, use no sections and leave presentation.title and focusEntityId empty. \
          Choose stack for one simple group, split when list-to-detail exploration helps, and focus when one record is primary. \
          Tasks support list or checklist, schedule supports list or timeline, and projects support list or cards. \
          focusEntityId must be one selected entity ID or an empty string. Keep answers concise because the client renders \
@@ -886,7 +887,8 @@ fn assistant_output_schema() -> Value {
                 "type": "object",
                 "properties": {
                     "title": {
-                        "type": "string"
+                        "type": "string",
+                        "description": "A concise title for an interactive data result. Use an empty string for general conversation."
                     },
                     "layout": {
                         "type": "string",
@@ -1006,7 +1008,14 @@ fn assistant_output_schema() -> Value {
 fn validated_assistant_response(
     response: &str,
     context: &TurnContext,
-) -> Result<(String, AssistantPresentation, Vec<AgentActionCommand>), ()> {
+) -> Result<
+    (
+        String,
+        Option<AssistantPresentation>,
+        Vec<AgentActionCommand>,
+    ),
+    (),
+> {
     let structured: StructuredAssistantTurn = serde_json::from_str(response).map_err(|_| ())?;
     let mut answer = structured.answer.trim().to_owned();
     let actions = validated_agent_actions(&structured, context)?;
@@ -1017,18 +1026,29 @@ fn validated_assistant_response(
         }
         return Ok((
             answer,
-            AssistantPresentation {
+            Some(AssistantPresentation {
                 kind: AssistantPresentationKind::Summary,
                 title: "요청을 처리하고 있어요".to_owned(),
                 items: Vec::new(),
                 layout: AssistantPresentationLayout::Stack,
                 sections: Vec::new(),
                 focus_item_id: None,
-            },
+            }),
             actions,
         ));
     }
     let title = structured.presentation.title.trim().to_owned();
+    if structured.intent.mode == StructuredTurnMode::Conversation {
+        if answer.is_empty()
+            || answer.chars().count() > 24_000
+            || title.chars().count() > 200
+            || !structured.presentation.sections.is_empty()
+            || !structured.presentation.focus_entity_id.trim().is_empty()
+        {
+            return Err(());
+        }
+        return Ok((answer, None, actions));
+    }
     if answer.is_empty()
         || answer.chars().count() > 24_000
         || title.is_empty()
@@ -1092,7 +1112,7 @@ fn validated_assistant_response(
         focus_item_id,
     };
     presentation.validate().map_err(|_| ())?;
-    Ok((answer, presentation, actions))
+    Ok((answer, Some(presentation), actions))
 }
 
 fn validate_turn_intent(intent: &StructuredTurnIntent, has_actions: bool) -> Result<(), ()> {
@@ -2867,6 +2887,39 @@ mod tests {
     }
 
     #[test]
+    fn general_conversation_completes_without_an_interactive_presentation() {
+        let context = TurnContext {
+            prompt: "<user_request>\n아 일하기 싫다ㅏ\n</user_request>".to_owned(),
+            schedule: Vec::new(),
+            tasks: Vec::new(),
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
+        };
+        let response = serde_json::json!({
+            "actions": [],
+            "answer": "그럴 때 있지… 오늘은 5분만 시작해도 충분해.",
+            "intent": { "confidence": 99, "mode": "conversation" },
+            "presentation": {
+                "focusEntityId": "",
+                "layout": "stack",
+                "sections": [],
+                "title": ""
+            }
+        })
+        .to_string();
+
+        let (answer, presentation, actions) =
+            validated_assistant_response(&response, &context).expect("conversation result");
+
+        assert_eq!(answer, "그럴 때 있지… 오늘은 5분만 시작해도 충분해.");
+        assert!(presentation.is_none());
+        assert!(actions.is_empty());
+    }
+
+    #[test]
     fn structured_selection_drops_ids_missing_from_authenticated_context() {
         let task = Task {
             id: Uuid::now_v7(),
@@ -2907,6 +2960,7 @@ mod tests {
         .to_string();
         let (_, presentation, _) =
             validated_assistant_response(&response, &context).expect("valid response");
+        let presentation = presentation.expect("read result should have a presentation");
         assert_eq!(presentation.items.len(), 1);
         assert_eq!(presentation.sections.len(), 1);
         assert_eq!(presentation.focus_item_id, Some(task.id));
@@ -2975,6 +3029,7 @@ mod tests {
 
         let (_, presentation, _) =
             validated_assistant_response(&response, &context).expect("valid response");
+        let presentation = presentation.expect("read result should have a presentation");
         assert_eq!(
             presentation.kind,
             jimin_storage::agent::AssistantPresentationKind::Composite
@@ -3052,6 +3107,7 @@ mod tests {
 
         let (answer, presentation, _) =
             validated_assistant_response(&response, &context).expect("completion history result");
+        let presentation = presentation.expect("completion result should have a presentation");
 
         assert!(answer.contains("오늘 완료한 일은 2개예요."));
         assert_eq!(presentation.items.len(), 2);
@@ -3102,6 +3158,7 @@ mod tests {
 
         let (answer, presentation, _) =
             validated_assistant_response(&response, &context).expect("daily result");
+        let presentation = presentation.expect("daily result should have a presentation");
 
         assert!(answer.contains("오늘 확인할 할 일은 1개 있어요."));
         assert_eq!(presentation.items.len(), 1);
@@ -3164,6 +3221,7 @@ mod tests {
 
         let (_, presentation, _) =
             validated_assistant_response(&response, &context).expect("daily result");
+        let presentation = presentation.expect("daily result should have a presentation");
 
         assert_eq!(presentation.sections[0].item_ids, vec![today.id]);
         assert_eq!(presentation.items.len(), 1);
@@ -3547,6 +3605,7 @@ mod tests {
 
         let (_, presentation, action) =
             validated_assistant_response(&response, &context).expect("action result");
+        let presentation = presentation.expect("action result should have a presentation");
 
         assert_eq!(presentation.title, "요청을 처리하고 있어요");
         assert!(presentation.items.is_empty());
