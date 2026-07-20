@@ -130,6 +130,7 @@ pub enum AgentActionCommand {
         starts_at: OffsetDateTime,
         ends_at: OffsetDateTime,
         time_zone: String,
+        allow_schedule_conflict: bool,
     },
     UpdateSchedule {
         id: Uuid,
@@ -139,6 +140,7 @@ pub enum AgentActionCommand {
         ends_at: OffsetDateTime,
         time_zone: String,
         expected_version: i64,
+        allow_schedule_conflict: bool,
     },
     CancelSchedule {
         id: Uuid,
@@ -248,6 +250,7 @@ impl AgentActionCommand {
                 starts_at,
                 ends_at,
                 time_zone,
+                ..
             } => {
                 if is_v7(*id)
                     && valid_text(title, MAX_TITLE_CHARS, false)
@@ -268,6 +271,7 @@ impl AgentActionCommand {
                 ends_at,
                 time_zone,
                 expected_version,
+                ..
             } => {
                 if is_v7(*id)
                     && valid_text(title, MAX_TITLE_CHARS, false)
@@ -2580,6 +2584,16 @@ impl Database {
             .await
             .map_err(|error| classify(&error))?;
         }
+        if actions.iter().any(|action| {
+            matches!(
+                action,
+                AgentActionCommand::CreateSchedule { .. }
+                    | AgentActionCommand::UpdateSchedule { .. }
+            )
+        }) {
+            resolve_conversation_schedule_conflicts(&mut transaction, user_id, conversation_id)
+                .await?;
+        }
         let message_version = sqlx::query_scalar::<_, i64>(
             "\
             INSERT INTO messages (
@@ -2785,6 +2799,62 @@ impl Database {
     }
 }
 
+async fn resolve_conversation_schedule_conflicts(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    conversation_id: Uuid,
+) -> Result<(), StorageError> {
+    let fingerprint_prefix = format!("agent:schedule-conflict:{conversation_id}:%");
+    let recommendation_rows = sqlx::query_as::<_, (Uuid, i64)>(
+        "UPDATE recommendations AS recommendation
+         SET status = 'expired', revisit_at = NULL
+         FROM intelligence_signals AS signal
+         WHERE recommendation.signal_id = signal.id
+           AND recommendation.user_id = $1
+           AND signal.user_id = $1
+           AND signal.fingerprint LIKE $2
+           AND recommendation.status IN ('pending', 'deferred', 'analysis_requested')
+         RETURNING recommendation.id, recommendation.version",
+    )
+    .bind(user_id)
+    .bind(&fingerprint_prefix)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|error| classify(&error))?;
+    let signal_rows = sqlx::query_as::<_, (Uuid, i64)>(
+        "UPDATE intelligence_signals
+         SET status = 'resolved', resolved_at = NOW()
+         WHERE user_id = $1 AND status = 'active' AND fingerprint LIKE $2
+         RETURNING id, version",
+    )
+    .bind(user_id)
+    .bind(&fingerprint_prefix)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|error| classify(&error))?;
+    for (recommendation_id, version) in recommendation_rows {
+        append_change(
+            transaction,
+            user_id,
+            "recommendation",
+            recommendation_id,
+            version,
+        )
+        .await?;
+    }
+    for (signal_id, version) in signal_rows {
+        append_change(
+            transaction,
+            user_id,
+            "intelligence_signal",
+            signal_id,
+            version,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)] // The exhaustive match keeps each atomic SQL mutation visibly tied to its action contract.
 async fn persist_agent_action(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -2893,6 +2963,7 @@ async fn persist_agent_action(
             starts_at,
             ends_at,
             time_zone,
+            ..
         } => {
             let version = sqlx::query_scalar::<_, i64>(
                 "\
@@ -2935,6 +3006,7 @@ async fn persist_agent_action(
             ends_at,
             time_zone,
             expected_version,
+            ..
         } => {
             let version = sqlx::query_scalar::<_, i64>(
                 "\

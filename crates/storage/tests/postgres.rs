@@ -25,7 +25,8 @@ use jimin_storage::{
     goals::{GoalStatus, GoalUpdate, NewGoal},
     intelligence::{
         DecideRecommendation, DecideRecommendationOutcome, NewRecommendation,
-        RecommendationDecision, RecommendationStatus, SuggestedActionKind,
+        NewScheduleRequestConflict, RecommendationDecision, RecommendationStatus,
+        SuggestedActionKind,
     },
     planning::{
         DeleteTaskOutcome, NewScheduleEntry, NewTask, ScheduleEntryUpdate, TaskStatus, TaskUpdate,
@@ -3961,6 +3962,7 @@ async fn connected_schedules_use_one_durable_google_mutation_stream() {
                     starts_at: now + TimeDuration::days(2),
                     ends_at: now + TimeDuration::days(2) + TimeDuration::hours(1),
                     time_zone: "Asia/Seoul".to_owned(),
+                    allow_schedule_conflict: false,
                 }],
             )
             .await
@@ -4499,6 +4501,119 @@ async fn recommendation_decisions_are_scoped_versioned_and_idempotent() {
         DecideRecommendationOutcome::NotFound
     ));
 
+    database.close().await;
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Verify conflict persistence, agent execution, and automatic inbox cleanup as one lifecycle.
+async fn resolved_conversation_schedule_conflict_leaves_the_active_decision_inbox() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let conversation_id = Uuid::now_v7();
+    database
+        .create_conversation(&NewConversation {
+            id: conversation_id,
+            user_id: owner.profile.id,
+            title: Some("일정 조정".to_owned()),
+        })
+        .await
+        .expect("conversation should persist");
+    let queued = database
+        .enqueue_agent_turn(&NewAgentTurn {
+            job_id: Uuid::now_v7(),
+            message_id: Uuid::now_v7(),
+            client_message_id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            conversation_id,
+            content: "그럼 오후 4시에 추가해 줘".to_owned(),
+        })
+        .await
+        .expect("turn should queue");
+    let now = OffsetDateTime::now_utc();
+    let recommendation = database
+        .record_schedule_request_conflict(&NewScheduleRequestConflict {
+            user_id: owner.profile.id,
+            conversation_id,
+            agent_job_id: queued.job_id,
+            conflicting_schedule_id: None,
+            rationale: "오후 3시에는 회사 회의가 있어 치과 일정을 추가하지 않았어요.".to_owned(),
+            expected_effect: "오후 4시로 조정하면 두 일정을 모두 준비할 수 있어요.".to_owned(),
+            risk_summary: "이동 시간을 함께 확인해 주세요.".to_owned(),
+            valid_until: now + TimeDuration::days(1),
+        })
+        .await
+        .expect("schedule conflict should enter the decision inbox");
+    assert_eq!(recommendation.status, RecommendationStatus::Pending);
+    assert_eq!(
+        database
+            .active_recommendations_for_user(owner.profile.id, now, 10)
+            .await
+            .expect("active recommendations should load")
+            .len(),
+        1
+    );
+
+    let runner_id = "schedule-conflict-resolution";
+    let claimed = database
+        .claim_next_agent_job(runner_id, Duration::from_secs(30))
+        .await
+        .expect("job should claim")
+        .expect("queued job should exist");
+    assert!(
+        database
+            .start_agent_job(
+                claimed.id,
+                runner_id,
+                "thread-schedule-conflict",
+                Duration::from_secs(30),
+            )
+            .await
+            .expect("job should start")
+    );
+    assert!(
+        database
+            .complete_agent_job_with_actions(
+                claimed.id,
+                runner_id,
+                Uuid::now_v7(),
+                "치과 일정을 추가했어요.",
+                None,
+                &[AgentActionCommand::CreateSchedule {
+                    id: Uuid::now_v7(),
+                    title: "치과".to_owned(),
+                    notes: None,
+                    starts_at: now + TimeDuration::hours(4),
+                    ends_at: now + TimeDuration::hours(5),
+                    time_zone: "Asia/Seoul".to_owned(),
+                    allow_schedule_conflict: false,
+                }],
+            )
+            .await
+            .expect("resolved schedule action should commit")
+    );
+
+    assert!(
+        database
+            .active_recommendations_for_user(owner.profile.id, now, 10)
+            .await
+            .expect("resolved inbox should load")
+            .is_empty()
+    );
+    let history = database
+        .recommendation_history_for_user(owner.profile.id, 10)
+        .await
+        .expect("decision history should load");
+    assert_eq!(history[0].id, recommendation.id);
+    assert_eq!(history[0].status, RecommendationStatus::Expired);
     database.close().await;
 }
 

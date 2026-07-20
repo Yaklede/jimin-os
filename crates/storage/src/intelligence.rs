@@ -167,6 +167,20 @@ pub struct NewRecommendation {
     pub valid_until: Option<OffsetDateTime>,
 }
 
+/// A schedule request that the assistant intentionally left unexecuted after
+/// finding a conflict. It remains in the decision inbox until the same
+/// conversation successfully creates or moves a schedule.
+pub struct NewScheduleRequestConflict {
+    pub user_id: Uuid,
+    pub conversation_id: Uuid,
+    pub agent_job_id: Uuid,
+    pub conflicting_schedule_id: Option<Uuid>,
+    pub rationale: String,
+    pub expected_effect: String,
+    pub risk_summary: String,
+    pub valid_until: OffsetDateTime,
+}
+
 pub struct DecideRecommendation {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -308,6 +322,23 @@ impl DecideRecommendation {
     }
 }
 
+impl NewScheduleRequestConflict {
+    fn validate(&self, now: OffsetDateTime) -> Result<(), StorageError> {
+        if !is_v7(self.user_id)
+            || !is_v7(self.conversation_id)
+            || !is_v7(self.agent_job_id)
+            || !valid_optional_id(self.conflicting_schedule_id)
+            || !valid_text(&self.rationale, MAX_RATIONALE_CHARS, false)
+            || !valid_text(&self.expected_effect, MAX_EFFECT_CHARS, false)
+            || !valid_text(&self.risk_summary, MAX_EFFECT_CHARS, false)
+            || self.valid_until <= now
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
 impl TryFrom<RecommendationRow> for Recommendation {
     type Error = StorageError;
 
@@ -391,6 +422,112 @@ impl Database {
             recommendation.user_id,
             "recommendation",
             recommendation.id,
+            row.version,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        Recommendation::try_from(row)
+    }
+
+    /// Keeps one unresolved conversational schedule conflict in the decision
+    /// inbox. Replays for the same agent job update the same signal and
+    /// recommendation instead of creating duplicate reminders.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation or persistence error when the conflict cannot be
+    /// recorded atomically.
+    pub async fn record_schedule_request_conflict(
+        &self,
+        conflict: &NewScheduleRequestConflict,
+    ) -> Result<Recommendation, StorageError> {
+        let now = OffsetDateTime::now_utc();
+        conflict.validate(now)?;
+        let fingerprint = format!(
+            "agent:schedule-conflict:{}:{}",
+            conflict.conversation_id, conflict.agent_job_id
+        );
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let (signal_id, signal_version) = sqlx::query_as::<_, (Uuid, i64)>(
+            "INSERT INTO intelligence_signals (
+                id, user_id, kind, severity, title, summary, source_type,
+                source_entity_id, fingerprint, status, observed_at, valid_until
+             ) VALUES (
+                $1, $2, 'schedule_conflict', 2, '일정 시간을 다시 정해 주세요',
+                $3, 'manual', $4, $5, 'active', $6, $7
+             )
+             ON CONFLICT (user_id, fingerprint) WHERE status = 'active'
+             DO UPDATE SET
+                summary = EXCLUDED.summary,
+                source_entity_id = EXCLUDED.source_entity_id,
+                observed_at = EXCLUDED.observed_at,
+                valid_until = EXCLUDED.valid_until
+             RETURNING id, version",
+        )
+        .bind(Uuid::now_v7())
+        .bind(conflict.user_id)
+        .bind(conflict.rationale.trim())
+        .bind(conflict.conflicting_schedule_id)
+        .bind(&fingerprint)
+        .bind(now)
+        .bind(conflict.valid_until)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let row = sqlx::query_as::<_, RecommendationRow>(
+            "INSERT INTO recommendations (
+                id, user_id, signal_id, title, rationale, expected_effect,
+                risk_summary, confidence, urgency, impact, risk_level,
+                effort_minutes, suggested_action_kind, suggested_entity_id,
+                status, valid_until
+             ) VALUES (
+                $1, $2, $3, '일정 시간을 다시 정해 주세요', $4, $5,
+                $6, 100, 2, 2, 1, 5, 'review', $7, 'pending', $8
+             )
+             ON CONFLICT (signal_id) WHERE signal_id IS NOT NULL
+             DO UPDATE SET
+                rationale = EXCLUDED.rationale,
+                expected_effect = EXCLUDED.expected_effect,
+                risk_summary = EXCLUDED.risk_summary,
+                suggested_entity_id = EXCLUDED.suggested_entity_id,
+                status = CASE
+                    WHEN recommendations.status IN ('pending', 'deferred', 'analysis_requested')
+                        THEN 'pending'
+                    ELSE recommendations.status
+                END,
+                revisit_at = NULL,
+                valid_until = EXCLUDED.valid_until
+             RETURNING
+                id, workspace_id, project_id, goal_id, signal_id,
+                title, rationale, expected_effect, risk_summary,
+                confidence, urgency, impact, risk_level, effort_minutes,
+                suggested_action_kind, suggested_entity_id, status, valid_until,
+                revisit_at, created_at, updated_at, version",
+        )
+        .bind(Uuid::now_v7())
+        .bind(conflict.user_id)
+        .bind(signal_id)
+        .bind(conflict.rationale.trim())
+        .bind(conflict.expected_effect.trim())
+        .bind(conflict.risk_summary.trim())
+        .bind(conflict.conflicting_schedule_id)
+        .bind(conflict.valid_until)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        append_change(
+            &mut transaction,
+            conflict.user_id,
+            "intelligence_signal",
+            signal_id,
+            signal_version,
+        )
+        .await?;
+        append_change(
+            &mut transaction,
+            conflict.user_id,
+            "recommendation",
+            row.id,
             row.version,
         )
         .await?;

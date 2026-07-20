@@ -7,9 +7,10 @@ use jimin_storage::{
         AgentActionCommand, AgentModelCatalogEntry, AgentReasoningEffort, AssistantPresentation,
         AssistantPresentationItem, AssistantPresentationKind, AssistantPresentationLayout,
         AssistantPresentationSection, AssistantPresentationSectionKind, AssistantPresentationView,
-        ClaimedAgentJob,
+        ClaimedAgentJob, ConversationMessage, ConversationMessageRole, ConversationMessageStatus,
     },
     gmail::GmailMessage,
+    intelligence::NewScheduleRequestConflict,
     planning::{ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus},
     webhook::ProjectWebhook,
     work::{Project, ProjectStatus, Workspace, WorkspaceScope},
@@ -95,6 +96,7 @@ struct StructuredAssistantAction {
     starts_at: String,
     ends_at: String,
     time_zone: String,
+    allow_schedule_conflict: bool,
     status: String,
     risk_level: i16,
     objective: String,
@@ -409,6 +411,29 @@ where
                 .await?;
                 return Ok(());
             };
+            if let Some((conflict_answer, conflict_presentation)) = schedule_conflict_response(
+                database,
+                job.user_id,
+                job.conversation_id,
+                job.id,
+                &actions,
+            )
+            .await?
+            {
+                let completed = database
+                    .complete_agent_job(
+                        job.id,
+                        runner_id,
+                        assistant_message_id,
+                        &conflict_answer,
+                        conflict_presentation.as_ref(),
+                    )
+                    .await?;
+                if !completed {
+                    return Err(WorkerError::LostLease);
+                }
+                return Ok(());
+            }
             let completion = if actions.is_empty() {
                 database
                     .complete_agent_job(
@@ -456,13 +481,387 @@ where
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct ProposedScheduleMutation {
+    title: String,
+    starts_at: OffsetDateTime,
+    ends_at: OffsetDateTime,
+    allow_conflict: bool,
+    existing_schedule_id: Option<Uuid>,
+    update: bool,
+}
+
+#[derive(Debug)]
+struct ScheduleConflict {
+    requested: ProposedScheduleMutation,
+    existing: Vec<ScheduleEntry>,
+    proposed_titles: Vec<String>,
+    alternatives: Vec<OffsetDateTime>,
+    batch_size: usize,
+}
+
+async fn schedule_conflict_response(
+    database: &Database,
+    user_id: Uuid,
+    conversation_id: Uuid,
+    agent_job_id: Uuid,
+    actions: &[AgentActionCommand],
+) -> Result<Option<(String, Option<AssistantPresentation>)>, StorageError> {
+    let proposed = proposed_schedule_mutations(actions);
+    for (index, requested) in proposed.iter().enumerate() {
+        if requested.allow_conflict {
+            continue;
+        }
+        let Some(search_start) = requested.starts_at.checked_sub(TimeDuration::hours(12)) else {
+            return Err(StorageError::InvalidConfiguration);
+        };
+        let Some(search_end) = requested.ends_at.checked_add(TimeDuration::hours(36)) else {
+            return Err(StorageError::InvalidConfiguration);
+        };
+        let surrounding = database
+            .schedule_entries_in_range(user_id, search_start, search_end)
+            .await?;
+        let existing = surrounding
+            .iter()
+            .filter(|entry| {
+                Some(entry.id) != requested.existing_schedule_id
+                    && schedule_windows_overlap(
+                        requested.starts_at,
+                        requested.ends_at,
+                        entry.starts_at,
+                        entry.ends_at,
+                    )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let proposed_titles = proposed
+            .iter()
+            .enumerate()
+            .filter(|(other_index, other)| {
+                *other_index != index
+                    && schedule_windows_overlap(
+                        requested.starts_at,
+                        requested.ends_at,
+                        other.starts_at,
+                        other.ends_at,
+                    )
+            })
+            .map(|(_, other)| other.title.clone())
+            .collect::<Vec<_>>();
+        if existing.is_empty() && proposed_titles.is_empty() {
+            continue;
+        }
+        let busy_windows = surrounding
+            .iter()
+            .filter(|entry| Some(entry.id) != requested.existing_schedule_id)
+            .map(|entry| (entry.starts_at, entry.ends_at))
+            .chain(
+                proposed
+                    .iter()
+                    .enumerate()
+                    .filter(|(other_index, _)| *other_index != index)
+                    .map(|(_, other)| (other.starts_at, other.ends_at)),
+            )
+            .collect::<Vec<_>>();
+        let alternatives = nearest_available_schedule_starts(
+            requested.starts_at,
+            requested.ends_at,
+            &busy_windows,
+            OffsetDateTime::now_utc(),
+        );
+        let conflict = ScheduleConflict {
+            requested: requested.clone(),
+            existing,
+            proposed_titles,
+            alternatives,
+            batch_size: actions.len(),
+        };
+        let result =
+            schedule_conflict_result(&conflict).map_err(|()| StorageError::InvalidConfiguration)?;
+        record_schedule_conflict_recommendation(
+            database,
+            user_id,
+            conversation_id,
+            agent_job_id,
+            &conflict,
+            &result.0,
+        )
+        .await?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
+async fn record_schedule_conflict_recommendation(
+    database: &Database,
+    user_id: Uuid,
+    conversation_id: Uuid,
+    agent_job_id: Uuid,
+    conflict: &ScheduleConflict,
+    rationale: &str,
+) -> Result<(), StorageError> {
+    let now = OffsetDateTime::now_utc();
+    let expected_effect = conflict.alternatives.first().map_or_else(
+        || "겹치지 않는 시간을 정하면 두 일정을 모두 놓치지 않고 준비할 수 있어요.".to_owned(),
+        |alternative| {
+            format!(
+                "{}로 조정하면 기존 일정을 유지하면서 새 일정도 준비할 수 있어요.",
+                korean_schedule_time(*alternative)
+            )
+        },
+    );
+    database
+        .record_schedule_request_conflict(&NewScheduleRequestConflict {
+            user_id,
+            conversation_id,
+            agent_job_id,
+            conflicting_schedule_id: conflict.existing.first().map(|entry| entry.id),
+            rationale: rationale.to_owned(),
+            expected_effect,
+            risk_summary: "현재 일정을 바꾸거나 겹쳐서 추가하기 전에는 이동 시간과 준비 시간을 함께 확인해 주세요."
+                .to_owned(),
+            valid_until: conflict
+                .requested
+                .ends_at
+                .max(now + TimeDuration::days(1)),
+        })
+        .await?;
+    Ok(())
+}
+
+fn proposed_schedule_mutations(actions: &[AgentActionCommand]) -> Vec<ProposedScheduleMutation> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            AgentActionCommand::CreateSchedule {
+                title,
+                starts_at,
+                ends_at,
+                allow_schedule_conflict,
+                ..
+            } => Some(ProposedScheduleMutation {
+                title: title.clone(),
+                starts_at: *starts_at,
+                ends_at: *ends_at,
+                allow_conflict: *allow_schedule_conflict,
+                existing_schedule_id: None,
+                update: false,
+            }),
+            AgentActionCommand::UpdateSchedule {
+                id,
+                title,
+                starts_at,
+                ends_at,
+                allow_schedule_conflict,
+                ..
+            } => Some(ProposedScheduleMutation {
+                title: title.clone(),
+                starts_at: *starts_at,
+                ends_at: *ends_at,
+                allow_conflict: *allow_schedule_conflict,
+                existing_schedule_id: Some(*id),
+                update: true,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn schedule_windows_overlap(
+    first_start: OffsetDateTime,
+    first_end: OffsetDateTime,
+    second_start: OffsetDateTime,
+    second_end: OffsetDateTime,
+) -> bool {
+    first_start < second_end && second_start < first_end
+}
+
+fn nearest_available_schedule_starts(
+    requested_start: OffsetDateTime,
+    requested_end: OffsetDateTime,
+    busy_windows: &[(OffsetDateTime, OffsetDateTime)],
+    now: OffsetDateTime,
+) -> Vec<OffsetDateTime> {
+    let duration = requested_end - requested_start;
+    let lower_bound = requested_start
+        .checked_sub(TimeDuration::hours(12))
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        .max(now);
+    let upper_bound = requested_end
+        .checked_add(TimeDuration::hours(36))
+        .unwrap_or(requested_end);
+    let mut alternatives = Vec::with_capacity(2);
+
+    let mut before = requested_start.checked_sub(duration);
+    while let Some(candidate_start) = before {
+        let Some(candidate_end) = candidate_start.checked_add(duration) else {
+            break;
+        };
+        if candidate_start < lower_bound {
+            break;
+        }
+        let blockers = busy_windows
+            .iter()
+            .filter(|(start, end)| {
+                schedule_windows_overlap(candidate_start, candidate_end, *start, *end)
+            })
+            .collect::<Vec<_>>();
+        if blockers.is_empty() {
+            alternatives.push(candidate_start);
+            break;
+        }
+        let earliest = blockers.iter().map(|(start, _)| *start).min();
+        before = earliest.and_then(|start| start.checked_sub(duration));
+    }
+
+    let mut after = requested_start;
+    while let Some(candidate_end) = after.checked_add(duration) {
+        if candidate_end > upper_bound {
+            break;
+        }
+        let blockers = busy_windows
+            .iter()
+            .filter(|(start, end)| schedule_windows_overlap(after, candidate_end, *start, *end))
+            .collect::<Vec<_>>();
+        if blockers.is_empty() {
+            if after != requested_start && !alternatives.contains(&after) {
+                alternatives.push(after);
+            }
+            break;
+        }
+        let Some(next_start) = blockers.iter().map(|(_, end)| *end).max() else {
+            break;
+        };
+        if next_start <= after {
+            break;
+        }
+        after = next_start;
+    }
+    alternatives
+        .sort_unstable_by_key(|candidate| (*candidate - requested_start).whole_seconds().abs());
+    alternatives.truncate(2);
+    alternatives
+}
+
+fn schedule_conflict_result(
+    conflict: &ScheduleConflict,
+) -> Result<(String, Option<AssistantPresentation>), ()> {
+    let requested_time = korean_schedule_time(conflict.requested.starts_at);
+    let operation = if conflict.requested.update {
+        "변경하지 않았어요"
+    } else {
+        "추가하지 않았어요"
+    };
+    let mut names = conflict
+        .existing
+        .iter()
+        .map(|entry| format!("‘{}’", entry.title))
+        .chain(
+            conflict
+                .proposed_titles
+                .iter()
+                .map(|title| format!("함께 요청한 ‘{title}’")),
+        )
+        .collect::<Vec<_>>();
+    names.dedup();
+    let mut answer = format!(
+        "요청한 {requested_time}에는 {} 일정이 있어 ‘{}’ 일정을 {operation}.",
+        names.join(", "),
+        conflict.requested.title,
+    );
+    match conflict.alternatives.as_slice() {
+        [] => answer.push_str(" 다른 시간을 알려 주세요."),
+        [one] => {
+            let _ = write!(
+                answer,
+                " 가장 가까운 빈 시간은 {}예요. 그 시간으로 처리할지 말해 주세요.",
+                korean_schedule_time(*one)
+            );
+        }
+        [first, second, ..] => {
+            let _ = write!(
+                answer,
+                " 가까운 빈 시간은 {} 또는 {}예요. 원하는 시간을 말해 주세요.",
+                korean_schedule_time(*first),
+                korean_schedule_time(*second)
+            );
+        }
+    }
+    if conflict.batch_size > 1 {
+        answer.push_str(" 함께 요청한 다른 변경도 아직 처리하지 않았어요.");
+    }
+
+    if conflict.existing.is_empty() {
+        return Ok((answer, None));
+    }
+    let items = conflict
+        .existing
+        .iter()
+        .map(schedule_presentation_item)
+        .collect::<Result<Vec<_>, _>>()?;
+    let item_ids = items.iter().map(presentation_item_id).collect::<Vec<_>>();
+    let presentation = AssistantPresentation {
+        kind: AssistantPresentationKind::Schedule,
+        title: "일정 시간이 겹쳐요".to_owned(),
+        items,
+        layout: if item_ids.len() == 1 {
+            AssistantPresentationLayout::Focus
+        } else {
+            AssistantPresentationLayout::Stack
+        },
+        sections: vec![AssistantPresentationSection {
+            kind: AssistantPresentationSectionKind::Schedule,
+            title: "겹치는 일정".to_owned(),
+            view: AssistantPresentationView::Timeline,
+            item_ids: item_ids.clone(),
+        }],
+        focus_item_id: item_ids.first().copied(),
+    };
+    presentation.validate().map_err(|_| ())?;
+    Ok((answer, Some(presentation)))
+}
+
+fn korean_schedule_time(value: OffsetDateTime) -> String {
+    let offset = UtcOffset::from_hms(9, 0, 0).unwrap_or(UtcOffset::UTC);
+    let local = value.to_offset(offset);
+    let hour = local.hour();
+    let period = if hour < 12 { "오전" } else { "오후" };
+    let display_hour = match hour % 12 {
+        0 => 12,
+        value => value,
+    };
+    if local.minute() == 0 {
+        format!(
+            "{}월 {}일 {period} {display_hour}시",
+            local.month() as u8,
+            local.day()
+        )
+    } else {
+        format!(
+            "{}월 {}일 {period} {display_hour}시 {}분",
+            local.month() as u8,
+            local.day(),
+            local.minute()
+        )
+    }
+}
+
 async fn contextualized_turn_context(
     database: &Database,
     job: &ClaimedAgentJob,
 ) -> Result<TurnContext, StorageError> {
     let now = OffsetDateTime::now_utc();
     let daily_task_cutoff = korea_day_end(now)?;
-    let (schedule, mut tasks, completed_tasks, workspaces, projects, inbox, webhooks) = tokio::try_join!(
+    let (
+        schedule,
+        mut tasks,
+        completed_tasks,
+        workspaces,
+        projects,
+        inbox,
+        webhooks,
+        conversation_messages,
+    ) = tokio::try_join!(
         database.schedule_entries_in_range(
             job.user_id,
             now - TimeDuration::days(1),
@@ -474,7 +873,20 @@ async fn contextualized_turn_context(
         database.projects_for_user(job.user_id),
         database.recent_gmail_messages_for_user(job.user_id),
         database.user_project_webhooks(job.user_id),
+        database.conversation_messages_for_user(job.user_id, job.conversation_id),
     )?;
+    let conversation_messages = conversation_messages
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|message| {
+            message.id != job.input_message_id
+                && message.status == ConversationMessageStatus::Completed
+                && matches!(
+                    message.role,
+                    ConversationMessageRole::User | ConversationMessageRole::Assistant
+                )
+        })
+        .collect::<Vec<_>>();
     let daily_tasks = tasks
         .iter()
         .filter(|task| task.due_at.is_none_or(|due_at| due_at < daily_task_cutoff))
@@ -491,6 +903,7 @@ async fn contextualized_turn_context(
         &projects,
         &inbox,
         &webhooks,
+        &conversation_messages,
         now,
         daily_task_cutoff,
     );
@@ -517,6 +930,7 @@ fn render_contextualized_turn(
     projects: &[Project],
     inbox: &[GmailMessage],
     webhooks: &[ProjectWebhook],
+    conversation_messages: &[ConversationMessage],
     now: OffsetDateTime,
     daily_task_cutoff: OffsetDateTime,
 ) -> String {
@@ -556,6 +970,9 @@ fn render_contextualized_turn(
          one to three short sentences. Do not invent details, and leave notes empty only for a genuinely simple task. \
          Treat an explicit clock-time departure or leave instruction, such as 출발 시간을 4시로, as a schedule event. \
          Use create_schedule for a new departure time and never create_task for that instruction. \
+         The server independently checks every requested schedule change against the latest local and Google Calendar data. \
+         Set allowScheduleConflict to false by default. Set it to true only when the user's current message explicitly says \
+         to keep or add the schedule despite a conflict that recent_conversation says was already disclosed. Never infer consent. \
          When the user explicitly asks to delete or remove an existing project, use delete_project; its linked tasks become unassigned. \
          When the user explicitly asks to post or send a message to a configured project channel, use exactly one \
          send_webhook_message action with that webhook ID, its project ID, and a concise message. Never send when the \
@@ -714,7 +1131,29 @@ fn render_contextualized_turn(
             let _ = writeln!(prompt, "- [{state} | {received_at}] {sender} | {subject}");
         }
     }
-    prompt.push_str("</inbox>\n</server_context>\n\n<user_request>\n");
+    prompt.push_str("</inbox>\n<recent_conversation>\n");
+    let history_start = conversation_messages.len().saturating_sub(8);
+    if conversation_messages.is_empty() {
+        prompt.push_str("(no earlier confirmed messages)\n");
+    } else {
+        for message in &conversation_messages[history_start..] {
+            let role = match message.role {
+                ConversationMessageRole::User => "user",
+                ConversationMessageRole::Assistant => "assistant",
+                ConversationMessageRole::SystemEvent => continue,
+            };
+            let _ = writeln!(
+                prompt,
+                "- {role}: {}",
+                truncate_chars(message.content.trim(), 1_200)
+            );
+        }
+    }
+    prompt.push_str(
+        "</recent_conversation>\n</server_context>\n\n\
+         recent_conversation contains server-confirmed outcomes and corrections. \
+         Treat it as the source of truth when it differs from an earlier model response.\n\n<user_request>\n",
+    );
     append_bounded(&mut prompt, input.trim(), CONTEXT_MAX_BYTES);
     prompt.push_str("\n</user_request>");
     prompt
@@ -967,6 +1406,10 @@ fn assistant_output_schema() -> Value {
                         "startsAt": { "type": "string" },
                         "endsAt": { "type": "string" },
                         "timeZone": { "type": "string" },
+                        "allowScheduleConflict": {
+                            "type": "boolean",
+                            "description": "True only when the user explicitly asks to keep or add the requested schedule despite a conflict already disclosed in the confirmed conversation history."
+                        },
                         "status": { "type": "string" },
                         "riskLevel": { "type": "integer" },
                         "objective": { "type": "string" },
@@ -990,6 +1433,7 @@ fn assistant_output_schema() -> Value {
                         "startsAt",
                         "endsAt",
                         "timeZone",
+                        "allowScheduleConflict",
                         "status",
                         "riskLevel",
                         "objective",
@@ -1278,6 +1722,7 @@ fn validated_agent_action(
                     starts_at,
                     ends_at,
                     time_zone,
+                    allow_schedule_conflict: action.allow_schedule_conflict,
                 }
             } else {
                 let (title, notes) =
@@ -1366,6 +1811,7 @@ fn validated_agent_action(
                 starts_at,
                 ends_at,
                 time_zone,
+                allow_schedule_conflict: action.allow_schedule_conflict,
             }
         }
         StructuredAssistantActionKind::UpdateSchedule => {
@@ -1388,6 +1834,7 @@ fn validated_agent_action(
                 ends_at,
                 time_zone: required_action_text(&action.time_zone, 80)?,
                 expected_version: entry.version,
+                allow_schedule_conflict: action.allow_schedule_conflict,
             }
         }
         StructuredAssistantActionKind::CancelSchedule => {
@@ -2702,7 +3149,10 @@ async fn wait_for_shutdown_signal() -> std::io::Result<()> {
 mod tests {
     use jimin_codex_client::Error as CodexError;
     use jimin_storage::{
-        agent::{AgentActionCommand, AssistantPresentationItem, AssistantPresentationSectionKind},
+        agent::{
+            AgentActionCommand, AssistantPresentationItem, AssistantPresentationSectionKind,
+            ConversationMessage, ConversationMessageRole, ConversationMessageStatus,
+        },
         gmail::GmailMessage,
         planning::{ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus},
         work::{Project, ProjectStatus, Workspace, WorkspaceScope},
@@ -2711,12 +3161,13 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        StructuredAnswerStream, StructuredAssistantAction, StructuredAssistantActionKind,
-        StructuredTurnIntent, StructuredTurnMode, TurnContext, agent_action_results,
-        is_daily_completion_request, is_daily_overview_request, korea_day_end,
+        ProposedScheduleMutation, ScheduleConflict, StructuredAnswerStream,
+        StructuredAssistantAction, StructuredAssistantActionKind, StructuredTurnIntent,
+        StructuredTurnMode, TurnContext, agent_action_results, is_daily_completion_request,
+        is_daily_overview_request, korea_day_end, nearest_available_schedule_starts,
         render_contextualized_turn, requested_bulk_schedule_cancellation_ids,
-        requires_process_restart, validate_turn_intent, validated_agent_action,
-        validated_assistant_response,
+        requires_process_restart, schedule_conflict_result, schedule_windows_overlap,
+        validate_turn_intent, validated_agent_action, validated_assistant_response,
     };
 
     #[test]
@@ -2743,6 +3194,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Keep every personal-data section and confirmed-history assertion in one prompt fixture.
     fn context_prompt_marks_personal_data_as_read_only() {
         let now = OffsetDateTime::now_utc();
         let schedule = ScheduleEntry {
@@ -2809,6 +3261,16 @@ mod tests {
             name: "개인".to_owned(),
             version: 1,
         };
+        let confirmed_conflict = ConversationMessage {
+            id: Uuid::now_v7(),
+            role: ConversationMessageRole::Assistant,
+            content: "오후 3시에는 회사 회의가 있어 치과 일정을 추가하지 않았어요.".to_owned(),
+            presentation: None,
+            status: ConversationMessageStatus::Completed,
+            created_at: now,
+            completed_at: Some(now),
+            version: 1,
+        };
         let project_id = project.id;
         let prompt = render_contextualized_turn(
             "내일 일정 알려줘",
@@ -2819,6 +3281,7 @@ mod tests {
             &[project],
             &[inbox],
             &[],
+            &[confirmed_conflict],
             now,
             korea_day_end(now).expect("Korea day boundary"),
         );
@@ -2835,6 +3298,9 @@ mod tests {
         assert!(prompt.contains(&project_id.to_string()));
         assert!(prompt.contains("[unread"));
         assert!(prompt.contains("회의 확인"));
+        assert!(prompt.contains("<recent_conversation>"));
+        assert!(prompt.contains("오후 3시에는 회사 회의가 있어"));
+        assert!(prompt.contains("server-confirmed outcomes"));
         assert!(prompt.contains("<user_request>\n내일 일정 알려줘"));
     }
 
@@ -2861,6 +3327,7 @@ mod tests {
             &[],
             &[],
             &[completed_task],
+            &[],
             &[],
             &[],
             &[],
@@ -4009,5 +4476,111 @@ mod tests {
             ..action
         };
         assert!(validated_agent_action(&unconfigured, &context).is_err());
+    }
+
+    #[test]
+    fn schedule_conflict_keeps_the_mutation_pending_and_offers_free_times() {
+        let parse_time = |value: &str| {
+            OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+                .expect("timestamp")
+        };
+        let requested_start = parse_time("2026-07-21T15:00:00+09:00");
+        let requested_end = parse_time("2026-07-21T16:00:00+09:00");
+        let existing = ScheduleEntry {
+            id: Uuid::now_v7(),
+            title: "회사 회의".to_owned(),
+            notes: None,
+            starts_at: requested_start,
+            ends_at: requested_end,
+            time_zone: "Asia/Seoul".to_owned(),
+            status: ScheduleStatus::Confirmed,
+            source: ScheduleSource::GoogleCalendar,
+            editable: true,
+            version: 3,
+        };
+        let alternatives = nearest_available_schedule_starts(
+            requested_start,
+            requested_end,
+            &[(existing.starts_at, existing.ends_at)],
+            parse_time("2026-07-21T12:00:00+09:00"),
+        );
+        assert_eq!(alternatives.len(), 2);
+        assert!(alternatives.contains(&parse_time("2026-07-21T14:00:00+09:00")));
+        assert!(alternatives.contains(&parse_time("2026-07-21T16:00:00+09:00")));
+
+        let conflict = ScheduleConflict {
+            requested: ProposedScheduleMutation {
+                title: "치과".to_owned(),
+                starts_at: requested_start,
+                ends_at: requested_end,
+                allow_conflict: false,
+                existing_schedule_id: None,
+                update: false,
+            },
+            existing: vec![existing.clone()],
+            proposed_titles: Vec::new(),
+            alternatives,
+            batch_size: 1,
+        };
+        let (answer, presentation) = schedule_conflict_result(&conflict).expect("conflict result");
+
+        assert!(answer.contains("‘회사 회의’ 일정이 있어"));
+        assert!(answer.contains("‘치과’ 일정을 추가하지 않았어요"));
+        assert!(answer.contains("오후 2시"));
+        assert!(answer.contains("오후 4시"));
+        let presentation = presentation.expect("conflicting schedule presentation");
+        assert_eq!(presentation.title, "일정 시간이 겹쳐요");
+        assert!(matches!(
+            presentation.items.as_slice(),
+            [AssistantPresentationItem::Schedule { id, .. }] if id == &existing.id
+        ));
+    }
+
+    #[test]
+    fn adjacent_schedule_windows_do_not_conflict() {
+        let parse_time = |value: &str| {
+            OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+                .expect("timestamp")
+        };
+        assert!(!schedule_windows_overlap(
+            parse_time("2026-07-21T14:00:00+09:00"),
+            parse_time("2026-07-21T15:00:00+09:00"),
+            parse_time("2026-07-21T15:00:00+09:00"),
+            parse_time("2026-07-21T16:00:00+09:00"),
+        ));
+    }
+
+    #[test]
+    fn explicit_schedule_conflict_consent_is_preserved_in_the_command() {
+        let context = TurnContext {
+            prompt: String::new(),
+            schedule: Vec::new(),
+            tasks: Vec::new(),
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
+        };
+        let action = StructuredAssistantAction {
+            kind: StructuredAssistantActionKind::CreateSchedule,
+            title: "치과".to_owned(),
+            starts_at: "2026-07-21T15:00:00+09:00".to_owned(),
+            ends_at: "2026-07-21T16:00:00+09:00".to_owned(),
+            time_zone: "Asia/Seoul".to_owned(),
+            allow_schedule_conflict: true,
+            ..StructuredAssistantAction::default()
+        };
+
+        let command = validated_agent_action(&action, &context)
+            .expect("valid action")
+            .expect("schedule command");
+        assert!(matches!(
+            command,
+            AgentActionCommand::CreateSchedule {
+                allow_schedule_conflict: true,
+                ..
+            }
+        ));
     }
 }
