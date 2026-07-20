@@ -38,6 +38,7 @@ use jimin_storage::{
         CalendarAccount, CalendarAccountStatus, CreateCalendarOAuthAuthorization,
         DisconnectCalendarAccountOutcome,
     },
+    goals::{Goal, GoalStatus, GoalUpdate, NewGoal},
     intelligence::{
         DecideRecommendation, DecideRecommendationOutcome, Recommendation, RecommendationDecision,
         RecommendationStatus, SuggestedActionKind,
@@ -371,6 +372,29 @@ pub struct ProjectResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectListResponse {
     items: Vec<ProjectResponse>,
+    next_cursor: Option<String>,
+}
+
+/// A desired outcome that gives projects and daily work a clear direction.
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalResponse {
+    id: uuid::Uuid,
+    workspace_id: Option<uuid::Uuid>,
+    project_id: Option<uuid::Uuid>,
+    title: String,
+    desired_outcome: String,
+    status: String,
+    target_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+    version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalListResponse {
+    items: Vec<GoalResponse>,
     next_cursor: Option<String>,
 }
 
@@ -862,6 +886,28 @@ struct DeleteProjectRequest {
 
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CreateGoalRequest {
+    workspace_id: Option<uuid::Uuid>,
+    project_id: Option<uuid::Uuid>,
+    title: String,
+    desired_outcome: String,
+    target_at: Option<String>,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UpdateGoalRequest {
+    workspace_id: Option<uuid::Uuid>,
+    project_id: Option<uuid::Uuid>,
+    title: String,
+    desired_outcome: String,
+    status: String,
+    target_at: Option<String>,
+    expected_version: i64,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CreateProjectWebhookRequest {
     provider: String,
     url: String,
@@ -1017,6 +1063,9 @@ pub(crate) fn error_response(
         update_schedule_entry,
         delete_schedule_entry,
         list_workspaces,
+        list_goals,
+        create_goal,
+        update_goal,
         list_projects,
         create_project,
         update_project,
@@ -1161,6 +1210,7 @@ pub fn router(state: ApiState) -> Router {
             post(decide_recommendation),
         )
         .route("/v1/workspaces", get(list_workspaces))
+        .merge(goal_router())
         .route("/v1/projects", get(list_projects).post(create_project))
         .route(
             "/v1/projects/{project_id}",
@@ -1270,6 +1320,12 @@ fn webhook_router() -> Router<ApiState> {
             "/v1/projects/{project_id}/webhook-deliveries/{delivery_id}/retry",
             post(retry_webhook_delivery),
         )
+}
+
+fn goal_router() -> Router<ApiState> {
+    Router::new()
+        .route("/v1/goals", get(list_goals).post(create_goal))
+        .route("/v1/goals/{goal_id}", axum::routing::put(update_goal))
 }
 
 fn calendar_router() -> Router<ApiState> {
@@ -2268,6 +2324,148 @@ fn recommendation_conflict_response(request_id: RequestId) -> Response {
         request_id,
         false,
     )
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/goals",
+    tag = "work",
+    responses((status = 200, body = GoalListResponse), (status = 401), (status = 503))
+)]
+async fn list_goals(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .goals_for_user(principal.identity().user_id())
+        .await
+    {
+        Ok(goals) => match goals
+            .into_iter()
+            .map(goal_response)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(items) => Json(GoalListResponse {
+                items,
+                next_cursor: None,
+            })
+            .into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/goals",
+    tag = "work",
+    request_body = CreateGoalRequest,
+    responses((status = 201, body = GoalResponse), (status = 400), (status = 401), (status = 503))
+)]
+async fn create_goal(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Json(body): Json<CreateGoalRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Ok(target_at) = parse_optional_timestamp(body.target_at) else {
+        return invalid_request_response(request_id);
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .create_goal(&NewGoal {
+            id: uuid::Uuid::now_v7(),
+            user_id: principal.identity().user_id(),
+            workspace_id: body.workspace_id,
+            project_id: body.project_id,
+            title: body.title,
+            desired_outcome: body.desired_outcome,
+            target_at,
+        })
+        .await
+    {
+        Ok(goal) => match goal_response(goal) {
+            Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/goals/{goal_id}",
+    tag = "work",
+    params(("goal_id" = String, Path)),
+    request_body = UpdateGoalRequest,
+    responses((status = 200, body = GoalResponse), (status = 400), (status = 401), (status = 409), (status = 503))
+)]
+async fn update_goal(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(goal_id): Path<uuid::Uuid>,
+    Json(body): Json<UpdateGoalRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let status = match body.status.as_str() {
+        "active" => GoalStatus::Active,
+        "paused" => GoalStatus::Paused,
+        "achieved" => GoalStatus::Achieved,
+        "cancelled" => GoalStatus::Cancelled,
+        _ => return invalid_request_response(request_id),
+    };
+    let Ok(target_at) = parse_optional_timestamp(body.target_at) else {
+        return invalid_request_response(request_id);
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .update_goal(&GoalUpdate {
+            id: goal_id,
+            user_id: principal.identity().user_id(),
+            workspace_id: body.workspace_id,
+            project_id: body.project_id,
+            title: body.title,
+            desired_outcome: body.desired_outcome,
+            status,
+            target_at,
+            expected_version: body.expected_version,
+        })
+        .await
+    {
+        Ok(Some(goal)) => match goal_response(goal) {
+            Ok(response) => Json(response).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Ok(None) => error_response(
+            StatusCode::CONFLICT,
+            "goal.version_conflict",
+            "목표가 다른 곳에서 변경됐어요. 최신 상태를 확인해 주세요.",
+            request_id,
+            false,
+        ),
+        Err(error) => storage_error_response(&error, request_id),
+    }
 }
 
 #[utoipa::path(
@@ -4781,6 +4979,12 @@ fn invalid_request_response(request_id: RequestId) -> Response {
     )
 }
 
+fn parse_optional_timestamp(value: Option<String>) -> Result<Option<OffsetDateTime>, ()> {
+    value
+        .map(|value| OffsetDateTime::parse(&value, &Rfc3339).map_err(|_| ()))
+        .transpose()
+}
+
 fn application_error_response(error: &ApplicationError, request_id: RequestId) -> Response {
     match error {
         ApplicationError::InvalidIdentity | ApplicationError::InvalidSessionLifetime => {
@@ -4973,6 +5177,29 @@ fn workspace_response(workspace: Workspace) -> WorkspaceResponse {
         name: workspace.name,
         version: workspace.version,
     }
+}
+
+fn goal_response(goal: Goal) -> Result<GoalResponse, ()> {
+    Ok(GoalResponse {
+        id: goal.id,
+        workspace_id: goal.workspace_id,
+        project_id: goal.project_id,
+        title: goal.title,
+        desired_outcome: goal.desired_outcome,
+        status: match goal.status {
+            GoalStatus::Active => "active".to_owned(),
+            GoalStatus::Paused => "paused".to_owned(),
+            GoalStatus::Achieved => "achieved".to_owned(),
+            GoalStatus::Cancelled => "cancelled".to_owned(),
+        },
+        target_at: goal
+            .target_at
+            .map(|value| value.format(&Rfc3339).map_err(|_| ()))
+            .transpose()?,
+        created_at: goal.created_at.format(&Rfc3339).map_err(|_| ())?,
+        updated_at: goal.updated_at.format(&Rfc3339).map_err(|_| ())?,
+        version: goal.version,
+    })
 }
 
 fn project_response(project: Project) -> Result<ProjectResponse, ()> {
@@ -5693,6 +5920,8 @@ mod tests {
                 "/v1/conversations/{conversation_id}/stream",
                 "/v1/conversations/{conversation_id}/turns",
                 "/v1/devices",
+                "/v1/goals",
+                "/v1/goals/{goal_id}",
                 "/v1/home",
                 "/v1/me",
                 "/v1/projects",
@@ -5731,6 +5960,7 @@ mod tests {
                 .is_some()
         );
         for path in [
+            "/v1/goals",
             "/v1/schedule-entries",
             "/v1/tasks",
             "/v1/tasks/{task_id}/complete",
@@ -5745,6 +5975,14 @@ mod tests {
                 "{path} must publish its JSON request contract",
             );
         }
+        assert!(
+            document.paths.paths["/v1/goals/{goal_id}"]
+                .put
+                .as_ref()
+                .and_then(|operation| operation.request_body.as_ref())
+                .is_some(),
+            "goal updates must publish their JSON request contract",
+        );
     }
 
     #[tokio::test]
@@ -5832,6 +6070,17 @@ mod tests {
     #[tokio::test]
     async fn work_endpoints_require_a_live_signed_session() {
         let (state, _, _) = signed_auth_state(true);
+        let goal_response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/goals")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+        assert_eq!(goal_response.status(), StatusCode::UNAUTHORIZED);
+
         let workspace_response = router(state.clone())
             .oneshot(
                 Request::builder()

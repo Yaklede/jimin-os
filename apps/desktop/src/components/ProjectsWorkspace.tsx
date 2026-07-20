@@ -15,6 +15,7 @@ import {
 import { FormEvent, useEffect, useRef, useState } from "react";
 
 import { type Project, type Workspace } from "../api/projects";
+import { type Goal } from "../api/goals";
 import { type Task } from "../api/planning";
 import {
   type ManagedWebhookProvider,
@@ -30,10 +31,12 @@ import {
   useDelayedSkeleton,
 } from "./ContentSkeleton";
 import { EmptySurface } from "./HomeWorkspace";
+import { GoalsPanel } from "./GoalsPanel";
 import { ProjectWebhookPanel } from "./ProjectWebhookPanel";
 
 type ProjectsWorkspaceProps = {
   workspaces: Workspace[];
+  goals: Goal[];
   projects: Project[];
   tasks: Task[];
   webhooks: ProjectWebhook[];
@@ -55,6 +58,22 @@ type ProjectsWorkspaceProps = {
     nextAction?: string;
     dueAt?: string;
   }): Promise<void>;
+  onCreateGoal(input: {
+    title: string;
+    desiredOutcome: string;
+    projectId?: string;
+    targetAt?: string;
+  }): Promise<void>;
+  onUpdateGoal(
+    goal: Goal,
+    input: {
+      title: string;
+      desiredOutcome: string;
+      status: Goal["status"];
+      projectId?: string;
+      targetAt?: string;
+    },
+  ): Promise<void>;
   onUpdateProject(
     project: Project,
     input: {
@@ -102,6 +121,7 @@ type ProjectsWorkspaceProps = {
 
 export function ProjectsWorkspace({
   workspaces,
+  goals,
   projects,
   tasks,
   webhooks,
@@ -117,6 +137,8 @@ export function ProjectsWorkspace({
   onSelectProject,
   onClearProject,
   onCreateProject,
+  onCreateGoal,
+  onUpdateGoal,
   onUpdateProject,
   onDeleteProject,
   onCreateTask,
@@ -259,6 +281,15 @@ export function ProjectsWorkspace({
           <WorkspaceTabsSkeleton visible={skeletonVisible} />
         ) : null}
       </div>
+
+      <GoalsPanel
+        goals={goals}
+        projects={projects}
+        workspaceId={selectedWorkspaceId}
+        saving={saving}
+        onCreate={onCreateGoal}
+        onUpdate={onUpdateGoal}
+      />
 
       {(error || formError) && (
         <p className="inline-alert" role="alert">

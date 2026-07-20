@@ -42,6 +42,7 @@ import {
   type Project,
   type Workspace,
 } from "./api/projects";
+import { createGoal, fetchGoals, updateGoal, type Goal } from "./api/goals";
 import {
   createProjectWebhook,
   deleteProjectWebhook,
@@ -156,6 +157,7 @@ export default function App() {
   );
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [goals, setGoals] = useState<Goal[]>([]);
   const [projectTasks, setProjectTasks] = useState<Task[]>([]);
   const [projectWebhooks, setProjectWebhooks] = useState<ProjectWebhook[]>([]);
   const [webhookDeliveries, setWebhookDeliveries] = useState<WebhookDelivery[]>(
@@ -174,6 +176,9 @@ export default function App() {
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [webhooksLoading, setWebhooksLoading] = useState(false);
   const [projectsSaving, setProjectsSaving] = useState(false);
+  const [goalsLoading, setGoalsLoading] = useState(false);
+  const [goalsSaving, setGoalsSaving] = useState(false);
+  const [goalsError, setGoalsError] = useState<string>();
   const [projectsError, setProjectsError] = useState<string>();
   const [workspacesReady, setWorkspacesReady] = useState(false);
   const [selectedConversationId, setSelectedConversationId] = useState<
@@ -592,6 +597,23 @@ export default function App() {
     }
   }, [apiBaseUrl, tokens, withAuthenticatedSession]);
 
+  const loadGoals = useCallback(async () => {
+    if (!tokens) return;
+    setGoalsLoading(true);
+    setGoalsError(undefined);
+    try {
+      setGoals(
+        await withAuthenticatedSession((accessToken) =>
+          fetchGoals(apiBaseUrl, accessToken),
+        ),
+      );
+    } catch {
+      setGoalsError(copy.goals.loadProblem);
+    } finally {
+      setGoalsLoading(false);
+    }
+  }, [apiBaseUrl, tokens, withAuthenticatedSession]);
+
   const loadProjectsForWorkspace = useCallback(
     async (workspaceId: string, preferredProjectId?: string) => {
       if (!tokens) return false;
@@ -748,6 +770,7 @@ export default function App() {
       setWorkspaces([]);
       setWorkspacesReady(false);
       setProjects([]);
+      setGoals([]);
       setProjectTasks([]);
       setSelectedWorkspaceId(undefined);
       setSelectedProjectId(undefined);
@@ -756,6 +779,7 @@ export default function App() {
       setHighlightedPlanningTaskId(undefined);
       setPlanningEditTarget(undefined);
       setProjectsError(undefined);
+      setGoalsError(undefined);
       setConversationMessages([]);
       setSelectedConversationId(undefined);
       setHomeConversationId(undefined);
@@ -982,6 +1006,10 @@ export default function App() {
   useEffect(() => {
     void loadWorkspaces();
   }, [loadWorkspaces]);
+
+  useEffect(() => {
+    void loadGoals();
+  }, [loadGoals]);
 
   useEffect(() => {
     if (selectedWorkspaceId) {
@@ -1669,6 +1697,64 @@ export default function App() {
     }
   }
 
+  async function createWorkspaceGoal(input: {
+    title: string;
+    desiredOutcome: string;
+    projectId?: string;
+    targetAt?: string;
+  }): Promise<void> {
+    if (!selectedWorkspaceId) throw new Error("workspace unavailable");
+    setGoalsSaving(true);
+    setGoalsError(undefined);
+    try {
+      const goal = await withAuthenticatedSession((accessToken) =>
+        createGoal(apiBaseUrl, accessToken, {
+          workspaceId: selectedWorkspaceId,
+          ...input,
+        }),
+      );
+      setGoals((current) => [goal, ...current]);
+      void loadHomeSnapshot();
+    } catch (error) {
+      setGoalsError(copy.goals.saveProblem);
+      throw error;
+    } finally {
+      setGoalsSaving(false);
+    }
+  }
+
+  async function updateWorkspaceGoal(
+    goal: Goal,
+    input: {
+      title: string;
+      desiredOutcome: string;
+      status: Goal["status"];
+      projectId?: string;
+      targetAt?: string;
+    },
+  ): Promise<void> {
+    setGoalsSaving(true);
+    setGoalsError(undefined);
+    try {
+      const updated = await withAuthenticatedSession((accessToken) =>
+        updateGoal(apiBaseUrl, accessToken, goal, {
+          workspaceId: goal.workspaceId ?? selectedWorkspaceId,
+          ...input,
+        }),
+      );
+      setGoals((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      void loadHomeSnapshot();
+    } catch (error) {
+      setGoalsError(copy.goals.saveProblem);
+      void loadGoals();
+      throw error;
+    } finally {
+      setGoalsSaving(false);
+    }
+  }
+
   async function updateWorkspaceProject(
     project: Project,
     input: {
@@ -2251,6 +2337,7 @@ export default function App() {
       return;
     }
     if (nextDestination === "projects") {
+      void loadGoals();
       const latestProject = [
         ...(latestAssistantMessage?.presentation?.items ?? []),
       ]
@@ -2374,6 +2461,7 @@ export default function App() {
           {destination === "projects" && (
             <ProjectsWorkspace
               workspaces={workspaces}
+              goals={goals}
               projects={projects}
               tasks={projectTasks}
               webhooks={projectWebhooks}
@@ -2381,10 +2469,10 @@ export default function App() {
               selectedWorkspaceId={selectedWorkspaceId}
               selectedProjectId={selectedProjectId}
               highlightedTaskId={highlightedProjectTaskId}
-              loading={projectsLoading || mode === "loading"}
+              loading={projectsLoading || goalsLoading || mode === "loading"}
               webhookLoading={webhooksLoading}
-              saving={projectsSaving}
-              error={projectsError}
+              saving={projectsSaving || goalsSaving}
+              error={goalsError ?? projectsError}
               onSelectWorkspace={selectWorkspace}
               onSelectProject={selectProject}
               onClearProject={() => {
@@ -2395,6 +2483,8 @@ export default function App() {
                 setWebhookDeliveries([]);
               }}
               onCreateProject={createWorkspaceProject}
+              onCreateGoal={createWorkspaceGoal}
+              onUpdateGoal={updateWorkspaceGoal}
               onUpdateProject={updateWorkspaceProject}
               onDeleteProject={deleteWorkspaceProject}
               onCreateTask={createProjectTask}

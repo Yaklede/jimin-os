@@ -9,6 +9,7 @@ pub mod auth;
 pub mod calendar;
 pub mod calendar_mutation;
 pub mod gmail;
+pub mod goals;
 pub mod intelligence;
 pub mod planning;
 pub mod webhook;

@@ -541,7 +541,10 @@ impl Database {
             .map_err(classify)
     }
 
-    async fn ensure_default_workspaces(&self, user_id: Uuid) -> Result<(), StorageError> {
+    pub(crate) async fn ensure_default_workspaces(
+        &self,
+        user_id: Uuid,
+    ) -> Result<(), StorageError> {
         sqlx::query(
             "\
             INSERT INTO workspaces (id, user_id, scope, name)

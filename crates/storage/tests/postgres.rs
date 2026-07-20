@@ -21,6 +21,7 @@ use jimin_storage::{
         ProviderCalendarVisibility,
     },
     calendar_mutation::{ScheduleCalendarMutationOperation, provider_event_id_for_schedule},
+    goals::{GoalStatus, GoalUpdate, NewGoal},
     intelligence::{
         DecideRecommendation, DecideRecommendationOutcome, NewRecommendation,
         RecommendationDecision, RecommendationStatus, SuggestedActionKind,
@@ -2360,6 +2361,110 @@ async fn project_update_is_scoped_versioned_and_emits_current_state() {
             .expect("stale project update should not fail")
             .is_none()
     );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn goal_crud_is_owner_scoped_and_versioned() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let other_owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("other fixture owner should exist");
+    let personal = database
+        .workspaces_for_user(owner.profile.id)
+        .await
+        .expect("workspace query should succeed")
+        .into_iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Personal)
+        .expect("personal workspace should exist");
+    let project = database
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            workspace_id: personal.id,
+            title: "개인 AI 비서".to_owned(),
+            objective: Some("업무 판단과 실행 연결".to_owned()),
+            risk_level: 0,
+            next_action: None,
+            due_at: None,
+        })
+        .await
+        .expect("project should persist");
+    let target_at = OffsetDateTime::now_utc() + TimeDuration::days(30);
+    let created = database
+        .create_goal(&NewGoal {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            workspace_id: Some(personal.id),
+            project_id: Some(project.id),
+            title: "업무 자동화 범위 확대".to_owned(),
+            desired_outcome: "매주 반복 업무 시간을 5시간 줄인다.".to_owned(),
+            target_at: Some(target_at),
+        })
+        .await
+        .expect("goal should persist");
+    assert_eq!(created.status, GoalStatus::Active);
+    assert_eq!(created.project_id, Some(project.id));
+
+    let listed = database
+        .goals_for_user(owner.profile.id)
+        .await
+        .expect("owner goals should load");
+    assert_eq!(listed, vec![created.clone()]);
+    assert!(
+        database
+            .goals_for_user(other_owner.profile.id)
+            .await
+            .expect("other owner goals should load")
+            .is_empty()
+    );
+
+    let updated = database
+        .update_goal(&GoalUpdate {
+            id: created.id,
+            user_id: owner.profile.id,
+            workspace_id: created.workspace_id,
+            project_id: created.project_id,
+            title: created.title.clone(),
+            desired_outcome: created.desired_outcome.clone(),
+            status: GoalStatus::Achieved,
+            target_at: created.target_at,
+            expected_version: created.version,
+        })
+        .await
+        .expect("goal update should succeed")
+        .expect("current version should update");
+    assert_eq!(updated.status, GoalStatus::Achieved);
+    assert!(updated.version > created.version);
+    assert!(
+        database
+            .update_goal(&GoalUpdate {
+                id: updated.id,
+                user_id: owner.profile.id,
+                workspace_id: updated.workspace_id,
+                project_id: updated.project_id,
+                title: updated.title.clone(),
+                desired_outcome: updated.desired_outcome.clone(),
+                status: GoalStatus::Paused,
+                target_at: updated.target_at,
+                expected_version: created.version,
+            })
+            .await
+            .expect("stale goal update should not fail")
+            .is_none()
+    );
+
     database.close().await;
 }
 
