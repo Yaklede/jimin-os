@@ -412,9 +412,9 @@ impl Database {
         rows.into_iter().map(Recommendation::try_from).collect()
     }
 
-    /// Applies or idempotently replays one explicit owner decision. Approval
-    /// changes recommendation state only; action execution remains a separate
-    /// audited stage.
+    /// Applies or idempotently replays one explicit owner decision. A safe
+    /// review action is completed and audited in the same transaction; actions
+    /// that mutate another domain remain approved for their dedicated executor.
     ///
     /// # Errors
     ///
@@ -442,7 +442,7 @@ impl Database {
             .fetch_optional(&mut *transaction)
             .await
             .map_err(classify)?;
-        let Some(row) = row else {
+        let Some(mut row) = row else {
             let exists = sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS(
                     SELECT 1 FROM recommendations WHERE id = $1 AND user_id = $2
@@ -477,6 +477,8 @@ impl Database {
         .execute(&mut *transaction)
         .await
         .map_err(classify)?;
+        let action_result_id =
+            execute_safe_approved_action(&mut transaction, command, &mut row).await?;
         append_change(
             &mut transaction,
             command.user_id,
@@ -485,6 +487,16 @@ impl Database {
             row.version,
         )
         .await?;
+        if let Some(result_id) = action_result_id {
+            append_change(
+                &mut transaction,
+                command.user_id,
+                "recommendation_action_result",
+                result_id,
+                1,
+            )
+            .await?;
+        }
         append_change(
             &mut transaction,
             command.user_id,
@@ -579,6 +591,69 @@ impl Database {
         transaction.commit().await.map_err(classify)?;
         rows.into_iter().map(Recommendation::try_from).collect()
     }
+}
+
+async fn mark_review_recommendation_executed(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    recommendation_id: Uuid,
+) -> Result<RecommendationRow, StorageError> {
+    sqlx::query_as::<_, RecommendationRow>(
+        "UPDATE recommendations
+         SET status = 'executed', revisit_at = NULL
+         WHERE id = $1 AND user_id = $2 AND status = 'approved'
+         RETURNING
+            id, workspace_id, project_id, goal_id, signal_id,
+            title, rationale, expected_effect, risk_summary,
+            confidence, urgency, impact, risk_level, effort_minutes,
+            suggested_action_kind, suggested_entity_id, status, valid_until,
+            revisit_at, created_at, updated_at, version",
+    )
+    .bind(recommendation_id)
+    .bind(user_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(classify)
+}
+
+async fn execute_safe_approved_action(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &DecideRecommendation,
+    recommendation: &mut RecommendationRow,
+) -> Result<Option<Uuid>, StorageError> {
+    if command.decision != RecommendationDecision::Approve
+        || recommendation.suggested_action_kind.as_deref() != Some("review")
+    {
+        return Ok(None);
+    }
+    let completed_at = OffsetDateTime::now_utc();
+    sqlx::query(
+        "INSERT INTO recommendation_action_results (
+            id, user_id, recommendation_id, action_type, entity_id,
+            status, summary, expected_effect, actual_effect,
+            started_at, completed_at
+         ) VALUES (
+            $1, $2, $3, 'review', $4, 'succeeded', $5, $6, $7, $8, $8
+         )",
+    )
+    .bind(command.id)
+    .bind(command.user_id)
+    .bind(command.recommendation_id)
+    .bind(recommendation.suggested_entity_id)
+    .bind("추천 내용을 확인했어요.")
+    .bind(&recommendation.expected_effect)
+    .bind("사용자가 추천의 근거와 예상 효과를 확인했어요.")
+    .bind(completed_at)
+    .execute(&mut **transaction)
+    .await
+    .map_err(classify)?;
+    *recommendation = mark_review_recommendation_executed(
+        transaction,
+        command.user_id,
+        command.recommendation_id,
+    )
+    .await?;
+    Ok(Some(command.id))
 }
 
 async fn upsert_work_signal(

@@ -4507,9 +4507,12 @@ async fn work_brief_refresh_generates_one_actionable_recommendation_per_active_s
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;
     };
-    let database =
-        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
-            .expect("test database URL should be valid");
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        1,
+        Duration::from_secs(2),
+    )
+    .expect("test database URL should be valid");
     database.migrate().await.expect("migration should succeed");
     let owner = database
         .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
@@ -4544,19 +4547,44 @@ async fn work_brief_refresh_generates_one_actionable_recommendation_per_active_s
     assert_eq!(repeated.len(), 1);
     assert_eq!(repeated[0].id, generated[0].id);
 
+    let decision = DecideRecommendation {
+        id: Uuid::now_v7(),
+        user_id: owner.profile.id,
+        recommendation_id: generated[0].id,
+        decision: RecommendationDecision::Approve,
+        reason: None,
+        revisit_at: None,
+        expected_version: generated[0].version,
+    };
     let outcome = database
-        .decide_recommendation(&DecideRecommendation {
-            id: Uuid::now_v7(),
-            user_id: owner.profile.id,
-            recommendation_id: generated[0].id,
-            decision: RecommendationDecision::Approve,
-            reason: None,
-            revisit_at: None,
-            expected_version: generated[0].version,
-        })
+        .decide_recommendation(&decision)
         .await
         .expect("recommendation decision should persist");
-    assert!(matches!(outcome, DecideRecommendationOutcome::Applied(_)));
+    let DecideRecommendationOutcome::Applied(executed) = outcome else {
+        panic!("review approval should be applied");
+    };
+    assert_eq!(executed.status, RecommendationStatus::Executed);
+    let replayed = database
+        .decide_recommendation(&decision)
+        .await
+        .expect("recommendation decision should replay");
+    let DecideRecommendationOutcome::Replayed(replayed) = replayed else {
+        panic!("identical review approval should replay");
+    };
+    assert_eq!(replayed.status, RecommendationStatus::Executed);
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("test database should be reachable");
+    let action_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM recommendation_action_results
+         WHERE recommendation_id = $1 AND action_type = 'review' AND status = 'succeeded'",
+    )
+    .bind(generated[0].id)
+    .fetch_one(&pool)
+    .await
+    .expect("action result should be queryable");
+    assert_eq!(action_count, 1);
+    pool.close().await;
     assert!(
         database
             .refresh_work_brief(owner.profile.id, now + TimeDuration::minutes(2))
