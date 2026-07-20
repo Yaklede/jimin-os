@@ -24,7 +24,7 @@ expect_rejected() {
 expect_rejected 'http://os.jimin.ai.kr'
 expect_rejected 'https://os.jimin.ai.kr/api'
 expect_rejected 'https://os.jimin.ai.kr?mode=private'
-expect_rejected 'https://user:password@os.jimin.ai.kr'
+expect_rejected 'https://user:<password>@os.jimin.ai.kr'
 expect_rejected 'https://localhost:8443'
 expect_rejected 'https://127.0.0.1:8443'
 

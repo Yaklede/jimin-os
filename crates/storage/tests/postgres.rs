@@ -4527,8 +4527,8 @@ async fn recommendation_decisions_are_scoped_versioned_and_idempotent() {
     else {
         panic!("first decision should be applied");
     };
-    assert_eq!(approved.status, RecommendationStatus::Approved);
-    assert_eq!(approved.version, deferred.version + 1);
+    assert_eq!(approved.status, RecommendationStatus::Executed);
+    assert_eq!(approved.version, deferred.version + 2);
 
     assert!(matches!(
         database
@@ -4536,7 +4536,7 @@ async fn recommendation_decisions_are_scoped_versioned_and_idempotent() {
             .await
             .expect("identical decision should replay"),
         DecideRecommendationOutcome::Replayed(replayed)
-            if replayed.status == RecommendationStatus::Approved
+            if replayed.status == RecommendationStatus::Executed
     ));
     assert!(matches!(
         database
