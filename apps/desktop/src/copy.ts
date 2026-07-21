@@ -88,6 +88,7 @@ export const copy = {
     schedule: "일정",
     projects: "프로젝트",
     decisions: "판단함",
+    meetings: "회의",
     chat: "채팅",
     memory: "기억",
     settings: settingsTab,
@@ -219,6 +220,7 @@ export const copy = {
     recommendationConfirmed: "확인한 내용과 결과를 기록했어요.",
     recommendationDeferred: "4시간 뒤에 다시 알려드릴게요.",
     openDecisionInbox: "판단함 보기",
+    openMeetings: "회의 기록",
     recommendationDecisionNotice:
       "제안을 정리하지 못했어요. 잠시 후 다시 시도해 주세요.",
     overdue: "기한 지남",
@@ -259,6 +261,88 @@ export const copy = {
     },
     loadNotice: "판단함을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
     decisionNotice: "제안을 처리하지 못했어요. 다시 시도해 주세요.",
+  },
+  meetings: {
+    eyebrow: "회의 인텔리전스",
+    title: "회의",
+    description:
+      "말한 내용을 회의록으로 정리하고, 결정과 후속 일을 실제 업무로 연결해요.",
+    newMeeting: "회의 기록하기",
+    listLabel: "회의 기록",
+    recent: "최근 회의",
+    count: (count: number) => `${count}개`,
+    loading: "회의 기록을 불러오는 중이에요.",
+    loadFailed: "회의 기록을 불러오지 못했어요. 다시 확인해 주세요.",
+    detailFailed: "회의 내용을 불러오지 못했어요. 다시 선택해 주세요.",
+    createFailed:
+      "회의 분석을 시작하지 못했어요. 내용을 확인하고 다시 시도해 주세요.",
+    applyFailed:
+      "후속 일을 반영하지 못했어요. 연결된 프로젝트나 일정을 확인해 주세요.",
+    rejectFailed: "이 항목을 제외하지 못했어요. 잠시 후 다시 시도해 주세요.",
+    emptyTitle: "아직 정리한 회의가 없어요",
+    emptyDescription:
+      "회의를 받아쓰거나 기존 회의록을 붙여 넣어 시작해 보세요.",
+    selectTitle: "회의를 선택해 주세요",
+    selectDescription:
+      "요약과 결정사항, 실행할 일을 한곳에서 확인할 수 있어요.",
+    noProject: "프로젝트 연결 안 함",
+    composerEyebrow: "새 회의",
+    composerTitle: "회의 내용을 남겨 주세요",
+    composerDescription:
+      "받아쓰거나 기존 회의록을 붙여 넣으면 지민이 결정과 할 일을 분리해 드려요.",
+    nameLabel: "회의 이름",
+    namePlaceholder: "예: 비스킷링크 주간 회의",
+    workspaceLabel: "업무 영역",
+    projectLabel: "연결할 프로젝트",
+    transcriptLabel: "회의 내용",
+    transcriptPlaceholder:
+      "회의 중 받아쓰기를 시작하거나, 이미 작성한 회의록을 붙여 넣어 주세요.",
+    dictationTitle: "말한 내용을 바로 적을 수 있어요",
+    dictationDescription:
+      "받아쓰기는 문장 단위로 이어 붙여져요. 끝난 뒤 원문을 고칠 수 있어요.",
+    dictatingTitle: "회의 내용을 듣고 있어요",
+    dictatingDescription:
+      "말을 멈춰도 계속 이어서 들을게요. 끝나면 중지를 눌러 주세요.",
+    startDictation: "받아쓰기 시작",
+    stopDictation: "받아쓰기 중지",
+    dictationFailed:
+      "음성을 계속 받아쓰지 못했어요. 직접 입력하거나 다시 시작해 주세요.",
+    dictationUnsupported:
+      "이 기기에서는 받아쓰기를 바로 사용할 수 없어요. 회의록을 직접 붙여 넣어 주세요.",
+    dictationPermission:
+      "마이크를 사용할 수 없어요. 기기 설정에서 권한을 허용한 뒤 다시 시도해 주세요.",
+    analyze: "정리 시작하기",
+    queuing: "정리를 시작하는 중",
+    analyzingTitle: "회의 내용을 정리하고 있어요",
+    analyzingDescription:
+      "원문을 바탕으로 요약, 결정사항, 실행 후보를 나누고 있어요. 잠시 후 자동으로 보여드릴게요.",
+    analysisFailedTitle: "회의를 정리하지 못했어요",
+    analysisFailedDescription:
+      "원문은 그대로 보관되어 있어요. 연결 상태를 확인한 뒤 다시 정리해 주세요.",
+    retryAnalysis: "다시 정리하기",
+    retrying: "다시 정리하는 중",
+    retryFailed: "회의를 다시 정리하지 못했어요. 연결 상태를 확인해 주세요.",
+    summaryLabel: "한눈에 보기",
+    decisionsTitle: "결정사항",
+    actionsTitle: "실행할 일",
+    noDecisions: "명확하게 확정된 결정은 없어요.",
+    noActions: "지금 바로 옮길 후속 일은 없어요.",
+    followUpTitle: "다음에 확인할 내용",
+    scheduleAction: "일정 후보",
+    taskAction: "할 일 후보",
+    confidence: (confidence: number) => `근거 일치 ${confidence}%`,
+    exclude: "제외",
+    apply: "업무에 반영",
+    applied: "업무에 반영했어요",
+    excluded: "이 회의에서는 제외했어요",
+    timeNotSet: "날짜가 정해지지 않았어요",
+    status: {
+      queued: "정리 대기",
+      analyzing: "정리 중",
+      review_ready: "확인 필요",
+      applied: "검토 완료",
+      failed: "정리 실패",
+    },
   },
   summary: {
     checkingTitle: "서버 상태를 확인하고 있어요",

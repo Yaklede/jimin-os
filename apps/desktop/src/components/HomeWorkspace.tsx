@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  AudioLines,
   CalendarDays,
   ChevronRight,
   Circle,
@@ -59,6 +60,7 @@ type HomeWorkspaceProps = {
     entry: Pick<ScheduleEntry, "id" | "startsAt">,
   ): void | Promise<void>;
   onOpenDecisionInbox(): void;
+  onOpenMeetings(): void;
   onDecideRecommendation(
     recommendation: Recommendation,
     decision: "approve" | "defer",
@@ -85,6 +87,7 @@ export function HomeWorkspace({
   onOpenProject,
   onOpenSchedule,
   onOpenDecisionInbox,
+  onOpenMeetings,
   onDecideRecommendation,
 }: HomeWorkspaceProps) {
   const [completingTaskId, setCompletingTaskId] = useState<string>();
@@ -178,6 +181,14 @@ export function HomeWorkspace({
           <p>{copy.home.title}</p>
         </div>
         <div className="home-greeting__actions">
+          <button
+            className="home-greeting__decisions focus-visible-control"
+            type="button"
+            onClick={onOpenMeetings}
+          >
+            <AudioLines aria-hidden="true" />
+            <span>{copy.home.openMeetings}</span>
+          </button>
           <button
             className="home-greeting__decisions focus-visible-control"
             type="button"

@@ -101,6 +101,7 @@ import {
 import { DecisionInboxWorkspace } from "./components/DecisionInboxWorkspace";
 import { HomeWorkspace } from "./components/HomeWorkspace";
 import { MemoryWorkspace } from "./components/MemoryWorkspace";
+import { MeetingsWorkspace } from "./components/MeetingsWorkspace";
 import { OsShell, type OsDestination } from "./components/OsShell";
 import { PlanningWorkspace } from "./components/PlanningWorkspace";
 import {
@@ -2788,6 +2789,7 @@ export default function App() {
               onOpenProject={openProjectFromAssistant}
               onOpenSchedule={openScheduleFromAssistant}
               onOpenDecisionInbox={() => navigate("decisions")}
+              onOpenMeetings={() => navigate("meetings")}
               onDecideRecommendation={decideHomeRecommendation}
             />
           )}
@@ -2863,6 +2865,16 @@ export default function App() {
               loading={decisionsLoading || mode === "loading"}
               error={decisionsError}
               onDecide={decideHomeRecommendation}
+            />
+          )}
+          {destination === "meetings" && tokens && (
+            <MeetingsWorkspace
+              apiBaseUrl={apiBaseUrl}
+              accessToken={tokens.accessToken}
+              workspaces={workspaces}
+              projects={projects}
+              selectedWorkspaceId={selectedWorkspaceId}
+              onSelectWorkspace={selectWorkspace}
             />
           )}
           {destination === "memory" && (

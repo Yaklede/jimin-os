@@ -1,4 +1,5 @@
 import {
+  AudioLines,
   BrainCircuit,
   CalendarDays,
   FolderKanban,
@@ -21,6 +22,7 @@ export type OsDestination =
   | "home"
   | "calendar"
   | "projects"
+  | "meetings"
   | "decisions"
   | "chat"
   | "memory"
@@ -102,6 +104,12 @@ export function OsShell({
             icon={<Inbox aria-hidden="true" />}
             label={copy.navigation.decisions}
             onClick={() => onNavigate("decisions")}
+          />
+          <NavigationButton
+            active={destination === "meetings"}
+            icon={<AudioLines aria-hidden="true" />}
+            label={copy.navigation.meetings}
+            onClick={() => onNavigate("meetings")}
           />
           <NavigationButton
             active={destination === "memory"}
