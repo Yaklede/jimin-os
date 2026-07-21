@@ -28,6 +28,10 @@ use jimin_storage::{
         NewScheduleRequestConflict, RecommendationDecision, RecommendationStatus,
         SuggestedActionKind,
     },
+    meetings::{
+        MeetingActionKind, MeetingActionStatus, MeetingAnalysisResult, MeetingStatus, NewMeeting,
+        NewMeetingActionItem, NewMeetingDecision,
+    },
     planning::{
         DeleteTaskOutcome, NewScheduleEntry, NewTask, ScheduleEntryUpdate, TaskStatus, TaskUpdate,
     },
@@ -5154,6 +5158,101 @@ async fn work_brief_connects_schedule_goal_and_inbox_context() {
         generated
             .iter()
             .any(|item| item.title == "읽지 않은 메일을 확인하세요")
+    );
+
+    database.close().await;
+}
+
+#[tokio::test]
+async fn meeting_analysis_moves_from_transcript_to_owner_review() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let meeting_id = Uuid::now_v7();
+    database
+        .create_meeting(&NewMeeting {
+            id: meeting_id,
+            user_id: owner.profile.id,
+            workspace_id: None,
+            project_id: None,
+            title: "출시 준비 회의".to_owned(),
+            transcript: "지민: 내일까지 계약 흐름을 검토해요.\n담당자: 오전에 확인할게요."
+                .to_owned(),
+            started_at: Some(OffsetDateTime::now_utc()),
+            duration_seconds: Some(900),
+        })
+        .await
+        .expect("meeting should persist");
+    let runner = "meeting-integration-runner";
+    let claimed = database
+        .claim_next_meeting_analysis(runner, Duration::from_secs(30))
+        .await
+        .expect("analysis queue should load")
+        .expect("new meeting should be claimable");
+    assert_eq!(claimed.meeting_id, meeting_id);
+    assert!(
+        database
+            .start_meeting_analysis(claimed.id, runner, Duration::from_secs(30))
+            .await
+            .expect("analysis should start")
+    );
+    let target_entity_id = Uuid::now_v7();
+    database
+        .complete_meeting_analysis(
+            &claimed,
+            runner,
+            &MeetingAnalysisResult {
+                summary: "계약 등록 흐름을 출시 전에 다시 확인하기로 했어요.".to_owned(),
+                topics: vec!["출시 준비".to_owned()],
+                risks: vec!["검토가 늦어지면 출시 일정에 영향을 줄 수 있어요.".to_owned()],
+                follow_up: Some("다음 회의에서 검토 결과를 확인해요.".to_owned()),
+                decisions: vec![NewMeetingDecision {
+                    id: Uuid::now_v7(),
+                    content: "계약 등록 흐름을 다시 검토한다.".to_owned(),
+                    rationale: None,
+                    source_excerpt: "내일까지 계약 흐름을 검토해요.".to_owned(),
+                    source_timestamp_seconds: None,
+                }],
+                action_items: vec![NewMeetingActionItem {
+                    id: Uuid::now_v7(),
+                    target_entity_id,
+                    kind: MeetingActionKind::Task,
+                    project_id: None,
+                    title: "계약 등록 흐름 검토".to_owned(),
+                    notes: Some("출시 전 주요 경로를 확인해요.".to_owned()),
+                    priority: 2,
+                    due_at: Some(OffsetDateTime::now_utc() + TimeDuration::days(1)),
+                    starts_at: None,
+                    ends_at: None,
+                    time_zone: None,
+                    source_excerpt: "내일까지 계약 흐름을 검토해요.".to_owned(),
+                    confidence: 95,
+                }],
+            },
+        )
+        .await
+        .expect("analysis should persist");
+
+    let detail = database
+        .meeting_detail_for_user(owner.profile.id, meeting_id)
+        .await
+        .expect("meeting detail should load")
+        .expect("meeting should remain visible");
+    assert_eq!(detail.meeting.status, MeetingStatus::ReviewReady);
+    assert_eq!(detail.decisions.len(), 1);
+    assert_eq!(detail.action_items.len(), 1);
+    assert_eq!(detail.action_items[0].target_entity_id, target_entity_id);
+    assert_eq!(
+        detail.action_items[0].status,
+        MeetingActionStatus::Suggested
     );
 
     database.close().await;

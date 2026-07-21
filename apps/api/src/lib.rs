@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod calendar_oauth;
 pub mod config;
+mod meetings;
 pub mod probe;
 pub mod push;
 mod voice_command;
@@ -1178,6 +1179,11 @@ pub(crate) fn error_response(
         request_agent_authentication,
         get_agent_model_settings,
         update_agent_model_settings,
+        meetings::list_meetings,
+        meetings::create_meeting,
+        meetings::get_meeting,
+        meetings::reanalyze_meeting,
+        meetings::decide_meeting_action,
         live,
         ready,
         me,
@@ -1261,6 +1267,18 @@ pub(crate) fn error_response(
         TaskListQuery,
         CompleteTaskRequest,
         VoiceCommandRequest,
+        meetings::CreateMeetingRequest,
+        meetings::DecideMeetingActionRequest,
+        meetings::MeetingActionDecision,
+        meetings::MeetingResponse,
+        meetings::MeetingListResponse,
+        meetings::MeetingListItemResponse,
+        meetings::MeetingDetailResponse,
+        meetings::MeetingDecisionResponse,
+        meetings::MeetingActionItemResponse,
+        meetings::MeetingStatusResponse,
+        meetings::MeetingActionKindResponse,
+        meetings::MeetingActionStatusResponse,
         push::PushRegistrationResponse,
         push::RegisterPushTokenRequest
     )),
@@ -1273,6 +1291,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
     ApiDoc::openapi()
 }
 
+#[allow(clippy::too_many_lines)] // The router is an auditable registry of public API surfaces.
 pub fn router(state: ApiState) -> Router {
     let router = Router::new()
         .route("/health/live", get(live))
@@ -1353,7 +1372,8 @@ pub fn router(state: ApiState) -> Router {
             axum::routing::post(resolve_agent_action),
         )
         .route("/v1/me", get(me))
-        .route("/v1/devices", get(devices));
+        .route("/v1/devices", get(devices))
+        .merge(meetings::routes());
 
     let allowed_origins = allowed_client_origins(state.trusted_network());
 

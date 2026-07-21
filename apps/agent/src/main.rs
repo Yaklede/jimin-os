@@ -15,6 +15,7 @@ use tokio::io::AsyncReadExt;
 
 mod config;
 mod health;
+mod meeting_analysis;
 mod worker_loop;
 
 use config::{AgentConfig, ConfigError};
