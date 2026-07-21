@@ -31,6 +31,7 @@ use jimin_storage::{
     planning::{
         DeleteTaskOutcome, NewScheduleEntry, NewTask, ScheduleEntryUpdate, TaskStatus, TaskUpdate,
     },
+    push::EncryptedPushToken,
     webhook::{
         EncryptedWebhookSecret, NewProjectWebhook, ProjectWebhookUpdate,
         RetryWebhookDeliveryOutcome, WebhookDestinationUpdate, WebhookProvider,
@@ -77,6 +78,151 @@ struct ExhaustedCalendarMutationRow {
     response_status: Option<i16>,
     locked_until: Option<OffsetDateTime>,
     response_body: serde_json::Value,
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The integration test keeps registration transfer, queue reconciliation, and delivery acknowledgement in one lifecycle."
+)]
+async fn push_registration_transfer_and_reminder_queue_are_device_safe_and_idempotent() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 2, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let user_id = Uuid::now_v7();
+    let first = database
+        .provision_login(&provision_android_login_command(user_id, Uuid::now_v7()))
+        .await
+        .expect("first Android device should exist");
+    let second = database
+        .provision_login(&provision_android_login_command(user_id, Uuid::now_v7()))
+        .await
+        .expect("replacement Android device should exist");
+    let first_token = EncryptedPushToken {
+        ciphertext: vec![11; 48],
+        nonce: vec![12; 24],
+        fingerprint: vec![13; 32],
+    };
+    database
+        .register_push_token(Uuid::now_v7(), user_id, first.device.id, &first_token)
+        .await
+        .expect("first device token should register");
+    let replacement_token = EncryptedPushToken {
+        ciphertext: vec![21; 48],
+        nonce: vec![22; 24],
+        fingerprint: first_token.fingerprint,
+    };
+    database
+        .register_push_token(
+            Uuid::now_v7(),
+            user_id,
+            second.device.id,
+            &replacement_token,
+        )
+        .await
+        .expect("the same provider token should move to the replacement device");
+    assert!(
+        !database
+            .push_registration_state(user_id, first.device.id)
+            .await
+            .expect("first registration state should load")
+            .enabled
+    );
+    assert!(
+        database
+            .push_registration_state(user_id, second.device.id)
+            .await
+            .expect("replacement registration state should load")
+            .enabled
+    );
+
+    let now = OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .expect("whole-second fixture time");
+    let target_at = now + TimeDuration::minutes(10);
+    let task = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id,
+            project_id: None,
+            title: "푸시 알림 할 일".to_owned(),
+            notes: None,
+            priority: 1,
+            due_at: Some(target_at),
+        })
+        .await
+        .expect("due task should persist");
+    let schedule = database
+        .create_schedule_entry(&NewScheduleEntry {
+            id: Uuid::now_v7(),
+            user_id,
+            title: "푸시 알림 일정".to_owned(),
+            notes: None,
+            starts_at: target_at,
+            ends_at: target_at + TimeDuration::hours(1),
+            time_zone: "Asia/Seoul".to_owned(),
+        })
+        .await
+        .expect("upcoming schedule should persist");
+
+    assert_eq!(
+        database
+            .queue_due_push_reminders(now)
+            .await
+            .expect("due reminders should queue"),
+        2
+    );
+    assert_eq!(
+        database
+            .queue_due_push_reminders(now)
+            .await
+            .expect("reconciliation should be idempotent"),
+        0
+    );
+    let deliveries = database
+        .claim_push_deliveries("push-integration-worker", 10)
+        .await
+        .expect("queued reminders should be claimable");
+    assert_eq!(deliveries.len(), 2);
+    assert!(deliveries.iter().all(|delivery| {
+        delivery.device_id == second.device.id
+            && delivery.token_ciphertext == replacement_token.ciphertext
+            && delivery.token_nonce == replacement_token.nonce
+    }));
+    assert!(
+        deliveries
+            .iter()
+            .any(|delivery| delivery.item_id == task.id)
+    );
+    assert!(
+        deliveries
+            .iter()
+            .any(|delivery| delivery.item_id == schedule.id)
+    );
+    for delivery in deliveries {
+        database
+            .complete_push_delivery(
+                delivery.id,
+                "push-integration-worker",
+                delivery.attempt_count,
+                200,
+            )
+            .await
+            .expect("provider acknowledgement should complete the reminder");
+    }
+    assert!(
+        database
+            .push_registration_state(user_id, second.device.id)
+            .await
+            .expect("delivery health should load")
+            .last_delivered_at
+            .is_some()
+    );
+    database.close().await;
 }
 
 #[tokio::test]
@@ -4859,10 +5005,27 @@ async fn work_brief_connects_schedule_goal_and_inbox_context() {
 }
 
 fn provision_login_command(user_id: Uuid, installation_id: Uuid) -> ProvisionLogin {
+    provision_login_for_platform(user_id, installation_id, ClientPlatform::Macos)
+}
+
+fn provision_android_login_command(user_id: Uuid, installation_id: Uuid) -> ProvisionLogin {
+    provision_login_for_platform(user_id, installation_id, ClientPlatform::Android)
+}
+
+fn provision_login_for_platform(
+    user_id: Uuid,
+    installation_id: Uuid,
+    platform: ClientPlatform,
+) -> ProvisionLogin {
+    let device_name = match platform {
+        ClientPlatform::Android => "M1 integration test Android",
+        ClientPlatform::Ios => "M1 integration test iPhone",
+        ClientPlatform::Macos => "M1 integration test Mac",
+    };
     let device = DeviceRegistration::new(
         installation_id,
-        ClientPlatform::Macos,
-        "M1 integration test Mac",
+        platform,
+        device_name,
         "0.1.0-test",
         Some("test-os".to_owned()),
     )

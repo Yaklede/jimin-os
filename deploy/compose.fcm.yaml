@@ -1,0 +1,13 @@
+# Optional Firebase Cloud Messaging runtime. The service-account JSON stays in
+# a read-only Docker secret and is never expanded into Compose environment or
+# image layers.
+services:
+  api:
+    environment:
+      JIMIN_FIREBASE_SERVICE_ACCOUNT_FILE: /run/secrets/firebase_service_account
+    secrets:
+      - firebase_service_account
+
+secrets:
+  firebase_service_account:
+    file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/firebase_service_account

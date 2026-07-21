@@ -2,6 +2,7 @@ pub mod auth;
 pub mod calendar_oauth;
 pub mod config;
 pub mod probe;
+pub mod push;
 mod voice_command;
 pub mod webhook;
 
@@ -93,6 +94,7 @@ pub struct ApiState {
     planning: Option<Database>,
     calendar_oauth: Option<Arc<CalendarOAuthRuntime>>,
     webhook: Option<Arc<webhook::WebhookRuntime>>,
+    push: Option<Arc<push::PushRuntime>>,
     agent: Option<Database>,
 }
 
@@ -114,6 +116,7 @@ impl ApiState {
             planning: None,
             calendar_oauth: None,
             webhook: None,
+            push: None,
             agent: None,
         }
     }
@@ -178,6 +181,17 @@ impl ApiState {
 
     fn webhook(&self) -> Option<&Arc<webhook::WebhookRuntime>> {
         self.webhook.as_ref()
+    }
+
+    #[must_use]
+    pub fn with_push_runtime(mut self, runtime: push::PushRuntime) -> Self {
+        self.push = Some(Arc::new(runtime));
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn push(&self) -> Option<&Arc<push::PushRuntime>> {
+        self.push.as_ref()
     }
 
     #[must_use]
@@ -1125,7 +1139,10 @@ pub(crate) fn error_response(
         live,
         ready,
         me,
-        devices
+        devices,
+        push::get_push_registration,
+        push::register_push_token,
+        push::delete_push_registration
     ),
     components(schemas(
         LiveStatus,
@@ -1199,7 +1216,9 @@ pub(crate) fn error_response(
         ProjectListQuery,
         TaskListQuery,
         CompleteTaskRequest,
-        VoiceCommandRequest
+        VoiceCommandRequest,
+        push::PushRegistrationResponse,
+        push::RegisterPushTokenRequest
     )),
     tags((name = "health", description = "Process and dependency health"))
 )]
@@ -1214,7 +1233,7 @@ pub fn router(state: ApiState) -> Router {
     let router = Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
-        .merge(calendar_router())
+        .merge(calendar_router().merge(push_router()))
         .route("/v1/auth/refresh", axum::routing::post(refresh_session))
         .route(
             "/v1/access/session",
@@ -1346,6 +1365,15 @@ fn webhook_router() -> Router<ApiState> {
             "/v1/projects/{project_id}/webhook-deliveries/{delivery_id}/retry",
             post(retry_webhook_delivery),
         )
+}
+
+fn push_router() -> Router<ApiState> {
+    Router::new().route(
+        "/v1/push/registration",
+        get(push::get_push_registration)
+            .put(push::register_push_token)
+            .delete(push::delete_push_registration),
+    )
 }
 
 fn goal_router() -> Router<ApiState> {
@@ -1595,6 +1623,71 @@ pub fn spawn_webhook_delivery_worker(state: &ApiState) -> Option<tokio::task::Jo
                 );
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }))
+}
+
+/// Starts the durable FCM reminder loop when storage and Firebase credentials
+/// are both available. Reminder content and registration tokens are never
+/// included in logs.
+#[must_use]
+pub fn spawn_push_delivery_worker(state: &ApiState) -> Option<tokio::task::JoinHandle<()>> {
+    let planning = state.planning()?.clone();
+    let runtime = Arc::clone(state.push()?);
+    let worker_id = format!("push-delivery-{}", uuid::Uuid::now_v7());
+    Some(tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        loop {
+            if planning
+                .queue_due_push_reminders(OffsetDateTime::now_utc())
+                .await
+                .is_err()
+            {
+                warn!(
+                    event = "push.reconciliation_deferred",
+                    error_code = "storage.persistence_unavailable"
+                );
+            } else if let Ok(deliveries) = planning.claim_push_deliveries(&worker_id, 10).await {
+                for delivery in deliveries {
+                    match runtime.deliver(&delivery).await {
+                        Ok(response_code) => {
+                            let _ = planning
+                                .complete_push_delivery(
+                                    delivery.id,
+                                    &worker_id,
+                                    delivery.attempt_count,
+                                    response_code,
+                                )
+                                .await;
+                        }
+                        Err(error) => {
+                            let _ = planning
+                                .fail_push_delivery(
+                                    delivery.id,
+                                    &worker_id,
+                                    delivery.attempt_count,
+                                    error.response_code(),
+                                    error.code(),
+                                    error.retryable(),
+                                    error.invalidates_token(),
+                                )
+                                .await;
+                            warn!(
+                                event = "push.delivery_failed",
+                                error_code = error.code(),
+                                retryable = error.retryable(),
+                                attempt = delivery.attempt_count
+                            );
+                        }
+                    }
+                }
+            } else {
+                warn!(
+                    event = "push.delivery_deferred",
+                    error_code = "storage.persistence_unavailable"
+                );
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }))
 }
@@ -6026,6 +6119,7 @@ mod tests {
                 "/v1/projects/{project_id}/webhooks/{webhook_id}",
                 "/v1/projects/{project_id}/webhooks/{webhook_id}/messages",
                 "/v1/projects/{project_id}/webhooks/{webhook_id}/test",
+                "/v1/push/registration",
                 "/v1/recommendations",
                 "/v1/recommendations/{recommendation_id}/decisions",
                 "/v1/schedule-entries",

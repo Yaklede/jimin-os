@@ -130,6 +130,13 @@ init_deployment() {
   if [[ "${calendar_oauth_enabled}" == "1" ]]; then
     COMPOSE_ARGS+=(--file "${REPO_ROOT}/deploy/compose.google-calendar.yaml")
   fi
+  fcm_enabled="$(effective_value JIMIN_FIREBASE_MESSAGING_ENABLED)"
+  fcm_enabled="${fcm_enabled:-0}"
+  [[ "${fcm_enabled}" =~ ^[01]$ ]] \
+    || die "JIMIN_FIREBASE_MESSAGING_ENABLED must be 0 or 1"
+  if [[ "${fcm_enabled}" == "1" ]]; then
+    COMPOSE_ARGS+=(--file "${REPO_ROOT}/deploy/compose.fcm.yaml")
+  fi
   if [[ -n "${JIMIN_RELEASE_ENV:-}" ]]; then
     [[ -f "${JIMIN_RELEASE_ENV}" ]] || die "release env not found: ${JIMIN_RELEASE_ENV}"
     COMPOSE_ARGS+=(--env-file "${JIMIN_RELEASE_ENV}")
@@ -223,6 +230,9 @@ validate_runtime_secrets() {
   if [[ "$(effective_value JIMIN_GOOGLE_CALENDAR_OAUTH_ENABLED)" == "1" ]]; then
     validate_secret_file "${secrets_dir}/google_calendar_client_secret" "Google Calendar client secret file"
     validate_secret_file "${secrets_dir}/calendar_encryption_key" "Calendar encryption key file"
+  fi
+  if [[ "$(effective_value JIMIN_FIREBASE_MESSAGING_ENABLED)" == "1" ]]; then
+    validate_secret_file "${secrets_dir}/firebase_service_account" "Firebase service-account file"
   fi
   if [[ "${DEPLOY_TLS_MODE}" == "files" ]]; then
     validate_secret_file "${secrets_dir}/gateway_tls_cert" "gateway certificate"

@@ -25,6 +25,8 @@ deploy/secrets/staging/
 | `api_database_url` | 같은 password를 사용한 전체 PostgreSQL URL 한 줄 | api |
 | `google_calendar_client_secret` | Google OAuth web client secret 한 줄 | api, Calendar OAuth를 켠 경우만 |
 | `calendar_encryption_key` | Calendar refresh/PKCE token을 암호화할 32바이트 이상 무작위 값 한 줄 | api, Calendar OAuth를 켠 경우만 |
+| `firebase_service_account` | Firebase Admin SDK 서비스 계정 JSON 원본 | api, FCM을 켠 경우만 |
+| `google-services.json` | `io.jimin.os` Android 앱의 Firebase 구성 파일 | Android client build |
 | `gateway_tls_cert` | PEM certificate chain; `JIMIN_TLS_MODE=files`에서만 필요 | gateway |
 | `gateway_tls_key` | PEM private key; `JIMIN_TLS_MODE=files`에서만 필요 | gateway |
 
@@ -37,3 +39,7 @@ postgres://jimin_api:<password>@postgres:5432/jimin_os
 두 DB secret의 password가 다르면 API readiness가 실패한다. TLS가 `internal`이면 certificate와 key 파일을 만들지 않는다. 검증 script는 임시 디렉터리의 비밀이 아닌 fixture만 사용하며 이 경로에 실제 값을 생성하지 않는다.
 
 Google Calendar는 `JIMIN_GOOGLE_CALENDAR_OAUTH_ENABLED=1`일 때만 위 두 파일을 mount한다. 이때 `JIMIN_GOOGLE_CALENDAR_REDIRECT_URI`와 Google Cloud Console의 OAuth web-client redirect URI는 정확히 같아야 한다. client credential이나 encryption key를 환경 파일·앱·로그에 넣지 않는다.
+
+FCM은 `JIMIN_FIREBASE_MESSAGING_ENABLED=1`일 때만 `firebase_service_account`를
+read-only secret으로 mount한다. Firebase Console에서 내려받은 JSON을 수정하거나
+환경 변수에 펼치지 말고 파일 권한을 `0600`으로 유지한다.

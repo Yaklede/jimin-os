@@ -9,8 +9,9 @@ use jimin_api::{
         SecretSetting,
     },
     probe::{ProbeTarget, run_probe},
+    push::PushRuntime,
     router, serve_with_shutdown, spawn_calendar_mutation_worker, spawn_calendar_sync_worker,
-    spawn_webhook_delivery_worker,
+    spawn_push_delivery_worker, spawn_webhook_delivery_worker,
     webhook::WebhookRuntime,
 };
 use jimin_application::{PairingLifetime, SessionLifetime, SessionService};
@@ -115,6 +116,33 @@ async fn run_server() -> Result<(), &'static str> {
         }
         AuthenticationSetting::Missing | AuthenticationSetting::Invalid => None,
     };
+    let push_runtime = match (config.authentication(), config.firebase_service_account()) {
+        (AuthenticationSetting::Available(settings), SecretSetting::Available(service_account)) => {
+            if let Ok(runtime) = PushRuntime::new(settings.pairing_pepper(), service_account) {
+                Some(runtime)
+            } else {
+                warn!(
+                    event = "push.configuration_invalid",
+                    error_code = "push.configuration_invalid"
+                );
+                None
+            }
+        }
+        (_, SecretSetting::Invalid) => {
+            warn!(
+                event = "push.configuration_invalid",
+                error_code = "push.configuration_invalid"
+            );
+            None
+        }
+        _ => {
+            info!(
+                event = "push.configuration_missing",
+                error_code = "push.configuration_missing"
+            );
+            None
+        }
+    };
     let configuration_ready = configuration_ready && runtime.is_some();
     let readiness_database = database
         .as_ref()
@@ -131,6 +159,9 @@ async fn run_server() -> Result<(), &'static str> {
     }
     if let Some(webhook_runtime) = webhook_runtime {
         state = state.with_webhook_runtime(webhook_runtime);
+    }
+    if let Some(push_runtime) = push_runtime {
+        state = state.with_push_runtime(push_runtime);
     }
     match config.calendar_oauth() {
         CalendarOAuthSetting::Available(settings) => {
@@ -173,6 +204,7 @@ async fn run_server() -> Result<(), &'static str> {
     let calendar_sync_task = spawn_calendar_sync_worker(&state);
     let calendar_mutation_task = spawn_calendar_mutation_worker(&state);
     let webhook_delivery_task = spawn_webhook_delivery_worker(&state);
+    let push_delivery_task = spawn_push_delivery_worker(&state);
     let result = serve_with_shutdown(listener, router(state), shutdown_signal())
         .await
         .map_err(|_| "api.serve_failed");
@@ -192,6 +224,10 @@ async fn run_server() -> Result<(), &'static str> {
     if let Some(webhook_delivery_task) = webhook_delivery_task {
         webhook_delivery_task.abort();
         let _ = webhook_delivery_task.await;
+    }
+    if let Some(push_delivery_task) = push_delivery_task {
+        push_delivery_task.abort();
+        let _ = push_delivery_task.await;
     }
     if let Some(database) = database {
         database.close().await;

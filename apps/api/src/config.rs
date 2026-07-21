@@ -28,6 +28,7 @@ pub struct AppConfig {
     trusted_network: bool,
     authentication: AuthenticationSetting,
     calendar_oauth: CalendarOAuthSetting,
+    firebase_service_account: SecretSetting,
 }
 
 pub enum SecretSetting {
@@ -141,6 +142,7 @@ impl AppConfig {
         };
         let authentication = AuthenticationSetting::load()?;
         let calendar_oauth = CalendarOAuthSetting::load()?;
+        let firebase_service_account = firebase_service_account()?;
 
         Ok(Self {
             bind_addr,
@@ -151,6 +153,7 @@ impl AppConfig {
             trusted_network,
             authentication,
             calendar_oauth,
+            firebase_service_account,
         })
     }
 
@@ -193,6 +196,16 @@ impl AppConfig {
     pub const fn calendar_oauth(&self) -> &CalendarOAuthSetting {
         &self.calendar_oauth
     }
+
+    #[must_use]
+    pub const fn firebase_service_account(&self) -> &SecretSetting {
+        &self.firebase_service_account
+    }
+}
+
+fn firebase_service_account() -> Result<SecretSetting, ConfigError> {
+    let file = env_string("JIMIN_FIREBASE_SERVICE_ACCOUNT_FILE")?;
+    Ok(resolve_secret(None, file, read_secret_file))
 }
 
 impl CalendarOAuthSetting {
