@@ -260,8 +260,11 @@ impl MeetingAnalysisResult {
                 .chain(&self.risks)
                 .all(|value| valid_body_text(value, MAX_DETAIL_CHARS))
             || !valid_optional_body_text(self.follow_up.as_deref(), MAX_DETAIL_CHARS)
-            || !self.decisions.iter().all(NewMeetingDecision::valid)
-            || !self.action_items.iter().all(NewMeetingActionItem::valid)
+            || !self
+                .decisions
+                .iter()
+                .all(|decision| decision.validate().is_ok())
+            || !self.action_items.iter().all(|item| item.validate().is_ok())
         {
             return Err(StorageError::InvalidConfiguration);
         }
@@ -270,17 +273,31 @@ impl MeetingAnalysisResult {
 }
 
 impl NewMeetingDecision {
-    fn valid(&self) -> bool {
-        is_v7(self.id)
+    /// Validates one model-derived decision before it is included in a result.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] when the decision is
+    /// incomplete or exceeds the persisted bounds.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        (is_v7(self.id)
             && valid_body_text(&self.content, MAX_EXCERPT_CHARS)
             && valid_optional_body_text(self.rationale.as_deref(), MAX_EXCERPT_CHARS)
             && valid_body_text(&self.source_excerpt, MAX_EXCERPT_CHARS)
-            && self.source_timestamp_seconds.is_none_or(|value| value >= 0)
+            && self.source_timestamp_seconds.is_none_or(|value| value >= 0))
+        .then_some(())
+        .ok_or(StorageError::InvalidConfiguration)
     }
 }
 
 impl NewMeetingActionItem {
-    fn valid(&self) -> bool {
+    /// Validates one model-derived action candidate before it is included in a result.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] when the candidate is
+    /// incomplete, out of bounds, or has an inconsistent schedule window.
+    pub fn validate(&self) -> Result<(), StorageError> {
         let schedule_fields_valid = match self.kind {
             MeetingActionKind::Task => {
                 self.starts_at.is_none() && self.ends_at.is_none() && self.time_zone.is_none()
@@ -295,7 +312,7 @@ impl NewMeetingActionItem {
                         .is_some_and(|value| valid_text(value, 100))
             }
         };
-        is_v7(self.id)
+        (is_v7(self.id)
             && is_v7(self.target_entity_id)
             && valid_optional_id(self.project_id)
             && valid_text(&self.title, MAX_TITLE_CHARS)
@@ -303,7 +320,9 @@ impl NewMeetingActionItem {
             && (0..=3).contains(&self.priority)
             && valid_body_text(&self.source_excerpt, MAX_EXCERPT_CHARS)
             && (0..=100).contains(&self.confidence)
-            && schedule_fields_valid
+            && schedule_fields_valid)
+            .then_some(())
+            .ok_or(StorageError::InvalidConfiguration)
     }
 }
 

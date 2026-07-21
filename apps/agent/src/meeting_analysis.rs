@@ -265,24 +265,27 @@ fn validated_analysis(
     let decisions = structured
         .decisions
         .into_iter()
-        .map(|decision| NewMeetingDecision {
-            id: Uuid::now_v7(),
-            content: decision.content,
-            rationale: optional_string(&decision.rationale),
-            source_excerpt: decision.source_excerpt,
-            source_timestamp_seconds: (decision.source_timestamp_seconds >= 0)
-                .then_some(decision.source_timestamp_seconds),
+        .filter_map(|decision| {
+            let decision = NewMeetingDecision {
+                id: Uuid::now_v7(),
+                content: decision.content,
+                rationale: optional_string(&decision.rationale),
+                source_excerpt: decision.source_excerpt,
+                source_timestamp_seconds: (decision.source_timestamp_seconds >= 0)
+                    .then_some(decision.source_timestamp_seconds),
+            };
+            decision.validate().is_ok().then_some(decision)
         })
         .collect();
     let action_items = structured
         .action_items
         .into_iter()
-        .map(|item| validated_action_item(item, job))
-        .collect::<Option<Vec<_>>>()?;
+        .filter_map(|item| validated_action_item(item, job))
+        .collect();
     let result = MeetingAnalysisResult {
         summary: structured.summary,
-        topics: structured.topics,
-        risks: structured.risks,
+        topics: valid_details(structured.topics),
+        risks: valid_details(structured.risks),
         follow_up: optional_string(&structured.follow_up),
         decisions,
         action_items,
@@ -303,12 +306,7 @@ fn validated_action_item(
     let starts_at = optional_datetime(&item.starts_at).ok()?;
     let ends_at = optional_datetime(&item.ends_at).ok()?;
     let (kind, starts_at, ends_at, time_zone) = match item.kind {
-        StructuredMeetingActionKind::Task => {
-            if starts_at.is_some() || ends_at.is_some() || !item.time_zone.trim().is_empty() {
-                return None;
-            }
-            (MeetingActionKind::Task, None, None, None)
-        }
+        StructuredMeetingActionKind::Task => (MeetingActionKind::Task, None, None, None),
         StructuredMeetingActionKind::Schedule => {
             let (Some(starts_at), Some(ends_at)) = (starts_at, ends_at) else {
                 return None;
@@ -324,7 +322,7 @@ fn validated_action_item(
             )
         }
     };
-    Some(NewMeetingActionItem {
+    let item = NewMeetingActionItem {
         id: Uuid::now_v7(),
         target_entity_id: Uuid::now_v7(),
         kind,
@@ -338,7 +336,15 @@ fn validated_action_item(
         time_zone,
         source_excerpt: item.source_excerpt,
         confidence: item.confidence,
-    })
+    };
+    item.validate().is_ok().then_some(item)
+}
+
+fn valid_details(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .collect()
 }
 
 fn optional_uuid(value: &str) -> Result<Option<Uuid>, ()> {
@@ -414,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn schedule_requires_a_complete_window() {
+    fn incomplete_schedule_is_dropped_without_losing_the_summary() {
         let response = r#"{
             "summary":"출시 전 검토가 필요하다.",
             "topics":["출시"],
@@ -427,6 +433,34 @@ mod tests {
                 "timeZone":"","sourceExcerpt":"내일까지 마쳐 주세요.","confidence":90
             }]
         }"#;
-        assert!(validated_analysis(response, &job()).is_none());
+        let analysis = validated_analysis(response, &job()).expect("summary remains usable");
+        assert!(analysis.action_items.is_empty());
+    }
+
+    #[test]
+    fn task_ignores_schedule_only_fields_from_the_model() {
+        let response = r#"{
+            "summary":"출시 전 검토가 필요하다.",
+            "topics":["출시"],
+            "risks":[],
+            "followUp":"",
+            "decisions":[],
+            "actionItems":[{
+                "kind":"task","projectId":"","title":"계약 검토","notes":"누락 조항 확인",
+                "priority":1,"dueAt":"2026-07-22T15:00:00+09:00",
+                "startsAt":"2026-07-22T14:00:00+09:00",
+                "endsAt":"2026-07-22T15:00:00+09:00","timeZone":"Asia/Seoul",
+                "sourceExcerpt":"내일까지 마쳐 주세요.","confidence":90
+            }]
+        }"#;
+        let analysis =
+            validated_analysis(response, &job()).expect("analysis should normalize task");
+        let action = analysis
+            .action_items
+            .first()
+            .expect("task should remain reviewable");
+        assert!(action.starts_at.is_none());
+        assert!(action.ends_at.is_none());
+        assert!(action.time_zone.is_none());
     }
 }
