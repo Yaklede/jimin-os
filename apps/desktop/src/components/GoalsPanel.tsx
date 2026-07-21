@@ -123,7 +123,13 @@ export function GoalsPanel({
   }
 
   return (
-    <section className="goals-panel" aria-labelledby="goals-panel-title">
+    <section
+      className="goals-panel"
+      data-empty={
+        !formOpen && activeGoals.length === 0 && inactiveGoals.length === 0
+      }
+      aria-labelledby="goals-panel-title"
+    >
       <header className="goals-panel__heading">
         <div>
           <span className="goals-panel__icon" aria-hidden="true">

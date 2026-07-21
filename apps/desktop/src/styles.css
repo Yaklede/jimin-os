@@ -602,7 +602,7 @@ svg {
 .home-deadline-brief,
 .home-now-brief,
 .home-voice-callout,
-.home-next-schedule,
+.home-schedule-surface,
 .home-task-surface,
 .planning-surface,
 .memory-empty,
@@ -1849,8 +1849,9 @@ svg {
   min-width: 0;
 }
 
-.home-next-schedule {
-  padding: 18px;
+.home-page[data-overview-panels="1"] .home-next-schedule,
+.home-page[data-overview-panels="1"] .home-tasks {
+  grid-column: 1 / -1;
 }
 
 .home-section-heading,
@@ -1877,10 +1878,12 @@ svg {
 }
 
 .schedule-highlight {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px;
   align-items: center;
-  gap: 12px;
-  min-height: 70px;
+  gap: 8px;
+  min-height: 72px;
+  padding: 8px 14px;
 }
 
 .schedule-highlight__open {
@@ -1929,19 +1932,26 @@ svg {
 
 .schedule-highlight__edit,
 .schedule-highlight__source {
-  margin-left: auto;
-  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
 }
 
 .schedule-highlight__edit {
-  padding: 0 10px;
+  padding: 0;
 }
 
 .schedule-highlight__source {
-  color: var(--muted);
-  font-size: 12px;
+  display: grid;
+  place-items: center;
+  color: var(--faint);
 }
 
+.schedule-highlight__source svg {
+  width: 17px;
+  height: 17px;
+}
+
+.home-schedule-surface,
 .home-task-surface {
   overflow: hidden;
 }
@@ -1961,8 +1971,8 @@ svg {
   grid-template-columns: 44px minmax(0, 1fr) 44px;
   align-items: center;
   column-gap: 8px;
-  min-height: 56px;
-  padding: 6px 14px;
+  min-height: 72px;
+  padding: 8px 14px;
 }
 
 .home-task-list li + li {
@@ -2447,10 +2457,10 @@ svg {
 
 .empty-surface {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 10px;
-  min-height: 82px;
-  padding: 16px;
+  min-height: 72px;
+  padding: 12px 16px;
 }
 
 .empty-surface > svg {
@@ -2653,12 +2663,6 @@ svg {
   margin: 0 0 10px;
 }
 
-.planning-section-description {
-  margin: -4px 0 10px;
-  color: var(--muted);
-  font-size: 13px;
-}
-
 .planning-section-heading > div {
   display: flex;
   align-items: center;
@@ -2675,11 +2679,17 @@ svg {
   overflow: hidden;
 }
 
+.planning-surface[data-empty="true"] {
+  box-shadow: none;
+}
+
 .planning-timeline li {
   display: grid;
   grid-template-columns: 72px 2px minmax(0, 1fr) auto;
+  min-height: 72px;
+  align-items: center;
   gap: 12px;
-  padding: 14px 16px;
+  padding: 8px 14px;
 }
 
 .planning-timeline li + li {
@@ -2688,7 +2698,7 @@ svg {
 
 .planning-timeline time {
   display: grid;
-  align-content: start;
+  align-content: center;
   gap: 2px;
   color: var(--accent);
   font-variant-numeric: tabular-nums;
@@ -2709,9 +2719,9 @@ svg {
   font-weight: 600;
 }
 
-.planning-timeline li > span {
+.planning-timeline li > span[aria-hidden="true"] {
   width: 2px;
-  min-height: 34px;
+  min-height: 40px;
   border-radius: 2px;
   background: var(--accent);
 }
@@ -2721,20 +2731,29 @@ svg {
   color: var(--muted);
 }
 
-.planning-timeline--history li > span {
+.planning-timeline--history li > span[aria-hidden="true"] {
   background: var(--border-strong);
 }
 
 .planning-row-edit {
   align-self: center;
-  padding: 0 10px;
+  width: 44px;
+  height: 44px;
+  padding: 0;
 }
 
 .planning-row-source {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
   align-self: center;
-  color: var(--muted);
-  font-size: 12px;
-  white-space: nowrap;
+  color: var(--faint);
+}
+
+.planning-row-source svg {
+  width: 17px;
+  height: 17px;
 }
 
 .planning-timeline strong,
@@ -2759,7 +2778,7 @@ svg {
   grid-template-columns: 44px minmax(0, 1fr) auto auto;
   align-items: center;
   column-gap: 8px;
-  min-height: 60px;
+  min-height: 72px;
   padding: 8px 14px;
 }
 
@@ -2772,9 +2791,12 @@ svg {
 }
 
 .planning-task-list strong {
-  display: block;
+  display: -webkit-box;
   overflow-wrap: anywhere;
-  white-space: normal;
+  overflow: hidden;
+  line-height: 20px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .planning-task-list__complete,
@@ -3239,6 +3261,23 @@ svg {
   box-shadow: var(--shadow-panel);
 }
 
+.goals-panel[data-empty="true"] {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.goals-panel[data-empty="true"] .goals-panel__heading {
+  display: contents;
+}
+
+.goals-panel[data-empty="true"] .goals-panel__list {
+  display: none;
+}
+
 .goals-panel__heading,
 .goals-panel__heading > div,
 .goal-row,
@@ -3621,6 +3660,53 @@ svg {
   grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
   gap: 16px;
   align-items: start;
+}
+
+.projects-layout[data-empty="true"] {
+  display: block;
+}
+
+.projects-layout[data-empty="true"] > .projects-list,
+.projects-layout[data-empty="true"] > .project-detail {
+  display: none;
+}
+
+.projects-zero-state {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  max-width: 760px;
+  min-height: 88px;
+  padding: 12px 0;
+}
+
+.projects-zero-state__icon {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border-radius: var(--radius-control);
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.projects-zero-state__icon svg {
+  width: 21px;
+  height: 21px;
+}
+
+.projects-zero-state h2 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.projects-zero-state p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .projects-section-heading {
@@ -6037,6 +6123,11 @@ svg {
     padding: 16px;
   }
 
+  .goals-panel[data-empty="true"] {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 0;
+  }
+
   .goals-panel__heading {
     align-items: stretch;
     flex-direction: column;
@@ -6075,6 +6166,16 @@ svg {
   .projects-layout[data-project-selected="true"] .projects-list,
   .projects-layout[data-project-selected="false"] .project-detail {
     display: none;
+  }
+
+  .projects-zero-state {
+    grid-template-columns: 44px minmax(0, 1fr);
+    padding: 8px 0;
+  }
+
+  .projects-zero-state .primary-button {
+    grid-column: 1 / -1;
+    width: 100%;
   }
 
   .project-create-form,
@@ -6297,7 +6398,7 @@ svg {
   }
 
   .home-next-schedule {
-    padding: 16px;
+    padding: 0;
   }
 
   .home-task-list li {
@@ -6328,6 +6429,10 @@ svg {
 
   .planning-page {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .planning-surface[data-empty="true"] .empty-surface p {
+    display: none;
   }
 
   .planning-page__heading {

@@ -3,6 +3,7 @@ import {
   CalendarDays,
   ChevronRight,
   Circle,
+  Cloud,
   Clock3,
   Inbox,
   ListTodo,
@@ -117,6 +118,9 @@ export function HomeWorkspace({
     assistantJob,
     assistantMessage,
   );
+  const showSchedulePanel = showingSkeleton || Boolean(nextSchedule);
+  const showTaskPanel = showingSkeleton || taskCount > 0;
+  const overviewPanelCount = Number(showSchedulePanel) + Number(showTaskPanel);
 
   useEffect(() => {
     setScheduleNow(new Date());
@@ -165,6 +169,7 @@ export function HomeWorkspace({
     <section
       className="home-page"
       data-assistant-state={assistantState}
+      data-overview-panels={overviewPanelCount}
       aria-busy={showingSkeleton}
     >
       <header className="home-greeting">
@@ -337,130 +342,129 @@ export function HomeWorkspace({
             <ChevronRight aria-hidden="true" />
           </button>
 
-          <section
-            className="home-next-schedule"
-            aria-labelledby="next-schedule-title"
-            ref={scheduleSectionRef}
-            tabIndex={-1}
-          >
-            <div className="home-section-heading">
-              <h2 id="next-schedule-title">
-                {nextSchedule ? "다음 일정" : copy.home.scheduleTitle}
-              </h2>
-              {nextSchedule && (
-                <span>{relativeScheduleTime(nextSchedule.startsAt)}</span>
-              )}
-            </div>
-            {showingSkeleton ? (
-              <ScheduleSkeleton visible={skeletonVisible} />
-            ) : nextSchedule ? (
-              <ScheduleHighlight
-                entry={nextSchedule}
-                onOpen={() => void onOpenSchedule(nextSchedule)}
-                onEdit={
-                  nextSchedule.source === "manual"
-                    ? () => onEditSchedule(nextSchedule)
-                    : undefined
-                }
-              />
-            ) : (
-              <EmptySurface
-                title={copy.home.scheduleEmptyTitle}
-                description={copy.home.scheduleEmptyDescription}
-              />
-            )}
-          </section>
-
-          <section
-            className="home-tasks"
-            aria-labelledby="today-task-title"
-            ref={taskSectionRef}
-            tabIndex={-1}
-          >
-            <div className="home-section-heading">
-              <h2 id="today-task-title">{copy.home.taskTitle}</h2>
-              <span>
-                {showingSkeleton ? (
-                  <SkeletonGroup
-                    className="skeleton-count"
-                    label={copy.home.loadingShort}
-                    visible={skeletonVisible}
-                  >
-                    <SkeletonBlock />
-                  </SkeletonGroup>
-                ) : (
-                  copy.home.taskCount(taskCount)
+          {showSchedulePanel && (
+            <section
+              className="home-next-schedule"
+              aria-labelledby="next-schedule-title"
+              ref={scheduleSectionRef}
+              tabIndex={-1}
+            >
+              <div className="home-section-heading">
+                <h2 id="next-schedule-title">
+                  {nextSchedule ? "다음 일정" : copy.home.scheduleTitle}
+                </h2>
+                {nextSchedule && (
+                  <span>{relativeScheduleTime(nextSchedule.startsAt)}</span>
                 )}
-              </span>
-            </div>
-            <div className="home-task-surface">
-              {showingSkeleton ? (
-                <TaskListSkeleton rows={4} visible={skeletonVisible} />
-              ) : snapshot?.tasks.length ? (
-                <ul className="home-task-list">
-                  {snapshot.tasks.map((task) => (
-                    <li
-                      key={task.id}
-                      ref={
-                        highlightedHomeTaskId === task.id
-                          ? highlightedHomeTaskRef
-                          : undefined
-                      }
-                      data-highlighted={highlightedHomeTaskId === task.id}
-                      tabIndex={
-                        highlightedHomeTaskId === task.id ? -1 : undefined
-                      }
+              </div>
+              <div className="home-schedule-surface">
+                {showingSkeleton ? (
+                  <ScheduleSkeleton visible={skeletonVisible} />
+                ) : nextSchedule ? (
+                  <ScheduleHighlight
+                    entry={nextSchedule}
+                    onOpen={() => void onOpenSchedule(nextSchedule)}
+                    onEdit={
+                      nextSchedule.source === "manual"
+                        ? () => onEditSchedule(nextSchedule)
+                        : undefined
+                    }
+                  />
+                ) : null}
+              </div>
+            </section>
+          )}
+
+          {showTaskPanel && (
+            <section
+              className="home-tasks"
+              aria-labelledby="today-task-title"
+              ref={taskSectionRef}
+              tabIndex={-1}
+            >
+              <div className="home-section-heading">
+                <h2 id="today-task-title">{copy.home.taskTitle}</h2>
+                <span>
+                  {showingSkeleton ? (
+                    <SkeletonGroup
+                      className="skeleton-count"
+                      label={copy.home.loadingShort}
+                      visible={skeletonVisible}
                     >
-                      <button
-                        className="home-task-list__complete focus-visible-control"
-                        type="button"
-                        onClick={() => void complete(task)}
-                        disabled={Boolean(completingTaskId)}
-                        aria-label={copy.home.completeTask(task.title)}
+                      <SkeletonBlock />
+                    </SkeletonGroup>
+                  ) : (
+                    copy.home.taskCount(taskCount)
+                  )}
+                </span>
+              </div>
+              <div className="home-task-surface">
+                {showingSkeleton ? (
+                  <TaskListSkeleton rows={4} visible={skeletonVisible} />
+                ) : snapshot?.tasks.length ? (
+                  <ul className="home-task-list">
+                    {snapshot.tasks.map((task) => (
+                      <li
+                        key={task.id}
+                        ref={
+                          highlightedHomeTaskId === task.id
+                            ? highlightedHomeTaskRef
+                            : undefined
+                        }
+                        data-highlighted={highlightedHomeTaskId === task.id}
+                        tabIndex={
+                          highlightedHomeTaskId === task.id ? -1 : undefined
+                        }
                       >
-                        {completingTaskId === task.id ? (
-                          <span className="button-spinner" aria-hidden="true" />
-                        ) : (
-                          <Circle aria-hidden="true" />
-                        )}
-                      </button>
-                      <button
-                        className="home-task-list__open focus-visible-control"
-                        type="button"
-                        onClick={() => void onOpenPlanningTask(task)}
-                        disabled={Boolean(completingTaskId)}
-                        aria-label={copy.home.openTaskInSchedule(task.title)}
-                      >
-                        <span>{task.title}</span>
-                        {task.dueAt && (
-                          <time
-                            dateTime={task.dueAt}
-                            data-due-state={taskDueState(task)}
-                          >
-                            {taskDueLabel(task)}
-                          </time>
-                        )}
-                      </button>
-                      <button
-                        className="home-task-list__edit focus-visible-control"
-                        type="button"
-                        onClick={() => onEditTask(task)}
-                        disabled={Boolean(completingTaskId)}
-                        aria-label={copy.home.editTask(task.title)}
-                      >
-                        <Pencil aria-hidden="true" />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <EmptySurface
-                  title={copy.home.taskEmptyTitle}
-                  description={copy.home.taskEmptyDescription}
-                />
-              )}
-            </div>
-          </section>
+                        <button
+                          className="home-task-list__complete focus-visible-control"
+                          type="button"
+                          onClick={() => void complete(task)}
+                          disabled={Boolean(completingTaskId)}
+                          aria-label={copy.home.completeTask(task.title)}
+                        >
+                          {completingTaskId === task.id ? (
+                            <span
+                              className="button-spinner"
+                              aria-hidden="true"
+                            />
+                          ) : (
+                            <Circle aria-hidden="true" />
+                          )}
+                        </button>
+                        <button
+                          className="home-task-list__open focus-visible-control"
+                          type="button"
+                          onClick={() => void onOpenPlanningTask(task)}
+                          disabled={Boolean(completingTaskId)}
+                          aria-label={copy.home.openTaskInSchedule(task.title)}
+                        >
+                          <span>{task.title}</span>
+                          {task.dueAt && (
+                            <time
+                              dateTime={task.dueAt}
+                              data-due-state={taskDueState(task)}
+                            >
+                              {taskDueLabel(task)}
+                            </time>
+                          )}
+                        </button>
+                        <button
+                          className="home-task-list__edit focus-visible-control"
+                          type="button"
+                          onClick={() => onEditTask(task)}
+                          disabled={Boolean(completingTaskId)}
+                          aria-label={copy.home.editTask(task.title)}
+                        >
+                          <Pencil aria-hidden="true" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            </section>
+          )}
         </>
       )}
     </section>
@@ -973,8 +977,12 @@ function ScheduleHighlight({
           <span>{copy.actions.edit}</span>
         </button>
       ) : (
-        <span className="schedule-highlight__source">
-          {copy.schedule.connectedCalendar}
+        <span
+          className="schedule-highlight__source"
+          title={copy.schedule.connectedCalendar}
+        >
+          <Cloud aria-hidden="true" />
+          <span className="sr-only">{copy.schedule.connectedCalendar}</span>
         </span>
       )}
     </div>

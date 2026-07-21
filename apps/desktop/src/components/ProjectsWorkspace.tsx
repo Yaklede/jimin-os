@@ -396,7 +396,30 @@ export function ProjectsWorkspace({
       <div
         className="projects-layout"
         data-project-selected={Boolean(selectedProject)}
+        data-empty={!showingSkeleton && projects.length === 0}
       >
+        {!showingSkeleton && projects.length === 0 && !formOpen && (
+          <section
+            className="projects-zero-state"
+            aria-labelledby="projects-zero-state-title"
+          >
+            <span className="projects-zero-state__icon" aria-hidden="true">
+              <FolderKanban />
+            </span>
+            <div>
+              <h2 id="projects-zero-state-title">{copy.projects.emptyTitle}</h2>
+              <p>{copy.projects.emptyDescription}</p>
+            </div>
+            <button
+              className="primary-button focus-visible-control"
+              type="button"
+              onClick={() => setFormOpen(true)}
+            >
+              <Plus aria-hidden="true" />
+              {copy.actions.createProject}
+            </button>
+          </section>
+        )}
         <section
           className="projects-list"
           aria-labelledby="projects-list-title"

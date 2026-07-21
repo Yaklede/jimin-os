@@ -273,7 +273,10 @@ export function PlanningWorkspace({
             )}
           </span>
         </div>
-        <div className="planning-surface">
+        <div
+          className="planning-surface"
+          data-empty={!showingSkeleton && upcomingSchedule.length === 0}
+        >
           {showingSkeleton ? (
             <ScheduleTimelineSkeleton rows={3} visible={skeletonVisible} />
           ) : upcomingSchedule.length ? (
@@ -315,13 +318,17 @@ export function PlanningWorkspace({
             )}
           </span>
         </div>
-        <div className="planning-surface">
+        <div
+          className="planning-surface"
+          data-empty={!showingSkeleton && !snapshot?.tasks.length}
+        >
           {showingSkeleton ? (
             <PlanningTaskSkeleton rows={4} visible={skeletonVisible} />
           ) : snapshot?.tasks.length ? (
             <ul className="planning-task-list">
               {snapshot.tasks.map((task) => (
                 <li
+                  className="planning-entity-row planning-entity-row--task"
                   key={task.id}
                   ref={
                     task.id === highlightedTaskId
@@ -365,7 +372,6 @@ export function PlanningWorkspace({
                     aria-label={copy.home.editTask(task.title)}
                   >
                     <Pencil aria-hidden="true" />
-                    <span>{copy.actions.edit}</span>
                   </button>
                 </li>
               ))}
@@ -396,10 +402,10 @@ export function PlanningWorkspace({
             )}
           </span>
         </div>
-        <p className="planning-section-description">
-          {copy.schedule.historyDescription}
-        </p>
-        <div className="planning-surface">
+        <div
+          className="planning-surface"
+          data-empty={!showingSkeleton && pastSchedule.length === 0}
+        >
           {showingSkeleton ? (
             <ScheduleTimelineSkeleton rows={2} visible={skeletonVisible} />
           ) : pastSchedule.length ? (
@@ -444,13 +450,19 @@ export function PlanningWorkspace({
             )}
           </span>
         </div>
-        <div className="planning-surface">
+        <div
+          className="planning-surface"
+          data-empty={!showingSkeleton && !snapshot?.completedTasks.length}
+        >
           {showingSkeleton ? (
             <PlanningTaskSkeleton rows={2} visible={skeletonVisible} />
           ) : snapshot?.completedTasks.length ? (
             <ul className="planning-task-list planning-task-list--completed">
               {snapshot.completedTasks.map((task) => (
-                <li key={task.id}>
+                <li
+                  className="planning-entity-row planning-entity-row--completed"
+                  key={task.id}
+                >
                   <button
                     className="planning-task-list__restore focus-visible-control"
                     type="button"
@@ -576,6 +588,7 @@ function ScheduleRow({
 }) {
   return (
     <li
+      className="planning-entity-row planning-entity-row--schedule"
       ref={elementRef}
       data-highlighted={highlighted}
       tabIndex={highlighted ? -1 : undefined}
@@ -600,16 +613,18 @@ function ScheduleRow({
           aria-label={copy.schedule.editSchedule(entry.title)}
         >
           <Pencil aria-hidden="true" />
-          <span>{copy.actions.edit}</span>
         </button>
       ) : (
         <span
           className="planning-row-source"
           title={copy.schedule.readOnlyCalendar}
         >
-          {entry.source === "google_calendar"
-            ? copy.schedule.readOnlyCalendar
-            : copy.schedule.connectedCalendar}
+          <Cloud aria-hidden="true" />
+          <span className="sr-only">
+            {entry.source === "google_calendar"
+              ? copy.schedule.readOnlyCalendar
+              : copy.schedule.connectedCalendar}
+          </span>
         </span>
       )}
     </li>
