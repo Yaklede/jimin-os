@@ -69,6 +69,7 @@ import {
   type RecommendationDecision,
 } from "./api/intelligence";
 import { processVoiceCommand } from "./api/voice";
+import { disablePushRegistration, registerFcmToken } from "./api/push";
 import {
   AgentRequestError,
   createConversation,
@@ -127,10 +128,13 @@ import { localDayKey, millisecondsUntilNextLocalDay } from "./homeSchedule";
 import {
   acknowledgePendingReminderNavigation,
   cancelLocalReminder,
+  getNativePushToken,
+  getNotificationPermissionStatus,
   localNotificationsSupported,
   peekPendingReminderNavigation,
   reconcilePlanningReminders,
   reminderFallbackDestination,
+  type RemoteReminderStatus,
   type ReminderSyncStatus,
 } from "./local-notifications";
 
@@ -235,6 +239,8 @@ export default function App() {
   const [reminderSyncStatus, setReminderSyncStatus] =
     useState<ReminderSyncStatus>("idle");
   const [reminderSyncError, setReminderSyncError] = useState<string>();
+  const [remoteReminderStatus, setRemoteReminderStatus] =
+    useState<RemoteReminderStatus>("idle");
   const pendingConversationId = useRef<string | undefined>(undefined);
   const openedAuthenticationUrl = useRef<string | undefined>(undefined);
   const activeSessionRef = useRef<SessionTokens | undefined>(undefined);
@@ -414,17 +420,50 @@ export default function App() {
       const operation = (async () => {
         setReminderSyncStatus("syncing");
         setReminderSyncError(undefined);
+        setRemoteReminderStatus("syncing");
         try {
           const [from, to] = currentReminderRange();
           const snapshot = await withAuthenticatedSession((accessToken) =>
             fetchPlanning(apiBaseUrl, accessToken, from, to),
           );
           await reconcilePlanningReminders(snapshot);
+          const permission = await getNotificationPermissionStatus();
+          if (permission.status === "granted") {
+            const pushToken = await getNativePushToken();
+            if (pushToken.state === "ready") {
+              try {
+                await withAuthenticatedSession((accessToken) =>
+                  registerFcmToken(
+                    apiBaseUrl,
+                    accessToken,
+                    pushToken.registrationHandle,
+                  ),
+                );
+                setRemoteReminderStatus("connected");
+              } catch {
+                setRemoteReminderStatus("error");
+              }
+            } else {
+              setRemoteReminderStatus(
+                pushToken.state === "unconfigured" ? "local-only" : "error",
+              );
+            }
+          } else {
+            try {
+              await withAuthenticatedSession((accessToken) =>
+                disablePushRegistration(apiBaseUrl, accessToken),
+              );
+            } catch {
+              // Registration cleanup is retried on the next reconciliation.
+            }
+            setRemoteReminderStatus("local-only");
+          }
           setReminderSyncStatus("ready");
           return true;
         } catch {
           setReminderSyncStatus("error");
           setReminderSyncError(copy.settings.notificationsSyncNotice);
+          setRemoteReminderStatus("error");
           return false;
         }
       })();
@@ -821,6 +860,7 @@ export default function App() {
       setCalendarAction(undefined);
       setReminderSyncStatus("idle");
       setReminderSyncError(undefined);
+      setRemoteReminderStatus("idle");
       pendingConversationId.current = undefined;
       await bootstrapTrustedNetworkDevice();
     }
@@ -2581,6 +2621,7 @@ export default function App() {
               calendarError={calendarError}
               reminderSyncStatus={reminderSyncStatus}
               reminderSyncError={reminderSyncError}
+              remoteReminderStatus={remoteReminderStatus}
               onStartAuthentication={beginAgentAuthentication}
               onReloadModels={loadAgentModelSettings}
               onSaveModel={saveAgentModelSettings}

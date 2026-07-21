@@ -355,6 +355,18 @@
           "markdownDescription": "Denies the permissionStatus command without any pre-configured scope."
         },
         {
+          "description": "Enables the pushToken command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-pushToken",
+          "markdownDescription": "Enables the pushToken command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the pushToken command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-pushToken",
+          "markdownDescription": "Denies the pushToken command without any pre-configured scope."
+        },
+        {
           "description": "Enables the reconcileScheduled command without any pre-configured scope.",
           "type": "string",
           "const": "allow-reconcileScheduled",

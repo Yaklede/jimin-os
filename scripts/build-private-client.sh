@@ -20,10 +20,16 @@ build_macos() {
 }
 
 build_android() {
-  VITE_API_BASE_URL="${server_url}" \
-    VITE_LOCAL_PHONE_TEST=0 \
-    pnpm --filter @jimin-os/desktop tauri android build \
-      --debug --apk --target aarch64 --ci
+  (
+    local firebase_target="${REPO_ROOT}/apps/desktop/src-tauri/gen/android/app/google-services.json"
+    local firebase_source="${JIMIN_ANDROID_GOOGLE_SERVICES_FILE:-${REPO_ROOT}/deploy/secrets/staging/google-services.json}"
+    prepare_android_firebase_config "${firebase_source}" "${firebase_target}"
+    trap 'cleanup_android_firebase_config "${firebase_target}"' EXIT
+    VITE_API_BASE_URL="${server_url}" \
+      VITE_LOCAL_PHONE_TEST=0 \
+      pnpm --filter @jimin-os/desktop tauri android build \
+        --debug --apk --target aarch64 --ci
+  )
   verify_production_web_assets "${assets_dir}" "${server_url}"
 }
 

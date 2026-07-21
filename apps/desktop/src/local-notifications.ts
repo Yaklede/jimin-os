@@ -10,6 +10,12 @@ export type NotificationPermissionStatus = {
 };
 
 export type ReminderSyncStatus = "idle" | "syncing" | "ready" | "error";
+export type RemoteReminderStatus =
+  "idle" | "syncing" | "connected" | "local-only" | "error";
+
+export type NativePushTokenState =
+  | { state: "ready"; registrationHandle: string }
+  | { state: "unconfigured" | "unavailable" };
 
 export type LocalReminder = {
   itemType: "task" | "schedule";
@@ -141,6 +147,32 @@ export async function openNotificationSettings(
   }
   await runtime.invoke("plugin:local-notifications|openSettings");
   return true;
+}
+
+export async function getNativePushToken(
+  runtime = currentRuntime(),
+): Promise<NativePushTokenState> {
+  if (!notificationRuntimeAvailable(runtime.tauri, runtime.userAgent)) {
+    return { state: "unconfigured" };
+  }
+  const result = await runtime.invoke<unknown>(
+    "plugin:local-notifications|pushToken",
+  );
+  if (!isRecord(result)) throw new Error("invalid push token state");
+  if (
+    result.state === "ready" &&
+    typeof result.registrationHandle === "string" &&
+    result.registrationHandle.length >= 20 &&
+    result.registrationHandle.length <= 4096 &&
+    result.registrationHandle.trim() === result.registrationHandle &&
+    !/\s/.test(result.registrationHandle)
+  ) {
+    return { state: "ready", registrationHandle: result.registrationHandle };
+  }
+  if (result.state === "unconfigured" || result.state === "unavailable") {
+    return { state: result.state };
+  }
+  throw new Error("invalid push token state");
 }
 
 export async function scheduleLocalReminder(

@@ -8,6 +8,7 @@ const COMMANDS: &[&str] = &[
     "takePendingNavigation",
     "peekPendingNavigation",
     "ackPendingNavigation",
+    "pushToken",
 ];
 
 fn main() {

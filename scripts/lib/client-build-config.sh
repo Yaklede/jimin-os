@@ -59,3 +59,30 @@ verify_production_web_assets() {
     return 1
   fi
 }
+
+prepare_android_firebase_config() {
+  local source_file="${1:-}"
+  local target_file="${2:?Firebase target path is required}"
+
+  rm -f "${target_file}"
+  if [[ -z "${source_file}" || ! -f "${source_file}" ]]; then
+    printf 'Firebase Android config is absent; building with local reminders only.\n'
+    return 0
+  fi
+  local size
+  size="$(wc -c < "${source_file}" | tr -d '[:space:]')"
+  if [[ ! "${size}" =~ ^[0-9]+$ ]] || (( size < 100 || size > 65536 )); then
+    printf 'Firebase Android config has an invalid size.\n' >&2
+    return 1
+  fi
+  if ! grep -Eq '"package_name"[[:space:]]*:[[:space:]]*"io\.jimin\.os"' "${source_file}"; then
+    printf 'Firebase Android config is not registered for io.jimin.os.\n' >&2
+    return 1
+  fi
+  install -m 600 "${source_file}" "${target_file}"
+}
+
+cleanup_android_firebase_config() {
+  local target_file="${1:?Firebase target path is required}"
+  rm -f "${target_file}"
+}

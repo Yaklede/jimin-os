@@ -26,6 +26,7 @@ import {
   localNotificationsSupported,
   openNotificationSettings,
   type NotificationPermissionStatus,
+  type RemoteReminderStatus,
   type ReminderSyncStatus,
   requestNotificationPermission,
 } from "../local-notifications";
@@ -44,6 +45,7 @@ type SettingsWorkspaceProps = {
   calendarError: string | undefined;
   reminderSyncStatus: ReminderSyncStatus;
   reminderSyncError: string | undefined;
+  remoteReminderStatus: RemoteReminderStatus;
   onStartAuthentication(): Promise<void>;
   onReloadModels(): Promise<void>;
   onSaveModel(
@@ -71,6 +73,7 @@ export function SettingsWorkspace({
   calendarError,
   reminderSyncStatus,
   reminderSyncError,
+  remoteReminderStatus,
   onStartAuthentication,
   onReloadModels,
   onSaveModel,
@@ -694,10 +697,13 @@ export function SettingsWorkspace({
               notificationPermissionLoading ||
               notificationPermissionRequesting ||
               notificationSettingsOpening ||
-              reminderSyncStatus === "syncing"
+              reminderSyncStatus === "syncing" ||
+              remoteReminderStatus === "syncing"
             }
             data-state={
-              notificationPermissionError || reminderSyncError
+              notificationPermissionError ||
+              reminderSyncError ||
+              remoteReminderStatus === "error"
                 ? "error"
                 : notificationPermission?.status
             }
@@ -708,6 +714,7 @@ export function SettingsWorkspace({
                 <LoaderCircle className="spin" />
               ) : notificationPermissionError ||
                 reminderSyncError ||
+                remoteReminderStatus === "error" ||
                 notificationPermission?.status === "denied" ? (
                 <CircleAlert />
               ) : notificationPermission?.status === "granted" ? (
@@ -727,7 +734,11 @@ export function SettingsWorkspace({
                       ? copy.settings.notificationsSyncing
                       : reminderSyncStatus === "error"
                         ? copy.settings.notificationsSyncProblem
-                        : copy.settings.notificationsReady
+                        : remoteReminderStatus === "error"
+                          ? copy.settings.notificationsRemoteProblem
+                          : remoteReminderStatus === "connected"
+                            ? copy.settings.notificationsRemoteReady
+                            : copy.settings.notificationsLocalOnly
                     : notificationPermission?.canRequest
                       ? copy.settings.notificationsNeedsPermission
                       : copy.settings.notificationsNeedsSettings}
@@ -759,7 +770,8 @@ export function SettingsWorkspace({
                   {copy.settings.notificationsRetry}
                 </button>
               ) : notificationPermission?.status === "granted" ? (
-                reminderSyncStatus === "error" ? (
+                reminderSyncStatus === "error" ||
+                remoteReminderStatus === "error" ? (
                   <button
                     className="text-button focus-visible-control"
                     type="button"
@@ -771,15 +783,19 @@ export function SettingsWorkspace({
                 ) : (
                   <span className="settings-row__state" role="status">
                     {reminderSyncStatus === "syncing" ||
-                    reminderSyncStatus === "idle" ? (
+                    reminderSyncStatus === "idle" ||
+                    remoteReminderStatus === "syncing" ? (
                       <LoaderCircle className="spin" aria-hidden="true" />
                     ) : (
                       <CheckCircle2 aria-hidden="true" />
                     )}
                     {reminderSyncStatus === "syncing" ||
-                    reminderSyncStatus === "idle"
+                    reminderSyncStatus === "idle" ||
+                    remoteReminderStatus === "syncing"
                       ? copy.settings.notificationsSyncingAction
-                      : copy.settings.notificationsEnabled}
+                      : remoteReminderStatus === "connected"
+                        ? copy.settings.notificationsAlwaysEnabled
+                        : copy.settings.notificationsEnabled}
                   </span>
                 )
               ) : notificationPermission?.canRequest ? (

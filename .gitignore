@@ -17,6 +17,7 @@ deploy/secrets/*
 *.tfstate
 *.tfstate.*
 *service-account*.json
+google-services.json
 .netrc
 .envrc
 auth.json

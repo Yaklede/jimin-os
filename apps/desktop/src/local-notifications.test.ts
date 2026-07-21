@@ -5,6 +5,7 @@ import {
   acknowledgePendingReminderNavigation,
   cancelLocalReminder,
   getNotificationPermissionStatus,
+  getNativePushToken,
   notificationRuntimeAvailable,
   openNotificationSettings,
   peekPendingReminderNavigation,
@@ -142,6 +143,29 @@ describe("local notification bridge", () => {
       "plugin:local-notifications|permissionStatus",
       "plugin:local-notifications|requestPermission",
     ]);
+  });
+
+  it("reads a bounded FCM registration handle from the Android bridge", async () => {
+    const nativeInvoke = vi.fn().mockResolvedValue({
+      state: "ready",
+      registrationHandle: "fcm-registration-handle-for-jimin-os",
+    });
+    await expect(
+      getNativePushToken(androidRuntime(nativeInvoke)),
+    ).resolves.toEqual({
+      state: "ready",
+      registrationHandle: "fcm-registration-handle-for-jimin-os",
+    });
+    expect(nativeInvoke).toHaveBeenCalledWith(
+      "plugin:local-notifications|pushToken",
+    );
+  });
+
+  it("does not expose a registration handle when Firebase is not configured", async () => {
+    const nativeInvoke = vi.fn().mockResolvedValue({ state: "unconfigured" });
+    await expect(
+      getNativePushToken(androidRuntime(nativeInvoke)),
+    ).resolves.toEqual({ state: "unconfigured" });
   });
 
   it("schedules and cancels using the same item identity", async () => {

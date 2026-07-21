@@ -498,6 +498,12 @@ export const copy = {
     notificationsChecking: "알림 권한을 확인하고 있어요.",
     notificationsReady:
       "일정 시작과 할 일 기한이 다가오면 휴대폰에서 알려드려요.",
+    notificationsRemoteReady:
+      "앱을 닫아도 새 일정과 할 일 알림을 받을 수 있어요.",
+    notificationsLocalOnly:
+      "이 휴대폰에 준비된 일정과 할 일은 알림으로 알려드려요.",
+    notificationsRemoteProblem:
+      "휴대폰 알림은 준비했지만 새 알림을 개인 서버와 연결하지 못했어요. 다시 준비해 주세요.",
     notificationsNeedsPermission:
       "일정과 할 일 알림을 받으려면 휴대폰에서 알림을 허용해 주세요.",
     notificationsNeedsSettings:
@@ -512,6 +518,7 @@ export const copy = {
     notificationsAllow: "알림 허용하기",
     notificationsRequesting: "권한 확인 중",
     notificationsEnabled: "알림 켜짐",
+    notificationsAlwaysEnabled: "항상 알림 켜짐",
     notificationsOpenSettings: "휴대폰 설정 열기",
     notificationsOpeningSettings: "설정 여는 중",
     notificationsRetry: "다시 확인하기",

@@ -8,6 +8,8 @@ config_file="${1:-/tmp/jimin-os-phone-test.env}"
 device_serial="${2:-${ANDROID_SERIAL:-}}"
 apk_path="${REPO_ROOT}/apps/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk"
 
+source "${SCRIPT_DIR}/lib/client-build-config.sh"
+
 if [[ -z "${device_serial}" ]]; then
   physical_devices=()
   while read -r serial state; do
@@ -29,6 +31,10 @@ adb_device=(adb -s "${device_serial}")
 
 (
   cd "${REPO_ROOT}"
+  firebase_target="${REPO_ROOT}/apps/desktop/src-tauri/gen/android/app/google-services.json"
+  firebase_source="${JIMIN_ANDROID_GOOGLE_SERVICES_FILE:-${REPO_ROOT}/deploy/secrets/local/google-services.json}"
+  prepare_android_firebase_config "${firebase_source}" "${firebase_target}"
+  trap 'cleanup_android_firebase_config "${firebase_target}"' EXIT
   VITE_API_BASE_URL="http://127.0.0.1:8080" \
     VITE_LOCAL_PHONE_TEST=1 \
     pnpm --filter @jimin-os/desktop tauri android build --debug --apk --target aarch64 --ci

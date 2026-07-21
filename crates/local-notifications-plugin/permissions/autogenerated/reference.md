@@ -140,6 +140,32 @@ Denies the permissionStatus command without any pre-configured scope.
 <tr>
 <td>
 
+`local-notifications:allow-pushToken`
+
+</td>
+<td>
+
+Enables the pushToken command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`local-notifications:deny-pushToken`
+
+</td>
+<td>
+
+Denies the pushToken command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `local-notifications:allow-reconcileScheduled`
 
 </td>

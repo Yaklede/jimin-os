@@ -24,6 +24,7 @@
     "local-notifications:allow-reconcileScheduled",
     "local-notifications:allow-takePendingNavigation",
     "local-notifications:allow-peekPendingNavigation",
-    "local-notifications:allow-ackPendingNavigation"
+    "local-notifications:allow-ackPendingNavigation",
+    "local-notifications:allow-pushToken"
   ]
 }

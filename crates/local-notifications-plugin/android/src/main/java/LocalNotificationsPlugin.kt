@@ -27,10 +27,14 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import com.google.firebase.FirebaseApp
+import com.google.firebase.messaging.FirebaseMessaging
+import com.google.firebase.messaging.FirebaseMessagingService
+import com.google.firebase.messaging.RemoteMessage
 import org.json.JSONObject
 import java.util.UUID
 
-private const val channelId = "jimin_os_reminders_v1"
+private const val channelId = "jimin_os_reminders_v2"
 private const val extraItemType = "io.jimin.os.reminder.ITEM_TYPE"
 private const val extraItemId = "io.jimin.os.reminder.ITEM_ID"
 private const val extraDestination = "io.jimin.os.reminder.DESTINATION"
@@ -45,6 +49,7 @@ private const val permissionPreferences = "io.jimin.os.local_notifications"
 private const val postNotificationsRequested = "post_notifications_requested"
 private const val scheduledReminderKeys = "scheduled_reminder_keys"
 private const val installationNonceKey = "installation_nonce"
+private const val fcmRegistrationKey = "fcm_registration_handle"
 private const val reminderPayloadPrefix = "scheduled_reminder_payload:"
 private const val restoreDeliveryDelayMillis = 1_000L
 
@@ -143,6 +148,39 @@ class LocalNotificationsPlugin(private val activity: Activity) : Plugin(activity
       .putBoolean(postNotificationsRequested, true)
       .apply()
     requestPermissionForAlias("notifications", invoke, "onNotificationPermission")
+  }
+
+  @Command
+  fun pushToken(invoke: Invoke) {
+    if (FirebaseApp.getApps(activity).isEmpty()) {
+      invoke.resolve(JSObject().apply { put("state", "unconfigured") })
+      return
+    }
+    FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+      val registrationHandle =
+        if (task.isSuccessful) task.result?.trim()?.takeIf(::validFcmToken) else null
+      if (registrationHandle != null) {
+        rememberFcmRegistration(activity, registrationHandle)
+        invoke.resolve(
+          JSObject().apply {
+            put("state", "ready")
+            put("registrationHandle", registrationHandle)
+          },
+        )
+      } else {
+        val stored = readFcmRegistration(activity)
+        if (stored != null) {
+          invoke.resolve(
+            JSObject().apply {
+              put("state", "ready")
+              put("registrationHandle", stored)
+            },
+          )
+        } else {
+          invoke.resolve(JSObject().apply { put("state", "unavailable") })
+        }
+      }
+    }
   }
 
   @PermissionCallback
@@ -263,6 +301,45 @@ class LocalNotificationsPlugin(private val activity: Activity) : Plugin(activity
   }
 }
 
+class JiminFirebaseMessagingService : FirebaseMessagingService() {
+  override fun onNewToken(registrationHandle: String) {
+    registrationHandle
+      .trim()
+      .takeIf(::validFcmToken)
+      ?.let { rememberFcmRegistration(this, it) }
+  }
+
+  override fun onMessageReceived(message: RemoteMessage) {
+    if (!notificationsEnabled(this)) return
+    val data = message.data
+    val itemType = data["itemType"] ?: return
+    val itemId = data["itemId"] ?: return
+    val destination = data["destination"] ?: return
+    val projectId = data["projectId"]?.takeIf(String::isNotBlank)
+    val title = data["title"]?.trim() ?: return
+    val body = data["body"]?.trim() ?: return
+    val targetAtEpochMillis = data["targetAtEpochMillis"]?.toLongOrNull() ?: return
+    if (
+      !validNavigationSemantics(itemType, itemId, destination, projectId, targetAtEpochMillis) ||
+      title.isEmpty() || title.length > 120 || body.isEmpty() || body.length > 240
+    ) {
+      return
+    }
+    cancelScheduledReminder(this, itemType, itemId)
+    forgetScheduledReminder(this, itemType, itemId)
+    postReminderNotification(
+      this,
+      itemType,
+      itemId,
+      destination,
+      projectId,
+      targetAtEpochMillis,
+      title,
+      body,
+    )
+  }
+}
+
 class ReminderReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
     if (!notificationsEnabled(context)) return
@@ -275,40 +352,16 @@ class ReminderReceiver : BroadcastReceiver() {
       if (intent.hasExtra(extraTargetAt)) intent.getLongExtra(extraTargetAt, 0) else null
     val title = intent.getStringExtra(extraTitle) ?: return
     val body = intent.getStringExtra(extraBody)
-    ensureReminderChannel(context)
-
-    val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName) ?: return
-    launchIntent.apply {
-      action = openActionPrefix + stableReminderKey(itemType, itemId)
-      flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-      putExtra(extraItemType, itemType)
-      putExtra(extraItemId, itemId)
-      putExtra(extraDestination, destination)
-      projectId?.let { putExtra(extraProjectId, it) }
-      targetAtEpochMillis?.let { putExtra(extraTargetAt, it) }
-      putExtra(extraInstallNonce, installationNonce(context))
-    }
-    val contentIntent =
-      PendingIntent.getActivity(
-        context,
-        stableRequestCode(itemType, itemId),
-        launchIntent,
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-      )
-    val notification =
-      NotificationCompat.Builder(context, channelId)
-        .setSmallIcon(R.drawable.jimin_notification)
-        .setContentTitle(title)
-        .setContentText(body)
-        .setStyle(body?.let { NotificationCompat.BigTextStyle().bigText(it) })
-        .setCategory(NotificationCompat.CATEGORY_REMINDER)
-        .setPriority(NotificationCompat.PRIORITY_LOW)
-        .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-        .setOnlyAlertOnce(true)
-        .setAutoCancel(true)
-        .setContentIntent(contentIntent)
-        .build()
-    NotificationManagerCompat.from(context).notify(stableRequestCode(itemType, itemId), notification)
+    postReminderNotification(
+      context,
+      itemType,
+      itemId,
+      destination,
+      projectId,
+      targetAtEpochMillis ?: return,
+      title,
+      body,
+    )
     forgetScheduledReminder(context, itemType, itemId)
   }
 }
@@ -318,6 +371,51 @@ class ReminderBootReceiver : BroadcastReceiver() {
     if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
     restoreScheduledReminders(context)
   }
+}
+
+private fun postReminderNotification(
+  context: Context,
+  itemType: String,
+  itemId: String,
+  destination: String,
+  projectId: String?,
+  targetAtEpochMillis: Long,
+  title: String,
+  body: String?,
+) {
+  ensureReminderChannel(context)
+  val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName) ?: return
+  launchIntent.apply {
+    action = openActionPrefix + stableReminderKey(itemType, itemId)
+    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+    putExtra(extraItemType, itemType)
+    putExtra(extraItemId, itemId)
+    putExtra(extraDestination, destination)
+    projectId?.let { putExtra(extraProjectId, it) }
+    putExtra(extraTargetAt, targetAtEpochMillis)
+    putExtra(extraInstallNonce, installationNonce(context))
+  }
+  val contentIntent =
+    PendingIntent.getActivity(
+      context,
+      stableRequestCode(itemType, itemId),
+      launchIntent,
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+  val notification =
+    NotificationCompat.Builder(context, channelId)
+      .setSmallIcon(R.drawable.jimin_notification)
+      .setContentTitle(title)
+      .setContentText(body)
+      .setStyle(body?.let { NotificationCompat.BigTextStyle().bigText(it) })
+      .setCategory(NotificationCompat.CATEGORY_REMINDER)
+      .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+      .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+      .setOnlyAlertOnce(true)
+      .setAutoCancel(true)
+      .setContentIntent(contentIntent)
+      .build()
+  NotificationManagerCompat.from(context).notify(stableRequestCode(itemType, itemId), notification)
 }
 
 private fun permissionStatusResult(activity: Activity): JSObject =
@@ -354,13 +452,11 @@ private fun ensureReminderChannel(context: Context) {
   val manager = context.getSystemService(NotificationManager::class.java)
   if (manager.getNotificationChannel(channelId) != null) return
   val channel =
-    NotificationChannel(channelId, "일정과 할 일 알림", NotificationManager.IMPORTANCE_LOW).apply {
+    NotificationChannel(channelId, "일정과 할 일 알림", NotificationManager.IMPORTANCE_DEFAULT).apply {
       description = "일정 시작과 할 일 기한을 알려드려요."
       lockscreenVisibility = Notification.VISIBILITY_PRIVATE
       enableLights(false)
-      enableVibration(false)
       setShowBadge(false)
-      setSound(null, null)
     }
   manager.createNotificationChannel(channel)
 }
@@ -532,6 +628,20 @@ private fun installationNonce(context: Context): String =
       }
   }
 
+private fun rememberFcmRegistration(context: Context, registrationHandle: String) {
+  context
+    .getSharedPreferences(permissionPreferences, Context.MODE_PRIVATE)
+    .edit()
+    .putString(fcmRegistrationKey, registrationHandle)
+    .apply()
+}
+
+private fun readFcmRegistration(context: Context): String? =
+  context
+    .getSharedPreferences(permissionPreferences, Context.MODE_PRIVATE)
+    .getString(fcmRegistrationKey, null)
+    ?.takeIf(::validFcmToken)
+
 private fun parseReminderKey(value: String): Pair<String, String>? {
   val separator = value.indexOf(':')
   if (separator <= 0 || separator == value.lastIndex) return null
@@ -586,6 +696,9 @@ private fun validItemType(value: String): Boolean = value == "task" || value == 
 
 private fun validIdentifier(value: String): Boolean =
   value.length in 1..128 && value.all { it.isLetterOrDigit() || it == '-' || it == '_' }
+
+private fun validFcmToken(value: String): Boolean =
+  value.length in 20..4096 && value == value.trim() && value.all { !it.isWhitespace() && !it.isISOControl() }
 
 private fun stableReminderKey(itemType: String, itemId: String): String = "$itemType:$itemId"
 

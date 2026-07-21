@@ -69,3 +69,10 @@ dependencies {
 }
 
 apply(from = "tauri.build.gradle.kts")
+
+// Local and CI builds remain possible before a Firebase app is provisioned.
+// Release preparation copies the untracked file here and enables the official
+// Google Services resource generator automatically.
+if (file("google-services.json").isFile) {
+    apply(plugin = "com.google.gms.google-services")
+}

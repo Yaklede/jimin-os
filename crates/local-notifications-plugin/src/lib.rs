@@ -19,10 +19,10 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn android_implementation_keeps_the_private_low_visibility_contract() {
+    fn android_implementation_keeps_the_private_reminder_contract() {
         const SOURCE: &str = include_str!("../android/src/main/java/LocalNotificationsPlugin.kt");
 
-        assert!(SOURCE.contains("NotificationManager.IMPORTANCE_LOW"));
+        assert!(SOURCE.contains("NotificationManager.IMPORTANCE_DEFAULT"));
         assert!(SOURCE.contains("Notification.VISIBILITY_PRIVATE"));
         assert!(SOURCE.contains("setAndAllowWhileIdle"));
         assert!(SOURCE.contains("stableReminderKey"));
@@ -45,6 +45,10 @@ mod tests {
         assert_eq!(SOURCE.matches("scheduleAlarm(activity, args)").count(), 1);
         assert_eq!(SOURCE.matches("setShowBadge(false)").count(), 1);
         assert!(SOURCE.contains("forgetScheduledReminder(context, itemType, itemId)"));
+        assert!(SOURCE.contains("class JiminFirebaseMessagingService"));
+        assert!(SOURCE.contains("override fun onNewToken"));
+        assert!(SOURCE.contains("override fun onMessageReceived"));
+        assert!(SOURCE.contains("fun pushToken"));
     }
 
     #[test]
@@ -55,6 +59,8 @@ mod tests {
         assert!(MANIFEST.contains("android.permission.RECEIVE_BOOT_COMPLETED"));
         assert!(MANIFEST.contains("io.jimin.localnotifications.ReminderReceiver"));
         assert!(MANIFEST.contains("io.jimin.localnotifications.ReminderBootReceiver"));
+        assert!(MANIFEST.contains("io.jimin.localnotifications.JiminFirebaseMessagingService"));
+        assert!(MANIFEST.contains("com.google.firebase.MESSAGING_EVENT"));
         assert!(MANIFEST.contains("android.intent.action.BOOT_COMPLETED"));
         assert!(MANIFEST.contains("android:exported=\"false\""));
     }
