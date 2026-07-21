@@ -94,7 +94,10 @@ import {
   type Conversation,
   type ConversationMessage,
 } from "./api/agent";
-import { ConversationWorkspace } from "./components/ConversationWorkspace";
+import {
+  assistantResponseAfterLatestRequest,
+  ConversationWorkspace,
+} from "./components/ConversationWorkspace";
 import { DecisionInboxWorkspace } from "./components/DecisionInboxWorkspace";
 import { AssistantRail, HomeWorkspace } from "./components/HomeWorkspace";
 import { MemoryWorkspace } from "./components/MemoryWorkspace";
@@ -2660,9 +2663,8 @@ export default function App() {
       homeSnapshot === undefined &&
       agentAuthentication === undefined &&
       conversations.length === 0);
-  const latestAssistantMessage = [...conversationMessages]
-    .reverse()
-    .find((message) => message.role === "assistant");
+  const latestAssistantMessage =
+    assistantResponseAfterLatestRequest(conversationMessages);
   const latestUserRequest = [...conversationMessages]
     .reverse()
     .find((message) => message.role === "user")?.content;

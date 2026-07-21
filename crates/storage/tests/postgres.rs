@@ -3156,6 +3156,105 @@ async fn queued_agent_turn_is_leased_and_completed_once() {
 }
 
 #[tokio::test]
+async fn failed_agent_turn_finalizes_its_streamed_assistant_message() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database
+        .migrate()
+        .await
+        .expect("agent migration should succeed");
+    let provisioned = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let conversation_id = Uuid::now_v7();
+    database
+        .create_conversation(&NewConversation {
+            id: conversation_id,
+            user_id: provisioned.profile.id,
+            title: Some("추가 정보 질문".to_owned()),
+        })
+        .await
+        .expect("conversation should persist");
+    let queued = database
+        .enqueue_agent_turn(&NewAgentTurn {
+            job_id: Uuid::now_v7(),
+            message_id: Uuid::now_v7(),
+            client_message_id: Uuid::now_v7(),
+            user_id: provisioned.profile.id,
+            conversation_id,
+            content: "내일 미팅 추가".to_owned(),
+        })
+        .await
+        .expect("turn should queue");
+    let runner_id = "failed-message-agent";
+    let claim = database
+        .claim_next_agent_job(runner_id, Duration::from_secs(30))
+        .await
+        .expect("claim query should succeed")
+        .expect("queued job should be claimed");
+    assert!(
+        database
+            .start_agent_job(
+                claim.id,
+                runner_id,
+                "thread-failed-message-1",
+                Duration::from_secs(30),
+            )
+            .await
+            .expect("job should start")
+    );
+    assert!(
+        database
+            .append_agent_response_delta(
+                claim.id,
+                runner_id,
+                Uuid::now_v7(),
+                "시작 시간과 종료 시간을 알려주세요.",
+            )
+            .await
+            .expect("response delta should persist")
+    );
+
+    assert!(
+        database
+            .fail_agent_job(claim.id, runner_id, "agent_invalid_structured_response")
+            .await
+            .expect("job failure should persist")
+    );
+    assert_eq!(
+        database
+            .agent_job_for_user(provisioned.profile.id, queued.job_id)
+            .await
+            .expect("job query should succeed")
+            .expect("owner should read job")
+            .state,
+        AgentJobState::Failed
+    );
+    let messages = database
+        .conversation_messages_for_user(provisioned.profile.id, conversation_id)
+        .await
+        .expect("message query should succeed")
+        .expect("owner should read messages");
+    let assistant = messages
+        .iter()
+        .find(|message| message.role == ConversationMessageRole::Assistant)
+        .expect("streamed assistant message should remain visible");
+    assert_eq!(
+        assistant.status,
+        jimin_storage::agent::ConversationMessageStatus::Failed
+    );
+    assert_eq!(assistant.content, "시작 시간과 종료 시간을 알려주세요.");
+    assert!(assistant.completed_at.is_some());
+
+    database.close().await;
+}
+
+#[tokio::test]
 #[allow(
     clippy::too_many_lines,
     reason = "The integration test verifies one approval lifecycle and its idempotency."

@@ -402,6 +402,8 @@ function ConversationThread({
   const lastUserRequest = [...messages]
     .reverse()
     .find((message) => message.role === "user")?.content;
+  const latestTurnAssistantMessage =
+    assistantResponseAfterLatestRequest(messages);
 
   return (
     <section className="assistant-thread-panel" aria-busy={showingSkeleton}>
@@ -426,8 +428,7 @@ function ConversationThread({
         {messages.length ? (
           <ol className="assistant-message-list">
             {messages.map((message) => {
-              const streaming =
-                message.role === "assistant" && message.status === "streaming";
+              const streaming = isAssistantMessageStreaming(message, job);
               return (
                 <li
                   key={message.id}
@@ -484,13 +485,16 @@ function ConversationThread({
           job &&
           !isTerminalJob(job.state) && <AgentProgress state={job.state} />
         )}
-        {job && isFailedJob(job.state) && lastUserRequest && (
-          <AgentFailure
-            disabled={loading}
-            request={lastUserRequest}
-            onRetry={onRetry}
-          />
-        )}
+        {job &&
+          isFailedJob(job.state) &&
+          lastUserRequest &&
+          !hasDisplayableAssistantResponse(latestTurnAssistantMessage) && (
+            <AgentFailure
+              disabled={loading}
+              request={lastUserRequest}
+              onRetry={onRetry}
+            />
+          )}
         <div className="assistant-transcript__end" ref={transcriptEnd} />
       </div>
     </section>
@@ -814,6 +818,41 @@ function isTerminalJob(state: AgentJob["state"]) {
 
 function isFailedJob(state: AgentJob["state"]) {
   return ["failed", "cancelled"].includes(state);
+}
+
+export function assistantResponseAfterLatestRequest(
+  messages: ConversationMessage[],
+): ConversationMessage | undefined {
+  let latestUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") {
+      latestUserIndex = index;
+      break;
+    }
+  }
+  if (latestUserIndex < 0) return undefined;
+  for (let index = messages.length - 1; index > latestUserIndex; index -= 1) {
+    const message = messages[index];
+    if (message?.role === "assistant") return message;
+  }
+  return undefined;
+}
+
+export function hasDisplayableAssistantResponse(
+  message: ConversationMessage | undefined,
+): boolean {
+  return Boolean(message?.content.trim());
+}
+
+export function isAssistantMessageStreaming(
+  message: ConversationMessage,
+  job: AgentJob | undefined,
+): boolean {
+  return (
+    message.role === "assistant" &&
+    message.status === "streaming" &&
+    (!job || !isTerminalJob(job.state))
+  );
 }
 
 function selectedTitle(conversations: Conversation[], conversationId: string) {

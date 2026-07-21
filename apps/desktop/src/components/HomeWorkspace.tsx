@@ -1190,7 +1190,7 @@ function isTerminalJob(state: AgentJob["state"]): boolean {
   return ["completed", "failed", "cancelled", "declined"].includes(state);
 }
 
-function commandStatus(
+export function commandStatus(
   job: AgentJob | undefined,
   message: ConversationMessage | undefined,
 ): { title: string; description: string; needsReview: boolean } | undefined {
@@ -1199,6 +1199,13 @@ function commandStatus(
     return {
       title: copy.home.commandNeedsReview,
       description: copy.home.commandNeedsReviewDescription,
+      needsReview: true,
+    };
+  }
+  if (["failed", "cancelled"].includes(job.state) && message?.content.trim()) {
+    return {
+      title: copy.home.commandResponseReceived,
+      description: message.content.trim(),
       needsReview: true,
     };
   }

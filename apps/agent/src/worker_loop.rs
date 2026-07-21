@@ -989,7 +989,8 @@ fn render_contextualized_turn(
          server-calculated progress from connected project tasks. When deadlines do not conflict, put work connected to an \
          active goal before unlinked work and explain which goal the first action advances. For weekly goal questions, use \
          completedLast7Days, progress, overdue work, and next action as evidence; never invent a probability. \
-         For general conversation, use no sections and leave presentation.title and focusEntityId empty. \
+         For clarification questions and general conversation, use no sections and leave presentation.title and focusEntityId empty. \
+         The server renders clarification questions in a standard follow-up surface. \
          Choose stack for one simple group, split when list-to-detail exploration helps, and focus when one record is primary. \
          Tasks support list or checklist, schedule supports list or timeline, and projects support list or cards. \
          focusEntityId must be one selected entity ID or an empty string. Keep answers concise because the client renders \
@@ -1576,6 +1577,9 @@ fn validated_assistant_response(
         }
         return Ok((answer, None, actions));
     }
+    if structured.intent.mode == StructuredTurnMode::Clarify {
+        return validated_clarification_response(answer, actions);
+    }
     if answer.is_empty()
         || answer.chars().count() > 24_000
         || title.is_empty()
@@ -1640,6 +1644,34 @@ fn validated_assistant_response(
     };
     presentation.validate().map_err(|_| ())?;
     Ok((answer, Some(presentation), actions))
+}
+
+fn validated_clarification_response(
+    answer: String,
+    actions: Vec<AgentActionCommand>,
+) -> Result<
+    (
+        String,
+        Option<AssistantPresentation>,
+        Vec<AgentActionCommand>,
+    ),
+    (),
+> {
+    if answer.is_empty() || answer.chars().count() > 24_000 {
+        return Err(());
+    }
+    Ok((
+        answer,
+        Some(AssistantPresentation {
+            kind: AssistantPresentationKind::Summary,
+            title: "추가 정보가 필요해요".to_owned(),
+            items: Vec::new(),
+            layout: AssistantPresentationLayout::Stack,
+            sections: Vec::new(),
+            focus_item_id: None,
+        }),
+        actions,
+    ))
 }
 
 fn validate_turn_intent(intent: &StructuredTurnIntent, has_actions: bool) -> Result<(), ()> {
@@ -3539,6 +3571,48 @@ mod tests {
 
         assert_eq!(answer, "그럴 때 있지… 오늘은 5분만 시작해도 충분해.");
         assert!(presentation.is_none());
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn clarification_completes_with_a_follow_up_presentation() {
+        let context = TurnContext {
+            prompt: "<user_request>\n내일 미팅 추가\n</user_request>".to_owned(),
+            schedule: Vec::new(),
+            tasks: Vec::new(),
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
+        };
+        let response = serde_json::json!({
+            "actions": [],
+            "answer": "내일 일정을 추가하려면 시작 시간과 종료 시간을 알려주세요.",
+            "intent": { "confidence": 99, "mode": "clarify" },
+            "presentation": {
+                "focusEntityId": "",
+                "layout": "stack",
+                "sections": [],
+                "title": ""
+            }
+        })
+        .to_string();
+
+        let (answer, presentation, actions) =
+            validated_assistant_response(&response, &context).expect("clarification result");
+
+        assert_eq!(
+            answer,
+            "내일 일정을 추가하려면 시작 시간과 종료 시간을 알려주세요."
+        );
+        assert_eq!(
+            presentation
+                .as_ref()
+                .map(|presentation| presentation.title.as_str()),
+            Some("추가 정보가 필요해요")
+        );
+        assert!(presentation.is_some_and(|presentation| presentation.sections.is_empty()));
         assert!(actions.is_empty());
     }
 

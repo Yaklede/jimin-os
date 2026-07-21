@@ -2790,7 +2790,31 @@ impl Database {
                 .map_err(|error| classify(&error))?;
             return Ok(false);
         };
+        let failed_messages = sqlx::query_as::<_, (Uuid, i64)>(
+            "\
+            UPDATE messages
+            SET status = 'failed',
+                completed_at = NOW()
+            WHERE agent_job_id = $1
+              AND role = 'assistant'
+              AND status IN ('pending', 'streaming')
+            RETURNING id, version",
+        )
+        .bind(job_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
         append_change(&mut transaction, user_id, "agent_job", job_id, job_version).await?;
+        for (message_id, message_version) in failed_messages {
+            append_change(
+                &mut transaction,
+                user_id,
+                "message",
+                message_id,
+                message_version,
+            )
+            .await?;
+        }
         transaction
             .commit()
             .await

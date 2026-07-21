@@ -121,6 +121,7 @@ export const copy = {
     commandReview: "내용 확인하기",
     commandCompleted: "요청한 일을 처리했어요",
     commandCompletedDescription: "변경된 내용을 오늘 화면에 반영했어요.",
+    commandResponseReceived: "지민의 답변을 확인해 주세요",
     commandFailedTitle: "처리하지 못했어요. 다시 요청해 주세요",
     commandFailed: "잠시 후 같은 요청을 다시 보낼 수 있어요.",
     resultEyebrow: "요청 결과",
