@@ -2,6 +2,11 @@ import { createUuidV7, isUuidV7 } from "../uuid";
 
 export type SessionTokens = Record<"accessToken" | "refreshToken", string>;
 
+export interface IssuedDeviceSession {
+  tokens: SessionTokens;
+  syncCursor: string;
+}
+
 type ClientPlatform = "macos" | "ios" | "android";
 
 export interface ScheduleEntry {
@@ -60,7 +65,7 @@ export async function bootstrapTrustedNetworkSession(
   baseUrl: string,
   deviceName: string,
   installationId: string,
-): Promise<SessionTokens> {
+): Promise<IssuedDeviceSession> {
   if (!isUuidV7(installationId) || !deviceName.trim()) {
     throw new PlanningRequestError("invalid");
   }
@@ -88,10 +93,7 @@ export async function bootstrapTrustedNetworkSession(
   if (!isDeviceSessionResponse(body)) {
     throw new PlanningRequestError("unavailable");
   }
-  return {
-    ["accessToken"]: body.accessToken,
-    ["refreshToken"]: body.refreshToken,
-  };
+  return issuedDeviceSession(body);
 }
 
 export function clientPlatformForUserAgent(userAgent: string): ClientPlatform {
@@ -104,7 +106,7 @@ export function clientPlatformForUserAgent(userAgent: string): ClientPlatform {
 export async function refreshDeviceSession(
   baseUrl: string,
   refresh: string,
-): Promise<SessionTokens> {
+): Promise<IssuedDeviceSession> {
   const response = await fetch(`${normalizeBaseUrl(baseUrl)}/v1/auth/refresh`, {
     method: "POST",
     headers: {
@@ -120,9 +122,16 @@ export async function refreshDeviceSession(
   if (!isDeviceSessionResponse(body)) {
     throw new PlanningRequestError("unavailable");
   }
+  return issuedDeviceSession(body);
+}
+
+function issuedDeviceSession(body: DeviceSessionResponse): IssuedDeviceSession {
   return {
-    ["accessToken"]: body.accessToken,
-    ["refreshToken"]: body.refreshToken,
+    tokens: {
+      ["accessToken"]: body.accessToken,
+      ["refreshToken"]: body.refreshToken,
+    },
+    syncCursor: body.syncCursor,
   };
 }
 
@@ -376,7 +385,9 @@ function isDeviceSessionResponse(
   return (
     isRecord(value) &&
     typeof value.accessToken === "string" &&
-    typeof value.refreshToken === "string"
+    typeof value.refreshToken === "string" &&
+    typeof value.syncCursor === "string" &&
+    /^(0|[1-9]\d*)$/.test(value.syncCursor)
   );
 }
 

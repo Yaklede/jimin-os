@@ -48,6 +48,7 @@ use jimin_storage::{
         DeleteTaskOutcome, NewScheduleEntry, NewTask, ScheduleEntry, ScheduleEntryUpdate,
         ScheduleSource, ScheduleStatus, Task, TaskStatus, TaskUpdate,
     },
+    sync::SyncChange,
     webhook::{
         NewProjectWebhook, ProjectWebhook, ProjectWebhookUpdate, RetryWebhookDeliveryOutcome,
         WebhookDelivery, WebhookDestinationUpdate, WebhookProvider,
@@ -800,6 +801,45 @@ pub struct DeviceSessionResponse {
     sync_cursor: String,
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SyncChangesQuery {
+    after: i64,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct SyncChangeResponse {
+    sequence: String,
+    entity_type: String,
+    entity_id: uuid::Uuid,
+    operation: String,
+    entity_version: i64,
+    changed_at: String,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct SyncChangeListResponse {
+    items: Vec<SyncChangeResponse>,
+    next_cursor: String,
+    current_cursor: String,
+    has_more: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SyncStreamQuery {
+    after: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncCursorEvent {
+    cursor: String,
+}
+
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct RefreshSessionRequest {
@@ -1089,6 +1129,8 @@ pub(crate) fn error_response(
     paths(
         trusted_network_session,
         refresh_session,
+        list_sync_changes,
+        stream_sync_changes,
         list_schedule_entries,
         get_google_calendar_connection,
         disconnect_google_calendar,
@@ -1155,6 +1197,8 @@ pub(crate) fn error_response(
         DeviceResponse,
         DeviceListResponse,
         DeviceSessionResponse,
+        SyncChangeResponse,
+        SyncChangeListResponse,
         DeviceRegistrationRequest,
         CreateScheduleRequest,
         ScheduleEntryResponse,
@@ -1233,7 +1277,7 @@ pub fn router(state: ApiState) -> Router {
     let router = Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
-        .merge(calendar_router().merge(push_router()))
+        .merge(calendar_router().merge(push_router()).merge(sync_router()))
         .route("/v1/auth/refresh", axum::routing::post(refresh_session))
         .route(
             "/v1/access/session",
@@ -1374,6 +1418,12 @@ fn push_router() -> Router<ApiState> {
             .put(push::register_push_token)
             .delete(push::delete_push_registration),
     )
+}
+
+fn sync_router() -> Router<ApiState> {
+    Router::new()
+        .route("/v1/sync/changes", get(list_sync_changes))
+        .route("/v1/sync/stream", get(stream_sync_changes))
 }
 
 fn goal_router() -> Router<ApiState> {
@@ -5059,6 +5109,151 @@ fn calendar_connection_response(
 }
 
 #[utoipa::path(
+    get,
+    path = "/v1/sync/changes",
+    tag = "sync",
+    params(
+        ("after" = i64, Query, description = "Last fully applied sync sequence"),
+        ("limit" = Option<i64>, Query, description = "Page size from 1 through 200")
+    ),
+    responses(
+        (status = 200, body = SyncChangeListResponse),
+        (status = 400),
+        (status = 401),
+        (status = 503)
+    )
+)]
+async fn list_sync_changes(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Query(query): Query<SyncChangesQuery>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(database) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let limit = query.limit.unwrap_or(100);
+    if query.after < 0 || !(1..=200).contains(&limit) {
+        return invalid_request_response(request_id);
+    }
+
+    match database
+        .sync_changes_for_user(principal.identity().user_id(), query.after, limit)
+        .await
+    {
+        Ok(page) => {
+            let items = page
+                .items
+                .into_iter()
+                .map(sync_change_response)
+                .collect::<Result<Vec<_>, _>>();
+            match items {
+                Ok(items) => no_store_json(SyncChangeListResponse {
+                    items,
+                    next_cursor: page.next_cursor.to_string(),
+                    current_cursor: page.current_cursor.to_string(),
+                    has_more: page.has_more,
+                }),
+                Err(()) => unavailable_response(request_id),
+            }
+        }
+        Err(StorageError::InvalidConfiguration) => invalid_request_response(request_id),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/sync/stream",
+    tag = "sync",
+    params(("after" = i64, Query, description = "Last fully applied sync sequence")),
+    responses(
+        (status = 200, description = "Authenticated server-sent sync cursor updates"),
+        (status = 400),
+        (status = 401),
+        (status = 503)
+    )
+)]
+async fn stream_sync_changes(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Query(query): Query<SyncStreamQuery>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    if query.after < 0 {
+        return invalid_request_response(request_id);
+    }
+    let Some(database) = state.planning().cloned() else {
+        return unavailable_response(request_id);
+    };
+    let user_id = principal.identity().user_id();
+
+    let stream = futures_util::stream::unfold(
+        SyncStreamState {
+            database,
+            user_id,
+            last_cursor: query.after,
+        },
+        |mut stream_state| async move {
+            loop {
+                let Ok(cursor) = stream_state
+                    .database
+                    .current_sync_cursor_for_user(stream_state.user_id)
+                    .await
+                else {
+                    return None;
+                };
+                if cursor > stream_state.last_cursor {
+                    let Ok(data) = serde_json::to_string(&SyncCursorEvent {
+                        cursor: cursor.to_string(),
+                    }) else {
+                        return None;
+                    };
+                    stream_state.last_cursor = cursor;
+                    return Some((
+                        Ok::<Event, Infallible>(Event::default().event("cursor").data(data)),
+                        stream_state,
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        },
+    );
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(10))
+                .text("keep-alive"),
+        )
+        .into_response()
+}
+
+struct SyncStreamState {
+    database: Database,
+    user_id: uuid::Uuid,
+    last_cursor: i64,
+}
+
+fn sync_change_response(change: SyncChange) -> Result<SyncChangeResponse, ()> {
+    Ok(SyncChangeResponse {
+        sequence: change.sequence.to_string(),
+        entity_type: change.entity_type,
+        entity_id: change.entity_id,
+        operation: change.operation,
+        entity_version: change.entity_version,
+        changed_at: change.changed_at.format(&Rfc3339).map_err(|_| ())?,
+    })
+}
+
+#[utoipa::path(
     post,
     path = "/v1/auth/refresh",
     tag = "identity",
@@ -6124,6 +6319,8 @@ mod tests {
                 "/v1/recommendations/{recommendation_id}/decisions",
                 "/v1/schedule-entries",
                 "/v1/schedule-entries/{schedule_entry_id}",
+                "/v1/sync/changes",
+                "/v1/sync/stream",
                 "/v1/tasks",
                 "/v1/tasks/{task_id}",
                 "/v1/tasks/{task_id}/complete",
@@ -6171,6 +6368,24 @@ mod tests {
                 .is_some(),
             "goal updates must publish their JSON request contract",
         );
+    }
+
+    #[tokio::test]
+    async fn sync_endpoints_require_a_live_signed_session() {
+        for uri in ["/v1/sync/changes?after=0", "/v1/sync/stream?after=0"] {
+            let (state, _, _) = signed_auth_state(true);
+            let response = router(state)
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request should be valid"),
+                )
+                .await
+                .expect("handler should respond");
+
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
     }
 
     #[tokio::test]

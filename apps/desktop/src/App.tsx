@@ -71,6 +71,11 @@ import {
 import { processVoiceCommand } from "./api/voice";
 import { disablePushRegistration, registerFcmToken } from "./api/push";
 import {
+  fetchSyncChanges,
+  streamSyncCursor,
+  type SyncChange,
+} from "./api/sync";
+import {
   AgentRequestError,
   createConversation,
   fetchAgentAuthentication,
@@ -119,6 +124,12 @@ import {
   retryUnauthorizedRequest,
 } from "./session-retry";
 import { createUuidV7 } from "./uuid";
+import {
+  earlierSyncCursor,
+  laterSyncCursor,
+  readSyncCursor,
+  writeSyncCursor,
+} from "./sync-cursor";
 import {
   planningViewRange,
   samePlanningViewRange,
@@ -247,6 +258,8 @@ export default function App() {
   const refreshInFlightRef = useRef<Promise<SessionTokens> | undefined>(
     undefined,
   );
+  const syncCursorRef = useRef("0");
+  const syncPullInFlightRef = useRef<Promise<void> | undefined>(undefined);
   const reminderSyncInFlightRef = useRef<Promise<boolean> | undefined>(
     undefined,
   );
@@ -256,6 +269,16 @@ export default function App() {
   const applyActiveSession = useCallback((session: SessionTokens) => {
     activeSessionRef.current = session;
     setTokens(session);
+  }, []);
+
+  const initializeSyncCursor = useCallback((serverCursor?: string) => {
+    const storedCursor = readSyncCursor();
+    const cursor =
+      storedCursor === undefined
+        ? (serverCursor ?? "0")
+        : earlierSyncCursor(storedCursor, serverCursor);
+    syncCursorRef.current = cursor;
+    writeSyncCursor(cursor);
   }, []);
 
   const persistActiveSession = useCallback(
@@ -276,12 +299,15 @@ export default function App() {
       if (current && current.refreshToken !== staleRefreshToken) return current;
       if (refreshInFlightRef.current) return refreshInFlightRef.current;
 
-      const refresh = refreshDeviceSession(apiBaseUrl, staleRefreshToken);
+      const refresh = refreshDeviceSession(apiBaseUrl, staleRefreshToken).then(
+        async (refreshed) => {
+          await persistActiveSession(refreshed.tokens);
+          return refreshed.tokens;
+        },
+      );
       refreshInFlightRef.current = refresh;
       try {
-        const refreshed = await refresh;
-        await persistActiveSession(refreshed);
-        return refreshed;
+        return await refresh;
       } finally {
         if (refreshInFlightRef.current === refresh) {
           refreshInFlightRef.current = undefined;
@@ -305,17 +331,18 @@ export default function App() {
     setMessage(undefined);
     try {
       const installationId = await readOrCreateInstallationId();
-      const session = await bootstrapTrustedNetworkSession(
+      const issued = await bootstrapTrustedNetworkSession(
         apiBaseUrl,
         copy.personalServer.deviceName,
         installationId,
       );
-      await persistActiveSession(session);
+      initializeSyncCursor(issued.syncCursor);
+      await persistActiveSession(issued.tokens);
     } catch {
       setMode("server-unreachable");
       setMessage(copy.messages.serverOffline);
     }
-  }, [apiBaseUrl, persistActiveSession]);
+  }, [apiBaseUrl, initializeSyncCursor, persistActiveSession]);
 
   const refreshConversations = useCallback(async () => {
     if (!tokens) return;
@@ -822,6 +849,187 @@ export default function App() {
     withAuthenticatedSession,
   ]);
 
+  const refreshSynchronizedProjections = useCallback(
+    async (changes: SyncChange[], forceFull = false): Promise<void> => {
+      const entityTypes = new Set(changes.map((change) => change.entityType));
+      const affectsWork =
+        forceFull ||
+        [
+          "task",
+          "schedule_entry",
+          "calendar_event",
+          "calendar_account",
+          "project",
+          "goal",
+          "intelligence_signal",
+          "recommendation",
+          "recommendation_decision",
+          "recommendation_action_result",
+        ].some((entityType) => entityTypes.has(entityType));
+      const affectsDecisions =
+        forceFull ||
+        [
+          "intelligence_signal",
+          "recommendation",
+          "recommendation_decision",
+          "recommendation_action_result",
+        ].some((entityType) => entityTypes.has(entityType));
+      const affectsConversations =
+        forceFull ||
+        ["conversation", "message", "agent_job"].some((entityType) =>
+          entityTypes.has(entityType),
+        );
+      const affectsAgentSettings =
+        forceFull || entityTypes.has("agent_preference");
+      const affectsCalendarConnection =
+        forceFull || entityTypes.has("calendar_account");
+
+      if (affectsWork) {
+        const [from, to] = currentLocalDayRange();
+        const synchronized = await withAuthenticatedSession(
+          async (accessToken) => {
+            await refreshWorkBrief(apiBaseUrl, accessToken).catch(
+              () => undefined,
+            );
+            const [home, planning, synchronizedGoals, synchronizedProjects] =
+              await Promise.all([
+                fetchHomeSnapshot(apiBaseUrl, accessToken, from, to),
+                fetchPlanning(
+                  apiBaseUrl,
+                  accessToken,
+                  planningRange.from,
+                  planningRange.to,
+                ),
+                fetchGoals(apiBaseUrl, accessToken),
+                selectedWorkspaceId
+                  ? fetchProjects(apiBaseUrl, accessToken, selectedWorkspaceId)
+                  : Promise.resolve(undefined),
+              ]);
+            const synchronizedProjectTasks = selectedProjectId
+              ? await fetchProjectTasks(
+                  apiBaseUrl,
+                  accessToken,
+                  selectedProjectId,
+                )
+              : undefined;
+            return {
+              home,
+              planning,
+              synchronizedGoals,
+              synchronizedProjects,
+              synchronizedProjectTasks,
+            };
+          },
+        );
+        setHomeSnapshot(synchronized.home);
+        setPlanningSnapshot(synchronized.planning);
+        setGoals(synchronized.synchronizedGoals);
+        if (synchronized.synchronizedProjects) {
+          setProjects(synchronized.synchronizedProjects);
+          if (
+            selectedProjectId &&
+            !synchronized.synchronizedProjects.some(
+              (project) => project.id === selectedProjectId,
+            )
+          ) {
+            setSelectedProjectId(undefined);
+            setProjectTasks([]);
+          } else if (synchronized.synchronizedProjectTasks) {
+            setProjectTasks(synchronized.synchronizedProjectTasks);
+          }
+        }
+      }
+
+      if (affectsDecisions) {
+        setDecisionRecommendations(
+          await withAuthenticatedSession((accessToken) =>
+            fetchRecommendationHistory(apiBaseUrl, accessToken),
+          ),
+        );
+      }
+      if (affectsConversations) {
+        const synchronizedConversations = await withAuthenticatedSession(
+          (accessToken) => fetchConversations(apiBaseUrl, accessToken),
+        );
+        setConversations(synchronizedConversations);
+        if (selectedConversationId) {
+          setConversationMessages(
+            await withAuthenticatedSession((accessToken) =>
+              fetchConversationMessages(
+                apiBaseUrl,
+                accessToken,
+                selectedConversationId,
+              ),
+            ),
+          );
+        }
+      }
+      if (affectsAgentSettings) {
+        setAgentModelSettings(
+          await withAuthenticatedSession((accessToken) =>
+            fetchAgentModelSettings(apiBaseUrl, accessToken),
+          ),
+        );
+      }
+      if (affectsCalendarConnection) {
+        setCalendarConnection(
+          await withAuthenticatedSession((accessToken) =>
+            fetchGoogleCalendarConnection(apiBaseUrl, accessToken),
+          ),
+        );
+      }
+    },
+    [
+      apiBaseUrl,
+      planningRange.from,
+      planningRange.to,
+      selectedConversationId,
+      selectedProjectId,
+      selectedWorkspaceId,
+      withAuthenticatedSession,
+    ],
+  );
+
+  const pullSyncChanges = useCallback(async (): Promise<void> => {
+    if (!tokens) return;
+    if (syncPullInFlightRef.current) return syncPullInFlightRef.current;
+
+    const operation = (async () => {
+      for (let pageNumber = 0; pageNumber < 20; pageNumber += 1) {
+        const after = syncCursorRef.current;
+        const page = await withAuthenticatedSession((accessToken) =>
+          fetchSyncChanges(apiBaseUrl, accessToken, after),
+        );
+        if (BigInt(page.currentCursor) < BigInt(after)) {
+          await refreshSynchronizedProjections([], true);
+          syncCursorRef.current = page.currentCursor;
+          writeSyncCursor(page.currentCursor);
+          return;
+        }
+        if (page.items.length === 0) return;
+
+        await refreshSynchronizedProjections(page.items);
+        const appliedCursor = laterSyncCursor(after, page.nextCursor);
+        syncCursorRef.current = appliedCursor;
+        writeSyncCursor(appliedCursor);
+        if (!page.hasMore) return;
+      }
+    })();
+    syncPullInFlightRef.current = operation;
+    try {
+      await operation;
+    } finally {
+      if (syncPullInFlightRef.current === operation) {
+        syncPullInFlightRef.current = undefined;
+      }
+    }
+  }, [
+    apiBaseUrl,
+    refreshSynchronizedProjections,
+    tokens,
+    withAuthenticatedSession,
+  ]);
+
   async function discardSession() {
     try {
       await clearDeviceSession();
@@ -881,6 +1089,7 @@ export default function App() {
       .then(async (stored) => {
         if (!current) return;
         if (stored) {
+          initializeSyncCursor();
           applyActiveSession(stored.tokens);
           setMode("loading");
         } else {
@@ -899,11 +1108,72 @@ export default function App() {
     return () => {
       current = false;
     };
-  }, [apiBaseUrl, applyActiveSession, bootstrapTrustedNetworkDevice]);
+  }, [
+    apiBaseUrl,
+    applyActiveSession,
+    bootstrapTrustedNetworkDevice,
+    initializeSyncCursor,
+  ]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!tokens) return;
+    let active = true;
+    const controller = new AbortController();
+    let reconnectDelay = 1_000;
+
+    const pullVisibleChanges = () => {
+      if (document.visibilityState === "visible") {
+        void pullSyncChanges().catch(() => undefined);
+      }
+    };
+    const subscribe = async () => {
+      while (active && !controller.signal.aborted) {
+        try {
+          await withAuthenticatedSession((accessToken) =>
+            streamSyncCursor(
+              apiBaseUrl,
+              accessToken,
+              syncCursorRef.current,
+              controller.signal,
+              () => void pullSyncChanges().catch(() => undefined),
+            ),
+          );
+          reconnectDelay = 1_000;
+        } catch (error) {
+          if (
+            !active ||
+            controller.signal.aborted ||
+            (error instanceof DOMException && error.name === "AbortError")
+          ) {
+            return;
+          }
+        }
+        await new Promise((resolve) =>
+          window.setTimeout(resolve, reconnectDelay),
+        );
+        reconnectDelay = Math.min(reconnectDelay * 2, 15_000);
+      }
+    };
+
+    void pullSyncChanges().catch(() => undefined);
+    void subscribe();
+    const reconciliation = window.setInterval(pullVisibleChanges, 15_000);
+    window.addEventListener("focus", pullVisibleChanges);
+    document.addEventListener("visibilitychange", pullVisibleChanges);
+    window.addEventListener("online", pullVisibleChanges);
+    return () => {
+      active = false;
+      controller.abort();
+      window.clearInterval(reconciliation);
+      window.removeEventListener("focus", pullVisibleChanges);
+      document.removeEventListener("visibilitychange", pullVisibleChanges);
+      window.removeEventListener("online", pullVisibleChanges);
+    };
+  }, [apiBaseUrl, pullSyncChanges, tokens, withAuthenticatedSession]);
 
   useLayoutEffect(() => {
     const frame = window.requestAnimationFrame(() => {

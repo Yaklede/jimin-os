@@ -13,6 +13,7 @@ pub mod goals;
 pub mod intelligence;
 pub mod planning;
 pub mod push;
+pub mod sync;
 pub mod webhook;
 pub mod work;
 

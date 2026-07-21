@@ -81,6 +81,62 @@ struct ExhaustedCalendarMutationRow {
 }
 
 #[tokio::test]
+async fn sync_change_feed_pages_task_mutations_in_order() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 2, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let user_id = Uuid::now_v7();
+    database
+        .provision_login(&provision_login_command(user_id, Uuid::now_v7()))
+        .await
+        .expect("owner should exist");
+    let baseline = database
+        .current_sync_cursor_for_user(user_id)
+        .await
+        .expect("baseline cursor should load");
+    let task = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id,
+            project_id: None,
+            title: "기기 간 동기화 검증".to_owned(),
+            notes: None,
+            priority: 2,
+            due_at: None,
+        })
+        .await
+        .expect("task should persist");
+
+    let created = database
+        .sync_changes_for_user(user_id, baseline, 1)
+        .await
+        .expect("created task change should load");
+    assert_eq!(created.items.len(), 1);
+    assert_eq!(created.items[0].entity_type, "task");
+    assert_eq!(created.items[0].entity_id, task.id);
+    assert_eq!(created.items[0].operation, "upsert");
+    assert!(!created.has_more);
+
+    database
+        .complete_task(user_id, task.id, task.version)
+        .await
+        .expect("task completion should persist");
+    let completed = database
+        .sync_changes_for_user(user_id, created.next_cursor, 1)
+        .await
+        .expect("completed task change should load");
+    assert_eq!(completed.items.len(), 1);
+    assert_eq!(completed.items[0].entity_id, task.id);
+    assert!(completed.items[0].entity_version > task.version);
+
+    database.close().await;
+}
+
+#[tokio::test]
 #[allow(
     clippy::too_many_lines,
     reason = "The integration test keeps registration transfer, queue reconciliation, and delivery acknowledgement in one lifecycle."

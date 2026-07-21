@@ -131,4 +131,15 @@ mod tests {
         assert!(CAPABILITY.contains("local-notifications:allow-openSettings"));
         assert!(CAPABILITY.contains("local-notifications:allow-takePendingNavigation"));
     }
+
+    #[test]
+    fn android_webview_disables_accidental_page_zoom() {
+        const SOURCE: &str =
+            include_str!("../gen/android/app/src/main/java/io/jimin/os/MainActivity.kt");
+
+        assert!(SOURCE.contains("override fun onWebViewCreate(webView: WebView)"));
+        assert!(SOURCE.contains("setSupportZoom(false)"));
+        assert!(SOURCE.contains("builtInZoomControls = false"));
+        assert!(SOURCE.contains("displayZoomControls = false"));
+    }
 }

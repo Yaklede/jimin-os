@@ -3,6 +3,7 @@ package io.jimin.os
 import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
+import android.webkit.WebView
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import io.crates.keyring.Keyring
@@ -13,6 +14,13 @@ class MainActivity : TauriActivity() {
     super.onCreate(savedInstanceState)
     WindowCompat.setDecorFitsSystemWindows(window, true)
     updateSystemBarAppearance()
+  }
+
+  override fun onWebViewCreate(webView: WebView) {
+    super.onWebViewCreate(webView)
+    webView.settings.setSupportZoom(false)
+    webView.settings.builtInZoomControls = false
+    webView.settings.displayZoomControls = false
   }
 
   override fun onConfigurationChanged(newConfig: Configuration) {

@@ -42,8 +42,8 @@ describe("device session client", () => {
         "019f68cb-9400-7000-8000-000000000000",
       ),
     ).resolves.toEqual({
-      accessToken: "a",
-      refreshToken: "r",
+      tokens: { accessToken: "a", refreshToken: "r" },
+      syncCursor: "0",
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -90,8 +90,9 @@ describe("device session client", () => {
       "previous-refresh",
     );
 
-    expect(session.accessToken).toBe("a");
-    expect(session.refreshToken).toBe("r");
+    expect(session.tokens.accessToken).toBe("a");
+    expect(session.tokens.refreshToken).toBe("r");
+    expect(session.syncCursor).toBe("0");
     expect(fetchMock).toHaveBeenCalledWith(
       "https://jimin-os.example/v1/auth/refresh",
       expect.objectContaining({ method: "POST" }),
