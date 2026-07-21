@@ -69,7 +69,27 @@ docker buildx build \
 
 manifest_digest() {
   local image="$1"
-  docker buildx imagetools inspect "${image}" | awk '/^Digest:/ { print $2; exit }'
+  local digest=""
+  local attempt
+
+  # A pushed GHCR manifest can take a few seconds to become readable from a
+  # fresh registry request. Keep the release immutable and retry only the
+  # read-back that produces the digest-pinned deployment reference.
+  for attempt in {1..12}; do
+    digest="$(
+      docker buildx imagetools inspect "${image}" 2>/dev/null \
+        | awk '/^Digest:/ { print $2; exit }'
+    )" || true
+    if [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+      printf '%s\n' "${digest}"
+      return 0
+    fi
+    if [[ ${attempt} -lt 12 ]]; then
+      sleep 5
+    fi
+  done
+
+  return 1
 }
 
 api_digest="$(manifest_digest "${api_tag}")"
