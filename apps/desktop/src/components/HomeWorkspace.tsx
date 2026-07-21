@@ -861,63 +861,6 @@ function HomeAssistantCommand({
   );
 }
 
-type AssistantRailProps = {
-  assistantReady: boolean;
-  onOpenAssistant(): void;
-};
-
-export function AssistantRail({
-  assistantReady,
-  onOpenAssistant,
-}: AssistantRailProps) {
-  return (
-    <div className="assistant-rail">
-      <div className="assistant-rail__identity">
-        <span aria-hidden="true">
-          <Sparkles />
-        </span>
-        <div>
-          <strong>{copy.home.assistantRailTitle}</strong>
-          <p>
-            {assistantReady
-              ? copy.home.assistantReady
-              : copy.home.assistantNeedsConnection}
-          </p>
-        </div>
-      </div>
-      <p className="assistant-rail__message">
-        {assistantReady
-          ? "오늘의 일정과 할 일을 바탕으로 필요한 일을 같이 정리할게요."
-          : "ChatGPT를 연결하면 대화를 바로 시작할 수 있어요."}
-      </p>
-      <div className="assistant-rail__quick-actions">
-        <button
-          className="focus-visible-control"
-          type="button"
-          onClick={onOpenAssistant}
-        >
-          오늘 일정 정리하기
-        </button>
-        <button
-          className="focus-visible-control"
-          type="button"
-          onClick={onOpenAssistant}
-        >
-          해야 할 일 정하기
-        </button>
-      </div>
-      <button
-        className="assistant-rail__composer focus-visible-control"
-        type="button"
-        onClick={onOpenAssistant}
-      >
-        <span>{copy.home.assistantPrompt}</span>
-        <MessageCircleMore aria-hidden="true" />
-      </button>
-    </div>
-  );
-}
-
 export function EmptySurface({
   title,
   description,

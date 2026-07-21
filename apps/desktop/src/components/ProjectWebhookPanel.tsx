@@ -1,5 +1,6 @@
 import {
   History,
+  MoreHorizontal,
   PauseCircle,
   Pencil,
   PlayCircle,
@@ -84,6 +85,7 @@ export function ProjectWebhookPanel({
   ]);
   const [deleteTarget, setDeleteTarget] = useState<string>();
   const [editTarget, setEditTarget] = useState<string>();
+  const [actionMenuTarget, setActionMenuTarget] = useState<string>();
   const [retryTarget, setRetryTarget] = useState<string>();
   const [pendingAction, setPendingAction] = useState<{
     kind: PendingWebhookAction;
@@ -94,11 +96,10 @@ export function ProjectWebhookPanel({
   const createTriggerRef = useRef<HTMLButtonElement>(null);
   const createUrlRef = useRef<HTMLInputElement>(null);
   const restoreCreateFocusRef = useRef(false);
-  const editTriggerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const actionMenuTriggerRefs = useRef<
+    Record<string, HTMLButtonElement | null>
+  >({});
   const restoreEditTargetRef = useRef<string | undefined>(undefined);
-  const deleteTriggerRefs = useRef<Record<string, HTMLButtonElement | null>>(
-    {},
-  );
   const deleteSafeActionRef = useRef<HTMLButtonElement>(null);
   const restoreDeleteTargetRef = useRef<string | undefined>(undefined);
   const panelBusy = loading || saving || Boolean(pendingAction || retryTarget);
@@ -107,6 +108,7 @@ export function ProjectWebhookPanel({
     setFormOpen(false);
     setDeleteTarget(undefined);
     setEditTarget(undefined);
+    setActionMenuTarget(undefined);
     setRetryTarget(undefined);
     setPendingAction(undefined);
     restoreCreateFocusRef.current = false;
@@ -134,7 +136,7 @@ export function ProjectWebhookPanel({
     if (editTarget || !restoreEditTargetRef.current) return;
     const targetId = restoreEditTargetRef.current;
     const frame = window.requestAnimationFrame(() => {
-      editTriggerRefs.current[targetId]?.focus();
+      actionMenuTriggerRefs.current[targetId]?.focus();
       restoreEditTargetRef.current = undefined;
     });
     return () => window.cancelAnimationFrame(frame);
@@ -145,7 +147,7 @@ export function ProjectWebhookPanel({
     const target = deleteTarget
       ? deleteSafeActionRef.current
       : restoreTarget
-        ? deleteTriggerRefs.current[restoreTarget]
+        ? actionMenuTriggerRefs.current[restoreTarget]
         : undefined;
     if (!target) return;
     const frame = window.requestAnimationFrame(() => {
@@ -333,79 +335,17 @@ export function ProjectWebhookPanel({
                   {copy.projects.webhookProvider(webhook.provider)}
                 </strong>
                 <span>{webhook.destinationLabel}</span>
-                <span>
-                  {webhook.events.map(copy.projects.webhookEvent).join(" · ")}
-                </span>
-                <small data-enabled={webhook.enabled}>
+                <span>{webhookEventSummary(webhook.events)}</span>
+                <small
+                  className="project-webhook-list__status"
+                  data-enabled={webhook.enabled}
+                >
                   {webhook.enabled
                     ? copy.projects.webhookStatusActive
                     : copy.projects.webhookStatusPaused}
                 </small>
-                <small>{copy.projects.webhookSecretStored}</small>
               </div>
               <div className="project-webhook-list__actions">
-                <button
-                  ref={(node) => {
-                    editTriggerRefs.current[webhook.id] = node;
-                  }}
-                  className="secondary-button focus-visible-control"
-                  type="button"
-                  disabled={panelBusy}
-                  aria-expanded={editTarget === webhook.id}
-                  onClick={() => {
-                    setDeleteTarget(undefined);
-                    setEditTarget((current) => {
-                      if (current === webhook.id) {
-                        restoreEditTargetRef.current = webhook.id;
-                        return undefined;
-                      }
-                      return webhook.id;
-                    });
-                  }}
-                >
-                  <Pencil aria-hidden="true" />
-                  {copy.projects.webhookEdit}
-                </button>
-                <button
-                  className="secondary-button focus-visible-control"
-                  type="button"
-                  disabled={panelBusy}
-                  onClick={async () => {
-                    setPendingAction({ kind: "toggle", id: webhook.id });
-                    setError(undefined);
-                    setNotice(undefined);
-                    try {
-                      await onUpdate(webhook, {
-                        provider: webhook.provider,
-                        destinationMode: "keep",
-                        events: webhook.events,
-                        enabled: !webhook.enabled,
-                      });
-                      setNotice(copy.projects.webhookUpdated);
-                    } catch {
-                      setError(copy.projects.webhookUpdateProblem);
-                    } finally {
-                      setPendingAction(undefined);
-                    }
-                  }}
-                >
-                  {pendingAction?.kind === "toggle" &&
-                  pendingAction.id === webhook.id ? (
-                    <span className="button-spinner" aria-hidden="true" />
-                  ) : webhook.enabled ? (
-                    <PauseCircle aria-hidden="true" />
-                  ) : (
-                    <PlayCircle aria-hidden="true" />
-                  )}
-                  {pendingAction?.kind === "toggle" &&
-                  pendingAction.id === webhook.id
-                    ? webhook.enabled
-                      ? copy.projects.webhookPausing
-                      : copy.projects.webhookResuming
-                    : webhook.enabled
-                      ? copy.projects.webhookPause
-                      : copy.projects.webhookResume}
-                </button>
                 <button
                   className="secondary-button focus-visible-control"
                   type="button"
@@ -435,22 +375,99 @@ export function ProjectWebhookPanel({
                     ? copy.projects.webhookTesting
                     : copy.projects.webhookTest}
                 </button>
-                <button
-                  ref={(node) => {
-                    deleteTriggerRefs.current[webhook.id] = node;
-                  }}
-                  className="destructive-quiet-button focus-visible-control"
-                  type="button"
-                  disabled={panelBusy}
-                  aria-expanded={deleteTarget === webhook.id}
-                  onClick={() => {
-                    setEditTarget(undefined);
-                    setDeleteTarget(webhook.id);
-                  }}
-                >
-                  <Trash2 aria-hidden="true" />
-                  {copy.projects.webhookDelete}
-                </button>
+                <div className="project-webhook-list__more">
+                  <button
+                    ref={(node) => {
+                      actionMenuTriggerRefs.current[webhook.id] = node;
+                    }}
+                    className="icon-button focus-visible-control"
+                    type="button"
+                    disabled={panelBusy}
+                    aria-expanded={actionMenuTarget === webhook.id}
+                    aria-label={copy.projects.webhookMoreActions}
+                    onClick={() =>
+                      setActionMenuTarget((current) =>
+                        current === webhook.id ? undefined : webhook.id,
+                      )
+                    }
+                  >
+                    <MoreHorizontal aria-hidden="true" />
+                  </button>
+                  {actionMenuTarget === webhook.id && (
+                    <div
+                      className="project-webhook-list__menu"
+                      aria-label={copy.projects.webhookMoreActions}
+                    >
+                      <button
+                        className="focus-visible-control"
+                        type="button"
+                        disabled={panelBusy}
+                        aria-expanded={editTarget === webhook.id}
+                        onClick={() => {
+                          setDeleteTarget(undefined);
+                          setActionMenuTarget(undefined);
+                          setEditTarget((current) => {
+                            if (current === webhook.id) {
+                              restoreEditTargetRef.current = webhook.id;
+                              return undefined;
+                            }
+                            return webhook.id;
+                          });
+                        }}
+                      >
+                        <Pencil aria-hidden="true" />
+                        {copy.projects.webhookEdit}
+                      </button>
+                      <button
+                        className="focus-visible-control"
+                        type="button"
+                        disabled={panelBusy}
+                        onClick={async () => {
+                          setActionMenuTarget(undefined);
+                          setPendingAction({ kind: "toggle", id: webhook.id });
+                          setError(undefined);
+                          setNotice(undefined);
+                          try {
+                            await onUpdate(webhook, {
+                              provider: webhook.provider,
+                              destinationMode: "keep",
+                              events: webhook.events,
+                              enabled: !webhook.enabled,
+                            });
+                            setNotice(copy.projects.webhookUpdated);
+                          } catch {
+                            setError(copy.projects.webhookUpdateProblem);
+                          } finally {
+                            setPendingAction(undefined);
+                          }
+                        }}
+                      >
+                        {webhook.enabled ? (
+                          <PauseCircle aria-hidden="true" />
+                        ) : (
+                          <PlayCircle aria-hidden="true" />
+                        )}
+                        {webhook.enabled
+                          ? copy.projects.webhookPause
+                          : copy.projects.webhookResume}
+                      </button>
+                      <button
+                        className="project-webhook-list__menu-delete focus-visible-control"
+                        type="button"
+                        disabled={panelBusy}
+                        aria-expanded={deleteTarget === webhook.id}
+                        onClick={() => {
+                          setActionMenuTarget(undefined);
+                          setEditTarget(undefined);
+                          setDeleteTarget(webhook.id);
+                        }}
+                      >
+                        <Trash2 aria-hidden="true" />
+                        {copy.projects.webhookDelete}
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
               {editTarget === webhook.id && (
                 <WebhookEditForm
@@ -780,4 +797,12 @@ function formatDeliveryTime(value: string): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function webhookEventSummary(events: ProjectWebhookEvent[]): string {
+  const visibleEvents = events.slice(0, 2).map(copy.projects.webhookEvent);
+  const remainingCount = events.length - visibleEvents.length;
+  return remainingCount > 0
+    ? `${visibleEvents.join(" · ")} 외 ${remainingCount}개`
+    : visibleEvents.join(" · ");
 }

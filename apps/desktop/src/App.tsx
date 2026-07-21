@@ -99,7 +99,7 @@ import {
   ConversationWorkspace,
 } from "./components/ConversationWorkspace";
 import { DecisionInboxWorkspace } from "./components/DecisionInboxWorkspace";
-import { AssistantRail, HomeWorkspace } from "./components/HomeWorkspace";
+import { HomeWorkspace } from "./components/HomeWorkspace";
 import { MemoryWorkspace } from "./components/MemoryWorkspace";
 import { OsShell, type OsDestination } from "./components/OsShell";
 import { PlanningWorkspace } from "./components/PlanningWorkspace";
@@ -2743,14 +2743,6 @@ export default function App() {
           refreshing={
             mode === "loading" ||
             (destination === "decisions" && decisionsLoading)
-          }
-          rail={
-            destination !== "chat" ? (
-              <AssistantRail
-                assistantReady={agentAuthentication?.state === "ready"}
-                onOpenAssistant={openNewAssistantRequest}
-              />
-            ) : undefined
           }
         >
           {destination === "home" && (

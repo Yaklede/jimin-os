@@ -563,18 +563,6 @@ export function ProjectsWorkspace({
                   </p>
                 )}
               </section>
-              <ProjectWebhookPanel
-                projectId={selectedProject.id}
-                webhooks={webhooks}
-                deliveries={webhookDeliveries}
-                loading={webhookLoading}
-                saving={saving}
-                onCreate={onCreateWebhook}
-                onUpdate={onUpdateWebhook}
-                onTest={onTestWebhook}
-                onDelete={onDeleteWebhook}
-                onRetry={onRetryWebhookDelivery}
-              />
               <div className="project-detail__tasks">
                 <div className="projects-section-heading">
                   <div>
@@ -743,6 +731,18 @@ export function ProjectsWorkspace({
                   </section>
                 )}
               </div>
+              <ProjectWebhookPanel
+                projectId={selectedProject.id}
+                webhooks={webhooks}
+                deliveries={webhookDeliveries}
+                loading={webhookLoading}
+                saving={saving}
+                onCreate={onCreateWebhook}
+                onUpdate={onUpdateWebhook}
+                onTest={onTestWebhook}
+                onDelete={onDeleteWebhook}
+                onRetry={onRetryWebhookDelivery}
+              />
             </>
           ) : (
             <div className="project-detail__panel project-detail__selection">

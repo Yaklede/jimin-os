@@ -113,6 +113,7 @@ export const projectCopy = {
   webhookAuthenticationStored: "인증값을 안전하게 보관 중",
   webhookStatusActive: "변화 전송 중",
   webhookStatusPaused: "변화 전송 멈춤",
+  webhookMoreActions: "웹훅 관리 메뉴",
   webhookEnabledLabel: "프로젝트 변화 자동 전송",
   webhookEdit: "설정 바꾸기",
   webhookEditTitle: "웹훅 설정 바꾸기",

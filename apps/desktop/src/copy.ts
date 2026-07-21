@@ -201,11 +201,6 @@ export const copy = {
     nextActionSchedule: (title: string) => `${title} 준비를 같이 시작할까요?`,
     nextActionEmpty: "비어 있는 시간을 어떻게 쓸지 비서와 정해 보세요.",
     openAssistant: "비서 열기",
-    assistantRailTitle: "지민",
-    assistantReady: "오늘의 맥락을 바탕으로 함께 정리할 수 있어요.",
-    assistantNeedsConnection:
-      "ChatGPT를 연결하면 대화를 바로 시작할 수 있어요.",
-    assistantPrompt: "지민에게 말하기",
     loadingShort: "불러오는 중",
     deadlineTitle: "기한 확인",
     deadlineCount: (count: number) => `${count}개를 먼저 확인해 주세요`,

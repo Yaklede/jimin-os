@@ -29,7 +29,6 @@ export type OsDestination =
 type OsShellProps = {
   destination: OsDestination;
   children: ReactNode;
-  rail?: ReactNode;
   onNavigate(destination: OsDestination): void;
   onVoiceTranscript(value: string): void;
   onVoiceCommand(value: string): Promise<VoiceCommandOutcome>;
@@ -40,7 +39,6 @@ type OsShellProps = {
 export function OsShell({
   destination,
   children,
-  rail,
   onNavigate,
   onVoiceTranscript,
   onVoiceCommand,
@@ -175,8 +173,6 @@ export function OsShell({
           </div>
         </main>
       </section>
-
-      {rail && <aside className="os-rail">{rail}</aside>}
 
       <nav className="os-mobile-nav" aria-label={copy.navigation.label}>
         <NavigationButton
