@@ -3,12 +3,12 @@ use uuid::Uuid;
 
 const SESSION_ACCOUNT: &str = "device-session";
 const INSTALLATION_ACCOUNT: &str = "device-installation";
-const SESSION_SERVICE: &str = "io.jimin.os";
 const MAX_SESSION_BYTES: usize = 8 * 1024;
 
 #[tauri::command]
-fn read_device_session() -> Result<Option<String>, String> {
-    let entry = session_entry()?;
+#[allow(clippy::needless_pass_by_value)] // Tauri injects AppHandle as an owned command argument.
+fn read_device_session(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let entry = session_entry(&app)?;
     match entry.get_password() {
         Ok(value) => Ok(Some(value)),
         Err(KeyringError::NoEntry) => Ok(None),
@@ -17,19 +17,21 @@ fn read_device_session() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-fn save_device_session(value: &str) -> Result<(), String> {
+#[allow(clippy::needless_pass_by_value)] // Tauri injects AppHandle as an owned command argument.
+fn save_device_session(app: tauri::AppHandle, value: &str) -> Result<(), String> {
     if value.len() > MAX_SESSION_BYTES {
         return Err("The device session is too large to store safely.".to_owned());
     }
 
-    session_entry()?
+    session_entry(&app)?
         .set_password(value)
         .map_err(|_| "The device secure store could not be updated.".to_owned())
 }
 
 #[tauri::command]
-fn clear_device_session() -> Result<(), String> {
-    let entry = session_entry()?;
+#[allow(clippy::needless_pass_by_value)] // Tauri injects AppHandle as an owned command argument.
+fn clear_device_session(app: tauri::AppHandle) -> Result<(), String> {
+    let entry = session_entry(&app)?;
     match entry.delete_credential() {
         Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
         Err(_) => Err("The device secure store could not be cleared.".to_owned()),
@@ -37,8 +39,9 @@ fn clear_device_session() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn read_or_create_installation_id() -> Result<String, String> {
-    let entry = installation_entry()?;
+#[allow(clippy::needless_pass_by_value)] // Tauri injects AppHandle as an owned command argument.
+fn read_or_create_installation_id(app: tauri::AppHandle) -> Result<String, String> {
+    let entry = installation_entry(&app)?;
     match entry.get_password() {
         Ok(value) if valid_installation_id(&value) => Ok(value),
         Err(KeyringError::NoEntry) => {
@@ -52,17 +55,17 @@ fn read_or_create_installation_id() -> Result<String, String> {
     }
 }
 
-fn session_entry() -> Result<Entry, String> {
+fn session_entry(app: &tauri::AppHandle) -> Result<Entry, String> {
     #[cfg(target_os = "android")]
     configure_platform_store()?;
-    Entry::new(SESSION_SERVICE, SESSION_ACCOUNT)
+    Entry::new(&app.config().identifier, SESSION_ACCOUNT)
         .map_err(|_| "The device secure store is unavailable.".to_owned())
 }
 
-fn installation_entry() -> Result<Entry, String> {
+fn installation_entry(app: &tauri::AppHandle) -> Result<Entry, String> {
     #[cfg(target_os = "android")]
     configure_platform_store()?;
-    Entry::new(SESSION_SERVICE, INSTALLATION_ACCOUNT)
+    Entry::new(&app.config().identifier, INSTALLATION_ACCOUNT)
         .map_err(|_| "The device secure store is unavailable.".to_owned())
 }
 

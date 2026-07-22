@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Jimin OS Dev",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Jimin OS Dev"
+      }
+    ]
+  }
+}

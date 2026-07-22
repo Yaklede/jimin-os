@@ -7,23 +7,25 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 config_file="${1:-/tmp/jimin-os-phone-test.env}"
 device_serial="${2:-${ANDROID_SERIAL:-}}"
 apk_path="${REPO_ROOT}/apps/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk"
+dev_package="io.jimin.os.dev"
 
 source "${SCRIPT_DIR}/lib/client-build-config.sh"
 
 if [[ -z "${device_serial}" ]]; then
-  physical_devices=()
+  emulators=()
   while read -r serial state; do
-    if [[ "${state:-}" == "device" && "${serial}" != emulator-* ]]; then
-      physical_devices+=("${serial}")
+    if [[ "${state:-}" == "device" && "${serial}" == emulator-* ]]; then
+      emulators+=("${serial}")
     fi
   done < <(adb devices | tail -n +2)
 
-  if [[ ${#physical_devices[@]} -ne 1 ]]; then
-    printf 'Expected one connected physical Android device; found %s. Pass its serial as the second argument.\n' "${#physical_devices[@]}" >&2
+  if [[ ${#emulators[@]} -ne 1 ]]; then
+    printf 'Expected one running Android emulator; found %s. Pass its serial as the second argument.\n' "${#emulators[@]}" >&2
     exit 1
   fi
-  device_serial="${physical_devices[0]}"
+  device_serial="${emulators[0]}"
 fi
+require_android_emulator "${device_serial}"
 
 adb_device=(adb -s "${device_serial}")
 
@@ -32,13 +34,15 @@ adb_device=(adb -s "${device_serial}")
 (
   cd "${REPO_ROOT}"
   firebase_target="${REPO_ROOT}/apps/desktop/src-tauri/gen/android/app/google-services.json"
-  firebase_source="${JIMIN_ANDROID_GOOGLE_SERVICES_FILE:-${REPO_ROOT}/deploy/secrets/local/google-services.json}"
-  prepare_android_firebase_config "${firebase_source}" "${firebase_target}"
+  cleanup_android_firebase_config "${firebase_target}"
   trap 'cleanup_android_firebase_config "${firebase_target}"' EXIT
   VITE_API_BASE_URL="http://127.0.0.1:8080" \
     VITE_LOCAL_PHONE_TEST=1 \
-    pnpm --filter @jimin-os/desktop tauri android build --debug --apk --target aarch64 --ci
+    ORG_GRADLE_PROJECT_jiminDevPackage=true \
+    pnpm --filter @jimin-os/desktop tauri android build --debug --apk \
+      --target aarch64 --ci --config src-tauri/tauri.android-dev.conf.json
 )
+verify_android_apk_application_id "${apk_path}" "${dev_package}"
 
 "${adb_device[@]}" wait-for-device
 "${adb_device[@]}" install -r "${apk_path}"
@@ -47,7 +51,7 @@ if ! "${adb_device[@]}" reverse --list | grep -q 'tcp:8080 tcp:8080'; then
   printf 'Failed to configure adb reverse for %s.\n' "${device_serial}" >&2
   exit 1
 fi
-"${adb_device[@]}" shell am force-stop io.jimin.os
-"${adb_device[@]}" shell monkey -p io.jimin.os 1 >/dev/null
+"${adb_device[@]}" shell am force-stop "${dev_package}"
+"${adb_device[@]}" shell monkey -p "${dev_package}" 1 >/dev/null
 
-printf 'Installed local phone-test APK on %s: %s\n' "${device_serial}" "${apk_path}"
+printf 'Installed Jimin OS Dev on emulator %s: %s\n' "${device_serial}" "${apk_path}"

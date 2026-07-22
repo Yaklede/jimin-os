@@ -12,13 +12,15 @@ val tauriProperties = Properties().apply {
         propFile.inputStream().use { load(it) }
     }
 }
+val jiminDevPackage = providers.gradleProperty("jiminDevPackage").orNull == "true"
 
 android {
     compileSdk = 36
     namespace = "io.jimin.os"
     defaultConfig {
+        manifestPlaceholders["appLabel"] = if (jiminDevPackage) "Jimin OS Dev" else "Jimin OS"
         manifestPlaceholders["usesCleartextTraffic"] = "false"
-        applicationId = "io.jimin.os"
+        applicationId = if (jiminDevPackage) "io.jimin.os.dev" else "io.jimin.os"
         minSdk = 24
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()

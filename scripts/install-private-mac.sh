@@ -30,6 +30,12 @@ restore_previous_app() {
 trap restore_previous_app EXIT
 "${SCRIPT_DIR}/build-private-client.sh" macos "${server_url}"
 
+built_identifier="$(defaults read "${SOURCE_APP}/Contents/Info" CFBundleIdentifier 2>/dev/null || true)"
+if [[ "${built_identifier}" != "io.jimin.os" ]]; then
+  printf 'Refusing to install a non-production macOS bundle: %s\n' "${built_identifier:-unknown}" >&2
+  exit 1
+fi
+
 backup_dir="$(mktemp -d "${TMPDIR:-/tmp}/jimin-os-mac-install.XXXXXX")"
 pkill -f "${INSTALLED_APP}/Contents/MacOS/jimin-desktop" 2>/dev/null || true
 if [[ -e "${INSTALLED_APP}" ]]; then

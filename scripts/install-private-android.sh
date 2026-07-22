@@ -26,9 +26,11 @@ if [[ -z "${device_serial}" ]]; then
   fi
   device_serial="${physical_devices[0]}"
 fi
+require_android_physical_device "${device_serial}"
 
 adb_device=(adb -s "${device_serial}")
 "${SCRIPT_DIR}/build-private-client.sh" android "${server_url}"
+verify_android_apk_application_id "${apk_path}" "io.jimin.os"
 
 "${adb_device[@]}" wait-for-device
 "${adb_device[@]}" install -r "${apk_path}"

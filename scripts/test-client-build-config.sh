@@ -21,6 +21,34 @@ expect_rejected() {
 }
 
 [[ "$(production_server_url 'https://os.jimin.ai.kr/')" == "https://os.jimin.ai.kr" ]]
+require_android_emulator 'emulator-5554'
+require_android_physical_device 'R5KL20581QR'
+if require_android_emulator 'R5KL20581QR' >/dev/null 2>&1; then
+  printf 'Expected a physical device to be rejected for local Android testing.\n' >&2
+  exit 1
+fi
+if require_android_physical_device 'emulator-5554' >/dev/null 2>&1; then
+  printf 'Expected an emulator to be rejected for production installation.\n' >&2
+  exit 1
+fi
+
+mock_apkanalyzer="${temporary_dir}/apkanalyzer"
+mock_apk="${temporary_dir}/client.apk"
+touch "${mock_apk}"
+cat >"${mock_apkanalyzer}" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${MOCK_ANDROID_APPLICATION_ID:?}"
+EOF
+chmod +x "${mock_apkanalyzer}"
+JIMIN_ANDROID_APKANALYZER="${mock_apkanalyzer}" \
+  MOCK_ANDROID_APPLICATION_ID='io.jimin.os.dev' \
+  verify_android_apk_application_id "${mock_apk}" 'io.jimin.os.dev'
+if JIMIN_ANDROID_APKANALYZER="${mock_apkanalyzer}" \
+  MOCK_ANDROID_APPLICATION_ID='io.jimin.os.dev' \
+  verify_android_apk_application_id "${mock_apk}" 'io.jimin.os' >/dev/null 2>&1; then
+  printf 'Expected a development APK to be rejected by the production verifier.\n' >&2
+  exit 1
+fi
 expect_rejected 'http://os.jimin.ai.kr'
 expect_rejected 'https://os.jimin.ai.kr/api'
 expect_rejected 'https://os.jimin.ai.kr?mode=private'
