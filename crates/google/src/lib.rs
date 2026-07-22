@@ -48,6 +48,7 @@ const MAX_GMAIL_MESSAGE_RESPONSE_BYTES: usize = 512 * 1024;
 const MAX_CHAT_LIST_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CHAT_LIST_PAGES: usize = 50;
 const MAX_CHAT_ITEMS: usize = 5_000;
+const GOOGLE_CHAT_MESSAGE_ORDER: &str = "createTime ASC";
 const DEFAULT_JWKS_TTL: Duration = Duration::from_mins(5);
 const MAX_JWKS_TTL: Duration = Duration::from_hours(24);
 
@@ -1205,7 +1206,7 @@ impl GoogleChatAdapter {
             {
                 let mut query = url.query_pairs_mut();
                 query.append_pair("pageSize", "100");
-                query.append_pair("orderBy", "createTime asc");
+                query.append_pair("orderBy", GOOGLE_CHAT_MESSAGE_ORDER);
                 if let Some(created_after) = created_after {
                     let timestamp = created_after
                         .format(&time::format_description::well_known::Rfc3339)
@@ -2509,6 +2510,11 @@ mod tests {
             query.get("prompt").map(AsRef::as_ref),
             Some("consent select_account")
         );
+    }
+
+    #[test]
+    fn chat_message_order_matches_google_api_contract() {
+        assert_eq!(GOOGLE_CHAT_MESSAGE_ORDER, "createTime ASC");
     }
 
     #[test]
