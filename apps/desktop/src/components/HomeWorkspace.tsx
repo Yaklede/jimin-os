@@ -1,6 +1,5 @@
 import {
   AlertTriangle,
-  AudioLines,
   CalendarDays,
   ChevronRight,
   Circle,
@@ -12,6 +11,7 @@ import {
   Mic,
   Pencil,
   Send,
+  Settings2,
   Sparkles,
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -60,7 +60,7 @@ type HomeWorkspaceProps = {
     entry: Pick<ScheduleEntry, "id" | "startsAt">,
   ): void | Promise<void>;
   onOpenDecisionInbox(): void;
-  onOpenMeetings(): void;
+  onOpenSettings(): void;
   onDecideRecommendation(
     recommendation: Recommendation,
     decision: "approve" | "defer",
@@ -87,7 +87,7 @@ export function HomeWorkspace({
   onOpenProject,
   onOpenSchedule,
   onOpenDecisionInbox,
-  onOpenMeetings,
+  onOpenSettings,
   onDecideRecommendation,
 }: HomeWorkspaceProps) {
   const [completingTaskId, setCompletingTaskId] = useState<string>();
@@ -184,10 +184,10 @@ export function HomeWorkspace({
           <button
             className="home-greeting__decisions focus-visible-control"
             type="button"
-            onClick={onOpenMeetings}
+            onClick={onOpenSettings}
           >
-            <AudioLines aria-hidden="true" />
-            <span>{copy.home.openMeetings}</span>
+            <Settings2 aria-hidden="true" />
+            <span>{copy.navigation.settings}</span>
           </button>
           <button
             className="home-greeting__decisions focus-visible-control"

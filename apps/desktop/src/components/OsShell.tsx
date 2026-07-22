@@ -210,10 +210,10 @@ export function OsShell({
           onClick={() => onNavigate("calendar")}
         />
         <NavigationButton
-          active={destination === "settings"}
-          icon={<Settings2 aria-hidden="true" />}
-          label={copy.navigation.settings}
-          onClick={() => onNavigate("settings")}
+          active={destination === "meetings"}
+          icon={<AudioLines aria-hidden="true" />}
+          label={copy.navigation.meetings}
+          onClick={() => onNavigate("meetings")}
         />
       </nav>
 

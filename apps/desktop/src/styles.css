@@ -6762,6 +6762,18 @@ svg {
     min-height: 100dvh;
   }
 
+  .os-workspace::before {
+    position: fixed;
+    z-index: 19;
+    top: 0;
+    right: 0;
+    left: 0;
+    height: var(--mobile-top-clearance);
+    background: var(--canvas);
+    content: "";
+    pointer-events: none;
+  }
+
   .os-sidebar,
   .os-topbar {
     display: none;

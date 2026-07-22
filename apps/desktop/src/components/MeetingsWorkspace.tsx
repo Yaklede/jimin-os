@@ -87,6 +87,7 @@ export function MeetingsWorkspace({
   const [error, setError] = useState<string>();
   const [decisionBusyId, setDecisionBusyId] = useState<string>();
   const [retrying, setRetrying] = useState(false);
+  const meetingListRef = useRef<HTMLDivElement>(null);
   const skeletonVisible = useDelayedSkeleton(loading || detailLoading);
 
   const loadList = useCallback(async () => {
@@ -142,6 +143,21 @@ export function MeetingsWorkspace({
     }, 1_800);
     return () => window.clearInterval(timer);
   }, [detail, loadDetail]);
+
+  useEffect(() => {
+    if (!window.matchMedia("(max-width: 720px)").matches) return;
+    const list = meetingListRef.current;
+    const active = list?.querySelector<HTMLElement>('[data-active="true"]');
+    if (!list || !active) return;
+
+    const reduceMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    list.scrollTo({
+      left: Math.max(0, active.offsetLeft - 16),
+      behavior: reduceMotion ? "auto" : "smooth",
+    });
+  }, [meetings.length, selectedMeetingId]);
 
   async function submitMeeting(input: MeetingComposerInput) {
     setCreating(true);
@@ -247,7 +263,7 @@ export function MeetingsWorkspace({
           {!loading && meetings.length === 0 ? (
             <EmptyMeetings onCreate={() => setShowComposer(true)} />
           ) : (
-            <div className="meetings-list__items">
+            <div className="meetings-list__items" ref={meetingListRef}>
               {meetings.map((meeting) => (
                 <button
                   className="meeting-list-item focus-visible-control"
