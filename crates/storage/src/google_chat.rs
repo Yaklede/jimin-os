@@ -829,7 +829,10 @@ impl Database {
         let latest = messages.iter().map(|message| message.received_at).max();
         let source_version = sqlx::query_scalar::<_, i64>(
             "UPDATE project_google_chat_sources
-             SET last_provider_message_at = GREATEST(last_provider_message_at, $2),
+             SET last_provider_message_at = CASE
+                     WHEN $2::timestamptz IS NULL THEN last_provider_message_at
+                     ELSE GREATEST(COALESCE(last_provider_message_at, $2), $2)
+                 END,
                  last_successful_sync_at = NOW(), last_error_code = NULL
              WHERE id = $1
              RETURNING version",
@@ -1327,7 +1330,7 @@ fn valid_provider_message(message: &ProviderGoogleChatMessage) -> bool {
             .sender_name
             .as_deref()
             .is_none_or(|value| valid_text(value, MAX_DISPLAY_NAME_CHARS, false))
-        && valid_text(&message.content_text, MAX_MESSAGE_TEXT_CHARS, false)
+        && valid_text(&message.content_text, MAX_MESSAGE_TEXT_CHARS, true)
 }
 
 fn valid_secret(secret: &EncryptedCalendarSecret) -> bool {
@@ -1424,5 +1427,31 @@ mod tests {
             Ok(ProjectInflowStatus::Pending)
         ));
         assert!(ProjectInflowStatus::parse("unknown").is_err());
+    }
+
+    #[test]
+    fn provider_messages_accept_google_chat_multiline_text() {
+        let message = ProviderGoogleChatMessage {
+            provider_message_name: "spaces/AAAAAAAAAAA/messages/BBBBBBBBBBB.BBBBBBBBBBB".to_owned(),
+            provider_thread_name: Some("spaces/AAAAAAAAAAA/threads/CCCCCCCCCCC".to_owned()),
+            sender_name: Some("업무 담당자".to_owned()),
+            content_text: "첫 번째 요청\n\t후속 확인 사항".to_owned(),
+            received_at: OffsetDateTime::UNIX_EPOCH,
+        };
+
+        assert!(valid_provider_message(&message));
+    }
+
+    #[test]
+    fn provider_messages_still_reject_unsafe_control_characters() {
+        let message = ProviderGoogleChatMessage {
+            provider_message_name: "spaces/AAAAAAAAAAA/messages/BBBBBBBBBBB.BBBBBBBBBBB".to_owned(),
+            provider_thread_name: None,
+            sender_name: None,
+            content_text: "업무 요청\u{0000}".to_owned(),
+            received_at: OffsetDateTime::UNIX_EPOCH,
+        };
+
+        assert!(!valid_provider_message(&message));
     }
 }

@@ -606,9 +606,12 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         .await
         .expect("source connection should load")
         .expect("source connection should exist");
-    let long_message = "확인이 필요한 회사 요청입니다. ".repeat(600);
+    let long_message = format!(
+        "확인이 필요한 회사 요청입니다.\n\t{}",
+        "후속 내용 ".repeat(600)
+    );
     let provider_message = ProviderGoogleChatMessage {
-        provider_message_name: "spaces/company-room/messages/message-1".to_owned(),
+        provider_message_name: "spaces/company-room/messages/message-1.message-1".to_owned(),
         provider_thread_name: Some("spaces/company-room/threads/thread-1".to_owned()),
         sender_name: Some("업무 담당자".to_owned()),
         content_text: long_message.clone(),
@@ -621,6 +624,16 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             .expect("first message should ingest")
             .len(),
         1
+    );
+    assert!(
+        database
+            .google_chat_source_sync_connection(source.id)
+            .await
+            .expect("updated source connection should load")
+            .expect("updated source connection should exist")
+            .last_provider_message_at
+            .is_some(),
+        "the first successful sync should initialize its provider cursor"
     );
     assert!(
         database
