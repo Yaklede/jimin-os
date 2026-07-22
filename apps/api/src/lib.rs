@@ -51,8 +51,9 @@ use jimin_storage::{
     },
     sync::SyncChange,
     webhook::{
-        NewProjectWebhook, ProjectWebhook, ProjectWebhookUpdate, RetryWebhookDeliveryOutcome,
-        WebhookDelivery, WebhookDestinationUpdate, WebhookProvider,
+        GoogleChatMentionDirectory, NewProjectWebhook, ProjectWebhook, ProjectWebhookUpdate,
+        RetryWebhookDeliveryOutcome, WebhookDelivery, WebhookDestinationUpdate,
+        WebhookMentionDirectoryUpdate, WebhookProvider,
     },
     work::{
         DeleteProjectOutcome, NewProject, Project, ProjectStatus, ProjectUpdate, Workspace,
@@ -439,6 +440,7 @@ pub struct ProjectWebhookResponse {
     project_id: uuid::Uuid,
     provider: String,
     destination_label: String,
+    mention_directory: WebhookMentionDirectory,
     events: Vec<String>,
     enabled: bool,
     version: i64,
@@ -993,6 +995,7 @@ struct CreateProjectWebhookRequest {
     provider: String,
     url: String,
     events: Vec<String>,
+    mention_directory: Option<WebhookMentionDirectory>,
 }
 
 #[derive(serde::Deserialize, ToSchema)]
@@ -1004,6 +1007,13 @@ struct UpdateProjectWebhookRequest {
     events: Vec<String>,
     enabled: bool,
     expected_version: i64,
+    mention_directory: Option<WebhookMentionDirectory>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct WebhookMentionDirectory {
+    users: BTreeMap<String, String>,
 }
 
 #[derive(serde::Deserialize, ToSchema)]
@@ -1256,6 +1266,7 @@ pub(crate) fn error_response(
         CreateProjectWebhookRequest,
         UpdateProjectWebhookRequest,
         DeleteProjectWebhookRequest,
+        WebhookMentionDirectory,
         SendWebhookMessageRequest,
         UpdateTaskRequest,
         DeleteTaskRequest,
@@ -2980,6 +2991,17 @@ async fn create_project_webhook(
             false,
         );
     };
+    let Some(mention_directory) =
+        google_chat_mention_directory(provider, body.mention_directory.unwrap_or_default())
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "webhook.mention_directory_invalid",
+            "입력한 JSON 형식이나 Google Chat 사용자 ID가 올바르지 않아요. 내용을 고친 뒤 다시 저장해 주세요.",
+            request_id,
+            false,
+        );
+    };
     let Some(planning) = state.planning() else {
         return unavailable_response(request_id);
     };
@@ -3006,6 +3028,7 @@ async fn create_project_webhook(
             provider,
             destination,
             destination_hint: webhook_destination_label(provider),
+            mention_directory,
             events: body.events,
         })
         .await
@@ -3045,6 +3068,21 @@ async fn update_project_webhook(
             false,
         );
     };
+    let mention_directory = match body.mention_directory {
+        None => WebhookMentionDirectoryUpdate::Keep,
+        Some(value) => {
+            let Some(directory) = google_chat_mention_directory(provider, value) else {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "webhook.mention_directory_invalid",
+                    "입력한 JSON 형식이나 Google Chat 사용자 ID가 올바르지 않아요. 내용을 고친 뒤 다시 저장해 주세요.",
+                    request_id,
+                    false,
+                );
+            };
+            WebhookMentionDirectoryUpdate::Replace(directory)
+        }
+    };
     let destination = match (body.destination_mode.as_str(), body.url) {
         ("keep", None) => WebhookDestinationUpdate::Keep,
         ("replace", Some(value)) if !value.trim().is_empty() => {
@@ -3078,9 +3116,11 @@ async fn update_project_webhook(
             id: webhook_id,
             user_id: principal.identity().user_id(),
             project_id,
+            provider,
             events: body.events,
             enabled: body.enabled,
             destination,
+            mention_directory,
             expected_version: body.expected_version,
         })
         .await
@@ -5632,6 +5672,9 @@ fn project_webhook_response(webhook: ProjectWebhook) -> ProjectWebhookResponse {
         project_id: webhook.project_id,
         provider: webhook.provider.as_str().to_owned(),
         destination_label: webhook.destination_hint,
+        mention_directory: WebhookMentionDirectory {
+            users: webhook.mention_directory.users,
+        },
         events: webhook.events,
         enabled: webhook.enabled,
         version: webhook.version,
@@ -5657,6 +5700,16 @@ fn webhook_delivery_response(delivery: WebhookDelivery) -> Result<WebhookDeliver
 
 fn managed_webhook_provider(value: &str) -> Option<WebhookProvider> {
     WebhookProvider::parse(value)
+}
+
+fn google_chat_mention_directory(
+    provider: WebhookProvider,
+    directory: WebhookMentionDirectory,
+) -> Option<GoogleChatMentionDirectory> {
+    let directory = GoogleChatMentionDirectory {
+        users: directory.users,
+    };
+    directory.is_valid_for(provider).then_some(directory)
 }
 
 fn webhook_destination_label(provider: WebhookProvider) -> String {
@@ -6326,6 +6379,10 @@ mod tests {
                 "/v1/goals/{goal_id}",
                 "/v1/home",
                 "/v1/me",
+                "/v1/meetings",
+                "/v1/meetings/{meeting_id}",
+                "/v1/meetings/{meeting_id}/action-items/{item_id}/decisions",
+                "/v1/meetings/{meeting_id}/reanalyze",
                 "/v1/projects",
                 "/v1/projects/{project_id}",
                 "/v1/projects/{project_id}/webhook-deliveries",
@@ -6750,6 +6807,7 @@ mod tests {
             project_id: uuid::Uuid::now_v7(),
             provider: WebhookProvider::Discord,
             destination_hint: "Discord 채널".to_owned(),
+            mention_directory: GoogleChatMentionDirectory::default(),
             events: vec!["task.created".to_owned()],
             enabled: true,
             version: 1,
@@ -6757,11 +6815,39 @@ mod tests {
         .expect("webhook response should serialize");
         assert_eq!(value["provider"], "discord");
         assert_eq!(value["destinationLabel"], "Discord 채널");
+        assert_eq!(value["mentionDirectory"]["users"], serde_json::json!({}));
         assert!(value.get("hasAuthentication").is_none());
         assert!(value.get("url").is_none());
         assert!(value.get("authorization").is_none());
         assert!(value.get("authHeaderCiphertext").is_none());
         assert!(value.get("authHeaderNonce").is_none());
+    }
+
+    #[test]
+    fn google_chat_mention_directory_rejects_invalid_ids_and_discord_entries() {
+        let valid = WebhookMentionDirectory {
+            users: [(
+                "홍길동".to_owned(),
+                "users/123456789012345678901".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        assert!(
+            google_chat_mention_directory(WebhookProvider::GoogleChat, valid.clone()).is_some()
+        );
+        assert!(google_chat_mention_directory(WebhookProvider::Discord, valid).is_none());
+        assert!(
+            google_chat_mention_directory(
+                WebhookProvider::GoogleChat,
+                WebhookMentionDirectory {
+                    users: [("홍길동".to_owned(), "123456789012345678901".to_owned())]
+                        .into_iter()
+                        .collect(),
+                },
+            )
+            .is_none()
+        );
     }
 
     #[tokio::test]

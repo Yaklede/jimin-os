@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createProjectWebhook,
   deleteProjectWebhook,
+  fetchProjectWebhooks,
+  parseWebhookMentionDirectory,
   retryWebhookDelivery,
   testProjectWebhook,
   type ProjectWebhook,
@@ -20,6 +22,7 @@ describe("project webhook client", () => {
     projectId: "019f68cb-9400-7000-8000-000000000032",
     provider: "discord",
     destinationLabel: "Discord 채널",
+    mentionDirectory: { users: {} },
     events: ["task.created", "task.completed"],
     enabled: true,
     version: 3,
@@ -43,6 +46,7 @@ describe("project webhook client", () => {
           url: "https://discord.com/api/webhooks/123/private",
           provider: "discord",
           events: webhook.events,
+          mentionDirectory: { users: {} },
         },
       ),
     ).resolves.toEqual(webhook);
@@ -52,6 +56,7 @@ describe("project webhook client", () => {
       provider: "discord",
       url: "https://discord.com/api/webhooks/123/private",
       events: webhook.events,
+      mentionDirectory: { users: {} },
     });
   });
 
@@ -88,6 +93,7 @@ describe("project webhook client", () => {
         destinationMode: "keep",
         events: webhook.events,
         enabled: false,
+        mentionDirectory: { users: {} },
       }),
     ).resolves.toEqual(updated);
 
@@ -98,8 +104,63 @@ describe("project webhook client", () => {
       url: null,
       events: webhook.events,
       enabled: false,
+      mentionDirectory: { users: {} },
       expectedVersion: 3,
     });
+  });
+
+  it("parses the editable Google Chat user directory", () => {
+    expect(
+      parseWebhookMentionDirectory(`{
+        "users": {
+          "홍길동": "users/123456789012345678901",
+          "김개발": "users/987654321098765432109"
+        }
+      }`),
+    ).toEqual({
+      users: {
+        홍길동: "users/123456789012345678901",
+        김개발: "users/987654321098765432109",
+      },
+    });
+    expect(
+      parseWebhookMentionDirectory(
+        '{"users":{"홍길동":"123456789012345678901"}}',
+      ),
+    ).toBeUndefined();
+    expect(
+      parseWebhookMentionDirectory('{"users":{},"unexpected":true}'),
+    ).toBeUndefined();
+    expect(
+      parseWebhookMentionDirectory(
+        '{"users":{"홍길동":"users/123456789012345678901"},,}',
+      ),
+    ).toBeUndefined();
+  });
+
+  it("keeps the webhook screen usable during a server rollout", async () => {
+    const legacyWebhook = { ...webhook } as Partial<ProjectWebhook>;
+    delete legacyWebhook.mentionDirectory;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          JSON.stringify({ items: [legacyWebhook], nextCursor: null }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+      ),
+    );
+
+    await expect(
+      fetchProjectWebhooks(
+        "https://jimin-os.example",
+        "access",
+        webhook.projectId,
+      ),
+    ).resolves.toEqual([{ ...webhook, mentionDirectory: { users: {} } }]);
   });
 
   it("requeues a failed delivery with its stable delivery identifier", async () => {

@@ -6,7 +6,9 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit, Payload},
 };
-use jimin_storage::webhook::{ClaimedWebhookDelivery, EncryptedWebhookSecret, WebhookProvider};
+use jimin_storage::webhook::{
+    ClaimedWebhookDelivery, EncryptedWebhookSecret, GoogleChatMentionDirectory, WebhookProvider,
+};
 use rand::RngExt;
 use reqwest::{Client, redirect::Policy};
 use secrecy::{ExposeSecret, SecretString};
@@ -117,7 +119,12 @@ impl WebhookRuntime {
         {
             return Err(WebhookRuntimeError::Invalid);
         }
-        let outbound_payload = provider_payload(provider, &delivery.event_type, &delivery.payload)?;
+        let outbound_payload = provider_payload(
+            provider,
+            &delivery.event_type,
+            &delivery.payload,
+            &delivery.mention_directory,
+        )?;
         let request = self
             .client
             .post(url)
@@ -244,13 +251,21 @@ fn provider_payload(
     provider: WebhookProvider,
     event_type: &str,
     payload: &serde_json::Value,
+    mention_directory: &GoogleChatMentionDirectory,
 ) -> Result<serde_json::Value, WebhookRuntimeError> {
+    if !mention_directory.is_valid_for(provider) {
+        return Err(WebhookRuntimeError::Invalid);
+    }
     let message = payload
         .get("message")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map_or_else(|| default_event_message(event_type), str::to_owned);
+    let message = match provider {
+        WebhookProvider::GoogleChat => expand_google_chat_mentions(&message, mention_directory),
+        WebhookProvider::Discord => message,
+    };
     if message.is_empty() || message.chars().count() > MAX_CHAT_MESSAGE_CHARS {
         return Err(WebhookRuntimeError::Invalid);
     }
@@ -261,6 +276,56 @@ fn provider_payload(
             "allowed_mentions": { "parse": [] }
         }),
     })
+}
+
+fn expand_google_chat_mentions(message: &str, directory: &GoogleChatMentionDirectory) -> String {
+    let mut expanded = message.to_owned();
+    let mut users = directory.users.iter().collect::<Vec<_>>();
+    users.sort_by(|(left, _), (right, _)| {
+        right
+            .chars()
+            .count()
+            .cmp(&left.chars().count())
+            .then_with(|| left.cmp(right))
+    });
+    for (name, user_id) in users {
+        let replacement = format!("<{user_id}>");
+        expanded = replace_mention_token(&expanded, &format!("@{{{name}}}"), &replacement, false);
+        expanded = replace_mention_token(&expanded, &format!("@{name}"), &replacement, true);
+    }
+    expanded
+}
+
+fn replace_mention_token(
+    message: &str,
+    token: &str,
+    replacement: &str,
+    require_boundary: bool,
+) -> String {
+    let mut output = String::with_capacity(message.len());
+    let mut cursor = 0;
+    while let Some(relative_index) = message[cursor..].find(token) {
+        let index = cursor + relative_index;
+        let end = index + token.len();
+        let previous = message[..index].chars().next_back();
+        let next = message[end..].chars().next();
+        let boundary_matches = !require_boundary
+            || (previous.is_none_or(|character| !is_mention_identifier(character))
+                && next.is_none_or(|character| !is_mention_identifier(character)));
+        output.push_str(&message[cursor..index]);
+        if boundary_matches {
+            output.push_str(replacement);
+        } else {
+            output.push_str(token);
+        }
+        cursor = end;
+    }
+    output.push_str(&message[cursor..]);
+    output
+}
+
+fn is_mention_identifier(character: char) -> bool {
+    character.is_alphanumeric() || matches!(character, '_' | '.' | '+' | '-')
 }
 
 fn default_event_message(event_type: &str) -> String {
@@ -309,6 +374,7 @@ mod tests {
             provider: "discord".to_owned(),
             destination_ciphertext: encrypted.ciphertext,
             destination_nonce: encrypted.nonce,
+            mention_directory: GoogleChatMentionDirectory::default(),
         };
         assert_eq!(
             runtime
@@ -318,7 +384,13 @@ mod tests {
             destination.expose_secret()
         );
         assert_eq!(
-            provider_payload(WebhookProvider::Discord, "chat.message", &delivery.payload,).unwrap(),
+            provider_payload(
+                WebhookProvider::Discord,
+                "chat.message",
+                &delivery.payload,
+                &delivery.mention_directory,
+            )
+            .unwrap(),
             serde_json::json!({
                 "content": "배포가 완료됐어요.",
                 "allowed_mentions": { "parse": [] }
@@ -359,9 +431,66 @@ mod tests {
                 WebhookProvider::GoogleChat,
                 "chat.message",
                 &serde_json::json!({ "message": "내일 회의가 확정됐어요." }),
+                &GoogleChatMentionDirectory::default(),
             )
             .unwrap(),
             serde_json::json!({ "text": "내일 회의가 확정됐어요." })
+        );
+    }
+
+    #[test]
+    fn google_chat_mentions_only_explicit_registered_names() {
+        let directory = GoogleChatMentionDirectory {
+            users: [
+                (
+                    "홍길동".to_owned(),
+                    "users/123456789012345678901".to_owned(),
+                ),
+                (
+                    "김개발".to_owned(),
+                    "users/987654321098765432109".to_owned(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let payload = provider_payload(
+            WebhookProvider::GoogleChat,
+            "chat.message",
+            &serde_json::json!({
+                "message": "@홍길동 확인해 주세요. 김개발 님에게는 공유만 하고, @{김개발}도 확인해 주세요."
+            }),
+            &directory,
+        )
+        .unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "text": "<users/123456789012345678901> 확인해 주세요. 김개발 님에게는 공유만 하고, <users/987654321098765432109>도 확인해 주세요."
+            })
+        );
+    }
+
+    #[test]
+    fn mention_expansion_ignores_email_like_and_partial_tokens() {
+        let directory = GoogleChatMentionDirectory {
+            users: [(
+                "홍길동".to_owned(),
+                "users/123456789012345678901".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let payload = provider_payload(
+            WebhookProvider::GoogleChat,
+            "chat.message",
+            &serde_json::json!({ "message": "mail@홍길동.example과 @홍길동추가, @없는사람은 그대로예요." }),
+            &directory,
+        )
+        .unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({ "text": "mail@홍길동.example과 @홍길동추가, @없는사람은 그대로예요." })
         );
     }
 }

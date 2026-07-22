@@ -4084,6 +4084,7 @@ svg {
 
 .project-webhook-form input[type="url"],
 .project-webhook-form input[type="password"],
+.project-webhook-form textarea,
 .project-webhook-form select {
   width: 100%;
   min-height: 44px;
@@ -4095,8 +4096,17 @@ svg {
   outline: 0;
 }
 
+.project-webhook-form textarea {
+  min-height: 168px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .project-webhook-form input[type="url"]:focus-visible,
 .project-webhook-form input[type="password"]:focus-visible,
+.project-webhook-form textarea:focus-visible,
 .project-webhook-form select:focus-visible {
   border-color: var(--focus);
   outline: 2px solid var(--focus);

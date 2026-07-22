@@ -37,8 +37,9 @@ use jimin_storage::{
     },
     push::EncryptedPushToken,
     webhook::{
-        EncryptedWebhookSecret, NewProjectWebhook, ProjectWebhookUpdate,
-        RetryWebhookDeliveryOutcome, WebhookDestinationUpdate, WebhookProvider,
+        EncryptedWebhookSecret, GoogleChatMentionDirectory, NewProjectWebhook,
+        ProjectWebhookUpdate, RetryWebhookDeliveryOutcome, WebhookDestinationUpdate,
+        WebhookMentionDirectoryUpdate, WebhookProvider,
     },
     work::{DeleteProjectOutcome, NewProject, ProjectStatus, ProjectUpdate, WorkspaceScope},
 };
@@ -914,6 +915,7 @@ async fn project_webhook_queue_keeps_a_safe_delivery_snapshot() {
             provider: WebhookProvider::Discord,
             destination: encrypted_test_destination(11),
             destination_hint: "Discord 채널".to_owned(),
+            mention_directory: GoogleChatMentionDirectory::default(),
             events: vec!["task.created".to_owned(), "task.updated".to_owned()],
         })
         .await
@@ -1085,6 +1087,7 @@ async fn automatic_work_mutations_queue_safe_unique_webhook_deliveries() {
             provider: WebhookProvider::Discord,
             destination: encrypted_test_destination(13),
             destination_hint: "Discord 채널".to_owned(),
+            mention_directory: GoogleChatMentionDirectory::default(),
             events: vec![
                 "project.updated".to_owned(),
                 "task.created".to_owned(),
@@ -1242,9 +1245,9 @@ async fn automatic_work_mutations_queue_safe_unique_webhook_deliveries() {
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
-    reason = "The test verifies encrypted destination replacement, preservation, ownership, and version isolation as one update contract."
+    reason = "The test verifies destination and mention-directory replacement, delivery snapshots, ownership, and version isolation as one update contract."
 )]
-async fn project_webhook_update_replaces_and_preserves_destination_secrets() {
+async fn project_webhook_update_preserves_secrets_and_queued_mention_snapshots() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;
     };
@@ -1288,20 +1291,39 @@ async fn project_webhook_update_replaces_and_preserves_destination_secrets() {
             id: Uuid::now_v7(),
             user_id: owner.profile.id,
             project_id: project.id,
-            provider: WebhookProvider::Discord,
+            provider: WebhookProvider::GoogleChat,
             destination: encrypted_test_destination(15),
-            destination_hint: "Discord 채널".to_owned(),
+            destination_hint: "Google Chat 공간".to_owned(),
+            mention_directory: GoogleChatMentionDirectory {
+                users: [("홍길동".to_owned(), "users/12345".to_owned())]
+                    .into_iter()
+                    .collect(),
+            },
             events: vec!["task.created".to_owned()],
         })
         .await
         .expect("webhook should persist");
+    assert_eq!(
+        database
+            .queue_project_webhook_event(
+                owner.profile.id,
+                project.id,
+                "task.created",
+                &serde_json::json!({ "message": "@홍길동 확인해 주세요." }),
+            )
+            .await
+            .expect("delivery should queue with the current mention directory"),
+        1
+    );
     assert!(
         database
             .update_project_webhook(&ProjectWebhookUpdate {
                 id: webhook.id,
                 user_id: other.profile.id,
                 project_id: project.id,
+                provider: WebhookProvider::GoogleChat,
                 destination: WebhookDestinationUpdate::Keep,
+                mention_directory: WebhookMentionDirectoryUpdate::Keep,
                 events: webhook.events.clone(),
                 enabled: true,
                 expected_version: webhook.version,
@@ -1316,7 +1338,9 @@ async fn project_webhook_update_replaces_and_preserves_destination_secrets() {
                 id: webhook.id,
                 user_id: owner.profile.id,
                 project_id: project.id,
+                provider: WebhookProvider::GoogleChat,
                 destination: WebhookDestinationUpdate::Keep,
+                mention_directory: WebhookMentionDirectoryUpdate::Keep,
                 events: vec!["task.created".to_owned(), "task.created".to_owned()],
                 enabled: true,
                 expected_version: webhook.version,
@@ -1329,11 +1353,17 @@ async fn project_webhook_update_replaces_and_preserves_destination_secrets() {
             id: webhook.id,
             user_id: owner.profile.id,
             project_id: project.id,
+            provider: WebhookProvider::GoogleChat,
             destination: WebhookDestinationUpdate::Replace {
-                provider: WebhookProvider::Discord,
+                provider: WebhookProvider::GoogleChat,
                 secret: encrypted_test_destination(21),
-                hint: "Discord 채널".to_owned(),
+                hint: "Google Chat 공간".to_owned(),
             },
+            mention_directory: WebhookMentionDirectoryUpdate::Replace(GoogleChatMentionDirectory {
+                users: [("김개발".to_owned(), "users/67890".to_owned())]
+                    .into_iter()
+                    .collect(),
+            }),
             events: vec!["task.updated".to_owned()],
             enabled: false,
             expected_version: webhook.version,
@@ -1343,6 +1373,13 @@ async fn project_webhook_update_replaces_and_preserves_destination_secrets() {
         .expect("current webhook should update");
     assert!(!kept.enabled);
     assert!(kept.version > webhook.version);
+    assert_eq!(
+        kept.mention_directory
+            .users
+            .get("김개발")
+            .map(String::as_str),
+        Some("users/67890")
+    );
 
     let pool = sqlx::PgPool::connect(&database_url)
         .await
@@ -1355,13 +1392,26 @@ async fn project_webhook_update_replaces_and_preserves_destination_secrets() {
     .await
     .expect("replaced destination should load");
     assert_eq!(replaced_destination, (vec![21; 48], vec![22; 24]));
+    let queued_directory: serde_json::Value = sqlx::query_scalar(
+        "SELECT mention_directory FROM webhook_deliveries WHERE webhook_id = $1",
+    )
+    .bind(webhook.id)
+    .fetch_one(&pool)
+    .await
+    .expect("queued mention snapshot should load");
+    assert_eq!(
+        queued_directory,
+        serde_json::json!({ "users": { "홍길동": "users/12345" } })
+    );
 
     let preserved = database
         .update_project_webhook(&ProjectWebhookUpdate {
             id: webhook.id,
             user_id: owner.profile.id,
             project_id: project.id,
+            provider: WebhookProvider::GoogleChat,
             destination: WebhookDestinationUpdate::Keep,
+            mention_directory: WebhookMentionDirectoryUpdate::Keep,
             events: kept.events.clone(),
             enabled: true,
             expected_version: kept.version,
@@ -1384,7 +1434,9 @@ async fn project_webhook_update_replaces_and_preserves_destination_secrets() {
                 id: webhook.id,
                 user_id: owner.profile.id,
                 project_id: project.id,
+                provider: WebhookProvider::GoogleChat,
                 destination: WebhookDestinationUpdate::Keep,
+                mention_directory: WebhookMentionDirectoryUpdate::Keep,
                 events: preserved.events.clone(),
                 enabled: preserved.enabled,
                 expected_version: kept.version,
@@ -1446,6 +1498,7 @@ async fn agent_webhook_message_commits_with_its_action_audit() {
             provider: WebhookProvider::Discord,
             destination: encrypted_test_destination(31),
             destination_hint: "Discord 채널".to_owned(),
+            mention_directory: GoogleChatMentionDirectory::default(),
             events: vec!["chat.message".to_owned()],
         })
         .await
@@ -1609,6 +1662,7 @@ async fn failed_webhook_delivery_retries_with_the_same_id_idempotently() {
             provider: WebhookProvider::Discord,
             destination: encrypted_test_destination(17),
             destination_hint: "Discord 채널".to_owned(),
+            mention_directory: GoogleChatMentionDirectory::default(),
             events: vec!["webhook.test".to_owned()],
         })
         .await
@@ -2803,6 +2857,7 @@ async fn project_and_task_deletions_are_scoped_versioned_and_idempotent() {
             provider: WebhookProvider::Discord,
             destination: encrypted_test_destination(19),
             destination_hint: "Discord 채널".to_owned(),
+            mention_directory: GoogleChatMentionDirectory::default(),
             events: vec!["project.deleted".to_owned()],
         })
         .await

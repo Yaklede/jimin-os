@@ -16,8 +16,12 @@ import {
   type ProjectWebhook,
   type ManagedWebhookProvider,
   type ProjectWebhookEvent,
+  type WebhookMentionDirectory,
   type WebhookDestinationMode,
   type WebhookDelivery,
+  EMPTY_WEBHOOK_MENTION_DIRECTORY,
+  formatWebhookMentionDirectory,
+  parseWebhookMentionDirectory,
 } from "../api/webhooks";
 import { copy } from "../copy";
 
@@ -43,6 +47,7 @@ type ProjectWebhookPanelProps = {
     provider: ManagedWebhookProvider;
     url: string;
     events: ProjectWebhookEvent[];
+    mentionDirectory: WebhookMentionDirectory;
   }): Promise<void>;
   onUpdate(
     webhook: ProjectWebhook,
@@ -52,6 +57,7 @@ type ProjectWebhookPanelProps = {
       url?: string;
       events: ProjectWebhookEvent[];
       enabled: boolean;
+      mentionDirectory: WebhookMentionDirectory;
     },
   ): Promise<void>;
   onTest(webhook: ProjectWebhook): Promise<void>;
@@ -75,6 +81,9 @@ export function ProjectWebhookPanel({
   const [provider, setProvider] =
     useState<ManagedWebhookProvider>("google_chat");
   const [url, setUrl] = useState("");
+  const [mentionDirectoryText, setMentionDirectoryText] = useState(
+    formatWebhookMentionDirectory(EMPTY_WEBHOOK_MENTION_DIRECTORY),
+  );
   const [events, setEvents] = useState<ProjectWebhookEvent[]>([
     "project.updated",
     "project.deleted",
@@ -164,6 +173,14 @@ export function ProjectWebhookPanel({
       setError(copy.projects.webhookRequired);
       return;
     }
+    const mentionDirectory =
+      provider === "google_chat"
+        ? parseWebhookMentionDirectory(mentionDirectoryText)
+        : EMPTY_WEBHOOK_MENTION_DIRECTORY;
+    if (!mentionDirectory) {
+      setError(copy.projects.webhookMentionDirectoryProblem);
+      return;
+    }
     setError(undefined);
     setNotice(undefined);
     setPendingAction({ kind: "create", id: projectId });
@@ -172,8 +189,12 @@ export function ProjectWebhookPanel({
         provider,
         url: url.trim(),
         events,
+        mentionDirectory,
       });
       setUrl("");
+      setMentionDirectoryText(
+        formatWebhookMentionDirectory(EMPTY_WEBHOOK_MENTION_DIRECTORY),
+      );
       restoreCreateFocusRef.current = true;
       setFormOpen(false);
       setNotice(copy.projects.webhookSaved);
@@ -251,6 +272,7 @@ export function ProjectWebhookPanel({
               onChange={(event) => {
                 setProvider(event.target.value as ManagedWebhookProvider);
                 setUrl("");
+                setError(undefined);
               }}
             >
               <option value="google_chat">Google Chat</option>
@@ -274,6 +296,25 @@ export function ProjectWebhookPanel({
               onChange={(event) => setUrl(event.target.value)}
             />
           </label>
+          {provider === "google_chat" && (
+            <label htmlFor="project-webhook-mention-directory">
+              <span>{copy.projects.webhookMentionDirectoryLabel}</span>
+              <textarea
+                id="project-webhook-mention-directory"
+                name="project-webhook-mention-directory"
+                rows={8}
+                spellCheck={false}
+                value={mentionDirectoryText}
+                disabled={panelBusy}
+                placeholder={copy.projects.webhookMentionDirectoryPlaceholder}
+                onChange={(event) => {
+                  setMentionDirectoryText(event.target.value);
+                  setError(undefined);
+                }}
+              />
+              <small>{copy.projects.webhookMentionDirectoryDescription}</small>
+            </label>
+          )}
           <fieldset>
             <legend>{copy.projects.webhookEventsLabel}</legend>
             <div className="project-webhook-events">
@@ -336,6 +377,13 @@ export function ProjectWebhookPanel({
                 </strong>
                 <span>{webhook.destinationLabel}</span>
                 <span>{webhookEventSummary(webhook.events)}</span>
+                {webhook.provider === "google_chat" && (
+                  <span>
+                    {copy.projects.webhookMentionDirectoryCount(
+                      Object.keys(webhook.mentionDirectory.users).length,
+                    )}
+                  </span>
+                )}
                 <small
                   className="project-webhook-list__status"
                   data-enabled={webhook.enabled}
@@ -433,6 +481,7 @@ export function ProjectWebhookPanel({
                               destinationMode: "keep",
                               events: webhook.events,
                               enabled: !webhook.enabled,
+                              mentionDirectory: webhook.mentionDirectory,
                             });
                             setNotice(copy.projects.webhookUpdated);
                           } catch {
@@ -637,6 +686,7 @@ function WebhookEditForm({
     url?: string;
     events: ProjectWebhookEvent[];
     enabled: boolean;
+    mentionDirectory: WebhookMentionDirectory;
   }): Promise<void>;
 }) {
   const provider = webhook.provider;
@@ -645,6 +695,9 @@ function WebhookEditForm({
   const [url, setUrl] = useState("");
   const [events, setEvents] = useState<ProjectWebhookEvent[]>(webhook.events);
   const [enabled, setEnabled] = useState(webhook.enabled);
+  const [mentionDirectoryText, setMentionDirectoryText] = useState(
+    formatWebhookMentionDirectory(webhook.mentionDirectory),
+  );
   const [validation, setValidation] = useState<string>();
   const id = `webhook-edit-${webhook.id}`;
 
@@ -662,6 +715,14 @@ function WebhookEditForm({
       setValidation(copy.projects.webhookRequired);
       return;
     }
+    const mentionDirectory =
+      provider === "google_chat"
+        ? parseWebhookMentionDirectory(mentionDirectoryText)
+        : EMPTY_WEBHOOK_MENTION_DIRECTORY;
+    if (!mentionDirectory) {
+      setValidation(copy.projects.webhookMentionDirectoryProblem);
+      return;
+    }
     setValidation(undefined);
     await onSave({
       provider,
@@ -669,6 +730,7 @@ function WebhookEditForm({
       url: destinationMode === "replace" ? url.trim() : undefined,
       events,
       enabled,
+      mentionDirectory,
     });
   }
 
@@ -725,6 +787,25 @@ function WebhookEditForm({
             }}
           />
           <small>{copy.projects.webhookSecretDescription}</small>
+        </label>
+      )}
+      {provider === "google_chat" && (
+        <label htmlFor={`${id}-mention-directory`}>
+          <span>{copy.projects.webhookMentionDirectoryLabel}</span>
+          <textarea
+            id={`${id}-mention-directory`}
+            name={`${id}-mention-directory`}
+            rows={8}
+            spellCheck={false}
+            value={mentionDirectoryText}
+            disabled={saving}
+            placeholder={copy.projects.webhookMentionDirectoryPlaceholder}
+            onChange={(event) => {
+              setMentionDirectoryText(event.target.value);
+              setValidation(undefined);
+            }}
+          />
+          <small>{copy.projects.webhookMentionDirectoryDescription}</small>
         </label>
       )}
       <fieldset>

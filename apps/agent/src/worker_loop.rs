@@ -1027,6 +1027,9 @@ fn render_contextualized_turn(
          When the user explicitly asks to post or send a message to a configured project channel, use exactly one \
          send_webhook_message action with that webhook ID, its project ID, and a concise message. Never send when the \
          destination or intended message is ambiguous, and never mix a webhook message with other actions. \
+         For Google Chat, project_webhooks exposes matching registered mention_names without user IDs. When the user explicitly \
+         asks to mention a listed person, include exactly @{Name} in the message. Do not add a mention merely because a \
+         person's name appears, and leave names that are not listed as plain text. \
          Use exact existing entity, workspace, and project IDs; the server creates IDs for new records. \
          Use RFC3339 timestamps with the current +09:00 offset. An empty optional string means no value. \
          Never modify a Google Calendar entry; ask the user to change it in Google Calendar. \
@@ -1198,13 +1201,23 @@ fn render_contextualized_turn(
         prompt.push_str("(no configured Google Chat or Discord webhooks)\n");
     } else {
         for webhook in webhooks.iter().take(CONTEXT_PROJECT_LIMIT) {
+            let mention_names = serde_json::to_string(
+                &webhook
+                    .mention_directory
+                    .users
+                    .keys()
+                    .filter(|name| input.contains(name.as_str()))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap_or_else(|_| "[]".to_owned());
             let _ = writeln!(
                 prompt,
-                "- [id {} | project {} | provider {} | enabled {}] {}",
+                "- [id {} | project {} | provider {} | enabled {} | mention_names {}] {}",
                 webhook.id,
                 webhook.project_id,
                 webhook.provider.as_str(),
                 webhook.enabled,
+                mention_names,
                 webhook.destination_hint,
             );
         }
@@ -3279,6 +3292,7 @@ mod tests {
         gmail::GmailMessage,
         goals::{Goal, GoalHealth, GoalOverview, GoalStatus},
         planning::{ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus},
+        webhook::{GoogleChatMentionDirectory, ProjectWebhook, WebhookProvider},
         work::{Project, ProjectStatus, Workspace, WorkspaceScope},
     };
     use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
@@ -3467,6 +3481,55 @@ mod tests {
         assert!(prompt.contains("current_time=\"2026-07-14T10:00:00+09:00\""));
         assert!(prompt.contains("current_date=\"2026-07-14\""));
         assert!(prompt.contains("completed 2026-07-14T06:20:00+09:00"));
+    }
+
+    #[test]
+    fn context_prompt_exposes_google_chat_mention_names_without_user_ids() {
+        let now = OffsetDateTime::now_utc();
+        let webhook = ProjectWebhook {
+            id: Uuid::now_v7(),
+            project_id: Uuid::now_v7(),
+            provider: WebhookProvider::GoogleChat,
+            destination_hint: "Google Chat 공간".to_owned(),
+            mention_directory: GoogleChatMentionDirectory {
+                users: [
+                    (
+                        "홍길동".to_owned(),
+                        "users/123456789012345678901".to_owned(),
+                    ),
+                    (
+                        "김개발".to_owned(),
+                        "users/987654321098765432109".to_owned(),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            events: vec!["chat.message".to_owned()],
+            enabled: true,
+            version: 1,
+        };
+
+        let prompt = render_contextualized_turn(
+            "홍길동을 멘션해서 확인 메시지 보내 줘",
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[webhook],
+            &[],
+            now,
+            korea_day_end(now).expect("Korea day boundary"),
+        );
+
+        assert!(prompt.contains(r#"mention_names ["홍길동"]"#));
+        assert!(!prompt.contains("김개발"));
+        assert!(prompt.contains("include exactly @{Name}"));
+        assert!(!prompt.contains("users/123456789012345678901"));
+        assert!(!prompt.contains("users/987654321098765432109"));
     }
 
     #[test]

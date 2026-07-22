@@ -12,11 +12,20 @@ export type ProjectWebhookEvent =
 export type ProjectWebhookProvider = "google_chat" | "discord";
 export type ManagedWebhookProvider = ProjectWebhookProvider;
 
+export interface WebhookMentionDirectory {
+  users: Record<string, string>;
+}
+
+export const EMPTY_WEBHOOK_MENTION_DIRECTORY: WebhookMentionDirectory = {
+  users: {},
+};
+
 export interface ProjectWebhook {
   id: string;
   projectId: string;
   provider: ProjectWebhookProvider;
   destinationLabel: string;
+  mentionDirectory: WebhookMentionDirectory;
   events: ProjectWebhookEvent[];
   enabled: boolean;
   version: number;
@@ -43,11 +52,12 @@ export async function fetchProjectWebhooks(
   access: string,
   projectId: string,
 ): Promise<ProjectWebhook[]> {
-  return requestList<ProjectWebhook>(
+  const webhooks = await requestList<ProjectWebhook>(
     baseUrl,
     access,
     `/v1/projects/${encodeURIComponent(projectId)}/webhooks`,
   );
+  return webhooks.map(normalizeProjectWebhook);
 }
 
 export async function fetchWebhookDeliveries(
@@ -70,9 +80,10 @@ export async function createProjectWebhook(
     provider: ManagedWebhookProvider;
     url: string;
     events: ProjectWebhookEvent[];
+    mentionDirectory: WebhookMentionDirectory;
   },
 ): Promise<ProjectWebhook> {
-  return requestJson<ProjectWebhook>(
+  const webhook = await requestJson<ProjectWebhook>(
     baseUrl,
     access,
     `/v1/projects/${encodeURIComponent(projectId)}/webhooks`,
@@ -81,8 +92,10 @@ export async function createProjectWebhook(
       provider: input.provider,
       url: input.url,
       events: input.events,
+      mentionDirectory: input.mentionDirectory,
     },
   );
+  return normalizeProjectWebhook(webhook);
 }
 
 export async function updateProjectWebhook(
@@ -95,9 +108,10 @@ export async function updateProjectWebhook(
     url?: string;
     events: ProjectWebhookEvent[];
     enabled: boolean;
+    mentionDirectory: WebhookMentionDirectory;
   },
 ): Promise<ProjectWebhook> {
-  return requestJson<ProjectWebhook>(
+  const updated = await requestJson<ProjectWebhook>(
     baseUrl,
     access,
     `/v1/projects/${encodeURIComponent(webhook.projectId)}/webhooks/${encodeURIComponent(webhook.id)}`,
@@ -108,9 +122,54 @@ export async function updateProjectWebhook(
       url: input.destinationMode === "replace" ? input.url || null : null,
       events: input.events,
       enabled: input.enabled,
+      mentionDirectory: input.mentionDirectory,
       expectedVersion: webhook.version,
     },
   );
+  return normalizeProjectWebhook(updated);
+}
+
+export function parseWebhookMentionDirectory(
+  value: string,
+): WebhookMentionDirectory | undefined {
+  const source = value.trim();
+  if (!source) return EMPTY_WEBHOOK_MENTION_DIRECTORY;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(source);
+  } catch {
+    return undefined;
+  }
+  if (
+    !isRecord(parsed) ||
+    Object.keys(parsed).some((key) => key !== "users") ||
+    !isRecord(parsed.users) ||
+    Object.keys(parsed.users).length > 200 ||
+    new TextEncoder().encode(source).length > 32_768
+  ) {
+    return undefined;
+  }
+  const users: Record<string, string> = {};
+  for (const [name, userId] of Object.entries(parsed.users)) {
+    if (
+      typeof userId !== "string" ||
+      name.trim() !== name ||
+      name.length === 0 ||
+      Array.from(name).length > 80 ||
+      /[@<>{}\u0000-\u001F\u007F]/u.test(name) ||
+      !/^users\/[0-9]{1,40}$/u.test(userId)
+    ) {
+      return undefined;
+    }
+    users[name] = userId;
+  }
+  return { users };
+}
+
+export function formatWebhookMentionDirectory(
+  directory: WebhookMentionDirectory,
+): string {
+  return JSON.stringify(directory, null, 2);
 }
 
 export async function deleteProjectWebhook(
@@ -236,4 +295,14 @@ function isListResponse<T>(value: unknown): value is ListResponse<T> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function normalizeProjectWebhook(webhook: ProjectWebhook): ProjectWebhook {
+  return {
+    ...webhook,
+    mentionDirectory:
+      webhook.mentionDirectory && isRecord(webhook.mentionDirectory.users)
+        ? webhook.mentionDirectory
+        : { users: {} },
+  };
 }

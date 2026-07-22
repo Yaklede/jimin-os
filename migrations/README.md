@@ -74,4 +74,14 @@ restoring the two version-24 check constraints on a disposable copy. After a
 version-25 audit row is written, use the verified pre-migration backup rather
 than downgrading in place.
 
+Migration `0028_google_chat_mention_directory.sql` adds an editable Google Chat
+name-to-user directory to typed webhook configurations and copies that directory
+to every queued delivery. This keeps a retry's mention rendering immutable even
+if the webhook settings change later. Apply it to an empty database and a
+restored version-27 backup, then verify existing webhooks and deliveries receive
+an empty `users` object and `jimin_schema_metadata.schema_version = 28`. The new
+columns are additive, but after mention-aware deliveries are written rollback
+must use the verified pre-migration backup so the original delivery rendering is
+not lost.
+
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.

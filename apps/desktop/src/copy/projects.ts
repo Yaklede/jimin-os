@@ -104,6 +104,15 @@ export const projectCopy = {
       : "https://chat.googleapis.com/v1/spaces/…/messages",
   webhookSecretDescription:
     "주소는 서버에서 암호화해 보관하며 저장한 뒤에는 다시 보여주지 않아요.",
+  webhookMentionDirectoryLabel: "멘션할 사람 (JSON)",
+  webhookMentionDirectoryPlaceholder:
+    '{\n  "users": {\n    "홍길동": "users/123456789012345678901"\n  }\n}',
+  webhookMentionDirectoryDescription:
+    "이름과 Google Chat 사용자 ID를 등록해요. 메시지에 @이름 또는 @{이름}을 쓰면 해당 사용자를 멘션해요.",
+  webhookMentionDirectoryProblem:
+    "입력한 JSON 형식이나 users/숫자 값이 올바르지 않아요. 내용을 고친 뒤 다시 저장해 주세요.",
+  webhookMentionDirectoryCount: (count: number) =>
+    count > 0 ? `멘션할 사람 ${count}명` : "멘션할 사람 없음",
   webhookSecretStored: "웹훅 주소를 안전하게 보관 중",
   webhookEventsLabel: "보낼 변화",
   webhookAuthorizationLabel: "인증 헤더 (선택)",

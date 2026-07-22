@@ -21,6 +21,7 @@ import {
   type ManagedWebhookProvider,
   type ProjectWebhook,
   type ProjectWebhookEvent,
+  type WebhookMentionDirectory,
   type WebhookDestinationMode,
   type WebhookDelivery,
 } from "../api/webhooks";
@@ -104,6 +105,7 @@ type ProjectsWorkspaceProps = {
     provider: ManagedWebhookProvider;
     url: string;
     events: ProjectWebhookEvent[];
+    mentionDirectory: WebhookMentionDirectory;
   }): Promise<void>;
   onUpdateWebhook(
     webhook: ProjectWebhook,
@@ -113,6 +115,7 @@ type ProjectsWorkspaceProps = {
       url?: string;
       events: ProjectWebhookEvent[];
       enabled: boolean;
+      mentionDirectory: WebhookMentionDirectory;
     },
   ): Promise<void>;
   onTestWebhook(webhook: ProjectWebhook): Promise<void>;

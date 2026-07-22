@@ -1,5 +1,8 @@
 //! Project webhook configuration and durable outbound delivery queue.
 
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
@@ -13,6 +16,9 @@ const MAX_DELIVERY_ATTEMPTS: i32 = 5;
 const WEBHOOK_DELIVERY_LEASE_SECONDS: i64 = 30;
 const MAX_WORKER_ID_BYTES: usize = 200;
 const MAX_MESSAGE_CHARS: usize = 1_800;
+const MAX_MENTION_USERS: usize = 200;
+const MAX_MENTION_NAME_CHARS: usize = 80;
+const MAX_GOOGLE_CHAT_USER_ID_DIGITS: usize = 40;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebhookProvider {
@@ -37,12 +43,32 @@ impl WebhookProvider {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleChatMentionDirectory {
+    pub users: BTreeMap<String, String>,
+}
+
+impl GoogleChatMentionDirectory {
+    #[must_use]
+    pub fn is_valid_for(&self, provider: WebhookProvider) -> bool {
+        if provider == WebhookProvider::Discord && !self.users.is_empty() {
+            return false;
+        }
+        self.users.len() <= MAX_MENTION_USERS
+            && self.users.iter().all(|(name, user_id)| {
+                valid_mention_name(name) && valid_google_chat_user_id(user_id)
+            })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectWebhook {
     pub id: Uuid,
     pub project_id: Uuid,
     pub provider: WebhookProvider,
     pub destination_hint: String,
+    pub mention_directory: GoogleChatMentionDirectory,
     pub events: Vec<String>,
     pub enabled: bool,
     pub version: i64,
@@ -54,6 +80,8 @@ struct ProjectWebhookRow {
     project_id: Uuid,
     provider: String,
     destination_hint: String,
+    #[sqlx(json)]
+    mention_directory: GoogleChatMentionDirectory,
     events: Vec<String>,
     enabled: bool,
     version: i64,
@@ -66,6 +94,7 @@ pub struct NewProjectWebhook {
     pub provider: WebhookProvider,
     pub destination: EncryptedWebhookSecret,
     pub destination_hint: String,
+    pub mention_directory: GoogleChatMentionDirectory,
     pub events: Vec<String>,
 }
 
@@ -78,14 +107,21 @@ pub enum WebhookDestinationUpdate {
     },
 }
 
+pub enum WebhookMentionDirectoryUpdate {
+    Keep,
+    Replace(GoogleChatMentionDirectory),
+}
+
 /// Version-checked replacement of one owned webhook configuration.
 pub struct ProjectWebhookUpdate {
     pub id: Uuid,
     pub user_id: Uuid,
     pub project_id: Uuid,
+    pub provider: WebhookProvider,
     pub events: Vec<String>,
     pub enabled: bool,
     pub destination: WebhookDestinationUpdate,
+    pub mention_directory: WebhookMentionDirectoryUpdate,
     pub expected_version: i64,
 }
 
@@ -115,6 +151,8 @@ pub struct ClaimedWebhookDelivery {
     pub provider: String,
     pub destination_ciphertext: Vec<u8>,
     pub destination_nonce: Vec<u8>,
+    #[sqlx(json)]
+    pub mention_directory: GoogleChatMentionDirectory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
@@ -146,12 +184,13 @@ impl Database {
             INSERT INTO project_webhooks (
                 id, user_id, project_id, provider,
                 destination_ciphertext, destination_nonce, destination_hint,
-                events
+                mention_directory, events
             )
-            SELECT $1, $2, project.id, $4, $5, $6, $7, $8
+            SELECT $1, $2, project.id, $4, $5, $6, $7, $8, $9
             FROM projects AS project
             WHERE project.id = $3 AND project.user_id = $2
-            RETURNING id, project_id, provider, destination_hint, events, enabled, version",
+            RETURNING id, project_id, provider, destination_hint,
+                mention_directory, events, enabled, version",
         )
         .bind(command.id)
         .bind(command.user_id)
@@ -160,6 +199,7 @@ impl Database {
         .bind(command.destination.ciphertext.as_slice())
         .bind(command.destination.nonce.as_slice())
         .bind(command.destination_hint.trim())
+        .bind(sqlx::types::Json(&command.mention_directory))
         .bind(&command.events)
         .fetch_optional(self.pool())
         .await
@@ -184,7 +224,8 @@ impl Database {
         let rows = sqlx::query_as::<_, ProjectWebhookRow>(
             "\
             SELECT webhook.id, webhook.project_id, webhook.provider,
-                webhook.destination_hint, webhook.events, webhook.enabled, webhook.version
+                webhook.destination_hint, webhook.mention_directory,
+                webhook.events, webhook.enabled, webhook.version
             FROM project_webhooks AS webhook
             INNER JOIN projects AS project ON project.id = webhook.project_id
             WHERE webhook.project_id = $1 AND project.user_id = $2
@@ -214,7 +255,8 @@ impl Database {
         let rows = sqlx::query_as::<_, ProjectWebhookRow>(
             "\
             SELECT webhook.id, webhook.project_id, webhook.provider,
-                webhook.destination_hint, webhook.events, webhook.enabled, webhook.version
+                webhook.destination_hint, webhook.mention_directory,
+                webhook.events, webhook.enabled, webhook.version
             FROM project_webhooks AS webhook
             INNER JOIN projects AS project ON project.id = webhook.project_id
             WHERE project.user_id = $1
@@ -258,6 +300,12 @@ impl Database {
                 Some(hint.trim()),
             ),
         };
+        let (mention_mode, mention_directory) = match &command.mention_directory {
+            WebhookMentionDirectoryUpdate::Keep => ("keep", None),
+            WebhookMentionDirectoryUpdate::Replace(directory) => {
+                ("replace", Some(sqlx::types::Json(directory)))
+            }
+        };
         let row = sqlx::query_as::<_, ProjectWebhookRow>(
             "\
             UPDATE project_webhooks AS webhook
@@ -265,16 +313,19 @@ impl Database {
                 destination_ciphertext = CASE WHEN $4 = 'keep' THEN webhook.destination_ciphertext ELSE $6 END,
                 destination_nonce = CASE WHEN $4 = 'keep' THEN webhook.destination_nonce ELSE $7 END,
                 destination_hint = CASE WHEN $4 = 'keep' THEN webhook.destination_hint ELSE $8 END,
-                events = $9,
-                enabled = $10
+                mention_directory = CASE WHEN $9 = 'keep' THEN webhook.mention_directory ELSE $10 END,
+                events = $11,
+                enabled = $12
             FROM projects AS project
             WHERE webhook.id = $1
               AND webhook.project_id = $2
               AND webhook.version = $3
               AND project.id = webhook.project_id
-              AND project.user_id = $11
+              AND project.user_id = $13
+              AND webhook.provider = $14
             RETURNING webhook.id, webhook.project_id, webhook.provider,
-                webhook.destination_hint, webhook.events, webhook.enabled, webhook.version",
+                webhook.destination_hint, webhook.mention_directory,
+                webhook.events, webhook.enabled, webhook.version",
         )
         .bind(command.id)
         .bind(command.project_id)
@@ -284,9 +335,12 @@ impl Database {
         .bind(destination_ciphertext)
         .bind(destination_nonce)
         .bind(destination_hint)
+        .bind(mention_mode)
+        .bind(mention_directory)
         .bind(&command.events)
         .bind(command.enabled)
         .bind(command.user_id)
+        .bind(command.provider.as_str())
         .fetch_optional(self.pool())
         .await
         .map_err(classify)?;
@@ -378,11 +432,11 @@ impl Database {
             INSERT INTO webhook_deliveries (
                 id, user_id, project_id, webhook_id, provider,
                 destination_ciphertext, destination_nonce,
-                event_type, payload, status
+                mention_directory, event_type, payload, status
             )
             SELECT $4, $1, webhook.project_id, webhook.id, webhook.provider,
                 webhook.destination_ciphertext, webhook.destination_nonce,
-                'webhook.test', $5, 'queued'
+                webhook.mention_directory, 'webhook.test', $5, 'queued'
             FROM project_webhooks AS webhook
             INNER JOIN projects AS project ON project.id = webhook.project_id
             WHERE webhook.id = $3 AND webhook.project_id = $2
@@ -432,11 +486,11 @@ impl Database {
             INSERT INTO webhook_deliveries (
                 id, user_id, project_id, webhook_id, provider,
                 destination_ciphertext, destination_nonce,
-                event_type, payload, status
+                mention_directory, event_type, payload, status
             )
             SELECT $4, $1, webhook.project_id, webhook.id, webhook.provider,
                 webhook.destination_ciphertext, webhook.destination_nonce,
-                'chat.message', $5, 'queued'
+                webhook.mention_directory, 'chat.message', $5, 'queued'
             FROM project_webhooks AS webhook
             INNER JOIN projects AS project ON project.id = webhook.project_id
             WHERE webhook.id = $3 AND webhook.project_id = $2
@@ -512,7 +566,7 @@ impl Database {
             RETURNING delivery.id, delivery.webhook_id, delivery.project_id,
                 delivery.event_type, delivery.payload, delivery.attempt_count,
                 delivery.provider, delivery.destination_ciphertext,
-                delivery.destination_nonce",
+                delivery.destination_nonce, delivery.mention_directory",
         )
         .bind(limit)
         .bind(worker_id)
@@ -725,10 +779,19 @@ pub(crate) async fn queue_project_event_in_transaction(
     {
         return Err(StorageError::InvalidConfiguration);
     }
-    let webhooks = sqlx::query_as::<_, (Uuid, String, Vec<u8>, Vec<u8>)>(
+    let webhooks = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            Vec<u8>,
+            Vec<u8>,
+            sqlx::types::Json<GoogleChatMentionDirectory>,
+        ),
+    >(
         "\
         SELECT webhook.id, webhook.provider, webhook.destination_ciphertext,
-            webhook.destination_nonce
+            webhook.destination_nonce, webhook.mention_directory
         FROM project_webhooks AS webhook
         INNER JOIN projects AS project ON project.id = webhook.project_id
         WHERE webhook.project_id = $2 AND project.user_id = $1
@@ -740,14 +803,16 @@ pub(crate) async fn queue_project_event_in_transaction(
     .fetch_all(&mut **transaction)
     .await
     .map_err(classify)?;
-    for (webhook_id, provider, destination_ciphertext, destination_nonce) in &webhooks {
+    for (webhook_id, provider, destination_ciphertext, destination_nonce, mention_directory) in
+        &webhooks
+    {
         sqlx::query(
             "\
             INSERT INTO webhook_deliveries (
                 id, user_id, project_id, webhook_id, provider,
                 destination_ciphertext, destination_nonce,
-                event_type, payload, status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued')",
+                mention_directory, event_type, payload, status
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued')",
         )
         .bind(Uuid::now_v7())
         .bind(user_id)
@@ -756,6 +821,7 @@ pub(crate) async fn queue_project_event_in_transaction(
         .bind(provider)
         .bind(destination_ciphertext)
         .bind(destination_nonce)
+        .bind(mention_directory)
         .bind(event_type)
         .bind(payload)
         .execute(&mut **transaction)
@@ -787,6 +853,7 @@ fn validate_new_webhook(command: &NewProjectWebhook) -> Result<(), StorageError>
         || !is_v7(command.project_id)
         || invalid_encrypted_secret(&command.destination)
         || !valid_destination_hint(&command.destination_hint)
+        || !command.mention_directory.is_valid_for(command.provider)
         || command.events.is_empty()
         || command.events.len() > MAX_EVENT_TYPES
         || has_invalid_events(&command.events)
@@ -805,6 +872,12 @@ fn validate_webhook_update(command: &ProjectWebhookUpdate) -> Result<(), Storage
             hint,
         } => invalid_encrypted_secret(secret) || !valid_destination_hint(hint),
     };
+    let invalid_mention_directory = match &command.mention_directory {
+        WebhookMentionDirectoryUpdate::Keep => false,
+        WebhookMentionDirectoryUpdate::Replace(directory) => {
+            !directory.is_valid_for(command.provider)
+        }
+    };
     if !is_v7(command.id)
         || !is_v7(command.user_id)
         || !is_v7(command.project_id)
@@ -812,6 +885,7 @@ fn validate_webhook_update(command: &ProjectWebhookUpdate) -> Result<(), Storage
         || command.events.len() > MAX_EVENT_TYPES
         || has_invalid_events(&command.events)
         || invalid_destination
+        || invalid_mention_directory
         || command.expected_version <= 0
     {
         return Err(StorageError::InvalidConfiguration);
@@ -836,6 +910,24 @@ fn valid_destination_hint(value: &str) -> bool {
     (1..=120).contains(&length)
 }
 
+fn valid_mention_name(value: &str) -> bool {
+    let trimmed = value.trim();
+    let length = trimmed.chars().count();
+    value == trimmed
+        && (1..=MAX_MENTION_NAME_CHARS).contains(&length)
+        && !trimmed.chars().any(|character| {
+            character.is_control() || matches!(character, '@' | '<' | '>' | '{' | '}')
+        })
+}
+
+fn valid_google_chat_user_id(value: &str) -> bool {
+    let Some(digits) = value.strip_prefix("users/") else {
+        return false;
+    };
+    (1..=MAX_GOOGLE_CHAT_USER_ID_DIGITS).contains(&digits.len())
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 fn project_webhook(row: ProjectWebhookRow) -> ProjectWebhook {
     ProjectWebhook {
         id: row.id,
@@ -843,6 +935,7 @@ fn project_webhook(row: ProjectWebhookRow) -> ProjectWebhook {
         provider: WebhookProvider::parse(&row.provider)
             .expect("the webhook provider database constraint must stay in sync"),
         destination_hint: row.destination_hint,
+        mention_directory: row.mention_directory,
         events: row.events,
         enabled: row.enabled,
         version: row.version,

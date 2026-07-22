@@ -54,6 +54,7 @@ import {
   type ManagedWebhookProvider,
   type ProjectWebhook,
   type ProjectWebhookEvent,
+  type WebhookMentionDirectory,
   type WebhookDestinationMode,
   type WebhookDelivery,
 } from "./api/webhooks";
@@ -2346,6 +2347,7 @@ export default function App() {
     provider: ManagedWebhookProvider;
     url: string;
     events: ProjectWebhookEvent[];
+    mentionDirectory: WebhookMentionDirectory;
   }): Promise<void> {
     if (!selectedProjectId) throw new Error("project unavailable");
     setProjectsSaving(true);
@@ -2371,6 +2373,7 @@ export default function App() {
       url?: string;
       events: ProjectWebhookEvent[];
       enabled: boolean;
+      mentionDirectory: WebhookMentionDirectory;
     },
   ): Promise<void> {
     setProjectsSaving(true);
