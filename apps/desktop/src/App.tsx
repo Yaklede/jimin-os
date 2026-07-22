@@ -2789,6 +2789,7 @@ export default function App() {
               onOpenProject={openProjectFromAssistant}
               onOpenSchedule={openScheduleFromAssistant}
               onOpenDecisionInbox={() => navigate("decisions")}
+              onOpenMeetings={() => navigate("meetings")}
               onOpenSettings={() => navigate("settings")}
               onDecideRecommendation={decideHomeRecommendation}
             />

@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  AudioLines,
   CalendarDays,
   ChevronRight,
   Circle,
@@ -60,6 +61,7 @@ type HomeWorkspaceProps = {
     entry: Pick<ScheduleEntry, "id" | "startsAt">,
   ): void | Promise<void>;
   onOpenDecisionInbox(): void;
+  onOpenMeetings(): void;
   onOpenSettings(): void;
   onDecideRecommendation(
     recommendation: Recommendation,
@@ -87,6 +89,7 @@ export function HomeWorkspace({
   onOpenProject,
   onOpenSchedule,
   onOpenDecisionInbox,
+  onOpenMeetings,
   onOpenSettings,
   onDecideRecommendation,
 }: HomeWorkspaceProps) {
@@ -182,7 +185,15 @@ export function HomeWorkspace({
         </div>
         <div className="home-greeting__actions">
           <button
-            className="home-greeting__decisions focus-visible-control"
+            className="home-greeting__decisions home-greeting__meetings focus-visible-control"
+            type="button"
+            onClick={onOpenMeetings}
+          >
+            <AudioLines aria-hidden="true" />
+            <span>{copy.home.openMeetings}</span>
+          </button>
+          <button
+            className="home-greeting__decisions home-greeting__mobile-settings focus-visible-control"
             type="button"
             onClick={onOpenSettings}
           >

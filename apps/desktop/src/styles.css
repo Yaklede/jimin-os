@@ -496,6 +496,10 @@ svg {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.home-greeting__decisions.home-greeting__mobile-settings {
+  display: none;
+}
+
 .home-greeting,
 .home-command,
 .home-briefing,
@@ -6777,6 +6781,14 @@ svg {
   .os-sidebar,
   .os-topbar {
     display: none;
+  }
+
+  .home-greeting__meetings {
+    display: none;
+  }
+
+  .home-greeting__decisions.home-greeting__mobile-settings {
+    display: inline-flex;
   }
 
   .os-content {
