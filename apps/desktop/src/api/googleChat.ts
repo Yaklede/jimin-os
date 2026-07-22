@@ -42,6 +42,12 @@ export interface ProjectGoogleChatSource {
 
 export type ProjectInflowStatus = "pending" | "promoted" | "dismissed";
 
+export interface ProjectInflowMessage {
+  senderName: string | null;
+  contentText: string;
+  receivedAt: string;
+}
+
 export interface ProjectInflowItem {
   id: string;
   projectId: string;
@@ -49,7 +55,11 @@ export interface ProjectInflowItem {
   sourceName: string;
   senderName: string | null;
   contentText: string;
+  suggestedTaskTitle: string;
+  messageCount: number;
+  firstReceivedAt: string;
   receivedAt: string;
+  messages: ProjectInflowMessage[];
   status: ProjectInflowStatus;
   promotedTaskId: string | null;
   acknowledged: boolean;

@@ -610,20 +610,30 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         "확인이 필요한 회사 요청입니다.\n\t{}",
         "후속 내용 ".repeat(600)
     );
-    let provider_message = ProviderGoogleChatMessage {
-        provider_message_name: "spaces/company-room/messages/message-1.message-1".to_owned(),
-        provider_thread_name: Some("spaces/company-room/threads/thread-1".to_owned()),
-        sender_name: Some("업무 담당자".to_owned()),
-        content_text: long_message.clone(),
-        received_at: OffsetDateTime::now_utc(),
-    };
+    let received_at = OffsetDateTime::now_utc();
+    let provider_messages = [
+        ProviderGoogleChatMessage {
+            provider_message_name: "spaces/company-room/messages/message-1.message-1".to_owned(),
+            provider_thread_name: Some("spaces/company-room/threads/thread-1".to_owned()),
+            sender_name: Some("업무 담당자".to_owned()),
+            content_text: long_message.clone(),
+            received_at,
+        },
+        ProviderGoogleChatMessage {
+            provider_message_name: "spaces/company-room/messages/message-2.message-2".to_owned(),
+            provider_thread_name: Some("spaces/company-room/threads/thread-1".to_owned()),
+            sender_name: Some("개발 담당자".to_owned()),
+            content_text: "개발 범위와 예상 일정을 확인해 주세요.".to_owned(),
+            received_at: received_at + TimeDuration::seconds(1),
+        },
+    ];
     assert_eq!(
         database
-            .apply_google_chat_messages(&connection, std::slice::from_ref(&provider_message))
+            .apply_google_chat_messages(&connection, &provider_messages)
             .await
             .expect("first message should ingest")
             .len(),
-        1
+        2
     );
     assert!(
         database
@@ -637,7 +647,7 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
     );
     assert!(
         database
-            .apply_google_chat_messages(&connection, &[provider_message])
+            .apply_google_chat_messages(&connection, &provider_messages)
             .await
             .expect("duplicate provider message should be ignored")
             .is_empty()
@@ -650,7 +660,7 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         )
         .await
         .expect("project inflow should load");
-    assert_eq!(pending.len(), 1);
+    assert_eq!(pending.len(), 2);
     assert!(
         database
             .dismiss_project_inflow_item(
@@ -678,6 +688,19 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         .expect("owned inflow should promote")
         .expect("pending inflow should still be available");
     assert_eq!(promoted.status, ProjectInflowStatus::Promoted);
+    let promoted_group = database
+        .project_inflow_items(
+            owner.profile.id,
+            first_project.id,
+            Some(ProjectInflowStatus::Promoted),
+        )
+        .await
+        .expect("promoted Chat thread should load");
+    assert_eq!(promoted_group.len(), 2);
+    assert!(promoted_group.iter().all(|item| {
+        item.promoted_task_id == promoted.promoted_task_id
+            && item.provider_thread_name == promoted.provider_thread_name
+    }));
     let pool = sqlx::PgPool::connect(&database_url)
         .await
         .expect("test database should accept direct checks");

@@ -78,9 +78,9 @@ export const projectCopy = {
     "일을 바꾸지 못했어요. 최신 내용을 불러온 뒤 다시 시도해 주세요.",
   taskRemoveNotice:
     "일을 지우지 못했어요. 최신 내용을 불러온 뒤 다시 시도해 주세요.",
-  inflowTitle: "들어오는 업무",
+  inflowTitle: "확인할 대화",
   inflowDescription:
-    "회사 Google Chat에서 새 요청을 모아 보고, 필요한 내용만 할 일로 등록해요.",
+    "Chat 대화를 맥락별로 묶어 보여드려요. 해야 할 행동이 있는 대화만 할 일로 정리해요.",
   inflowConnectAccount: "회사 Google 계정 연결",
   inflowConnectAnotherAccount: "다른 회사 계정 연결",
   inflowConnectDescription:
@@ -93,12 +93,12 @@ export const projectCopy = {
   inflowAckLabel: "가져온 메시지에 👀 표시 남기기",
   inflowRefresh: "새 메시지 확인",
   inflowRemoveSource: "공간 연결 해제",
-  inflowEmpty: "새로 확인할 메시지가 없어요.",
+  inflowEmpty: "지금 검토할 업무 대화가 없어요.",
   inflowNoSource: "아직 확인할 Chat 공간을 연결하지 않았어요.",
-  inflowPromote: "할 일로 등록",
-  inflowDismiss: "이번에는 제외",
-  inflowTaskTitleLabel: "할 일 이름",
-  inflowTaskTitleHint: "요청에서 해야 할 행동을 짧게 정리해 주세요.",
+  inflowPromote: "할 일로 정리",
+  inflowDismiss: "업무 아님",
+  inflowTaskTitleLabel: "정리된 할 일",
+  inflowTaskTitleHint: "대화에서 해야 할 행동이나 완료 결과를 확인해 주세요.",
   inflowSourceProblem:
     "Chat 공간을 연결하지 못했어요. 회사 계정과 공간을 다시 확인해 주세요.",
   inflowLoadProblem:

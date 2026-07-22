@@ -278,21 +278,40 @@ function InflowItemRow({
   onDismiss(item: ProjectInflowItem): Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
-  const [title, setTitle] = useState(() =>
-    suggestedTaskTitle(item.contentText),
-  );
+  const [title, setTitle] = useState(() => item.suggestedTaskTitle);
 
   return (
     <li className="project-inflow-item">
       <div className="project-inflow-item__meta">
         <span>{item.sourceName}</span>
-        <span>{item.senderName ?? "보낸 사람 정보 없음"}</span>
-        <time dateTime={item.receivedAt}>
-          {formatReceivedAt(item.receivedAt)}
-        </time>
+        <span>대화 {item.messageCount}개</span>
+        <span>
+          {formatConversationRange(item.firstReceivedAt, item.receivedAt)}
+        </span>
         {item.acknowledged && <span>👀 표시 완료</span>}
       </div>
-      <p>{item.contentText}</p>
+      <div className="project-inflow-item__summary">
+        <strong>{item.suggestedTaskTitle}</strong>
+        <p>{item.contentText}</p>
+      </div>
+      {item.messages.length > 1 && (
+        <details className="project-inflow-item__context">
+          <summary>대화 맥락 {item.messages.length}개 보기</summary>
+          <ol>
+            {item.messages.map((message, index) => (
+              <li key={`${message.receivedAt}-${index}`}>
+                <div>
+                  <strong>{message.senderName ?? "보낸 사람 정보 없음"}</strong>
+                  <time dateTime={message.receivedAt}>
+                    {formatReceivedAt(message.receivedAt)}
+                  </time>
+                </div>
+                <p>{message.contentText}</p>
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
       {editing ? (
         <form
           className="project-inflow-item__promote"
@@ -356,14 +375,6 @@ function InflowItemRow({
   );
 }
 
-function suggestedTaskTitle(content: string): string {
-  const firstLine = content
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find(Boolean);
-  return (firstLine ?? "확인할 요청").replace(/^[\-*•]+\s*/, "").slice(0, 80);
-}
-
 function formatReceivedAt(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "받은 시간 확인 필요";
@@ -373,4 +384,23 @@ function formatReceivedAt(value: string): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
+}
+
+function formatConversationRange(
+  firstValue: string,
+  lastValue: string,
+): string {
+  const first = new Date(firstValue);
+  const last = new Date(lastValue);
+  if (Number.isNaN(first.getTime()) || Number.isNaN(last.getTime())) {
+    return "받은 시간 확인 필요";
+  }
+  const formatter = new Intl.DateTimeFormat("ko-KR", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  if (first.getTime() === last.getTime()) return formatter.format(last);
+  return `${formatter.format(first)}–${formatter.format(last)}`;
 }

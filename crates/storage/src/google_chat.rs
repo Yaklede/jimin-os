@@ -220,6 +220,7 @@ pub struct ProjectInflowItem {
     pub project_id: Uuid,
     pub source_id: Uuid,
     pub source_name: String,
+    pub provider_thread_name: Option<String>,
     pub sender_name: Option<String>,
     pub content_text: String,
     pub received_at: OffsetDateTime,
@@ -235,6 +236,7 @@ struct ProjectInflowItemRow {
     project_id: Uuid,
     source_id: Uuid,
     source_name: String,
+    provider_thread_name: Option<String>,
     sender_name: Option<String>,
     content_text: String,
     received_at: OffsetDateTime,
@@ -253,6 +255,7 @@ impl TryFrom<ProjectInflowItemRow> for ProjectInflowItem {
             project_id: row.project_id,
             source_id: row.source_id,
             source_name: row.source_name,
+            provider_thread_name: row.provider_thread_name,
             sender_name: row.sender_name,
             content_text: row.content_text,
             received_at: row.received_at,
@@ -985,7 +988,8 @@ impl Database {
         let status = status.map(status_name);
         let rows = sqlx::query_as::<_, ProjectInflowItemRow>(
             "SELECT item.id, item.project_id, item.source_id,
-                source.display_name AS source_name, item.sender_name, item.content_text,
+                source.display_name AS source_name, item.provider_thread_name,
+                item.sender_name, item.content_text,
                 item.received_at, item.status, item.promoted_task_id,
                 item.acknowledged_at, item.version
              FROM project_inflow_items AS item
@@ -1020,17 +1024,12 @@ impl Database {
             return Err(StorageError::InvalidConfiguration);
         }
         let mut transaction = self.pool().begin().await.map_err(classify)?;
-        let row = sqlx::query_as::<_, ProjectInflowItemRow>(
-            "UPDATE project_inflow_items AS item
-             SET status = 'dismissed'
-             FROM project_google_chat_sources AS source
-             WHERE item.id = $1 AND item.user_id = $2 AND item.project_id = $3
-               AND item.version = $4
-               AND item.status = 'pending' AND source.id = item.source_id
-             RETURNING item.id, item.project_id, item.source_id,
-                source.display_name AS source_name, item.sender_name, item.content_text,
-                item.received_at, item.status, item.promoted_task_id,
-                item.acknowledged_at, item.version",
+        let group = sqlx::query_as::<_, (Uuid, Option<String>)>(
+            "SELECT source_id, provider_thread_name
+             FROM project_inflow_items
+             WHERE id = $1 AND user_id = $2 AND project_id = $3
+               AND version = $4 AND status = 'pending'
+             FOR UPDATE",
         )
         .bind(item_id)
         .bind(user_id)
@@ -1039,8 +1038,36 @@ impl Database {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(classify)?;
-        let item = row.map(ProjectInflowItem::try_from).transpose()?;
-        if let Some(item) = item.as_ref() {
+        let Some((source_id, thread_name)) = group else {
+            transaction.rollback().await.map_err(classify)?;
+            return Ok(None);
+        };
+        let rows = sqlx::query_as::<_, ProjectInflowItemRow>(
+            "UPDATE project_inflow_items AS item
+             SET status = 'dismissed'
+             FROM project_google_chat_sources AS source
+             WHERE item.user_id = $2 AND item.project_id = $3
+               AND item.status = 'pending' AND source.id = item.source_id
+               AND (($4::TEXT IS NULL AND item.id = $1)
+                 OR ($4::TEXT IS NOT NULL AND item.source_id = $5
+                   AND item.provider_thread_name = $4))
+             RETURNING item.id, item.project_id, item.source_id,
+                source.display_name AS source_name, item.provider_thread_name,
+                item.sender_name, item.content_text,
+                item.received_at, item.status, item.promoted_task_id,
+                item.acknowledged_at, item.version",
+        )
+        .bind(item_id)
+        .bind(user_id)
+        .bind(project_id)
+        .bind(&thread_name)
+        .bind(source_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let mut selected = None;
+        for row in rows {
+            let item = ProjectInflowItem::try_from(row)?;
             append_change(
                 &mut transaction,
                 user_id,
@@ -1049,9 +1076,12 @@ impl Database {
                 item.version,
             )
             .await?;
+            if item.id == item_id {
+                selected = Some(item);
+            }
         }
         transaction.commit().await.map_err(classify)?;
-        Ok(item)
+        Ok(selected)
     }
 
     /// Promotes one pending inflow item into an owned project task atomically.
@@ -1078,8 +1108,8 @@ impl Database {
             return Err(StorageError::InvalidConfiguration);
         }
         let mut transaction = self.pool().begin().await.map_err(classify)?;
-        let locked = sqlx::query_as::<_, (Uuid, String)>(
-            "SELECT source_id, content_text
+        let locked = sqlx::query_as::<_, (Uuid, Option<String>)>(
+            "SELECT source_id, provider_thread_name
              FROM project_inflow_items
              WHERE id = $1 AND user_id = $2 AND project_id = $3
                AND version = $4 AND status = 'pending'
@@ -1092,63 +1122,126 @@ impl Database {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(classify)?;
-        let Some((_, source_text)) = locked else {
+        let Some((source_id, thread_name)) = locked else {
             transaction.rollback().await.map_err(classify)?;
             return Ok(None);
         };
-        let task_row = sqlx::query_as::<_, PromotedTaskRow>(
-            "INSERT INTO tasks (id, user_id, project_id, title, notes, status, priority, due_at)
-             VALUES ($1, $2, $3, $4, $5, 'open', $6, $7)
-             RETURNING id, project_id, title, notes, status, priority, due_at, completed_at, version",
-        )
-        .bind(command.task_id)
-        .bind(command.user_id)
-        .bind(command.project_id)
-        .bind(command.title.trim())
-        .bind(truncate_chars(&source_text, MAX_TASK_NOTES_CHARS))
-        .bind(command.priority)
-        .bind(command.due_at)
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(classify)?;
-        let task = task_row.into_task()?;
-        append_change(
+        let source_messages =
+            inflow_group_messages(&mut transaction, command, source_id, thread_name.as_deref())
+                .await?;
+        let task_notes = google_chat_task_notes(&source_messages);
+        insert_promoted_task(&mut transaction, command, &task_notes).await?;
+        let selected = mark_inflow_group_promoted(
             &mut transaction,
-            command.user_id,
-            "task",
-            task.id,
-            task.version,
+            command,
+            source_id,
+            thread_name.as_deref(),
         )
         .await?;
-        queue_task_webhook_in_transaction(&mut transaction, command.user_id, &task, "task.created")
-            .await?;
-        let row = sqlx::query_as::<_, ProjectInflowItemRow>(
-            "UPDATE project_inflow_items AS item
-             SET status = 'promoted', promoted_task_id = $2
-             FROM project_google_chat_sources AS source
-             WHERE item.id = $1 AND source.id = item.source_id
-             RETURNING item.id, item.project_id, item.source_id,
-                source.display_name AS source_name, item.sender_name, item.content_text,
-                item.received_at, item.status, item.promoted_task_id,
-                item.acknowledged_at, item.version",
-        )
-        .bind(command.item_id)
-        .bind(command.task_id)
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(classify)?;
+        transaction.commit().await.map_err(classify)?;
+        Ok(selected)
+    }
+}
+
+type InflowMessageEvidence = (Uuid, Option<String>, String, OffsetDateTime);
+
+async fn inflow_group_messages(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    command: &PromoteProjectInflowItem,
+    source_id: Uuid,
+    thread_name: Option<&str>,
+) -> Result<Vec<InflowMessageEvidence>, StorageError> {
+    sqlx::query_as::<_, InflowMessageEvidence>(
+        "SELECT id, sender_name, content_text, received_at
+         FROM project_inflow_items
+         WHERE user_id = $1 AND project_id = $2 AND status = 'pending'
+           AND (($3::TEXT IS NULL AND id = $4)
+             OR ($3::TEXT IS NOT NULL AND source_id = $5
+               AND provider_thread_name = $3))
+         ORDER BY received_at ASC, id ASC
+         FOR UPDATE",
+    )
+    .bind(command.user_id)
+    .bind(command.project_id)
+    .bind(thread_name)
+    .bind(command.item_id)
+    .bind(source_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(classify)
+}
+
+async fn insert_promoted_task(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    command: &PromoteProjectInflowItem,
+    task_notes: &str,
+) -> Result<(), StorageError> {
+    let row = sqlx::query_as::<_, PromotedTaskRow>(
+        "INSERT INTO tasks (id, user_id, project_id, title, notes, status, priority, due_at)
+         VALUES ($1, $2, $3, $4, $5, 'open', $6, $7)
+         RETURNING id, project_id, title, notes, status, priority, due_at, completed_at, version",
+    )
+    .bind(command.task_id)
+    .bind(command.user_id)
+    .bind(command.project_id)
+    .bind(command.title.trim())
+    .bind(task_notes)
+    .bind(command.priority)
+    .bind(command.due_at)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(classify)?;
+    let task = row.into_task()?;
+    append_change(transaction, command.user_id, "task", task.id, task.version).await?;
+    queue_task_webhook_in_transaction(transaction, command.user_id, &task, "task.created").await
+}
+
+async fn mark_inflow_group_promoted(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    command: &PromoteProjectInflowItem,
+    source_id: Uuid,
+    thread_name: Option<&str>,
+) -> Result<Option<ProjectInflowItem>, StorageError> {
+    let rows = sqlx::query_as::<_, ProjectInflowItemRow>(
+        "UPDATE project_inflow_items AS item
+         SET status = 'promoted', promoted_task_id = $2
+         FROM project_google_chat_sources AS source
+         WHERE item.user_id = $3 AND item.project_id = $4
+           AND item.status = 'pending' AND source.id = item.source_id
+           AND (($5::TEXT IS NULL AND item.id = $1)
+             OR ($5::TEXT IS NOT NULL AND item.source_id = $6
+               AND item.provider_thread_name = $5))
+         RETURNING item.id, item.project_id, item.source_id,
+            source.display_name AS source_name, item.provider_thread_name,
+            item.sender_name, item.content_text,
+            item.received_at, item.status, item.promoted_task_id,
+            item.acknowledged_at, item.version",
+    )
+    .bind(command.item_id)
+    .bind(command.task_id)
+    .bind(command.user_id)
+    .bind(command.project_id)
+    .bind(thread_name)
+    .bind(source_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(classify)?;
+    let mut selected = None;
+    for row in rows {
         let item = ProjectInflowItem::try_from(row)?;
         append_change(
-            &mut transaction,
+            transaction,
             command.user_id,
             "project_inflow_item",
             item.id,
             item.version,
         )
         .await?;
-        transaction.commit().await.map_err(classify)?;
-        Ok(Some(item))
+        if item.id == command.item_id {
+            selected = Some(item);
+        }
     }
+    Ok(selected)
 }
 
 #[derive(sqlx::FromRow)]
@@ -1331,6 +1424,18 @@ fn valid_provider_message(message: &ProviderGoogleChatMessage) -> bool {
             .as_deref()
             .is_none_or(|value| valid_text(value, MAX_DISPLAY_NAME_CHARS, false))
         && valid_text(&message.content_text, MAX_MESSAGE_TEXT_CHARS, true)
+}
+
+fn google_chat_task_notes(messages: &[(Uuid, Option<String>, String, OffsetDateTime)]) -> String {
+    let mut notes = String::from("Google Chat 대화에서 정리한 업무입니다.\n\n");
+    for (_, sender_name, content_text, _) in messages {
+        let sender = sender_name.as_deref().unwrap_or("보낸 사람 정보 없음");
+        notes.push_str(sender);
+        notes.push_str(":\n");
+        notes.push_str(content_text.trim());
+        notes.push_str("\n\n");
+    }
+    truncate_chars(notes.trim_end(), MAX_TASK_NOTES_CHARS)
 }
 
 fn valid_secret(secret: &EncryptedCalendarSecret) -> bool {

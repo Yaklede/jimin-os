@@ -663,11 +663,23 @@ pub struct ProjectInflowItemResponse {
     source_name: String,
     sender_name: Option<String>,
     content_text: String,
+    suggested_task_title: String,
+    message_count: usize,
+    first_received_at: String,
     received_at: String,
+    messages: Vec<ProjectInflowMessageResponse>,
     status: String,
     promoted_task_id: Option<uuid::Uuid>,
     acknowledged: bool,
     version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectInflowMessageResponse {
+    sender_name: Option<String>,
+    content_text: String,
+    received_at: String,
 }
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
@@ -1364,6 +1376,7 @@ pub(crate) fn error_response(
         GoogleChatSpaceListResponse,
         ProjectGoogleChatSourceResponse,
         ProjectGoogleChatSourceListResponse,
+        ProjectInflowMessageResponse,
         ProjectInflowItemResponse,
         ProjectInflowItemListResponse,
         CreateProjectGoogleChatSourceRequest,
@@ -5663,7 +5676,7 @@ async fn list_project_inflow_items(
         .await
     {
         Ok(items) => {
-            let items = items
+            let items = group_project_inflow_candidates(items)
                 .into_iter()
                 .map(project_inflow_item_response)
                 .collect::<Result<Vec<_>, _>>();
@@ -5733,7 +5746,8 @@ async fn decide_project_inflow_item(
         _ => return invalid_request_response(request_id),
     };
     match result {
-        Ok(Some(item)) => match project_inflow_item_response(item) {
+        Ok(Some(item)) => match project_inflow_item_response(single_project_inflow_candidate(item))
+        {
             Ok(response) => no_store_json(response),
             Err(()) => unavailable_response(request_id),
         },
@@ -6112,24 +6126,205 @@ fn project_google_chat_source_response(
     })
 }
 
-fn project_inflow_item_response(item: ProjectInflowItem) -> Result<ProjectInflowItemResponse, ()> {
-    let status = match item.status {
+struct ProjectInflowCandidate {
+    representative: ProjectInflowItem,
+    focus: ProjectInflowItem,
+    messages: Vec<ProjectInflowItem>,
+}
+
+fn single_project_inflow_candidate(item: ProjectInflowItem) -> ProjectInflowCandidate {
+    ProjectInflowCandidate {
+        representative: item.clone(),
+        focus: item.clone(),
+        messages: vec![item],
+    }
+}
+
+fn group_project_inflow_candidates(items: Vec<ProjectInflowItem>) -> Vec<ProjectInflowCandidate> {
+    let mut groups =
+        BTreeMap::<(uuid::Uuid, String, &'static str, Option<uuid::Uuid>), Vec<_>>::new();
+    for item in items {
+        let group = item.provider_thread_name.clone().map_or_else(
+            || format!("message:{}", item.id),
+            |thread| format!("thread:{thread}"),
+        );
+        let status = project_inflow_status_name(item.status);
+        groups
+            .entry((item.source_id, group, status, item.promoted_task_id))
+            .or_default()
+            .push(item);
+    }
+
+    let mut candidates = groups
+        .into_values()
+        .filter_map(|mut messages| {
+            messages.sort_by_key(|item| (item.received_at, item.id));
+            let focus = messages
+                .iter()
+                .max_by_key(|item| {
+                    (
+                        inflow_actionability_score(&item.content_text),
+                        item.content_text.chars().count(),
+                    )
+                })?
+                .clone();
+            let representative = messages.last()?.clone();
+            if representative.status == ProjectInflowStatus::Pending
+                && inflow_actionability_score(&focus.content_text) < 2
+            {
+                return None;
+            }
+            Some(ProjectInflowCandidate {
+                representative,
+                focus,
+                messages,
+            })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.representative.received_at));
+    candidates
+}
+
+fn project_inflow_status_name(status: ProjectInflowStatus) -> &'static str {
+    match status {
         ProjectInflowStatus::Pending => "pending",
         ProjectInflowStatus::Promoted => "promoted",
         ProjectInflowStatus::Dismissed => "dismissed",
+    }
+}
+
+fn inflow_actionability_score(content: &str) -> u8 {
+    let normalized = content.trim().to_lowercase();
+    let meaningful_chars = normalized
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .count();
+    if meaningful_chars < 4 {
+        return 0;
+    }
+    let request_terms = [
+        "요청",
+        "확인",
+        "검토",
+        "개발",
+        "수정",
+        "오류",
+        "안되",
+        "안돼",
+        "해야",
+        "필요",
+        "가능",
+        "전달",
+        "등록",
+        "처리",
+        "일정",
+        "문의",
+        "부탁",
+        "언제",
+        "얼마나",
+        "request",
+        "check",
+        "review",
+        "fix",
+        "issue",
+        "error",
+        "need",
+        "please",
+    ];
+    let mut score = 0;
+    if request_terms.iter().any(|term| normalized.contains(term)) {
+        score += 3;
+    }
+    if normalized.contains('?') || normalized.contains('？') {
+        score += 2;
+    }
+    if meaningful_chars >= 24 {
+        score += 1;
+    }
+    score
+}
+
+fn suggested_inflow_task_title(content: &str) -> String {
+    let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = normalized
+        .trim_start_matches("혹시 ")
+        .trim_start_matches("혹시")
+        .trim();
+    let lowered = normalized.to_lowercase();
+    let task_like_title = if lowered.contains("개발")
+        && (lowered.contains("얼마나 걸")
+            || lowered.contains("소요 시간")
+            || lowered.contains("예상 일정"))
+    {
+        Some("개발 범위와 예상 일정 확인")
+    } else if (lowered.contains("안되") || lowered.contains("안돼") || lowered.contains("오류"))
+        && (lowered.contains("확인") || lowered.contains("처리") || lowered.contains("대응"))
+    {
+        Some("문제 원인 확인 및 대응")
+    } else if lowered.contains("안내") && (lowered.contains("해야") || lowered.contains("필요"))
+    {
+        Some("안내할 내용 확인 및 전달")
+    } else if lowered.contains("전달") && (lowered.contains("확실") || lowered.contains("정확"))
+    {
+        Some("전달할 내용과 기준 확인")
+    } else {
+        None
     };
+    if let Some(title) = task_like_title {
+        return title.to_owned();
+    }
+    let title = normalized
+        .trim_end_matches(['.', '?', '!', '。', '？'])
+        .chars()
+        .take(100)
+        .collect::<String>();
+    if title.chars().count() >= 4 {
+        title
+    } else {
+        "대화 내용 확인".to_owned()
+    }
+}
+
+fn project_inflow_item_response(
+    candidate: ProjectInflowCandidate,
+) -> Result<ProjectInflowItemResponse, ()> {
+    let ProjectInflowCandidate {
+        representative,
+        focus,
+        messages,
+    } = candidate;
+    let first_received_at = messages.first().ok_or(())?.received_at;
+    let acknowledged = messages.iter().all(|item| item.acknowledged_at.is_some());
+    let message_count = messages.len();
+    let messages = messages
+        .into_iter()
+        .map(|item| {
+            Ok(ProjectInflowMessageResponse {
+                sender_name: item.sender_name,
+                content_text: item.content_text,
+                received_at: item.received_at.format(&Rfc3339).map_err(|_| ())?,
+            })
+        })
+        .collect::<Result<Vec<_>, ()>>()?;
     Ok(ProjectInflowItemResponse {
-        id: item.id,
-        project_id: item.project_id,
-        source_id: item.source_id,
-        source_name: item.source_name,
-        sender_name: item.sender_name,
-        content_text: item.content_text,
-        received_at: item.received_at.format(&Rfc3339).map_err(|_| ())?,
-        status: status.to_owned(),
-        promoted_task_id: item.promoted_task_id,
-        acknowledged: item.acknowledged_at.is_some(),
-        version: item.version,
+        id: representative.id,
+        project_id: representative.project_id,
+        source_id: representative.source_id,
+        source_name: representative.source_name,
+        sender_name: focus.sender_name,
+        suggested_task_title: suggested_inflow_task_title(&focus.content_text),
+        content_text: focus.content_text,
+        message_count,
+        first_received_at: first_received_at.format(&Rfc3339).map_err(|_| ())?,
+        received_at: representative
+            .received_at
+            .format(&Rfc3339)
+            .map_err(|_| ())?,
+        messages,
+        status: project_inflow_status_name(representative.status).to_owned(),
+        promoted_task_id: representative.promoted_task_id,
+        acknowledged,
+        version: representative.version,
     })
 }
 
@@ -7856,6 +8051,61 @@ mod tests {
                 .expect("handler should respond");
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
+    }
+
+    #[test]
+    fn inflow_candidates_group_threads_and_hide_reaction_only_messages() {
+        let project_id = Uuid::now_v7();
+        let source_id = Uuid::now_v7();
+        let thread_name = Some("spaces/company/threads/request-1".to_owned());
+        let make_item =
+            |content: &str, received_at: OffsetDateTime, provider_thread_name: Option<String>| {
+                ProjectInflowItem {
+                    id: Uuid::now_v7(),
+                    project_id,
+                    source_id,
+                    source_name: "PAYMENTS CS".to_owned(),
+                    provider_thread_name,
+                    sender_name: Some("업무 담당자".to_owned()),
+                    content_text: content.to_owned(),
+                    received_at,
+                    status: ProjectInflowStatus::Pending,
+                    promoted_task_id: None,
+                    acknowledged_at: Some(received_at),
+                    version: 1,
+                }
+            };
+        let items = vec![
+            make_item("ㅠ", OffsetDateTime::UNIX_EPOCH, thread_name.clone()),
+            make_item(
+                "혹시 이 기능은 개발에 얼마나 걸릴까요?",
+                OffsetDateTime::UNIX_EPOCH + TimeDuration::seconds(1),
+                thread_name,
+            ),
+            make_item(
+                "ㅇㅇ",
+                OffsetDateTime::UNIX_EPOCH + TimeDuration::seconds(2),
+                None,
+            ),
+        ];
+
+        let candidates = group_project_inflow_candidates(items);
+
+        assert_eq!(candidates.len(), 1);
+        let response = project_inflow_item_response(
+            candidates
+                .into_iter()
+                .next()
+                .expect("one candidate should remain"),
+        )
+        .expect("candidate should serialize");
+        assert_eq!(response.message_count, 2);
+        assert_eq!(response.messages.len(), 2);
+        assert_eq!(
+            response.content_text,
+            "혹시 이 기능은 개발에 얼마나 걸릴까요?"
+        );
+        assert_eq!(response.suggested_task_title, "개발 범위와 예상 일정 확인");
     }
 
     #[tokio::test]
