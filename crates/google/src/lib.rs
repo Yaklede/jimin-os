@@ -2404,9 +2404,10 @@ fn validated_chat_message_segments(message_name: &str) -> Result<[&str; 4], Goog
         || validated_chat_space_id(&format!("spaces/{space_id}")).is_err()
         || message_id.is_empty()
         || message_id.len() > 240
+        || matches!(*message_id, "." | "..")
         || !message_id
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
         return Err(GoogleAuthError::InvalidRequest);
     }
@@ -2515,6 +2516,16 @@ mod tests {
     #[test]
     fn chat_message_order_matches_google_api_contract() {
         assert_eq!(GOOGLE_CHAT_MESSAGE_ORDER, "createTime ASC");
+    }
+
+    #[test]
+    fn chat_message_names_accept_google_system_ids_without_path_traversal() {
+        assert!(
+            validated_chat_message_segments("spaces/AAAAAAAAAAA/messages/BBBBBBBBBBB.BBBBBBBBBBB")
+                .is_ok()
+        );
+        assert!(validated_chat_message_segments("spaces/AAAAAAAAAAA/messages/.").is_err());
+        assert!(validated_chat_message_segments("spaces/AAAAAAAAAAA/messages/..").is_err());
     }
 
     #[test]
