@@ -3241,11 +3241,11 @@ async fn persist_agent_action(
                 INSERT INTO webhook_deliveries (
                     id, user_id, project_id, webhook_id, provider,
                     destination_ciphertext, destination_nonce,
-                    event_type, payload, status
+                    mention_directory, event_type, payload, status
                 )
                 SELECT $1, $2, webhook.project_id, webhook.id, webhook.provider,
                     webhook.destination_ciphertext, webhook.destination_nonce,
-                    'chat.message', $5, 'queued'
+                    webhook.mention_directory, 'chat.message', $5, 'queued'
                 FROM project_webhooks AS webhook
                 INNER JOIN projects AS project ON project.id = webhook.project_id
                 WHERE webhook.id = $4 AND webhook.project_id = $3

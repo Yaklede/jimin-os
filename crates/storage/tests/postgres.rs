@@ -1495,10 +1495,14 @@ async fn agent_webhook_message_commits_with_its_action_audit() {
             id: Uuid::now_v7(),
             user_id: owner.profile.id,
             project_id: project.id,
-            provider: WebhookProvider::Discord,
+            provider: WebhookProvider::GoogleChat,
             destination: encrypted_test_destination(31),
-            destination_hint: "Discord 채널".to_owned(),
-            mention_directory: GoogleChatMentionDirectory::default(),
+            destination_hint: "Google Chat 공간".to_owned(),
+            mention_directory: GoogleChatMentionDirectory {
+                users: [("조지민".to_owned(), "users/12345".to_owned())]
+                    .into_iter()
+                    .collect(),
+            },
             events: vec!["chat.message".to_owned()],
         })
         .await
@@ -1508,7 +1512,7 @@ async fn agent_webhook_message_commits_with_its_action_audit() {
         .create_conversation(&NewConversation {
             id: conversation_id,
             user_id: owner.profile.id,
-            title: Some("Discord 전송".to_owned()),
+            title: Some("Google Chat 전송".to_owned()),
         })
         .await
         .expect("conversation should persist");
@@ -1519,7 +1523,7 @@ async fn agent_webhook_message_commits_with_its_action_audit() {
             client_message_id: Uuid::now_v7(),
             user_id: owner.profile.id,
             conversation_id,
-            content: "확인해야 할 일감을 Discord로 보내 줘".to_owned(),
+            content: "확인해야 할 일감을 Google Chat으로 보내 줘".to_owned(),
         })
         .await
         .expect("turn should queue");
@@ -1548,13 +1552,13 @@ async fn agent_webhook_message_commits_with_its_action_audit() {
                 job.id,
                 runner_id,
                 Uuid::now_v7(),
-                "연결된 Discord 채널로 메시지 전송을 시작했어요.",
+                "연결된 Google Chat 공간으로 메시지 전송을 시작했어요.",
                 None,
                 &[AgentActionCommand::SendWebhookMessage {
                     id: delivery_id,
                     project_id: project.id,
                     webhook_id: webhook.id,
-                    message: "확인해야 할 일감을 검토해 주세요.".to_owned(),
+                    message: "@{조지민} 확인해야 할 일감을 검토해 주세요.".to_owned(),
                 }],
             )
             .await
@@ -1603,7 +1607,19 @@ async fn agent_webhook_message_commits_with_its_action_audit() {
     assert_eq!(delivery.1, "chat.message");
     assert_eq!(
         delivery.2["message"],
-        serde_json::Value::String("확인해야 할 일감을 검토해 주세요.".to_owned())
+        serde_json::Value::String("@{조지민} 확인해야 할 일감을 검토해 주세요.".to_owned())
+    );
+    let mention_snapshot: serde_json::Value =
+        sqlx::query_scalar("SELECT mention_directory FROM webhook_deliveries WHERE id = $1")
+            .bind(delivery_id)
+            .fetch_one(&pool)
+            .await
+            .expect("queued Agent webhook mention directory should load");
+    assert_eq!(
+        mention_snapshot,
+        serde_json::json!({
+            "users": { "조지민": "users/12345" }
+        })
     );
 
     pool.close().await;
