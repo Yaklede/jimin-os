@@ -15,6 +15,12 @@ import {
 import { FormEvent, useEffect, useRef, useState } from "react";
 
 import { type Project, type Workspace } from "../api/projects";
+import {
+  type GoogleChatAccount,
+  type GoogleChatSpace,
+  type ProjectGoogleChatSource,
+  type ProjectInflowItem,
+} from "../api/googleChat";
 import { type Goal } from "../api/goals";
 import { type Task } from "../api/planning";
 import {
@@ -34,6 +40,7 @@ import {
 import { EmptySurface } from "./HomeWorkspace";
 import { GoalsPanel } from "./GoalsPanel";
 import { ProjectWebhookPanel } from "./ProjectWebhookPanel";
+import { ProjectInflowPanel } from "./ProjectInflowPanel";
 
 type ProjectsWorkspaceProps = {
   workspaces: Workspace[];
@@ -42,13 +49,20 @@ type ProjectsWorkspaceProps = {
   tasks: Task[];
   webhooks: ProjectWebhook[];
   webhookDeliveries: WebhookDelivery[];
+  googleChatAccountsAvailable: boolean;
+  googleChatAccounts: GoogleChatAccount[];
+  googleChatSpaces: GoogleChatSpace[];
+  googleChatSources: ProjectGoogleChatSource[];
+  projectInflowItems: ProjectInflowItem[];
   selectedWorkspaceId: string | undefined;
   selectedProjectId: string | undefined;
   highlightedTaskId: string | undefined;
   loading: boolean;
   webhookLoading: boolean;
+  inflowLoading: boolean;
   saving: boolean;
   error: string | undefined;
+  inflowError: string | undefined;
   onSelectWorkspace(workspaceId: string): void;
   onSelectProject(projectId: string): void;
   onOpenGoalTask(taskId: string, projectId: string): void;
@@ -121,6 +135,18 @@ type ProjectsWorkspaceProps = {
   onTestWebhook(webhook: ProjectWebhook): Promise<void>;
   onDeleteWebhook(webhook: ProjectWebhook): Promise<void>;
   onRetryWebhookDelivery(delivery: WebhookDelivery): Promise<void>;
+  onConnectGoogleChatAccount(): Promise<void>;
+  onLoadGoogleChatSpaces(accountId: string): Promise<void>;
+  onCreateGoogleChatSource(input: {
+    accountId: string;
+    spaceName: string;
+    displayName: string;
+    acknowledgeWithReaction: boolean;
+  }): Promise<void>;
+  onDeleteGoogleChatSource(source: ProjectGoogleChatSource): Promise<void>;
+  onSyncGoogleChatSource(source: ProjectGoogleChatSource): Promise<void>;
+  onPromoteInflow(item: ProjectInflowItem, title: string): Promise<void>;
+  onDismissInflow(item: ProjectInflowItem): Promise<void>;
 };
 
 export function ProjectsWorkspace({
@@ -130,13 +156,20 @@ export function ProjectsWorkspace({
   tasks,
   webhooks,
   webhookDeliveries,
+  googleChatAccountsAvailable,
+  googleChatAccounts,
+  googleChatSpaces,
+  googleChatSources,
+  projectInflowItems,
   selectedWorkspaceId,
   selectedProjectId,
   highlightedTaskId,
   loading,
   webhookLoading,
+  inflowLoading,
   saving,
   error,
+  inflowError,
   onSelectWorkspace,
   onSelectProject,
   onOpenGoalTask,
@@ -155,6 +188,13 @@ export function ProjectsWorkspace({
   onTestWebhook,
   onDeleteWebhook,
   onRetryWebhookDelivery,
+  onConnectGoogleChatAccount,
+  onLoadGoogleChatSpaces,
+  onCreateGoogleChatSource,
+  onDeleteGoogleChatSource,
+  onSyncGoogleChatSource,
+  onPromoteInflow,
+  onDismissInflow,
 }: ProjectsWorkspaceProps) {
   const [formOpen, setFormOpen] = useState(false);
   const [title, setTitle] = useState("");
@@ -757,6 +797,23 @@ export function ProjectsWorkspace({
                   </section>
                 )}
               </div>
+              <ProjectInflowPanel
+                accountsAvailable={googleChatAccountsAvailable}
+                accounts={googleChatAccounts}
+                spaces={googleChatSpaces}
+                sources={googleChatSources}
+                items={projectInflowItems}
+                loading={inflowLoading}
+                saving={saving}
+                problemMessage={inflowError}
+                onConnectAccount={onConnectGoogleChatAccount}
+                onLoadSpaces={onLoadGoogleChatSpaces}
+                onCreateSource={onCreateGoogleChatSource}
+                onDeleteSource={onDeleteGoogleChatSource}
+                onSyncSource={onSyncGoogleChatSource}
+                onPromote={onPromoteInflow}
+                onDismiss={onDismissInflow}
+              />
               <ProjectWebhookPanel
                 projectId={selectedProject.id}
                 webhooks={webhooks}

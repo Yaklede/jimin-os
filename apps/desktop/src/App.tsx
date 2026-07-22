@@ -44,6 +44,21 @@ import {
 } from "./api/projects";
 import { createGoal, fetchGoals, updateGoal, type Goal } from "./api/goals";
 import {
+  createProjectGoogleChatSource,
+  decideProjectInflow,
+  deleteProjectGoogleChatSource,
+  fetchGoogleChatConnections,
+  fetchGoogleChatSpaces,
+  fetchProjectGoogleChatSources,
+  fetchProjectInflow,
+  startGoogleChatAuthorization,
+  syncProjectGoogleChatSource,
+  type GoogleChatAccount,
+  type GoogleChatSpace,
+  type ProjectGoogleChatSource,
+  type ProjectInflowItem,
+} from "./api/googleChat";
+import {
   createProjectWebhook,
   deleteProjectWebhook,
   fetchProjectWebhooks,
@@ -191,6 +206,20 @@ export default function App() {
   const [goals, setGoals] = useState<Goal[]>([]);
   const [projectTasks, setProjectTasks] = useState<Task[]>([]);
   const [projectWebhooks, setProjectWebhooks] = useState<ProjectWebhook[]>([]);
+  const [googleChatAccountsAvailable, setGoogleChatAccountsAvailable] =
+    useState(false);
+  const [googleChatAccounts, setGoogleChatAccounts] = useState<
+    GoogleChatAccount[]
+  >([]);
+  const [googleChatSpaces, setGoogleChatSpaces] = useState<GoogleChatSpace[]>(
+    [],
+  );
+  const [projectGoogleChatSources, setProjectGoogleChatSources] = useState<
+    ProjectGoogleChatSource[]
+  >([]);
+  const [projectInflowItems, setProjectInflowItems] = useState<
+    ProjectInflowItem[]
+  >([]);
   const [webhookDeliveries, setWebhookDeliveries] = useState<WebhookDelivery[]>(
     [],
   );
@@ -206,6 +235,13 @@ export default function App() {
   >();
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [webhooksLoading, setWebhooksLoading] = useState(false);
+  const [inflowLoading, setInflowLoading] = useState(false);
+  const [inflowSaving, setInflowSaving] = useState(false);
+  const [inflowError, setInflowError] = useState<string>();
+  const [
+    googleChatAuthorizationExpiresAt,
+    setGoogleChatAuthorizationExpiresAt,
+  ] = useState<string>();
   const [projectsSaving, setProjectsSaving] = useState(false);
   const [goalsLoading, setGoalsLoading] = useState(false);
   const [goalsSaving, setGoalsSaving] = useState(false);
@@ -671,6 +707,43 @@ export default function App() {
       withAuthenticatedSession,
     ]);
 
+  const loadGoogleChatAccounts = useCallback(async (): Promise<
+    GoogleChatAccount[] | undefined
+  > => {
+    if (!tokens) return undefined;
+    try {
+      const connection = await withAuthenticatedSession((accessToken) =>
+        fetchGoogleChatConnections(apiBaseUrl, accessToken),
+      );
+      setGoogleChatAccountsAvailable(connection.available);
+      setGoogleChatAccounts(connection.items);
+      if (connection.items.some((account) => account.status === "active")) {
+        setGoogleChatAuthorizationExpiresAt(undefined);
+      }
+      return connection.items;
+    } catch {
+      setInflowError(copy.projects.inflowLoadProblem);
+      return undefined;
+    }
+  }, [apiBaseUrl, tokens, withAuthenticatedSession]);
+
+  const beginGoogleChatConnection = useCallback(async (): Promise<void> => {
+    if (!tokens || inflowSaving) return;
+    setInflowSaving(true);
+    setInflowError(undefined);
+    try {
+      const authorization = await withAuthenticatedSession((accessToken) =>
+        startGoogleChatAuthorization(apiBaseUrl, accessToken),
+      );
+      await openExternalUrl(authorization.authorizationUrl);
+      setGoogleChatAuthorizationExpiresAt(authorization.expiresAt);
+    } catch {
+      setInflowError(copy.projects.inflowSourceProblem);
+    } finally {
+      setInflowSaving(false);
+    }
+  }, [apiBaseUrl, inflowSaving, tokens, withAuthenticatedSession]);
+
   const loadWorkspaces = useCallback(async () => {
     if (!tokens) return;
     setWorkspacesReady(false);
@@ -790,6 +863,54 @@ export default function App() {
     [apiBaseUrl, tokens, withAuthenticatedSession],
   );
 
+  const loadProjectInflow = useCallback(
+    async (projectId: string) => {
+      if (!tokens) return undefined;
+      setInflowLoading(true);
+      setInflowError(undefined);
+      try {
+        const [sources, items] = await withAuthenticatedSession((accessToken) =>
+          Promise.all([
+            fetchProjectGoogleChatSources(apiBaseUrl, accessToken, projectId),
+            fetchProjectInflow(apiBaseUrl, accessToken, projectId, "pending"),
+          ]),
+        );
+        setProjectGoogleChatSources(sources);
+        setProjectInflowItems(items);
+        return { sources, items };
+      } catch {
+        setProjectGoogleChatSources([]);
+        setProjectInflowItems([]);
+        setInflowError(copy.projects.inflowLoadProblem);
+        return undefined;
+      } finally {
+        setInflowLoading(false);
+      }
+    },
+    [apiBaseUrl, tokens, withAuthenticatedSession],
+  );
+
+  const loadGoogleChatSpaces = useCallback(
+    async (accountId: string): Promise<void> => {
+      if (!tokens || !accountId) return;
+      setInflowLoading(true);
+      setInflowError(undefined);
+      try {
+        setGoogleChatSpaces(
+          await withAuthenticatedSession((accessToken) =>
+            fetchGoogleChatSpaces(apiBaseUrl, accessToken, accountId),
+          ),
+        );
+      } catch {
+        setGoogleChatSpaces([]);
+        setInflowError(copy.projects.inflowLoadProblem);
+      } finally {
+        setInflowLoading(false);
+      }
+    },
+    [apiBaseUrl, tokens, withAuthenticatedSession],
+  );
+
   const loadConversationMessages = useCallback(
     async (conversationId: string, background = false) => {
       if (!tokens) return;
@@ -888,6 +1009,11 @@ export default function App() {
         forceFull || entityTypes.has("agent_preference");
       const affectsCalendarConnection =
         forceFull || entityTypes.has("calendar_account");
+      const affectsGoogleChat =
+        forceFull ||
+        entityTypes.has("google_chat_account") ||
+        entityTypes.has("project_google_chat_source") ||
+        entityTypes.has("project_inflow_item");
 
       if (affectsWork) {
         const [from, to] = currentLocalDayRange();
@@ -983,6 +1109,10 @@ export default function App() {
           ),
         );
       }
+      if (affectsGoogleChat) {
+        await loadGoogleChatAccounts();
+        if (selectedProjectId) await loadProjectInflow(selectedProjectId);
+      }
     },
     [
       apiBaseUrl,
@@ -991,6 +1121,8 @@ export default function App() {
       selectedConversationId,
       selectedProjectId,
       selectedWorkspaceId,
+      loadGoogleChatAccounts,
+      loadProjectInflow,
       withAuthenticatedSession,
     ],
   );
@@ -1354,6 +1486,10 @@ export default function App() {
   }, [loadGoals]);
 
   useEffect(() => {
+    void loadGoogleChatAccounts();
+  }, [loadGoogleChatAccounts]);
+
+  useEffect(() => {
     if (selectedWorkspaceId) {
       void loadProjectsForWorkspace(selectedWorkspaceId);
     }
@@ -1363,12 +1499,42 @@ export default function App() {
     if (selectedProjectId) {
       void loadProjectTasks(selectedProjectId);
       void loadProjectWebhooks(selectedProjectId);
+      void loadProjectInflow(selectedProjectId);
     } else {
       setProjectTasks([]);
       setProjectWebhooks([]);
       setWebhookDeliveries([]);
+      setProjectGoogleChatSources([]);
+      setProjectInflowItems([]);
+      setGoogleChatSpaces([]);
     }
-  }, [loadProjectTasks, loadProjectWebhooks, selectedProjectId]);
+  }, [
+    loadProjectInflow,
+    loadProjectTasks,
+    loadProjectWebhooks,
+    selectedProjectId,
+  ]);
+
+  useEffect(() => {
+    if (!tokens || !googleChatAuthorizationExpiresAt) return;
+    if (new Date(googleChatAuthorizationExpiresAt).getTime() <= Date.now()) {
+      setGoogleChatAuthorizationExpiresAt(undefined);
+      return;
+    }
+    let current = true;
+    const poll = async () => {
+      const accounts = await loadGoogleChatAccounts();
+      if (current && accounts?.some((account) => account.status === "active")) {
+        setGoogleChatAuthorizationExpiresAt(undefined);
+      }
+    };
+    void poll();
+    const interval = window.setInterval(() => void poll(), 2_000);
+    return () => {
+      current = false;
+      window.clearInterval(interval);
+    };
+  }, [googleChatAuthorizationExpiresAt, loadGoogleChatAccounts, tokens]);
 
   useEffect(() => {
     if (
@@ -2476,6 +2642,127 @@ export default function App() {
     }
   }
 
+  async function createWorkspaceGoogleChatSource(input: {
+    accountId: string;
+    spaceName: string;
+    displayName: string;
+    acknowledgeWithReaction: boolean;
+  }): Promise<void> {
+    if (!selectedProjectId) throw new Error("project unavailable");
+    setInflowSaving(true);
+    setInflowError(undefined);
+    try {
+      const source = await withAuthenticatedSession((accessToken) =>
+        createProjectGoogleChatSource(
+          apiBaseUrl,
+          accessToken,
+          selectedProjectId,
+          input,
+        ),
+      );
+      setProjectGoogleChatSources((current) => [...current, source]);
+      await syncWorkspaceGoogleChatSource(source);
+    } catch (error) {
+      setInflowError(copy.projects.inflowSourceProblem);
+      throw error;
+    } finally {
+      setInflowSaving(false);
+    }
+  }
+
+  async function deleteWorkspaceGoogleChatSource(
+    source: ProjectGoogleChatSource,
+  ): Promise<void> {
+    setInflowSaving(true);
+    setInflowError(undefined);
+    try {
+      await withAuthenticatedSession((accessToken) =>
+        deleteProjectGoogleChatSource(apiBaseUrl, accessToken, source),
+      );
+      setProjectGoogleChatSources((current) =>
+        current.filter((item) => item.id !== source.id),
+      );
+      setProjectInflowItems((current) =>
+        current.filter((item) => item.sourceId !== source.id),
+      );
+    } catch (error) {
+      setInflowError(copy.projects.inflowSourceProblem);
+      throw error;
+    } finally {
+      setInflowSaving(false);
+    }
+  }
+
+  async function syncWorkspaceGoogleChatSource(
+    source: ProjectGoogleChatSource,
+  ): Promise<void> {
+    setInflowLoading(true);
+    setInflowError(undefined);
+    try {
+      const sources = await withAuthenticatedSession((accessToken) =>
+        syncProjectGoogleChatSource(apiBaseUrl, accessToken, source),
+      );
+      setProjectGoogleChatSources(sources);
+      await loadProjectInflow(source.projectId);
+    } catch (error) {
+      setInflowError(copy.projects.inflowLoadProblem);
+      throw error;
+    } finally {
+      setInflowLoading(false);
+    }
+  }
+
+  async function promoteWorkspaceInflow(
+    item: ProjectInflowItem,
+    title: string,
+  ): Promise<void> {
+    setInflowSaving(true);
+    setInflowError(undefined);
+    try {
+      await withAuthenticatedSession((accessToken) =>
+        decideProjectInflow(apiBaseUrl, accessToken, item, {
+          decision: "promote",
+          title,
+          priority: 1,
+        }),
+      );
+      setProjectInflowItems((current) =>
+        current.filter((currentItem) => currentItem.id !== item.id),
+      );
+      await Promise.all([
+        loadProjectTasks(item.projectId),
+        loadProjectsForWorkspace(selectedWorkspaceId ?? "", item.projectId),
+      ]);
+    } catch (error) {
+      setInflowError(copy.projects.inflowDecisionProblem);
+      throw error;
+    } finally {
+      setInflowSaving(false);
+    }
+  }
+
+  async function dismissWorkspaceInflow(
+    item: ProjectInflowItem,
+  ): Promise<void> {
+    setInflowSaving(true);
+    setInflowError(undefined);
+    try {
+      await withAuthenticatedSession((accessToken) =>
+        decideProjectInflow(apiBaseUrl, accessToken, item, {
+          decision: "dismiss",
+        }),
+      );
+      setProjectInflowItems((current) =>
+        current.filter((currentItem) => currentItem.id !== item.id),
+      );
+    } catch (error) {
+      setInflowError(copy.projects.inflowDecisionProblem);
+      throw error;
+    } finally {
+      setInflowSaving(false);
+    }
+  }
+
   function openNewAssistantRequest() {
     startConversation();
     setAssistantDraft(undefined);
@@ -2828,13 +3115,20 @@ export default function App() {
               tasks={projectTasks}
               webhooks={projectWebhooks}
               webhookDeliveries={webhookDeliveries}
+              googleChatAccountsAvailable={googleChatAccountsAvailable}
+              googleChatAccounts={googleChatAccounts}
+              googleChatSpaces={googleChatSpaces}
+              googleChatSources={projectGoogleChatSources}
+              projectInflowItems={projectInflowItems}
               selectedWorkspaceId={selectedWorkspaceId}
               selectedProjectId={selectedProjectId}
               highlightedTaskId={highlightedProjectTaskId}
               loading={projectsLoading || goalsLoading || mode === "loading"}
               webhookLoading={webhooksLoading}
-              saving={projectsSaving || goalsSaving}
+              inflowLoading={inflowLoading}
+              saving={projectsSaving || goalsSaving || inflowSaving}
               error={goalsError ?? projectsError}
+              inflowError={inflowError}
               onSelectWorkspace={selectWorkspace}
               onSelectProject={selectProject}
               onOpenGoalTask={(taskId, projectId) =>
@@ -2846,6 +3140,9 @@ export default function App() {
                 setProjectTasks([]);
                 setProjectWebhooks([]);
                 setWebhookDeliveries([]);
+                setProjectGoogleChatSources([]);
+                setProjectInflowItems([]);
+                setGoogleChatSpaces([]);
               }}
               onCreateProject={createWorkspaceProject}
               onCreateGoal={createWorkspaceGoal}
@@ -2861,6 +3158,13 @@ export default function App() {
               onTestWebhook={testWorkspaceWebhook}
               onDeleteWebhook={deleteWorkspaceWebhook}
               onRetryWebhookDelivery={retryWorkspaceWebhookDelivery}
+              onConnectGoogleChatAccount={beginGoogleChatConnection}
+              onLoadGoogleChatSpaces={loadGoogleChatSpaces}
+              onCreateGoogleChatSource={createWorkspaceGoogleChatSource}
+              onDeleteGoogleChatSource={deleteWorkspaceGoogleChatSource}
+              onSyncGoogleChatSource={syncWorkspaceGoogleChatSource}
+              onPromoteInflow={promoteWorkspaceInflow}
+              onDismissInflow={dismissWorkspaceInflow}
             />
           )}
           {destination === "decisions" && (
