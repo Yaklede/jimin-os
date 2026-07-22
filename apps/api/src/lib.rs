@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod calendar_oauth;
 pub mod config;
+pub mod google_chat_oauth;
 mod meetings;
 pub mod probe;
 pub mod push;
@@ -41,6 +42,11 @@ use jimin_storage::{
         DisconnectCalendarAccountOutcome,
     },
     goals::{GoalHealth, GoalNextActionKind, GoalOverview, GoalStatus, GoalUpdate, NewGoal},
+    google_chat::{
+        CreateGoogleChatOAuthAuthorization, GoogleChatAccount, GoogleChatAccountStatus,
+        NewProjectGoogleChatSource, ProjectGoogleChatSource, ProjectInflowItem,
+        ProjectInflowStatus, PromoteProjectInflowItem,
+    },
     intelligence::{
         DecideRecommendation, DecideRecommendationOutcome, Recommendation, RecommendationDecision,
         RecommendationStatus, SuggestedActionKind,
@@ -70,6 +76,7 @@ use utoipa::{OpenApi, ToSchema};
 
 use crate::{
     calendar_oauth::{CalendarOAuthError, CalendarOAuthRuntime, storage_failure_code},
+    google_chat_oauth::{GoogleChatOAuthError, GoogleChatOAuthRuntime},
     voice_command::{VoiceCommand, VoiceCommandError, VoiceTaskScope},
 };
 
@@ -96,6 +103,7 @@ pub struct ApiState {
     pairing: Option<Arc<PairingRuntime>>,
     planning: Option<Database>,
     calendar_oauth: Option<Arc<CalendarOAuthRuntime>>,
+    google_chat_oauth: Option<Arc<GoogleChatOAuthRuntime>>,
     webhook: Option<Arc<webhook::WebhookRuntime>>,
     push: Option<Arc<push::PushRuntime>>,
     agent: Option<Database>,
@@ -118,6 +126,7 @@ impl ApiState {
             pairing: None,
             planning: None,
             calendar_oauth: None,
+            google_chat_oauth: None,
             webhook: None,
             push: None,
             agent: None,
@@ -177,6 +186,12 @@ impl ApiState {
     }
 
     #[must_use]
+    pub fn with_google_chat_oauth(mut self, runtime: GoogleChatOAuthRuntime) -> Self {
+        self.google_chat_oauth = Some(Arc::new(runtime));
+        self
+    }
+
+    #[must_use]
     pub fn with_webhook_runtime(mut self, runtime: webhook::WebhookRuntime) -> Self {
         self.webhook = Some(Arc::new(runtime));
         self
@@ -200,6 +215,10 @@ impl ApiState {
     #[must_use]
     fn calendar_oauth(&self) -> Option<&Arc<CalendarOAuthRuntime>> {
         self.calendar_oauth.as_ref()
+    }
+
+    fn google_chat_oauth(&self) -> Option<&Arc<GoogleChatOAuthRuntime>> {
+        self.google_chat_oauth.as_ref()
     }
 
     #[must_use]
@@ -579,6 +598,113 @@ struct GoogleCalendarCallbackQuery {
     state: String,
     code: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleChatAccountResponse {
+    id: uuid::Uuid,
+    email: String,
+    status: String,
+    last_successful_sync_at: Option<String>,
+    last_error_code: Option<String>,
+    reauth_required: bool,
+    version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleChatAccountListResponse {
+    available: bool,
+    items: Vec<GoogleChatAccountResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleChatSpaceResponse {
+    name: String,
+    display_name: String,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleChatSpaceListResponse {
+    items: Vec<GoogleChatSpaceResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectGoogleChatSourceResponse {
+    id: uuid::Uuid,
+    project_id: uuid::Uuid,
+    account_id: uuid::Uuid,
+    account_email: String,
+    space_name: String,
+    display_name: String,
+    enabled: bool,
+    acknowledge_with_reaction: bool,
+    last_successful_sync_at: Option<String>,
+    last_error_code: Option<String>,
+    version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectGoogleChatSourceListResponse {
+    items: Vec<ProjectGoogleChatSourceResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectInflowItemResponse {
+    id: uuid::Uuid,
+    project_id: uuid::Uuid,
+    source_id: uuid::Uuid,
+    source_name: String,
+    sender_name: Option<String>,
+    content_text: String,
+    received_at: String,
+    status: String,
+    promoted_task_id: Option<uuid::Uuid>,
+    acknowledged: bool,
+    version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectInflowItemListResponse {
+    items: Vec<ProjectInflowItemResponse>,
+}
+
+#[derive(Debug, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CreateProjectGoogleChatSourceRequest {
+    account_id: uuid::Uuid,
+    space_name: String,
+    display_name: String,
+    acknowledge_with_reaction: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DeleteVersionedConnectionQuery {
+    expected_version: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ProjectInflowDecisionRequest {
+    decision: String,
+    expected_version: i64,
+    title: Option<String>,
+    priority: Option<i16>,
+    due_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ProjectInflowListQuery {
+    status: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
@@ -1148,6 +1274,16 @@ pub(crate) fn error_response(
         start_google_calendar_authorization,
         complete_google_calendar_authorization,
         sync_google_calendar,
+        list_google_chat_connections,
+        start_google_chat_authorization,
+        delete_google_chat_connection,
+        list_google_chat_spaces,
+        list_project_google_chat_sources,
+        create_project_google_chat_source,
+        delete_project_google_chat_source,
+        sync_project_google_chat_source,
+        list_project_inflow_items,
+        decide_project_inflow_item,
         get_home_snapshot,
         refresh_work_brief,
         list_recommendations,
@@ -1222,6 +1358,18 @@ pub(crate) fn error_response(
         GoogleCalendarConnectionResponse,
         StartGoogleCalendarAuthorizationRequest,
         StartGoogleCalendarAuthorizationResponse,
+        GoogleChatAccountResponse,
+        GoogleChatAccountListResponse,
+        GoogleChatSpaceResponse,
+        GoogleChatSpaceListResponse,
+        ProjectGoogleChatSourceResponse,
+        ProjectGoogleChatSourceListResponse,
+        ProjectInflowItemResponse,
+        ProjectInflowItemListResponse,
+        CreateProjectGoogleChatSourceRequest,
+        DeleteVersionedConnectionQuery,
+        ProjectInflowDecisionRequest,
+        ProjectInflowListQuery,
         TaskResponse,
         TaskListResponse,
         WorkspaceResponse,
@@ -1307,7 +1455,12 @@ pub fn router(state: ApiState) -> Router {
     let router = Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
-        .merge(calendar_router().merge(push_router()).merge(sync_router()))
+        .merge(
+            calendar_router()
+                .merge(google_chat_router())
+                .merge(push_router())
+                .merge(sync_router()),
+        )
         .route("/v1/auth/refresh", axum::routing::post(refresh_session))
         .route(
             "/v1/access/session",
@@ -1483,6 +1636,46 @@ fn calendar_router() -> Router<ApiState> {
         )
 }
 
+fn google_chat_router() -> Router<ApiState> {
+    Router::new()
+        .route(
+            "/v1/google-chat/connections",
+            get(list_google_chat_connections),
+        )
+        .route(
+            "/v1/google-chat/connections/authorizations",
+            post(start_google_chat_authorization),
+        )
+        .route(
+            "/v1/google-chat/connections/{account_id}",
+            axum::routing::delete(delete_google_chat_connection),
+        )
+        .route(
+            "/v1/google-chat/connections/{account_id}/spaces",
+            get(list_google_chat_spaces),
+        )
+        .route(
+            "/v1/projects/{project_id}/google-chat-sources",
+            get(list_project_google_chat_sources).post(create_project_google_chat_source),
+        )
+        .route(
+            "/v1/projects/{project_id}/google-chat-sources/{source_id}",
+            axum::routing::delete(delete_project_google_chat_source),
+        )
+        .route(
+            "/v1/projects/{project_id}/google-chat-sources/{source_id}/sync",
+            post(sync_project_google_chat_source),
+        )
+        .route(
+            "/v1/projects/{project_id}/inflow",
+            get(list_project_inflow_items),
+        )
+        .route(
+            "/v1/projects/{project_id}/inflow/{item_id}/decision",
+            post(decide_project_inflow_item),
+        )
+}
+
 fn allowed_client_origins(trusted_network: bool) -> Vec<HeaderValue> {
     let mut origins = vec![
         HeaderValue::from_static("tauri://localhost"),
@@ -1519,6 +1712,8 @@ where
 const CALENDAR_SYNC_INITIAL_DELAY: Duration = Duration::from_secs(30);
 const CALENDAR_SYNC_INTERVAL: Duration = Duration::from_mins(5);
 const CALENDAR_MUTATION_INTERVAL: Duration = Duration::from_secs(2);
+const GOOGLE_CHAT_SYNC_INITIAL_DELAY: Duration = Duration::from_secs(20);
+const GOOGLE_CHAT_SYNC_INTERVAL: Duration = Duration::from_mins(1);
 
 /// Starts the single-process Google Calendar reconciliation loop when both
 /// storage and provider configuration are available. The loop processes
@@ -1562,6 +1757,45 @@ pub fn spawn_calendar_sync_worker(state: &ApiState) -> Option<tokio::task::JoinH
                 );
             }
             tokio::time::sleep(CALENDAR_SYNC_INTERVAL).await;
+        }
+    }))
+}
+
+/// Periodically imports new messages from every enabled project Chat source.
+/// Sources are processed sequentially to keep provider usage bounded.
+#[must_use]
+pub fn spawn_google_chat_sync_worker(state: &ApiState) -> Option<tokio::task::JoinHandle<()>> {
+    let planning = state.planning()?.clone();
+    let runtime = Arc::clone(state.google_chat_oauth()?);
+    Some(tokio::spawn(async move {
+        tokio::time::sleep(GOOGLE_CHAT_SYNC_INITIAL_DELAY).await;
+        loop {
+            if let Ok(source_ids) = planning.active_google_chat_source_ids().await {
+                for source_id in source_ids {
+                    if let Err(error) =
+                        synchronize_google_chat_source(&planning, &runtime, source_id, None).await
+                    {
+                        let _ = planning
+                            .mark_google_chat_source_failure(
+                                source_id,
+                                error.failure_code(),
+                                error.reauth_required(),
+                            )
+                            .await;
+                        warn!(
+                            event = "google_chat.periodic_sync_failed",
+                            error_code = error.failure_code(),
+                            retryable = error.retryable()
+                        );
+                    }
+                }
+            } else {
+                warn!(
+                    event = "google_chat.periodic_sync_deferred",
+                    error_code = "storage.persistence_unavailable"
+                );
+            }
+            tokio::time::sleep(GOOGLE_CHAT_SYNC_INTERVAL).await;
         }
     }))
 }
@@ -4753,13 +4987,6 @@ async fn complete_google_calendar_authorization(
     State(state): State<ApiState>,
     Query(query): Query<GoogleCalendarCallbackQuery>,
 ) -> Response {
-    let Some(calendar_oauth) = state.calendar_oauth() else {
-        return calendar_callback_page(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "연결을 완료하지 못했어요",
-            "서버의 Google Calendar 연결 설정을 확인한 뒤 다시 시도해 주세요.",
-        );
-    };
     let Some(planning) = state.planning() else {
         return calendar_callback_page(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -4767,26 +4994,67 @@ async fn complete_google_calendar_authorization(
             "잠시 후 앱에서 다시 시도해 주세요.",
         );
     };
-    let claimed = match planning
-        .claim_calendar_oauth_authorization(&calendar_oauth.state_verifier(&query.state))
-        .await
-    {
-        Ok(Some(authorization)) => authorization,
-        Ok(None) => {
-            return calendar_callback_page(
-                StatusCode::BAD_REQUEST,
-                "연결을 완료하지 못했어요",
-                "연결 시간이 지났거나 이미 처리된 요청이에요. 앱에서 다시 연결해 주세요.",
-            );
+    if let Some(calendar_oauth) = state.calendar_oauth() {
+        match planning
+            .claim_calendar_oauth_authorization(&calendar_oauth.state_verifier(&query.state))
+            .await
+        {
+            Ok(Some(claimed)) => {
+                return finish_google_calendar_authorization(
+                    planning,
+                    calendar_oauth,
+                    claimed,
+                    query,
+                )
+                .await;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return calendar_callback_page(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "연결을 완료하지 못했어요",
+                    "잠시 후 앱에서 다시 시도해 주세요.",
+                );
+            }
         }
-        Err(_) => {
-            return calendar_callback_page(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "연결을 완료하지 못했어요",
-                "잠시 후 앱에서 다시 시도해 주세요.",
-            );
+    }
+    if let Some(google_chat_oauth) = state.google_chat_oauth() {
+        match planning
+            .claim_google_chat_oauth_authorization(&google_chat_oauth.state_verifier(&query.state))
+            .await
+        {
+            Ok(Some(claimed)) => {
+                return finish_google_chat_authorization(
+                    planning,
+                    google_chat_oauth,
+                    claimed,
+                    query,
+                )
+                .await;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return calendar_callback_page(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "연결을 완료하지 못했어요",
+                    "잠시 후 앱에서 다시 시도해 주세요.",
+                );
+            }
         }
-    };
+    }
+    calendar_callback_page(
+        StatusCode::BAD_REQUEST,
+        "연결을 완료하지 못했어요",
+        "연결 시간이 지났거나 이미 처리된 요청이에요. 앱에서 다시 연결해 주세요.",
+    )
+}
+
+async fn finish_google_calendar_authorization(
+    planning: &Database,
+    calendar_oauth: &CalendarOAuthRuntime,
+    claimed: jimin_storage::calendar::ClaimedCalendarOAuthAuthorization,
+    query: GoogleCalendarCallbackQuery,
+) -> Response {
     if query.error.is_some() || query.code.is_none() {
         let _ = planning
             .fail_calendar_oauth_authorization(claimed.id, "calendar.authorization_failed")
@@ -4844,6 +5112,64 @@ async fn complete_google_calendar_authorization(
         }
     };
     finish_initial_calendar_sync(planning, calendar_oauth, account.id, user_id).await
+}
+
+async fn finish_google_chat_authorization(
+    planning: &Database,
+    runtime: &GoogleChatOAuthRuntime,
+    claimed: jimin_storage::google_chat::ClaimedGoogleChatOAuthAuthorization,
+    query: GoogleCalendarCallbackQuery,
+) -> Response {
+    if query.error.is_some() || query.code.is_none() {
+        let _ = planning
+            .fail_google_chat_oauth_authorization(claimed.id, "google_chat.authorization_rejected")
+            .await;
+        return calendar_callback_page(
+            StatusCode::BAD_REQUEST,
+            "회사 Google 계정을 연결하지 못했어요",
+            "권한을 허용한 뒤 앱에서 다시 연결해 주세요.",
+        );
+    }
+    let authorization_id = claimed.id;
+    let completion = runtime
+        .complete_authorization(claimed, SecretString::from(query.code.unwrap_or_default()))
+        .await;
+    let command = match completion {
+        Ok(command) => command,
+        Err(error) => {
+            let _ = planning
+                .fail_google_chat_oauth_authorization(authorization_id, error.failure_code())
+                .await;
+            return google_chat_callback_error_page(error);
+        }
+    };
+    match planning
+        .complete_google_chat_oauth_authorization(&command)
+        .await
+    {
+        Ok(_) => calendar_callback_page(
+            StatusCode::OK,
+            "회사 Google 계정을 연결했어요",
+            "이제 프로젝트에서 확인할 Chat 공간을 선택해 주세요.",
+        ),
+        Err(error) => {
+            let _ = planning
+                .fail_google_chat_oauth_authorization(
+                    authorization_id,
+                    "google_chat.persistence_failed",
+                )
+                .await;
+            calendar_callback_page(
+                if matches!(error, StorageError::PersistenceUnavailable) {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::BAD_REQUEST
+                },
+                "회사 Google 계정을 연결하지 못했어요",
+                "앱에서 다시 연결해 주세요.",
+            )
+        }
+    }
 }
 
 async fn finish_initial_calendar_sync(
@@ -4943,6 +5269,523 @@ async fn sync_google_calendar(
             calendar_oauth_error_response(error, request_id)
         }
     }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/google-chat/connections",
+    tag = "google-chat",
+    responses((status = 200, body = GoogleChatAccountListResponse), (status = 401), (status = 503))
+)]
+async fn list_google_chat_connections(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .google_chat_accounts_for_user(principal.identity().user_id())
+        .await
+    {
+        Ok(accounts) => no_store_json(GoogleChatAccountListResponse {
+            available: state.google_chat_oauth().is_some(),
+            items: accounts
+                .into_iter()
+                .map(google_chat_account_response)
+                .collect(),
+        }),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/google-chat/connections/authorizations",
+    tag = "google-chat",
+    request_body = StartGoogleCalendarAuthorizationRequest,
+    responses((status = 201, body = StartGoogleCalendarAuthorizationResponse), (status = 400), (status = 401), (status = 503))
+)]
+async fn start_google_chat_authorization(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Json(request): Json<StartGoogleCalendarAuthorizationRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(client_kind) = parse_client_platform(&request.client_kind) else {
+        return invalid_request_response(request_id);
+    };
+    let Some(runtime) = state.google_chat_oauth() else {
+        return google_chat_oauth_error_response(GoogleChatOAuthError::Configuration, request_id);
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let authorization_id = uuid::Uuid::now_v7();
+    let authorization = match runtime.begin_authorization(authorization_id, client_kind) {
+        Ok(authorization) => authorization,
+        Err(error) => return google_chat_oauth_error_response(error, request_id),
+    };
+    let command = CreateGoogleChatOAuthAuthorization {
+        id: authorization_id,
+        user_id: principal.identity().user_id(),
+        session_id: principal.identity().session_id(),
+        device_id: principal.identity().device_id(),
+        state_verifier: authorization.state_verifier,
+        pkce_verifier: authorization.pkce_verifier,
+        client_kind,
+        expires_at: authorization.expires_at,
+    };
+    if let Err(error) = planning
+        .create_google_chat_oauth_authorization(&command)
+        .await
+    {
+        return storage_error_response(&error, request_id);
+    }
+    let Ok(expires_at) = authorization.expires_at.format(&Rfc3339) else {
+        return unavailable_response(request_id);
+    };
+    (
+        StatusCode::CREATED,
+        Json(StartGoogleCalendarAuthorizationResponse {
+            authorization_id,
+            authorization_url: authorization.authorization_url,
+            expires_at,
+        }),
+    )
+        .into_response()
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/google-chat/connections/{account_id}",
+    tag = "google-chat",
+    params(("account_id" = String, Path), ("expected_version" = i64, Query)),
+    responses((status = 204), (status = 401), (status = 409), (status = 503))
+)]
+async fn delete_google_chat_connection(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(account_id): Path<uuid::Uuid>,
+    Query(query): Query<DeleteVersionedConnectionQuery>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let user_id = principal.identity().user_id();
+    let revocation_connection = match planning
+        .google_chat_account_connection(user_id, account_id)
+        .await
+    {
+        Ok(connection) => connection,
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    match planning
+        .delete_google_chat_account(user_id, account_id, query.expected_version)
+        .await
+    {
+        Ok(true) => {
+            if let (Some(runtime), Some(connection)) =
+                (state.google_chat_oauth(), revocation_connection.as_ref())
+            {
+                let _ = runtime.revoke_account(connection).await;
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => error_response(
+            StatusCode::CONFLICT,
+            "google_chat.connection_changed",
+            "회사 Google 계정 상태가 달라졌어요. 다시 확인한 뒤 연결을 해제해 주세요.",
+            request_id,
+            false,
+        ),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/google-chat/connections/{account_id}/spaces",
+    tag = "google-chat",
+    params(("account_id" = String, Path)),
+    responses((status = 200, body = GoogleChatSpaceListResponse), (status = 401), (status = 404), (status = 503))
+)]
+async fn list_google_chat_spaces(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(account_id): Path<uuid::Uuid>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let Some(runtime) = state.google_chat_oauth() else {
+        return google_chat_oauth_error_response(GoogleChatOAuthError::Configuration, request_id);
+    };
+    let connection = match planning
+        .google_chat_account_connection(principal.identity().user_id(), account_id)
+        .await
+    {
+        Ok(Some(connection)) => connection,
+        Ok(None) => return not_found_response(request_id),
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    match runtime.list_spaces(&connection).await {
+        Ok(spaces) => no_store_json(GoogleChatSpaceListResponse {
+            items: spaces
+                .into_iter()
+                .map(|space| GoogleChatSpaceResponse {
+                    name: space.name,
+                    display_name: space.display_name,
+                })
+                .collect(),
+        }),
+        Err(error) => google_chat_oauth_error_response(error, request_id),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/google-chat-sources",
+    tag = "google-chat",
+    params(("project_id" = String, Path)),
+    responses((status = 200, body = ProjectGoogleChatSourceListResponse), (status = 401), (status = 503))
+)]
+async fn list_project_google_chat_sources(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(project_id): Path<uuid::Uuid>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .project_google_chat_sources(principal.identity().user_id(), project_id)
+        .await
+    {
+        Ok(items) => no_store_json(ProjectGoogleChatSourceListResponse {
+            items: items
+                .into_iter()
+                .filter_map(project_google_chat_source_response)
+                .collect(),
+        }),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/google-chat-sources",
+    tag = "google-chat",
+    params(("project_id" = String, Path)),
+    request_body = CreateProjectGoogleChatSourceRequest,
+    responses((status = 201, body = ProjectGoogleChatSourceResponse), (status = 400), (status = 401), (status = 503))
+)]
+async fn create_project_google_chat_source(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(project_id): Path<uuid::Uuid>,
+    Json(request): Json<CreateProjectGoogleChatSourceRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let command = NewProjectGoogleChatSource {
+        id: uuid::Uuid::now_v7(),
+        user_id: principal.identity().user_id(),
+        project_id,
+        account_id: request.account_id,
+        space_name: request.space_name,
+        display_name: request.display_name,
+        acknowledge_with_reaction: request.acknowledge_with_reaction,
+    };
+    match planning.create_project_google_chat_source(&command).await {
+        Ok(source) => match project_google_chat_source_response(source) {
+            Some(response) => (StatusCode::CREATED, Json(response)).into_response(),
+            None => unavailable_response(request_id),
+        },
+        Err(StorageError::InvalidConfiguration) => invalid_request_response(request_id),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/projects/{project_id}/google-chat-sources/{source_id}",
+    tag = "google-chat",
+    params(
+        ("project_id" = String, Path),
+        ("source_id" = String, Path),
+        ("expected_version" = i64, Query)
+    ),
+    responses((status = 204), (status = 401), (status = 409), (status = 503))
+)]
+async fn delete_project_google_chat_source(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path((project_id, source_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+    Query(query): Query<DeleteVersionedConnectionQuery>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .delete_project_google_chat_source(
+            principal.identity().user_id(),
+            project_id,
+            source_id,
+            query.expected_version,
+        )
+        .await
+    {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => error_response(
+            StatusCode::CONFLICT,
+            "google_chat.source_changed",
+            "연결된 Chat 공간 상태가 달라졌어요. 다시 확인해 주세요.",
+            request_id,
+            false,
+        ),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/google-chat-sources/{source_id}/sync",
+    tag = "google-chat",
+    params(("project_id" = String, Path), ("source_id" = String, Path)),
+    responses((status = 200, body = ProjectGoogleChatSourceListResponse), (status = 401), (status = 409), (status = 503))
+)]
+async fn sync_project_google_chat_source(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path((project_id, source_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let Some(runtime) = state.google_chat_oauth() else {
+        return google_chat_oauth_error_response(GoogleChatOAuthError::Configuration, request_id);
+    };
+    match synchronize_google_chat_source(
+        planning,
+        runtime,
+        source_id,
+        Some((principal.identity().user_id(), project_id)),
+    )
+    .await
+    {
+        Ok(()) => match planning
+            .project_google_chat_sources(principal.identity().user_id(), project_id)
+            .await
+        {
+            Ok(items) => no_store_json(ProjectGoogleChatSourceListResponse {
+                items: items
+                    .into_iter()
+                    .filter_map(project_google_chat_source_response)
+                    .collect(),
+            }),
+            Err(error) => storage_error_response(&error, request_id),
+        },
+        Err(error) => google_chat_oauth_error_response(error, request_id),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/inflow",
+    tag = "google-chat",
+    params(("project_id" = String, Path), ("status" = Option<String>, Query)),
+    responses((status = 200, body = ProjectInflowItemListResponse), (status = 400), (status = 401), (status = 503))
+)]
+async fn list_project_inflow_items(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(project_id): Path<uuid::Uuid>,
+    Query(query): Query<ProjectInflowListQuery>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let status = match query.status.as_deref() {
+        None | Some("all") => None,
+        Some("pending") => Some(ProjectInflowStatus::Pending),
+        Some("promoted") => Some(ProjectInflowStatus::Promoted),
+        Some("dismissed") => Some(ProjectInflowStatus::Dismissed),
+        Some(_) => return invalid_request_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .project_inflow_items(principal.identity().user_id(), project_id, status)
+        .await
+    {
+        Ok(items) => {
+            let items = items
+                .into_iter()
+                .map(project_inflow_item_response)
+                .collect::<Result<Vec<_>, _>>();
+            match items {
+                Ok(items) => no_store_json(ProjectInflowItemListResponse { items }),
+                Err(()) => unavailable_response(request_id),
+            }
+        }
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/inflow/{item_id}/decision",
+    tag = "google-chat",
+    params(("project_id" = String, Path), ("item_id" = String, Path)),
+    request_body = ProjectInflowDecisionRequest,
+    responses((status = 200, body = ProjectInflowItemResponse), (status = 400), (status = 401), (status = 409), (status = 503))
+)]
+async fn decide_project_inflow_item(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path((project_id, item_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+    Json(request): Json<ProjectInflowDecisionRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let user_id = principal.identity().user_id();
+    let result = match request.decision.as_str() {
+        "dismiss" => {
+            planning
+                .dismiss_project_inflow_item(user_id, project_id, item_id, request.expected_version)
+                .await
+        }
+        "promote" => {
+            let Some(title) = request.title.as_deref() else {
+                return invalid_request_response(request_id);
+            };
+            let Ok(due_at) = request
+                .due_at
+                .as_deref()
+                .map(|value| OffsetDateTime::parse(value, &Rfc3339).map_err(|_| ()))
+                .transpose()
+            else {
+                return invalid_request_response(request_id);
+            };
+            planning
+                .promote_project_inflow_item(&PromoteProjectInflowItem {
+                    user_id,
+                    project_id,
+                    item_id,
+                    expected_version: request.expected_version,
+                    task_id: uuid::Uuid::now_v7(),
+                    title: title.to_owned(),
+                    priority: request.priority.unwrap_or(1),
+                    due_at,
+                })
+                .await
+        }
+        _ => return invalid_request_response(request_id),
+    };
+    match result {
+        Ok(Some(item)) => match project_inflow_item_response(item) {
+            Ok(response) => no_store_json(response),
+            Err(()) => unavailable_response(request_id),
+        },
+        Ok(_) => error_response(
+            StatusCode::CONFLICT,
+            "project.inflow_changed",
+            "이 항목은 이미 처리되었어요. 들어오는 업무를 다시 불러와 주세요.",
+            request_id,
+            false,
+        ),
+        Err(StorageError::InvalidConfiguration) => invalid_request_response(request_id),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+async fn synchronize_google_chat_source(
+    planning: &Database,
+    runtime: &GoogleChatOAuthRuntime,
+    source_id: uuid::Uuid,
+    expected_owner: Option<(uuid::Uuid, uuid::Uuid)>,
+) -> Result<(), GoogleChatOAuthError> {
+    let connection = planning
+        .google_chat_source_sync_connection(source_id)
+        .await
+        .map_err(|_| GoogleChatOAuthError::ProviderUnavailable)?
+        .ok_or(GoogleChatOAuthError::ProviderRejected)?;
+    if expected_owner.is_some_and(|(user_id, project_id)| {
+        connection.user_id != user_id || connection.project_id != project_id
+    }) {
+        return Err(GoogleChatOAuthError::ProviderRejected);
+    }
+    let messages = runtime.list_source_messages(&connection).await?;
+    let acknowledgements = planning
+        .apply_google_chat_messages(&connection, &messages)
+        .await
+        .map_err(|_| GoogleChatOAuthError::ProviderUnavailable)?;
+    if connection.acknowledge_with_reaction && !acknowledgements.is_empty() {
+        let names = acknowledgements
+            .iter()
+            .map(|item| item.provider_message_name.clone())
+            .collect::<Vec<_>>();
+        if let Ok(outcomes) = runtime.acknowledge_messages(&connection, &names).await {
+            for (item, acknowledged) in acknowledgements.iter().zip(outcomes) {
+                if acknowledged {
+                    let _ = planning
+                        .mark_google_chat_inflow_acknowledged(connection.user_id, item.inflow_id)
+                        .await;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn synchronize_google_calendar(
@@ -5105,6 +5948,63 @@ fn calendar_callback_error_page(error: CalendarOAuthError) -> Response {
     )
 }
 
+fn google_chat_oauth_error_response(
+    error: GoogleChatOAuthError,
+    request_id: RequestId,
+) -> Response {
+    let (status, message) = match error {
+        GoogleChatOAuthError::Configuration => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "회사 Google 계정 연결을 아직 준비하고 있어요.",
+        ),
+        GoogleChatOAuthError::ProviderUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Google Chat에 연결할 수 없어요. 잠시 후 다시 시도해 주세요.",
+        ),
+        GoogleChatOAuthError::RequiredScopeMissing => (
+            StatusCode::FORBIDDEN,
+            "프로젝트 메시지를 확인할 권한이 부족해요. 회사 계정을 다시 연결해 주세요.",
+        ),
+        GoogleChatOAuthError::InvalidCallback
+        | GoogleChatOAuthError::ProviderRejected
+        | GoogleChatOAuthError::Encryption => (
+            StatusCode::BAD_REQUEST,
+            "회사 Google 계정 연결을 다시 진행해 주세요.",
+        ),
+    };
+    error_response(
+        status,
+        error.failure_code(),
+        message,
+        request_id,
+        error.retryable(),
+    )
+}
+
+fn google_chat_callback_error_page(error: GoogleChatOAuthError) -> Response {
+    let message = match error {
+        GoogleChatOAuthError::ProviderUnavailable => {
+            "Google Chat에 연결할 수 없어요. 잠시 후 앱에서 다시 시도해 주세요."
+        }
+        GoogleChatOAuthError::RequiredScopeMissing => {
+            "Chat 공간과 메시지를 확인할 권한을 허용한 뒤 다시 연결해 주세요."
+        }
+        GoogleChatOAuthError::Configuration
+        | GoogleChatOAuthError::InvalidCallback
+        | GoogleChatOAuthError::ProviderRejected
+        | GoogleChatOAuthError::Encryption => "앱에서 회사 Google 계정 연결을 다시 시도해 주세요.",
+    };
+    calendar_callback_page(
+        if error.retryable() {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::BAD_REQUEST
+        },
+        "회사 Google 계정을 연결하지 못했어요",
+        message,
+    )
+}
+
 fn calendar_callback_page(status: StatusCode, title: &str, message: &str) -> Response {
     let page = format!(
         "<!doctype html><html lang=\"ko\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{title}</title><body><main><h1>{title}</h1><p>{message}</p></main></body></html>"
@@ -5166,6 +6066,71 @@ fn calendar_connection_response(
         reauth_required: account.status == CalendarAccountStatus::ReauthRequired,
         version: Some(account.version),
     }
+}
+
+fn google_chat_account_response(account: GoogleChatAccount) -> GoogleChatAccountResponse {
+    let status = match account.status {
+        GoogleChatAccountStatus::Connecting => "connecting",
+        GoogleChatAccountStatus::Active => "active",
+        GoogleChatAccountStatus::ReauthRequired => "reauth_required",
+        GoogleChatAccountStatus::Revoking => "revoking",
+        GoogleChatAccountStatus::Revoked => "revoked",
+        GoogleChatAccountStatus::Error => "error",
+    };
+    GoogleChatAccountResponse {
+        id: account.id,
+        email: account.email,
+        status: status.to_owned(),
+        last_successful_sync_at: account
+            .last_successful_sync_at
+            .and_then(|value| value.format(&Rfc3339).ok()),
+        last_error_code: account.last_error_code,
+        reauth_required: account.status == GoogleChatAccountStatus::ReauthRequired,
+        version: account.version,
+    }
+}
+
+fn project_google_chat_source_response(
+    source: ProjectGoogleChatSource,
+) -> Option<ProjectGoogleChatSourceResponse> {
+    Some(ProjectGoogleChatSourceResponse {
+        id: source.id,
+        project_id: source.project_id,
+        account_id: source.account_id,
+        account_email: source.account_email,
+        space_name: source.space_name,
+        display_name: source.display_name,
+        enabled: source.enabled,
+        acknowledge_with_reaction: source.acknowledge_with_reaction,
+        last_successful_sync_at: source
+            .last_successful_sync_at
+            .map(|value| value.format(&Rfc3339))
+            .transpose()
+            .ok()?,
+        last_error_code: source.last_error_code,
+        version: source.version,
+    })
+}
+
+fn project_inflow_item_response(item: ProjectInflowItem) -> Result<ProjectInflowItemResponse, ()> {
+    let status = match item.status {
+        ProjectInflowStatus::Pending => "pending",
+        ProjectInflowStatus::Promoted => "promoted",
+        ProjectInflowStatus::Dismissed => "dismissed",
+    };
+    Ok(ProjectInflowItemResponse {
+        id: item.id,
+        project_id: item.project_id,
+        source_id: item.source_id,
+        source_name: item.source_name,
+        sender_name: item.sender_name,
+        content_text: item.content_text,
+        received_at: item.received_at.format(&Rfc3339).map_err(|_| ())?,
+        status: status.to_owned(),
+        promoted_task_id: item.promoted_task_id,
+        acknowledged: item.acknowledged_at.is_some(),
+        version: item.version,
+    })
 }
 
 #[utoipa::path(
@@ -6348,6 +7313,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The OpenAPI route registry assertion intentionally keeps the full public surface in one ordered contract."
+    )]
     fn openapi_paths_match_the_health_router_contract() {
         let document = openapi_document();
         let paths: Vec<_> = document.paths.paths.keys().map(String::as_str).collect();
@@ -6377,6 +7346,10 @@ mod tests {
                 "/v1/devices",
                 "/v1/goals",
                 "/v1/goals/{goal_id}",
+                "/v1/google-chat/connections",
+                "/v1/google-chat/connections/authorizations",
+                "/v1/google-chat/connections/{account_id}",
+                "/v1/google-chat/connections/{account_id}/spaces",
                 "/v1/home",
                 "/v1/me",
                 "/v1/meetings",
@@ -6385,6 +7358,11 @@ mod tests {
                 "/v1/meetings/{meeting_id}/reanalyze",
                 "/v1/projects",
                 "/v1/projects/{project_id}",
+                "/v1/projects/{project_id}/google-chat-sources",
+                "/v1/projects/{project_id}/google-chat-sources/{source_id}",
+                "/v1/projects/{project_id}/google-chat-sources/{source_id}/sync",
+                "/v1/projects/{project_id}/inflow",
+                "/v1/projects/{project_id}/inflow/{item_id}/decision",
                 "/v1/projects/{project_id}/webhook-deliveries",
                 "/v1/projects/{project_id}/webhook-deliveries/{delivery_id}/retry",
                 "/v1/projects/{project_id}/webhooks",
@@ -6427,6 +7405,9 @@ mod tests {
             "/v1/tasks",
             "/v1/tasks/{task_id}/complete",
             "/v1/recommendations/{recommendation_id}/decisions",
+            "/v1/google-chat/connections/authorizations",
+            "/v1/projects/{project_id}/google-chat-sources",
+            "/v1/projects/{project_id}/inflow/{item_id}/decision",
         ] {
             assert!(
                 document.paths.paths[path]
@@ -6867,6 +7848,67 @@ mod tests {
                 .method("DELETE")
                 .uri("/v1/calendar/connections/google?expectedVersion=1")
                 .body(Body::empty())
+                .expect("request should be valid"),
+        ] {
+            let response = router(state.clone())
+                .oneshot(request)
+                .await
+                .expect("handler should respond");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn google_chat_inflow_endpoints_require_a_live_signed_session() {
+        let (state, _, _) = signed_auth_state(true);
+        let account_id = "019f68cb-9400-7000-8000-000000000011";
+        let project_id = "019f68cb-9400-7000-8000-000000000012";
+        let source_id = "019f68cb-9400-7000-8000-000000000013";
+        let item_id = "019f68cb-9400-7000-8000-000000000014";
+        for request in [
+            Request::builder()
+                .uri("/v1/google-chat/connections")
+                .body(Body::empty())
+                .expect("request should be valid"),
+            Request::builder()
+                .method("POST")
+                .uri("/v1/google-chat/connections/authorizations")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"clientKind":"android"}"#))
+                .expect("request should be valid"),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/v1/google-chat/connections/{account_id}?expectedVersion=1"
+                ))
+                .body(Body::empty())
+                .expect("request should be valid"),
+            Request::builder()
+                .uri(format!("/v1/google-chat/connections/{account_id}/spaces"))
+                .body(Body::empty())
+                .expect("request should be valid"),
+            Request::builder()
+                .uri(format!("/v1/projects/{project_id}/google-chat-sources"))
+                .body(Body::empty())
+                .expect("request should be valid"),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/v1/projects/{project_id}/google-chat-sources/{source_id}/sync"
+                ))
+                .body(Body::empty())
+                .expect("request should be valid"),
+            Request::builder()
+                .uri(format!("/v1/projects/{project_id}/inflow?status=pending"))
+                .body(Body::empty())
+                .expect("request should be valid"),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/v1/projects/{project_id}/inflow/{item_id}/decision"
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"decision":"dismiss","expectedVersion":1}"#))
                 .expect("request should be valid"),
         ] {
             let response = router(state.clone())

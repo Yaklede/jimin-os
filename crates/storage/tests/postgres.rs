@@ -23,6 +23,11 @@ use jimin_storage::{
     calendar_mutation::{ScheduleCalendarMutationOperation, provider_event_id_for_schedule},
     gmail::ProviderGmailMessage,
     goals::{GoalHealth, GoalNextActionKind, GoalStatus, GoalUpdate, NewGoal},
+    google_chat::{
+        CompleteGoogleChatOAuthAuthorization, CreateGoogleChatOAuthAuthorization,
+        NewProjectGoogleChatSource, ProjectInflowStatus, PromoteProjectInflowItem,
+        ProviderGoogleChatMessage,
+    },
     intelligence::{
         DecideRecommendation, DecideRecommendationOutcome, NewRecommendation,
         NewScheduleRequestConflict, RecommendationDecision, RecommendationStatus,
@@ -461,6 +466,219 @@ async fn first_calendar_oauth_connection_persists_the_account_and_consumes_the_a
         CalendarAccountStatus::ReauthRequired
     );
 
+    pool.close().await;
+    database.close().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The integration test keeps multi-account OAuth, deduplication, project scoping, and atomic task promotion in one lifecycle."
+)]
+async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        2,
+        Duration::from_secs(2),
+    )
+    .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let workspace = database
+        .workspaces_for_user(owner.profile.id)
+        .await
+        .expect("workspace should load")
+        .into_iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Company)
+        .expect("company workspace should exist");
+    let first_project = database
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            workspace_id: workspace.id,
+            title: "회사 Chat 수집".to_owned(),
+            objective: None,
+            risk_level: 0,
+            next_action: None,
+            due_at: None,
+        })
+        .await
+        .expect("first project should persist");
+    let second_project = database
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            workspace_id: workspace.id,
+            title: "다른 회사 프로젝트".to_owned(),
+            objective: None,
+            risk_level: 0,
+            next_action: None,
+            due_at: None,
+        })
+        .await
+        .expect("second project should persist");
+
+    let mut account_ids = Vec::new();
+    for marker in [51_u8, 61_u8] {
+        let authorization_id = Uuid::now_v7();
+        let state_verifier = vec![marker; 32];
+        database
+            .create_google_chat_oauth_authorization(&CreateGoogleChatOAuthAuthorization {
+                id: authorization_id,
+                user_id: owner.profile.id,
+                session_id: owner.session_id,
+                device_id: owner.device.id,
+                state_verifier: state_verifier.clone(),
+                pkce_verifier: EncryptedCalendarSecret {
+                    ciphertext: vec![marker; 48],
+                    nonce: vec![marker.saturating_add(1); 24],
+                    key_version: 1,
+                },
+                client_kind: ClientPlatform::Android,
+                expires_at: OffsetDateTime::now_utc() + TimeDuration::minutes(10),
+            })
+            .await
+            .expect("Chat OAuth authorization should persist");
+        database
+            .claim_google_chat_oauth_authorization(&state_verifier)
+            .await
+            .expect("Chat OAuth authorization should be claimable")
+            .expect("Chat OAuth authorization should exist");
+        let account = database
+            .complete_google_chat_oauth_authorization(&CompleteGoogleChatOAuthAuthorization {
+                authorization_id,
+                account_id: Uuid::now_v7(),
+                user_id: owner.profile.id,
+                provider_subject: GoogleSubject::parse(format!(
+                    "company-chat-{}-{marker}",
+                    owner.profile.id
+                ))
+                .expect("provider subject should be valid"),
+                email: EmailAddress::parse(format!(
+                    "company-{marker}-{}@example.test",
+                    owner.profile.id
+                ))
+                .expect("company email should be valid"),
+                granted_scopes: vec![
+                    "https://www.googleapis.com/auth/chat.spaces.readonly".to_owned(),
+                    "https://www.googleapis.com/auth/chat.messages.readonly".to_owned(),
+                    "https://www.googleapis.com/auth/chat.messages.reactions.create".to_owned(),
+                ],
+                refresh_token: Some(EncryptedCalendarSecret {
+                    ciphertext: vec![marker; 64],
+                    nonce: vec![marker.saturating_add(2); 24],
+                    key_version: 1,
+                }),
+            })
+            .await
+            .expect("company Chat account should persist");
+        account_ids.push(account.id);
+    }
+    assert_eq!(
+        database
+            .google_chat_accounts_for_user(owner.profile.id)
+            .await
+            .expect("company accounts should load")
+            .len(),
+        2
+    );
+
+    let source = database
+        .create_project_google_chat_source(&NewProjectGoogleChatSource {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            project_id: first_project.id,
+            account_id: account_ids[1],
+            space_name: "spaces/company-room".to_owned(),
+            display_name: "운영 요청".to_owned(),
+            acknowledge_with_reaction: true,
+        })
+        .await
+        .expect("project source should persist");
+    let connection = database
+        .google_chat_source_sync_connection(source.id)
+        .await
+        .expect("source connection should load")
+        .expect("source connection should exist");
+    let long_message = "확인이 필요한 회사 요청입니다. ".repeat(600);
+    let provider_message = ProviderGoogleChatMessage {
+        provider_message_name: "spaces/company-room/messages/message-1".to_owned(),
+        provider_thread_name: Some("spaces/company-room/threads/thread-1".to_owned()),
+        sender_name: Some("업무 담당자".to_owned()),
+        content_text: long_message.clone(),
+        received_at: OffsetDateTime::now_utc(),
+    };
+    assert_eq!(
+        database
+            .apply_google_chat_messages(&connection, std::slice::from_ref(&provider_message))
+            .await
+            .expect("first message should ingest")
+            .len(),
+        1
+    );
+    assert!(
+        database
+            .apply_google_chat_messages(&connection, &[provider_message])
+            .await
+            .expect("duplicate provider message should be ignored")
+            .is_empty()
+    );
+    let pending = database
+        .project_inflow_items(
+            owner.profile.id,
+            first_project.id,
+            Some(ProjectInflowStatus::Pending),
+        )
+        .await
+        .expect("project inflow should load");
+    assert_eq!(pending.len(), 1);
+    assert!(
+        database
+            .dismiss_project_inflow_item(
+                owner.profile.id,
+                second_project.id,
+                pending[0].id,
+                pending[0].version,
+            )
+            .await
+            .expect("cross-project decision should be rejected safely")
+            .is_none()
+    );
+    let promoted = database
+        .promote_project_inflow_item(&PromoteProjectInflowItem {
+            user_id: owner.profile.id,
+            project_id: first_project.id,
+            item_id: pending[0].id,
+            expected_version: pending[0].version,
+            task_id: Uuid::now_v7(),
+            title: "회사 요청 확인".to_owned(),
+            priority: 2,
+            due_at: None,
+        })
+        .await
+        .expect("owned inflow should promote")
+        .expect("pending inflow should still be available");
+    assert_eq!(promoted.status, ProjectInflowStatus::Promoted);
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("test database should accept direct checks");
+    let notes_length =
+        sqlx::query_scalar::<_, i32>("SELECT char_length(notes) FROM tasks WHERE id = $1")
+            .bind(
+                promoted
+                    .promoted_task_id
+                    .expect("promoted task should exist"),
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("promoted task notes should load");
+    assert_eq!(notes_length, 10_000);
     pool.close().await;
     database.close().await;
 }

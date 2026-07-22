@@ -8,10 +8,11 @@ use jimin_api::{
         AppConfig, AuthenticationSetting, AuthenticationSettings, CalendarOAuthSetting,
         SecretSetting,
     },
+    google_chat_oauth::GoogleChatOAuthRuntime,
     probe::{ProbeTarget, run_probe},
     push::PushRuntime,
     router, serve_with_shutdown, spawn_calendar_mutation_worker, spawn_calendar_sync_worker,
-    spawn_push_delivery_worker, spawn_webhook_delivery_worker,
+    spawn_google_chat_sync_worker, spawn_push_delivery_worker, spawn_webhook_delivery_worker,
     webhook::WebhookRuntime,
 };
 use jimin_application::{PairingLifetime, SessionLifetime, SessionService};
@@ -173,6 +174,14 @@ async fn run_server() -> Result<(), &'static str> {
                     error_code = "calendar.configuration_invalid"
                 );
             }
+            if let Ok(google_chat_oauth) = GoogleChatOAuthRuntime::new(settings) {
+                state = state.with_google_chat_oauth(google_chat_oauth);
+            } else {
+                warn!(
+                    event = "google_chat.configuration_invalid",
+                    error_code = "google_chat.configuration_invalid"
+                );
+            }
         }
         CalendarOAuthSetting::Missing => info!(
             event = "calendar.configuration_missing",
@@ -204,6 +213,7 @@ async fn run_server() -> Result<(), &'static str> {
     let calendar_sync_task = spawn_calendar_sync_worker(&state);
     let calendar_mutation_task = spawn_calendar_mutation_worker(&state);
     let webhook_delivery_task = spawn_webhook_delivery_worker(&state);
+    let google_chat_sync_task = spawn_google_chat_sync_worker(&state);
     let push_delivery_task = spawn_push_delivery_worker(&state);
     let result = serve_with_shutdown(listener, router(state), shutdown_signal())
         .await
@@ -224,6 +234,10 @@ async fn run_server() -> Result<(), &'static str> {
     if let Some(webhook_delivery_task) = webhook_delivery_task {
         webhook_delivery_task.abort();
         let _ = webhook_delivery_task.await;
+    }
+    if let Some(google_chat_sync_task) = google_chat_sync_task {
+        google_chat_sync_task.abort();
+        let _ = google_chat_sync_task.await;
     }
     if let Some(push_delivery_task) = push_delivery_task {
         push_delivery_task.abort();

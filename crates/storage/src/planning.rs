@@ -1325,7 +1325,7 @@ fn task_matches_new(existing: &Task, requested: &NewTask) -> bool {
         && existing.due_at == requested.due_at
 }
 
-async fn queue_task_webhook_in_transaction(
+pub(crate) async fn queue_task_webhook_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
     task: &Task,

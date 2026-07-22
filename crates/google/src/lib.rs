@@ -30,6 +30,7 @@ const GOOGLE_CALENDAR_LIST_ENDPOINT: &str =
 const GOOGLE_CALENDAR_EVENTS_ENDPOINT: &str = "https://www.googleapis.com/calendar/v3/calendars";
 const GOOGLE_GMAIL_MESSAGES_ENDPOINT: &str =
     "https://gmail.googleapis.com/gmail/v1/users/me/messages";
+const GOOGLE_CHAT_SPACES_ENDPOINT: &str = "https://chat.googleapis.com/v1/spaces";
 const GOOGLE_ISSUERS: [&str; 2] = ["https://accounts.google.com", "accounts.google.com"];
 const MAX_AUTHORIZATION_CODE_BYTES: usize = 4 * 1024;
 const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
@@ -44,6 +45,9 @@ const MAX_RECURRENCE_RULES: usize = 128;
 const MAX_GMAIL_INBOX_MESSAGES: usize = 50;
 const MAX_GMAIL_LIST_RESPONSE_BYTES: usize = 512 * 1024;
 const MAX_GMAIL_MESSAGE_RESPONSE_BYTES: usize = 512 * 1024;
+const MAX_CHAT_LIST_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CHAT_LIST_PAGES: usize = 50;
+const MAX_CHAT_ITEMS: usize = 5_000;
 const DEFAULT_JWKS_TTL: Duration = Duration::from_mins(5);
 const MAX_JWKS_TTL: Duration = Duration::from_hours(24);
 
@@ -193,6 +197,30 @@ pub struct GoogleCalendarGrant {
     granted_scopes: Vec<String>,
 }
 
+/// The server-only result of company Google Chat consent.
+pub struct GoogleChatGrant {
+    identity: VerifiedGoogleIdentity,
+    refresh_token: Option<SecretString>,
+    granted_scopes: Vec<String>,
+}
+
+impl GoogleChatGrant {
+    #[must_use]
+    pub const fn identity(&self) -> &VerifiedGoogleIdentity {
+        &self.identity
+    }
+
+    #[must_use]
+    pub const fn refresh_token(&self) -> Option<&SecretString> {
+        self.refresh_token.as_ref()
+    }
+
+    #[must_use]
+    pub fn granted_scopes(&self) -> &[String] {
+        &self.granted_scopes
+    }
+}
+
 impl GoogleCalendarGrant {
     #[must_use]
     pub const fn identity(&self) -> &VerifiedGoogleIdentity {
@@ -229,6 +257,28 @@ pub struct GoogleCalendarAdapter {
     client: Client,
     client_id: String,
     client_secret: SecretString,
+}
+
+/// Fixed Google Chat provider adapter for company workspace ingestion.
+pub struct GoogleChatAdapter {
+    client: Client,
+    client_id: String,
+    client_secret: SecretString,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoogleChatSpaceEntry {
+    pub name: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoogleChatMessageEntry {
+    pub name: String,
+    pub thread_name: Option<String>,
+    pub sender_name: Option<String>,
+    pub text: String,
+    pub create_time: OffsetDateTime,
 }
 
 /// One validated Calendar list entry. Provider IDs remain server-only and are
@@ -972,6 +1022,273 @@ impl GoogleCalendarAdapter {
     }
 }
 
+impl GoogleChatAdapter {
+    /// Creates the fixed Chat API client used only by the server process.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized configuration error for invalid OAuth settings.
+    pub fn new(
+        client_id: impl Into<String>,
+        client_secret: SecretString,
+    ) -> Result<Self, GoogleAuthError> {
+        let client_id = validate_text(client_id.into(), 255)?;
+        if client_secret.expose_secret().is_empty()
+            || client_secret.expose_secret().len() > 4_096
+            || client_secret.expose_secret().chars().any(char::is_control)
+        {
+            return Err(GoogleAuthError::InvalidRequest);
+        }
+        let client = Client::builder()
+            .redirect(Policy::none())
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        Ok(Self {
+            client,
+            client_id,
+            client_secret,
+        })
+    }
+
+    /// Exchanges one encrypted-at-rest refresh token for a short-lived access
+    /// token. Provider token values never leave this adapter boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized validation or provider error.
+    pub async fn refresh_access_token(
+        &self,
+        refresh_token: &SecretString,
+    ) -> Result<SecretString, GoogleAuthError> {
+        let value = refresh_token.expose_secret();
+        if value.is_empty()
+            || value.len() > MAX_TOKEN_RESPONSE_BYTES
+            || value.chars().any(char::is_control)
+        {
+            return Err(GoogleAuthError::InvalidRequest);
+        }
+        let response = self
+            .client
+            .post(GOOGLE_TOKEN_ENDPOINT)
+            .form(&[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", value),
+                ("client_id", self.client_id.as_str()),
+                ("client_secret", self.client_secret.expose_secret()),
+            ])
+            .send()
+            .await
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        if !response.status().is_success() {
+            return Err(classify_provider_status(response.status().as_u16()));
+        }
+        if !is_json_response(&response) {
+            return Err(GoogleAuthError::ProviderUnavailable);
+        }
+        let payload = bounded_body(response, MAX_TOKEN_RESPONSE_BYTES).await?;
+        let response: GoogleRefreshTokenResponse =
+            serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
+        Ok(SecretString::from(validate_text(
+            response.access_token,
+            MAX_TOKEN_RESPONSE_BYTES,
+        )?))
+    }
+
+    /// Best-effort revokes a linked Chat refresh credential. Local deletion
+    /// remains the source of truth when Google is temporarily unavailable.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized validation or provider error.
+    pub async fn revoke_refresh_token(
+        &self,
+        refresh_token: &SecretString,
+    ) -> Result<(), GoogleAuthError> {
+        let token = refresh_token.expose_secret();
+        if token.is_empty()
+            || token.len() > MAX_TOKEN_RESPONSE_BYTES
+            || token.chars().any(char::is_control)
+        {
+            return Err(GoogleAuthError::InvalidRequest);
+        }
+        let response = self
+            .client
+            .post(GOOGLE_TOKEN_REVOCATION_ENDPOINT)
+            .form(&[("token", token)])
+            .send()
+            .await
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(classify_provider_status(response.status().as_u16()))
+        }
+    }
+
+    /// Lists bounded Chat spaces visible to the linked work identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized validation or provider error.
+    pub async fn list_spaces(
+        &self,
+        access_token: &SecretString,
+    ) -> Result<Vec<GoogleChatSpaceEntry>, GoogleAuthError> {
+        let token = validate_access_token(access_token)?;
+        let mut spaces = Vec::new();
+        let mut page_token: Option<String> = None;
+        for _ in 0..MAX_CHAT_LIST_PAGES {
+            let mut url = reqwest::Url::parse(GOOGLE_CHAT_SPACES_ENDPOINT)
+                .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+            {
+                let mut query = url.query_pairs_mut();
+                query.append_pair("pageSize", "100");
+                if let Some(page_token) = page_token.as_deref() {
+                    query.append_pair("pageToken", page_token);
+                }
+            }
+            let response = self
+                .client
+                .get(url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+            if !response.status().is_success() {
+                return Err(classify_provider_status(response.status().as_u16()));
+            }
+            if !is_json_response(&response) {
+                return Err(GoogleAuthError::ProviderUnavailable);
+            }
+            let payload = bounded_body(response, MAX_CHAT_LIST_RESPONSE_BYTES).await?;
+            let page: GoogleChatSpacePage =
+                serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
+            for space in page.spaces {
+                spaces.push(normalize_chat_space(space)?);
+                if spaces.len() > MAX_CHAT_ITEMS {
+                    return Err(GoogleAuthError::ProviderRejected);
+                }
+            }
+            page_token = page.next_page_token;
+            if page_token.is_none() {
+                return Ok(spaces);
+            }
+        }
+        Err(GoogleAuthError::ProviderRejected)
+    }
+
+    /// Lists newly created public messages for one validated Chat space.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized validation or provider error.
+    pub async fn list_messages(
+        &self,
+        access_token: &SecretString,
+        space_name: &str,
+        created_after: Option<OffsetDateTime>,
+    ) -> Result<Vec<GoogleChatMessageEntry>, GoogleAuthError> {
+        let token = validate_access_token(access_token)?;
+        let space_id = validated_chat_space_id(space_name)?;
+        let mut messages = Vec::new();
+        let mut page_token: Option<String> = None;
+        for _ in 0..MAX_CHAT_LIST_PAGES {
+            let mut url = reqwest::Url::parse("https://chat.googleapis.com/v1")
+                .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+            url.path_segments_mut()
+                .map_err(|()| GoogleAuthError::ProviderUnavailable)?
+                .push("spaces")
+                .push(space_id)
+                .push("messages");
+            {
+                let mut query = url.query_pairs_mut();
+                query.append_pair("pageSize", "100");
+                query.append_pair("orderBy", "createTime asc");
+                if let Some(created_after) = created_after {
+                    let timestamp = created_after
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .map_err(|_| GoogleAuthError::InvalidRequest)?;
+                    query.append_pair("filter", &format!("createTime > \"{timestamp}\""));
+                }
+                if let Some(page_token) = page_token.as_deref() {
+                    query.append_pair("pageToken", page_token);
+                }
+            }
+            let response = self
+                .client
+                .get(url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+            if !response.status().is_success() {
+                return Err(classify_provider_status(response.status().as_u16()));
+            }
+            if !is_json_response(&response) {
+                return Err(GoogleAuthError::ProviderUnavailable);
+            }
+            let payload = bounded_body(response, MAX_CHAT_LIST_RESPONSE_BYTES).await?;
+            let page: GoogleChatMessagePage =
+                serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
+            for message in page.messages {
+                if let Some(message) = normalize_chat_message(message)? {
+                    messages.push(message);
+                }
+                if messages.len() > MAX_CHAT_ITEMS {
+                    return Err(GoogleAuthError::ProviderRejected);
+                }
+            }
+            page_token = page.next_page_token;
+            if page_token.is_none() {
+                return Ok(messages);
+            }
+        }
+        Err(GoogleAuthError::ProviderRejected)
+    }
+
+    /// Adds the ingestion acknowledgement reaction after a message has been
+    /// stored durably. Repeating the same reaction is treated as success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized validation or provider error.
+    pub async fn acknowledge_message(
+        &self,
+        access_token: &SecretString,
+        message_name: &str,
+    ) -> Result<(), GoogleAuthError> {
+        let token = validate_access_token(access_token)?;
+        let segments = validated_chat_message_segments(message_name)?;
+        let mut url = reqwest::Url::parse("https://chat.googleapis.com/v1")
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|()| GoogleAuthError::ProviderUnavailable)?;
+        for segment in segments {
+            path.push(segment);
+        }
+        path.push("reactions");
+        drop(path);
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(token)
+            .json(&GoogleChatReactionBody {
+                emoji: GoogleChatEmoji { unicode: "👀" },
+            })
+            .send()
+            .await
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        if response.status().is_success() || response.status().as_u16() == 409 {
+            Ok(())
+        } else {
+            Err(classify_provider_status(response.status().as_u16()))
+        }
+    }
+}
+
 impl GoogleIdentityAdapter {
     /// Builds the adapter with fixed HTTPS endpoints and a no-redirect client.
     ///
@@ -1040,35 +1357,38 @@ impl GoogleIdentityAdapter {
         code_challenge: &str,
         force_consent: bool,
     ) -> Result<String, GoogleAuthError> {
-        if !valid_url_safe_value(state, 128) || !valid_url_safe_value(code_challenge, 128) {
-            return Err(GoogleAuthError::InvalidRequest);
-        }
-        let profile = self.profile_for(platform)?;
-        let redirect_uri = profile
-            .redirect_uris
-            .first()
-            .ok_or(GoogleAuthError::InvalidRequest)?;
-        let mut url = reqwest::Url::parse(GOOGLE_AUTHORIZATION_ENDPOINT)
-            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
-        {
-            let mut query = url.query_pairs_mut();
-            query.append_pair("client_id", profile.client_id());
-            query.append_pair("redirect_uri", redirect_uri);
-            query.append_pair("response_type", "code");
-            query.append_pair(
-                "scope",
-                "openid email https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly",
-            );
-            query.append_pair("state", state);
-            query.append_pair("code_challenge", code_challenge);
-            query.append_pair("code_challenge_method", "S256");
-            query.append_pair("access_type", "offline");
-            query.append_pair("include_granted_scopes", "true");
-            if force_consent {
-                query.append_pair("prompt", "consent");
-            }
-        }
-        Ok(url.into())
+        self.authorization_url(
+            platform,
+            state,
+            code_challenge,
+            force_consent,
+            "openid email https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+            false,
+        )
+    }
+
+    /// Builds consent for a distinct company Chat identity. `select_account`
+    /// is always requested so the owner's personal Calendar login is never
+    /// silently reused as a project workspace account.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error when the profile, state, or PKCE challenge is invalid.
+    pub fn chat_authorization_url(
+        &self,
+        platform: ClientPlatform,
+        state: &str,
+        code_challenge: &str,
+        force_consent: bool,
+    ) -> Result<String, GoogleAuthError> {
+        self.authorization_url(
+            platform,
+            state,
+            code_challenge,
+            force_consent,
+            "openid email https://www.googleapis.com/auth/chat.spaces.readonly https://www.googleapis.com/auth/chat.messages.readonly https://www.googleapis.com/auth/chat.messages.reactions.create",
+            true,
+        )
     }
 
     /// Exchanges Calendar consent and returns the verified identity, granted
@@ -1093,6 +1413,71 @@ impl GoogleIdentityAdapter {
             refresh_token: token_response.refresh_token.map(SecretString::from),
             granted_scopes: parse_scopes(token_response.scope),
         })
+    }
+
+    /// Exchanges a company Chat authorization and verifies its Google identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized request, provider, or identity verification error.
+    pub async fn exchange_chat(
+        &self,
+        request: GoogleAuthorizationCode,
+    ) -> Result<GoogleChatGrant, GoogleAuthError> {
+        let profile = self.profile_for(request.platform)?;
+        validate_exchange_request(&request, profile)?;
+        let token_response = self.exchange_token(&request, profile).await?;
+        let identity = self
+            .verify_identity_token(&token_response.id_token, profile)
+            .await?;
+        Ok(GoogleChatGrant {
+            identity,
+            refresh_token: token_response.refresh_token.map(SecretString::from),
+            granted_scopes: parse_scopes(token_response.scope),
+        })
+    }
+
+    fn authorization_url(
+        &self,
+        platform: ClientPlatform,
+        state: &str,
+        code_challenge: &str,
+        force_consent: bool,
+        scopes: &str,
+        select_account: bool,
+    ) -> Result<String, GoogleAuthError> {
+        if !valid_url_safe_value(state, 128) || !valid_url_safe_value(code_challenge, 128) {
+            return Err(GoogleAuthError::InvalidRequest);
+        }
+        let profile = self.profile_for(platform)?;
+        let redirect_uri = profile
+            .redirect_uris
+            .first()
+            .ok_or(GoogleAuthError::InvalidRequest)?;
+        let mut url = reqwest::Url::parse(GOOGLE_AUTHORIZATION_ENDPOINT)
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("client_id", profile.client_id());
+            query.append_pair("redirect_uri", redirect_uri);
+            query.append_pair("response_type", "code");
+            query.append_pair("scope", scopes);
+            query.append_pair("state", state);
+            query.append_pair("code_challenge", code_challenge);
+            query.append_pair("code_challenge_method", "S256");
+            query.append_pair("access_type", "offline");
+            query.append_pair("include_granted_scopes", "true");
+            let prompt = match (force_consent, select_account) {
+                (true, true) => Some("consent select_account"),
+                (true, false) => Some("consent"),
+                (false, true) => Some("select_account"),
+                (false, false) => None,
+            };
+            if let Some(prompt) = prompt {
+                query.append_pair("prompt", prompt);
+            }
+        }
+        Ok(url.into())
     }
 
     async fn exchange_token(
@@ -1352,6 +1737,60 @@ struct GoogleGmailHeader {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleChatSpacePage {
+    #[serde(default)]
+    spaces: Vec<GoogleChatSpaceResource>,
+    next_page_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleChatSpaceResource {
+    name: String,
+    display_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleChatMessagePage {
+    #[serde(default)]
+    messages: Vec<GoogleChatMessageResource>,
+    next_page_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleChatMessageResource {
+    name: String,
+    text: Option<String>,
+    create_time: String,
+    sender: Option<GoogleChatSender>,
+    thread: Option<GoogleChatThread>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleChatSender {
+    display_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GoogleChatThread {
+    name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct GoogleChatReactionBody<'a> {
+    emoji: GoogleChatEmoji<'a>,
+}
+
+#[derive(Serialize)]
+struct GoogleChatEmoji<'a> {
+    unicode: &'a str,
+}
+
+#[derive(Deserialize)]
 struct GoogleIdClaims {
     iss: String,
     aud: String,
@@ -1409,6 +1848,52 @@ fn parse_scopes(scope: Option<String>) -> Vec<String> {
     scopes.sort();
     scopes.dedup();
     scopes
+}
+
+fn normalize_chat_space(
+    resource: GoogleChatSpaceResource,
+) -> Result<GoogleChatSpaceEntry, GoogleAuthError> {
+    let name = validate_text(resource.name, 256)?;
+    let _ = validated_chat_space_id(&name)?;
+    let display_name = resource
+        .display_name
+        .map(|value| validate_text(value, 500))
+        .transpose()?
+        .unwrap_or_else(|| name.clone());
+    Ok(GoogleChatSpaceEntry { name, display_name })
+}
+
+fn normalize_chat_message(
+    resource: GoogleChatMessageResource,
+) -> Result<Option<GoogleChatMessageEntry>, GoogleAuthError> {
+    let text = match resource.text {
+        Some(value) if !value.trim().is_empty() => validate_provider_free_text(value, 32_768)?,
+        _ => return Ok(None),
+    };
+    let name = validate_text(resource.name, 1_024)?;
+    let _ = validated_chat_message_segments(&name)?;
+    let thread_name = resource
+        .thread
+        .and_then(|thread| thread.name)
+        .map(|value| validate_text(value, 1_024))
+        .transpose()?;
+    let sender_name = resource
+        .sender
+        .and_then(|sender| sender.display_name)
+        .map(|value| validate_text(value, 500))
+        .transpose()?;
+    let create_time = OffsetDateTime::parse(
+        &resource.create_time,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .map_err(|_| GoogleAuthError::ProviderRejected)?;
+    Ok(Some(GoogleChatMessageEntry {
+        name,
+        thread_name,
+        sender_name,
+        text,
+        create_time,
+    }))
 }
 
 fn normalize_calendar_list_item(
@@ -1893,6 +2378,40 @@ fn validate_provider_free_text(
     Ok(value)
 }
 
+fn validated_chat_space_id(space_name: &str) -> Result<&str, GoogleAuthError> {
+    let Some(space_id) = space_name.strip_prefix("spaces/") else {
+        return Err(GoogleAuthError::InvalidRequest);
+    };
+    if space_id.is_empty()
+        || space_id.len() > 240
+        || !space_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(GoogleAuthError::InvalidRequest);
+    }
+    Ok(space_id)
+}
+
+fn validated_chat_message_segments(message_name: &str) -> Result<[&str; 4], GoogleAuthError> {
+    let segments = message_name.split('/').collect::<Vec<_>>();
+    let [spaces, space_id, messages, message_id] = segments.as_slice() else {
+        return Err(GoogleAuthError::InvalidRequest);
+    };
+    if *spaces != "spaces"
+        || *messages != "messages"
+        || validated_chat_space_id(&format!("spaces/{space_id}")).is_err()
+        || message_id.is_empty()
+        || message_id.len() > 240
+        || !message_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(GoogleAuthError::InvalidRequest);
+    }
+    Ok([spaces, space_id, messages, message_id])
+}
+
 fn classify_provider_status(status: u16) -> GoogleAuthError {
     if status == 429 || status >= 500 {
         GoogleAuthError::ProviderUnavailable
@@ -1954,6 +2473,42 @@ mod tests {
         assert!(scope.contains("https://www.googleapis.com/auth/calendar.events"));
         assert!(scope.contains("https://www.googleapis.com/auth/calendar.calendarlist.readonly"));
         assert!(!scope.contains("https://www.googleapis.com/auth/gmail.readonly"));
+    }
+
+    #[test]
+    fn chat_authorization_requests_work_scopes_and_account_selection() {
+        let profile = GoogleOAuthProfile::new_with_client_secret(
+            ClientPlatform::Android,
+            "chat-client-id",
+            SecretString::from("chat-client-secret"),
+            ["https://os.jimin.ai.kr/oauth/google/calendar/callback".to_owned()],
+            true,
+        )
+        .expect("test OAuth profile should be valid");
+        let adapter = GoogleIdentityAdapter::new([profile])
+            .expect("test Google identity adapter should build");
+
+        let authorization_url = adapter
+            .chat_authorization_url(
+                ClientPlatform::Android,
+                "state-value",
+                "challenge-value",
+                true,
+            )
+            .expect("Chat authorization URL should be generated");
+        let url = reqwest::Url::parse(&authorization_url).expect("authorization URL should parse");
+        let query = url.query_pairs().collect::<BTreeMap<_, _>>();
+        let scope = query
+            .get("scope")
+            .expect("scope query parameter should exist");
+
+        assert!(scope.contains("https://www.googleapis.com/auth/chat.spaces.readonly"));
+        assert!(scope.contains("https://www.googleapis.com/auth/chat.messages.readonly"));
+        assert!(scope.contains("https://www.googleapis.com/auth/chat.messages.reactions.create"));
+        assert_eq!(
+            query.get("prompt").map(AsRef::as_ref),
+            Some("consent select_account")
+        );
     }
 
     #[test]

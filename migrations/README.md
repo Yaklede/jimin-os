@@ -84,4 +84,15 @@ columns are additive, but after mention-aware deliveries are written rollback
 must use the verified pre-migration backup so the original delivery rendering is
 not lost.
 
+Migration `0029_project_google_chat_inflow.sql` keeps the owner's personal
+Calendar credential separate from multiple company Google Chat identities. It
+adds project-owned Chat sources, a deduplicated inflow inbox, owner-scoped
+promote/dismiss decisions, and encrypted refresh-token storage. Apply it to an
+empty database and a restored version-28 backup, then verify that a repeated
+provider message creates one inflow item and that
+`jimin_schema_metadata.schema_version = 29`. Rollback after a company account,
+source, or inflow item is written requires the verified pre-migration backup;
+dropping the tables would also discard encrypted credentials and decision
+history.
+
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.
