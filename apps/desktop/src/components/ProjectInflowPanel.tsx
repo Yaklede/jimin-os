@@ -278,27 +278,36 @@ function InflowItemRow({
   onDismiss(item: ProjectInflowItem): Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
-  const [title, setTitle] = useState(() => item.suggestedTaskTitle);
+  const messages = item.messages ?? [
+    {
+      senderName: item.senderName,
+      contentText: item.contentText,
+      receivedAt: item.receivedAt,
+    },
+  ];
+  const suggestedTitle =
+    item.suggestedTaskTitle ?? legacySuggestedTaskTitle(item.contentText);
+  const messageCount = item.messageCount ?? messages.length;
+  const firstReceivedAt = item.firstReceivedAt ?? item.receivedAt;
+  const [title, setTitle] = useState(() => suggestedTitle);
 
   return (
     <li className="project-inflow-item">
       <div className="project-inflow-item__meta">
         <span>{item.sourceName}</span>
-        <span>대화 {item.messageCount}개</span>
-        <span>
-          {formatConversationRange(item.firstReceivedAt, item.receivedAt)}
-        </span>
+        <span>대화 {messageCount}개</span>
+        <span>{formatConversationRange(firstReceivedAt, item.receivedAt)}</span>
         {item.acknowledged && <span>👀 표시 완료</span>}
       </div>
       <div className="project-inflow-item__summary">
-        <strong>{item.suggestedTaskTitle}</strong>
+        <strong>{suggestedTitle}</strong>
         <p>{item.contentText}</p>
       </div>
-      {item.messages.length > 1 && (
+      {messages.length > 1 && (
         <details className="project-inflow-item__context">
-          <summary>대화 맥락 {item.messages.length}개 보기</summary>
+          <summary>대화 맥락 {messages.length}개 보기</summary>
           <ol>
-            {item.messages.map((message, index) => (
+            {messages.map((message, index) => (
               <li key={`${message.receivedAt}-${index}`}>
                 <div>
                   <strong>{message.senderName ?? "보낸 사람 정보 없음"}</strong>
@@ -373,6 +382,16 @@ function InflowItemRow({
       )}
     </li>
   );
+}
+
+function legacySuggestedTaskTitle(content: string): string {
+  const firstLine = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  return (firstLine ?? "대화 내용 확인")
+    .replace(/^[\-*•]+\s*/, "")
+    .slice(0, 100);
 }
 
 function formatReceivedAt(value: string): string {
