@@ -1847,6 +1847,9 @@ export default function App() {
             : project,
         ),
       );
+      if (selectedWorkspaceId) {
+        void loadProjectsForWorkspace(selectedWorkspaceId, task.projectId);
+      }
     }
     void loadGoals();
   }
@@ -2446,8 +2449,13 @@ export default function App() {
             : project,
         ),
       );
-      void loadHomeSnapshot();
-      void loadGoals();
+      await Promise.all([
+        selectedWorkspaceId
+          ? loadProjectsForWorkspace(selectedWorkspaceId, selectedProjectId)
+          : Promise.resolve(false),
+        loadHomeSnapshot(),
+        loadGoals(),
+      ]);
     } catch (error) {
       setProjectsError(copy.messages.projectTaskSaveNotice);
       throw error;
@@ -2494,8 +2502,13 @@ export default function App() {
           ),
         );
       }
-      void loadHomeSnapshot();
-      void loadGoals();
+      await Promise.all([
+        selectedWorkspaceId
+          ? loadProjectsForWorkspace(selectedWorkspaceId, selectedProjectId)
+          : Promise.resolve(false),
+        loadHomeSnapshot(),
+        loadGoals(),
+      ]);
     } catch {
       setProjectsError(copy.messages.taskCompletionNotice);
       if (selectedProjectId) void loadProjectTasks(selectedProjectId);
@@ -2556,9 +2569,14 @@ export default function App() {
           ),
         );
       }
-      void loadHomeSnapshot();
-      void loadPlanningSnapshot();
-      void loadGoals();
+      await Promise.all([
+        selectedWorkspaceId
+          ? loadProjectsForWorkspace(selectedWorkspaceId, selectedProjectId)
+          : Promise.resolve(false),
+        loadHomeSnapshot(),
+        loadPlanningSnapshot(),
+        loadGoals(),
+      ]);
     } catch {
       setProjectsError(copy.messages.projectTaskSaveNotice);
       if (selectedProjectId) void loadProjectTasks(selectedProjectId);
@@ -2603,6 +2621,9 @@ export default function App() {
         );
       }
       await Promise.all([
+        selectedWorkspaceId
+          ? loadProjectsForWorkspace(selectedWorkspaceId, selectedProjectId)
+          : Promise.resolve(false),
         loadHomeSnapshot(),
         loadPlanningSnapshot(),
         loadGoals(),
