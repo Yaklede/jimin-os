@@ -92,6 +92,7 @@ struct StructuredAssistantAction {
     entity_id: String,
     workspace_id: String,
     project_id: String,
+    parent_task_id: String,
     title: String,
     notes: String,
     assignee_name: String,
@@ -1023,6 +1024,10 @@ fn render_contextualized_turn(
          For create_task and update_task, set assigneeName to the explicitly requested owner. For updates, preserve the \
          current assigneeName unless the user asks to assign, reassign, or clear it. When task notes unambiguously name an \
          owner and the user asks to apply those assignments, create one update_task action per matching task. \
+         For a child task, set parentTaskId to the exact open root task ID. Preserve the current parentTaskId on unrelated \
+         updates and use an empty string only when the user explicitly asks to make it independent. A child task must stay \
+         in the same project as its parent and cannot have a deadline after the parent's deadline. When the user asks to \
+         split an existing large task, keep that task as the parent and create one create_task action per concrete child. \
          completed_tasks contains real completion history in newest-first order. For requests about work completed today, \
          use only records whose completed timestamp falls within the current Korea local day. Never infer completion from open_tasks. \
          When the user asks to undo an accidental completion or restore completed work, use reopen_task with the completed task ID. \
@@ -1098,9 +1103,11 @@ fn render_contextualized_turn(
                 .map_or_else(|| "no due date".to_owned(), korea_timestamp);
             let _ = writeln!(
                 prompt,
-                "- [id {} | project {} | assignee {} | priority {} | due {due} | version {}] {} | notes: {}",
+                "- [id {} | project {} | parent {} | assignee {} | priority {} | due {due} | version {}] {} | notes: {}",
                 task.id,
                 task.project_id
+                    .map_or_else(|| "none".to_owned(), |id| id.to_string()),
+                task.parent_task_id
                     .map_or_else(|| "none".to_owned(), |id| id.to_string()),
                 task.assignee_name.as_deref().unwrap_or("none"),
                 task.priority,
@@ -1125,9 +1132,11 @@ fn render_contextualized_turn(
                 .map_or_else(|| "unknown".to_owned(), korea_timestamp);
             let _ = writeln!(
                 prompt,
-                "- [id {} | project {} | assignee {} | priority {} | due {due} | completed {completed} | version {}] {} | notes: {}",
+                "- [id {} | project {} | parent {} | assignee {} | priority {} | due {due} | completed {completed} | version {}] {} | notes: {}",
                 task.id,
                 task.project_id
+                    .map_or_else(|| "none".to_owned(), |id| id.to_string()),
+                task.parent_task_id
                     .map_or_else(|| "none".to_owned(), |id| id.to_string()),
                 task.assignee_name.as_deref().unwrap_or("none"),
                 task.priority,
@@ -1168,11 +1177,15 @@ fn render_contextualized_turn(
             let next_action = project.next_action.as_deref().unwrap_or("no next action");
             let _ = writeln!(
                 prompt,
-                "- [id {} | workspace {} | {status} | risk {} | open tasks {} | version {} | due {}] {} | objective: {} | next: {next_action}",
+                "- [id {} | workspace {} | {status} | risk {} | progress {}% | tasks {} completed / {} open | overdue {} | unassigned {} | version {} | due {}] {} | objective: {} | next: {next_action}",
                 project.id,
                 project.workspace_id,
                 project.risk_level,
+                project.progress_percent,
+                project.completed_task_count,
                 project.open_task_count,
+                project.overdue_task_count,
+                project.unassigned_task_count,
                 project.version,
                 project
                     .due_at
@@ -1574,6 +1587,10 @@ fn assistant_output_schema() -> Value {
                         "entityId": { "type": "string" },
                         "workspaceId": { "type": "string" },
                         "projectId": { "type": "string" },
+                        "parentTaskId": {
+                            "type": "string",
+                            "description": "For child tasks, the exact open root task ID. Preserve it on unrelated updates and use an empty string only to remove an existing parent."
+                        },
                         "title": {
                             "type": "string",
                             "description": "For create_task, a concise action or outcome title written by the assistant, never the user's full request.",
@@ -1617,6 +1634,7 @@ fn assistant_output_schema() -> Value {
                         "entityId",
                         "workspaceId",
                         "projectId",
+                        "parentTaskId",
                         "title",
                         "notes",
                         "assigneeName",
@@ -1957,9 +1975,12 @@ fn validated_agent_action(
             } else {
                 let (title, notes) =
                     validated_created_task_copy(&context.prompt, &action.title, &action.notes)?;
+                let parent_task_id = parse_optional_id(&action.parent_task_id)?;
+                validate_structured_task_parent(context, None, project_id, parent_task_id, due_at)?;
                 AgentActionCommand::CreateTask {
                     id: Uuid::now_v7(),
                     project_id,
+                    parent_task_id,
                     title,
                     notes,
                     assignee_name: optional_action_text(&action.assignee_name, 80)?,
@@ -1982,14 +2003,18 @@ fn validated_agent_action(
             {
                 return Err(());
             }
+            let parent_task_id = parse_optional_id(&action.parent_task_id)?;
+            let due_at = parse_optional_timestamp(&action.due_at)?;
+            validate_structured_task_parent(context, Some(id), project_id, parent_task_id, due_at)?;
             AgentActionCommand::UpdateTask {
                 id,
                 project_id,
+                parent_task_id,
                 title: required_action_text(&action.title, 200)?,
                 notes: optional_action_document(&action.notes, 10_000)?,
                 assignee_name: optional_action_text(&action.assignee_name, 80)?,
                 priority: validated_level(action.priority)?,
-                due_at: parse_optional_timestamp(&action.due_at)?,
+                due_at,
                 status,
                 expected_status: task.status,
                 expected_version: task.version,
@@ -2311,6 +2336,38 @@ fn task_action_is_clock_bound_schedule(prompt: &str, title: &str) -> bool {
 
 fn validated_level(value: i16) -> Result<i16, ()> {
     (0..=3).contains(&value).then_some(value).ok_or(())
+}
+
+fn validate_structured_task_parent(
+    context: &TurnContext,
+    task_id: Option<Uuid>,
+    project_id: Option<Uuid>,
+    parent_task_id: Option<Uuid>,
+    due_at: Option<OffsetDateTime>,
+) -> Result<(), ()> {
+    let Some(parent_task_id) = parent_task_id else {
+        return Ok(());
+    };
+    if task_id == Some(parent_task_id) {
+        return Err(());
+    }
+    let parent = context
+        .tasks
+        .iter()
+        .find(|task| {
+            task.id == parent_task_id
+                && task.status == TaskStatus::Open
+                && task.parent_task_id.is_none()
+        })
+        .ok_or(())?;
+    if parent.project_id != project_id
+        || parent
+            .due_at
+            .is_some_and(|parent_due_at| due_at.is_some_and(|due_at| due_at > parent_due_at))
+    {
+        return Err(());
+    }
+    Ok(())
 }
 
 const fn agent_action_entity_id(action: &AgentActionCommand) -> Uuid {
@@ -3668,6 +3725,11 @@ mod tests {
             next_action: Some("구조화 응답 연결".to_owned()),
             due_at: None,
             open_task_count: 1,
+            total_task_count: 1,
+            completed_task_count: 0,
+            overdue_task_count: 0,
+            unassigned_task_count: 1,
+            progress_percent: 0,
             version: 1,
         };
         let workspace = Workspace {
@@ -4451,6 +4513,64 @@ mod tests {
     }
 
     #[test]
+    fn structured_create_task_can_attach_a_valid_child_to_an_open_parent() {
+        let parent_due_at = OffsetDateTime::parse(
+            "2026-08-31T18:00:00+09:00",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("timestamp");
+        let parent = Task {
+            id: Uuid::now_v7(),
+            project_id: None,
+            parent_task_id: None,
+            title: "A 작업 완료".to_owned(),
+            notes: None,
+            assignee_name: None,
+            status: TaskStatus::Open,
+            priority: 2,
+            due_at: Some(parent_due_at),
+            completed_at: None,
+            version: 1,
+        };
+        let context = TurnContext {
+            prompt: String::new(),
+            schedule: Vec::new(),
+            tasks: vec![parent.clone()],
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
+        };
+        let action = StructuredAssistantAction {
+            kind: StructuredAssistantActionKind::CreateTask,
+            parent_task_id: parent.id.to_string(),
+            title: "A-1 상세 기능 구현".to_owned(),
+            priority: 2,
+            due_at: "2026-08-14T18:00:00+09:00".to_owned(),
+            ..StructuredAssistantAction::default()
+        };
+
+        let command = validated_agent_action(&action, &context)
+            .expect("valid child action")
+            .expect("child command");
+        assert!(matches!(
+            command,
+            AgentActionCommand::CreateTask {
+                project_id: None,
+                parent_task_id: Some(actual_parent_id),
+                ..
+            } if actual_parent_id == parent.id
+        ));
+
+        let too_late = StructuredAssistantAction {
+            due_at: "2026-09-01T18:00:00+09:00".to_owned(),
+            ..action
+        };
+        assert!(validated_agent_action(&too_late, &context).is_err());
+    }
+
+    #[test]
     fn structured_update_task_can_apply_an_assignee_from_notes() {
         let task = Task {
             id: Uuid::now_v7(),
@@ -4727,6 +4847,11 @@ mod tests {
             next_action: Some("다음 작업 확인".to_owned()),
             due_at: None,
             open_task_count: 2,
+            total_task_count: 2,
+            completed_task_count: 0,
+            overdue_task_count: 0,
+            unassigned_task_count: 0,
+            progress_percent: 0,
             version: 7,
         };
         let context = TurnContext {
@@ -5264,6 +5389,11 @@ mod tests {
             next_action: None,
             due_at: None,
             open_task_count: 0,
+            total_task_count: 1,
+            completed_task_count: 1,
+            overdue_task_count: 0,
+            unassigned_task_count: 0,
+            progress_percent: 100,
             version: 4,
         };
         let task = Task {

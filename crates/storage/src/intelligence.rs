@@ -5,8 +5,10 @@
 //! decision. Decision writes use optimistic concurrency and an idempotent
 //! client mutation ID before later stages execute any suggested action.
 
+use std::collections::BTreeMap;
+
 use sqlx::{Postgres, Transaction};
-use time::OffsetDateTime;
+use time::{OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 use uuid::Uuid;
 
 use crate::{
@@ -375,6 +377,27 @@ impl TryFrom<RecommendationRow> for Recommendation {
 }
 
 impl Database {
+    /// Returns owners whose active devices should receive independently
+    /// refreshed work intelligence. The result contains identifiers only and
+    /// is bounded for one worker pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when active owners cannot be listed.
+    pub async fn active_work_brief_user_ids(&self) -> Result<Vec<Uuid>, StorageError> {
+        sqlx::query_scalar(
+            "SELECT DISTINCT users.id
+             FROM users
+             INNER JOIN devices ON devices.user_id = users.id
+             WHERE devices.status = 'active'
+             ORDER BY users.id
+             LIMIT 100",
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(classify)
+    }
+
     /// Persists one server-generated recommendation after verifying every
     /// optional scope belongs to the same owner.
     ///
@@ -948,7 +971,11 @@ fn work_observations(
     if tasks.len() >= 5 {
         observations.push(workload_observation(tasks.len(), now));
     }
+    observations.extend(assignee_workload_observations(tasks, now));
     observations.extend(schedule_observations(schedules, now));
+    if let Some(observation) = tomorrow_work_observation(tasks, schedules, now) {
+        observations.push(observation);
+    }
     observations.extend(
         goals
             .iter()
@@ -1093,7 +1120,18 @@ fn project_attention_observation(
     project: &Project,
     now: OffsetDateTime,
 ) -> Option<WorkObservation> {
-    let (title, summary, severity, risk_level, risk_summary) = if project.risk_level >= 2 {
+    let (title, summary, severity, risk_level, risk_summary) = if project.overdue_task_count > 0 {
+        (
+            format!("{}의 늦어진 일을 먼저 정리하세요", project.title),
+            format!(
+                "진행률은 {}%이고 기한이 지난 실행 항목이 {}개 있어요.",
+                project.progress_percent, project.overdue_task_count
+            ),
+            3,
+            2,
+            Some("늦어진 하위 일이 전체 프로젝트 일정에 영향을 줄 수 있어요.".to_owned()),
+        )
+    } else if project.risk_level >= 2 {
         (
             format!("{}의 위험 요소를 먼저 확인하세요", project.title),
             "프로젝트 위험도가 높게 설정되어 있어 진행 상태를 다시 확인할 필요가 있어요."
@@ -1101,6 +1139,25 @@ fn project_attention_observation(
             project.risk_level,
             project.risk_level,
             Some("확인하지 않으면 일정이나 범위 조정이 늦어질 수 있어요.".to_owned()),
+        )
+    } else if project.unassigned_task_count > 0 {
+        (
+            format!("{}의 담당자를 정하세요", project.title),
+            format!(
+                "담당자가 정해지지 않은 실행 항목이 {}개 있어요.",
+                project.unassigned_task_count
+            ),
+            2,
+            1,
+            Some("담당자가 없으면 시작 여부와 진행 상태를 확인하기 어려워요.".to_owned()),
+        )
+    } else if project.progress_percent == 100 && project.total_task_count > 0 {
+        (
+            format!("{}의 완료 여부를 확인하세요", project.title),
+            "실행 항목을 모두 마쳤어요. 프로젝트의 목적까지 달성했는지 확인할 차례예요.".to_owned(),
+            1,
+            0,
+            None,
         )
     } else if project.open_task_count > 0 && project.next_action.is_none() {
         (
@@ -1167,6 +1224,45 @@ fn workload_observation(task_count: usize, now: OffsetDateTime) -> WorkObservati
     }
 }
 
+fn assignee_workload_observations(tasks: &[Task], now: OffsetDateTime) -> Vec<WorkObservation> {
+    let mut workload = BTreeMap::<&str, usize>::new();
+    for task in tasks {
+        if let Some(assignee) = task.assignee_name.as_deref() {
+            *workload.entry(assignee).or_default() += 1;
+        }
+    }
+    workload
+        .into_iter()
+        .filter(|(_, count)| *count >= 5)
+        .take(3)
+        .map(|(assignee, count)| WorkObservation {
+            fingerprint: format!("work:assignee-workload:{assignee}"),
+            workspace_id: None,
+            project_id: None,
+            goal_id: None,
+            severity: 2,
+            kind: "workload",
+            source_type: "system",
+            source_entity_id: None,
+            suggested_action_kind: SuggestedActionKind::Review,
+            suggested_entity_id: None,
+            title: format!("{assignee}님의 업무량을 다시 확인하세요"),
+            summary: format!("현재 담당한 열린 할 일이 {count}개 있어요."),
+            expected_effect: "담당 업무를 나누거나 우선순위를 정하면 병목을 줄일 수 있어요."
+                .to_owned(),
+            risk_summary: Some(
+                "한 사람에게 업무가 몰리면 프로젝트 일정이 함께 늦어질 수 있어요.".to_owned(),
+            ),
+            confidence: 98,
+            urgency: 2,
+            impact: 2,
+            risk_level: 1,
+            effort_minutes: Some(10),
+            valid_until: now + time::Duration::days(2),
+        })
+        .collect()
+}
+
 fn schedule_observations(schedules: &[ScheduleEntry], now: OffsetDateTime) -> Vec<WorkObservation> {
     let mut observations = Vec::new();
     if let Some((first, second)) = schedules
@@ -1229,6 +1325,60 @@ fn schedule_observations(schedules: &[ScheduleEntry], now: OffsetDateTime) -> Ve
         });
     }
     observations
+}
+
+fn tomorrow_work_observation(
+    tasks: &[Task],
+    schedules: &[ScheduleEntry],
+    now: OffsetDateTime,
+) -> Option<WorkObservation> {
+    let korea_offset = UtcOffset::from_hms(9, 0, 0).ok()?;
+    let korea_now = now.to_offset(korea_offset);
+    if korea_now.hour() < 18 {
+        return None;
+    }
+    let tomorrow = korea_now.date().next_day()?;
+    let day_after = tomorrow.next_day()?;
+    let tomorrow_start =
+        PrimitiveDateTime::new(tomorrow, Time::MIDNIGHT).assume_offset(korea_offset);
+    let tomorrow_end =
+        PrimitiveDateTime::new(day_after, Time::MIDNIGHT).assume_offset(korea_offset);
+    let task_count = tasks
+        .iter()
+        .filter(|task| {
+            task.due_at
+                .is_some_and(|due_at| due_at >= tomorrow_start && due_at < tomorrow_end)
+        })
+        .count();
+    let schedule_count = schedules
+        .iter()
+        .filter(|entry| entry.starts_at >= tomorrow_start && entry.starts_at < tomorrow_end)
+        .count();
+    if task_count + schedule_count == 0 {
+        return None;
+    }
+    Some(WorkObservation {
+        fingerprint: format!("work:tomorrow-preview:{tomorrow}"),
+        workspace_id: None,
+        project_id: None,
+        goal_id: None,
+        severity: 1,
+        kind: "opportunity",
+        source_type: "system",
+        source_entity_id: None,
+        suggested_action_kind: SuggestedActionKind::Review,
+        suggested_entity_id: None,
+        title: "내일 일정과 할 일을 미리 확인하세요".to_owned(),
+        summary: format!("내일 일정 {schedule_count}개와 마감할 일 {task_count}개가 있어요."),
+        expected_effect: "오늘 마무리할 것과 내일 바로 시작할 일을 미리 나눌 수 있어요.".to_owned(),
+        risk_summary: None,
+        confidence: 100,
+        urgency: 1,
+        impact: 1,
+        risk_level: 0,
+        effort_minutes: Some(5),
+        valid_until: tomorrow_end,
+    })
 }
 
 fn goal_observation(overview: &GoalOverview, now: OffsetDateTime) -> Option<WorkObservation> {
@@ -1513,8 +1663,13 @@ fn classify(_: sqlx::Error) -> StorageError {
 mod tests {
     use super::{
         DecideRecommendation, NewRecommendation, RecommendationDecision, SuggestedActionKind,
+        project_attention_observation, tomorrow_work_observation,
     };
-    use time::OffsetDateTime;
+    use crate::{
+        planning::{ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus},
+        work::{Project, ProjectStatus},
+    };
+    use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
     use uuid::Uuid;
 
     fn valid_recommendation() -> NewRecommendation {
@@ -1582,5 +1737,84 @@ mod tests {
             expected_version: 1,
         };
         assert!(deferred.validate().is_ok());
+    }
+
+    #[test]
+    fn evening_brief_previews_tomorrow_in_korea_time() {
+        let offset = UtcOffset::from_hms(9, 0, 0).expect("Korea offset");
+        let now = PrimitiveDateTime::new(
+            Date::from_calendar_date(2026, Month::July, 24).expect("valid date"),
+            Time::from_hms(18, 0, 0).expect("valid time"),
+        )
+        .assume_offset(offset);
+        let tomorrow_due = now + time::Duration::hours(16);
+        let task = Task {
+            id: Uuid::now_v7(),
+            project_id: None,
+            parent_task_id: None,
+            title: "내일 마감할 일".to_owned(),
+            notes: None,
+            assignee_name: None,
+            status: TaskStatus::Open,
+            priority: 1,
+            due_at: Some(tomorrow_due),
+            completed_at: None,
+            version: 1,
+        };
+        let schedule = ScheduleEntry {
+            id: Uuid::now_v7(),
+            title: "내일 회의".to_owned(),
+            notes: None,
+            starts_at: tomorrow_due + time::Duration::hours(1),
+            ends_at: tomorrow_due + time::Duration::hours(2),
+            time_zone: "Asia/Seoul".to_owned(),
+            status: ScheduleStatus::Confirmed,
+            source: ScheduleSource::Manual,
+            editable: true,
+            version: 1,
+        };
+
+        assert!(
+            tomorrow_work_observation(
+                std::slice::from_ref(&task),
+                std::slice::from_ref(&schedule),
+                now - time::Duration::hours(1),
+            )
+            .is_none()
+        );
+        let observation = tomorrow_work_observation(&[task], &[schedule], now)
+            .expect("evening work should create a tomorrow preview");
+        assert_eq!(observation.title, "내일 일정과 할 일을 미리 확인하세요");
+        assert_eq!(
+            observation.summary,
+            "내일 일정 1개와 마감할 일 1개가 있어요."
+        );
+        assert_eq!(observation.urgency, 1);
+    }
+
+    #[test]
+    fn project_attention_prioritizes_overdue_executable_work() {
+        let project = Project {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            title: "개인 운영체제".to_owned(),
+            objective: Some("실행 흐름 완성".to_owned()),
+            status: ProjectStatus::Active,
+            risk_level: 1,
+            next_action: Some("늦어진 하위 일 처리".to_owned()),
+            due_at: None,
+            open_task_count: 3,
+            total_task_count: 4,
+            completed_task_count: 2,
+            overdue_task_count: 1,
+            unassigned_task_count: 0,
+            progress_percent: 50,
+            version: 1,
+        };
+        let observation = project_attention_observation(&project, OffsetDateTime::now_utc())
+            .expect("overdue work should need attention");
+        assert!(observation.title.contains("늦어진 일"));
+        assert!(observation.summary.contains("50%"));
+        assert_eq!(observation.urgency, 3);
     }
 }

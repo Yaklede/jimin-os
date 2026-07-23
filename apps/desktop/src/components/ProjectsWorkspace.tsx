@@ -551,8 +551,13 @@ export function ProjectsWorkspace({
                       </span>
                       <span className="project-list__meta">
                         <span>
-                          {copy.projects.openTaskCount(project.openTaskCount)}
+                          {copy.projects.projectProgress(
+                            project.progressPercent,
+                          )}
                         </span>
+                        <small>
+                          {copy.projects.openTaskCount(project.openTaskCount)}
+                        </small>
                         <ChevronRight aria-hidden="true" />
                       </span>
                     </button>
@@ -676,6 +681,65 @@ export function ProjectsWorkspace({
                     {formatDueDate(selectedProject.dueAt)}
                   </span>
                 </div>
+                <section
+                  className="project-progress"
+                  aria-labelledby="project-progress-title"
+                  data-health={selectedProject.health}
+                >
+                  <div className="project-progress__heading">
+                    <div>
+                      <span id="project-progress-title">
+                        {copy.projects.progressTitle}
+                      </span>
+                      <strong>
+                        {copy.projects.projectHealth[selectedProject.health]}
+                      </strong>
+                    </div>
+                    <strong>
+                      {copy.projects.progressPercent(
+                        selectedProject.progressPercent,
+                      )}
+                    </strong>
+                  </div>
+                  <div
+                    className="project-progress__track"
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={selectedProject.progressPercent}
+                  >
+                    <span
+                      style={{
+                        width: `${Math.max(
+                          0,
+                          Math.min(100, selectedProject.progressPercent),
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                  <div className="project-progress__facts">
+                    <span>
+                      {copy.projects.progressSummary(
+                        selectedProject.completedTaskCount,
+                        selectedProject.totalTaskCount,
+                      )}
+                    </span>
+                    {selectedProject.overdueTaskCount > 0 && (
+                      <span data-attention="true">
+                        {copy.projects.overdueTaskCount(
+                          selectedProject.overdueTaskCount,
+                        )}
+                      </span>
+                    )}
+                    {selectedProject.unassignedTaskCount > 0 && (
+                      <span>
+                        {copy.projects.unassignedTaskCount(
+                          selectedProject.unassignedTaskCount,
+                        )}
+                      </span>
+                    )}
+                  </div>
+                </section>
                 {editingProjectId === selectedProject.id ? (
                   <ProjectEditForm
                     key={`${selectedProject.id}:${selectedProject.version}`}

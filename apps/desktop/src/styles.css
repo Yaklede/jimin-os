@@ -1874,7 +1874,7 @@ svg {
 
 .home-deadline-brief li {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: stretch;
   min-height: 58px;
 }
@@ -1884,9 +1884,28 @@ svg {
 }
 
 .home-deadline-brief__task,
+.home-deadline-brief__complete,
 .home-deadline-brief__edit {
   border: 0;
   background: transparent;
+}
+
+.home-deadline-brief__complete {
+  display: grid;
+  width: 48px;
+  min-height: 48px;
+  align-self: center;
+  place-items: center;
+  color: var(--muted);
+}
+
+.home-deadline-brief__complete:hover {
+  color: var(--accent);
+}
+
+.home-deadline-brief__complete svg {
+  width: 20px;
+  height: 20px;
 }
 
 .home-deadline-brief__task {
@@ -1895,7 +1914,7 @@ svg {
   align-items: center;
   gap: 10px;
   min-width: 0;
-  padding: 8px 4px 8px 18px;
+  padding: 8px 4px;
   text-align: left;
 }
 
@@ -4076,6 +4095,11 @@ svg {
   font-variant-numeric: tabular-nums;
 }
 
+.project-list__meta small {
+  color: var(--muted);
+  font-size: inherit;
+}
+
 .project-risk {
   display: inline-flex;
   align-items: center;
@@ -4997,6 +5021,60 @@ svg {
   width: 16px;
   height: 16px;
   color: var(--faint);
+}
+
+.project-progress {
+  display: grid;
+  gap: 10px;
+}
+
+.project-progress__heading,
+.project-progress__facts {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.project-progress__heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.project-progress__heading span,
+.project-progress__facts {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.project-progress__heading strong {
+  color: var(--text-strong);
+  font-size: 14px;
+}
+
+.project-progress[data-health="at_risk"] .project-progress__heading > strong,
+.project-progress__facts [data-attention="true"] {
+  color: var(--warning);
+}
+
+.project-progress__track {
+  overflow: hidden;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--surface-subtle);
+}
+
+.project-progress__track > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 220ms ease;
+}
+
+.project-progress__facts {
+  justify-content: flex-start;
+  flex-wrap: wrap;
 }
 
 .project-edit-form {

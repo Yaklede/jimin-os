@@ -104,6 +104,7 @@ pub enum AgentActionCommand {
     CreateTask {
         id: Uuid,
         project_id: Option<Uuid>,
+        parent_task_id: Option<Uuid>,
         title: String,
         notes: Option<String>,
         assignee_name: Option<String>,
@@ -113,6 +114,7 @@ pub enum AgentActionCommand {
     UpdateTask {
         id: Uuid,
         project_id: Option<Uuid>,
+        parent_task_id: Option<Uuid>,
         title: String,
         notes: Option<String>,
         assignee_name: Option<String>,
@@ -194,6 +196,7 @@ impl AgentActionCommand {
             Self::CreateTask {
                 id,
                 project_id,
+                parent_task_id,
                 title,
                 notes,
                 assignee_name,
@@ -202,6 +205,8 @@ impl AgentActionCommand {
             } => {
                 if is_v7(*id)
                     && project_id.is_none_or(is_v7)
+                    && parent_task_id.is_none_or(is_v7)
+                    && parent_task_id != &Some(*id)
                     && valid_text(title, MAX_TITLE_CHARS, false)
                     && valid_optional_document(notes.as_ref(), 10_000)
                     && valid_optional(assignee_name.as_ref(), 80)
@@ -215,6 +220,7 @@ impl AgentActionCommand {
             Self::UpdateTask {
                 id,
                 project_id,
+                parent_task_id,
                 title,
                 notes,
                 assignee_name,
@@ -226,6 +232,8 @@ impl AgentActionCommand {
             } => {
                 if is_v7(*id)
                     && project_id.is_none_or(is_v7)
+                    && parent_task_id.is_none_or(is_v7)
+                    && parent_task_id != &Some(*id)
                     && valid_text(title, MAX_TITLE_CHARS, false)
                     && valid_optional_document(notes.as_ref(), 10_000)
                     && valid_optional(assignee_name.as_ref(), 80)
@@ -2908,6 +2916,7 @@ async fn persist_agent_action(
         AgentActionCommand::CreateTask {
             id,
             project_id,
+            parent_task_id,
             title,
             notes,
             assignee_name,
@@ -2917,17 +2926,33 @@ async fn persist_agent_action(
             let version = sqlx::query_scalar::<_, i64>(
                 "\
                 INSERT INTO tasks (
-                    id, user_id, project_id, title, notes, assignee_name, status, priority, due_at
+                    id, user_id, project_id, parent_task_id, title, notes,
+                    assignee_name, status, priority, due_at
                 )
-                SELECT $1, $2, $3, $4, $5, $6, 'open', $7, $8
-                WHERE $3::uuid IS NULL OR EXISTS (
-                    SELECT 1 FROM projects WHERE id = $3 AND user_id = $2
+                SELECT $1, $2, $3, $4, $5, $6, $7, 'open', $8, $9
+                WHERE (
+                    $3::uuid IS NULL OR EXISTS (
+                        SELECT 1 FROM projects WHERE id = $3 AND user_id = $2
+                    )
+                )
+                AND (
+                    $4::uuid IS NULL OR EXISTS (
+                        SELECT 1
+                        FROM tasks AS parent
+                        WHERE parent.id = $4
+                          AND parent.user_id = $2
+                          AND parent.status = 'open'
+                          AND parent.parent_task_id IS NULL
+                          AND parent.project_id IS NOT DISTINCT FROM $3
+                          AND (parent.due_at IS NULL OR $9::timestamptz IS NULL OR $9 <= parent.due_at)
+                    )
                 )
                 RETURNING version",
             )
             .bind(id)
             .bind(user_id)
             .bind(project_id)
+            .bind(parent_task_id)
             .bind(title.trim())
             .bind(trim_optional_text(notes.as_deref()))
             .bind(trim_optional_text(assignee_name.as_deref()))
@@ -2942,6 +2967,7 @@ async fn persist_agent_action(
         AgentActionCommand::UpdateTask {
             id,
             project_id,
+            parent_task_id,
             title,
             notes,
             assignee_name,
@@ -2964,18 +2990,32 @@ async fn persist_agent_action(
             let version = sqlx::query_scalar::<_, i64>(
                 "\
                 UPDATE tasks
-                SET project_id = $3, title = $4, notes = $5, assignee_name = $6,
-                    priority = $7, due_at = $8, status = $9,
-                    completed_at = CASE WHEN $9 = 'completed' THEN completed_at ELSE NULL END
-                WHERE id = $1 AND user_id = $2 AND status = $10 AND version = $11
+                SET project_id = $3, parent_task_id = $4, title = $5, notes = $6,
+                    assignee_name = $7, priority = $8, due_at = $9, status = $10,
+                    completed_at = CASE WHEN $10 = 'completed' THEN completed_at ELSE NULL END
+                WHERE id = $1 AND user_id = $2 AND status = $11 AND version = $12
                   AND ($3::uuid IS NULL OR EXISTS (
                       SELECT 1 FROM projects WHERE id = $3 AND user_id = $2
                   ))
+                  AND (
+                      $4::uuid IS NULL OR EXISTS (
+                          SELECT 1
+                          FROM tasks AS parent
+                          WHERE parent.id = $4
+                            AND parent.id <> $1
+                            AND parent.user_id = $2
+                            AND parent.status = 'open'
+                            AND parent.parent_task_id IS NULL
+                            AND parent.project_id IS NOT DISTINCT FROM $3
+                            AND (parent.due_at IS NULL OR $9::timestamptz IS NULL OR $9 <= parent.due_at)
+                      )
+                  )
                 RETURNING version",
             )
             .bind(id)
             .bind(user_id)
             .bind(project_id)
+            .bind(parent_task_id)
             .bind(title.trim())
             .bind(trim_optional_text(notes.as_deref()))
             .bind(trim_optional_text(assignee_name.as_deref()))
@@ -3006,6 +3046,15 @@ async fn persist_agent_action(
                 SET status = $3,
                     completed_at = CASE WHEN $3 = 'completed' THEN NOW() ELSE NULL END
                 WHERE id = $1 AND user_id = $2 AND status = $4 AND version = $5
+                  AND (
+                      $3 = 'open' OR NOT EXISTS (
+                          SELECT 1
+                          FROM tasks AS child
+                          WHERE child.user_id = $2
+                            AND child.parent_task_id = $1
+                            AND child.status = 'open'
+                      )
+                  )
                 RETURNING version",
             )
             .bind(id)

@@ -8,7 +8,6 @@ const MAX_TOKEN_CIPHERTEXT_BYTES: usize = 8 * 1024;
 const MAX_ERROR_CODE_BYTES: usize = 120;
 const MAX_WORKER_ID_BYTES: usize = 200;
 const MAX_ATTEMPTS: i32 = 8;
-const REMINDER_LEAD_TIME: Duration = Duration::minutes(15);
 const DELIVERY_LEASE_SECONDS: i32 = 120;
 const _: () = assert!(DELIVERY_LEASE_SECONDS > 15);
 
@@ -51,7 +50,9 @@ struct ReminderCandidate {
     item_version: i64,
     project_id: Option<Uuid>,
     raw_title: String,
+    raw_body: Option<String>,
     target_at: OffsetDateTime,
+    notify_at: OffsetDateTime,
 }
 
 impl Database {
@@ -204,8 +205,9 @@ impl Database {
         Ok(())
     }
 
-    /// Reconciles due task and schedule reminders into a durable, per-device
-    /// queue. The unique item-version key makes the operation idempotent.
+    /// Reconciles due task and schedule reminders plus high-priority assistant
+    /// briefs into a durable, per-device queue. The unique item-version key
+    /// makes the operation idempotent.
     ///
     /// # Errors
     ///
@@ -218,18 +220,44 @@ impl Database {
         let candidates = sqlx::query_as::<_, ReminderCandidate>(
             "SELECT task.user_id, 'task'::TEXT AS item_type, task.id AS item_id,
                     task.version AS item_version, task.project_id,
-                    task.title AS raw_title, task.due_at AS target_at
+                    task.title AS raw_title, NULL::TEXT AS raw_body,
+                    task.due_at AS target_at,
+                    task.due_at - INTERVAL '15 minutes' AS notify_at
              FROM tasks AS task
              WHERE task.status = 'open' AND task.due_at IS NOT NULL
                AND task.due_at > $1 AND task.due_at - INTERVAL '15 minutes' <= $1
              UNION ALL
              SELECT entry.user_id, 'schedule'::TEXT AS item_type, entry.id AS item_id,
                     entry.version AS item_version, NULL::UUID AS project_id,
-                    entry.title AS raw_title, entry.starts_at AS target_at
+                    entry.title AS raw_title, NULL::TEXT AS raw_body,
+                    entry.starts_at AS target_at,
+                    entry.starts_at - INTERVAL '15 minutes' AS notify_at
              FROM schedule_entries AS entry
              WHERE entry.status = 'confirmed' AND entry.starts_at > $1
                AND entry.starts_at - INTERVAL '15 minutes' <= $1
-             ORDER BY target_at, item_id
+             UNION ALL
+             SELECT recommendation.user_id, 'brief'::TEXT AS item_type,
+                    recommendation.id AS item_id,
+                    recommendation.version AS item_version,
+                    NULL::UUID AS project_id,
+                    recommendation.title AS raw_title,
+                    recommendation.rationale AS raw_body,
+                    COALESCE(recommendation.valid_until, $1 + INTERVAL '1 day') AS target_at,
+                    $1 AS notify_at
+             FROM recommendations AS recommendation
+             WHERE recommendation.urgency >= 2
+               AND (
+                   recommendation.status IN ('pending', 'analysis_requested')
+                   OR (
+                       recommendation.status = 'deferred'
+                       AND recommendation.revisit_at <= $1
+                   )
+               )
+               AND (
+                   recommendation.valid_until IS NULL
+                   OR recommendation.valid_until > $1
+               )
+             ORDER BY notify_at, item_id
              LIMIT 500",
         )
         .bind(now)
@@ -468,6 +496,25 @@ impl Database {
                              AND entry.status = 'confirmed' AND entry.version = delivery.item_version
                              AND entry.starts_at = delivery.target_at
                        ))
+                       OR
+                       (delivery.item_type = 'brief' AND EXISTS (
+                           SELECT 1 FROM recommendations AS recommendation
+                           WHERE recommendation.id = delivery.item_id
+                             AND recommendation.user_id = delivery.user_id
+                             AND recommendation.version = delivery.item_version
+                             AND recommendation.urgency >= 2
+                             AND (
+                                 recommendation.status IN ('pending', 'analysis_requested')
+                                 OR (
+                                     recommendation.status = 'deferred'
+                                     AND recommendation.revisit_at <= NOW()
+                                 )
+                             )
+                             AND (
+                                 recommendation.valid_until IS NULL
+                                 OR recommendation.valid_until > NOW()
+                             )
+                       ))
                    )
                )",
         )
@@ -510,9 +557,9 @@ async fn queue_candidate(
         .bind(destination)
         .bind(candidate.project_id)
         .bind(&title)
-        .bind(body)
+        .bind(&body)
         .bind(candidate.target_at)
-        .bind(candidate.target_at - REMINDER_LEAD_TIME)
+        .bind(candidate.notify_at)
         .execute(&mut **transaction)
         .await
         .map_err(classify)?;
@@ -521,25 +568,41 @@ async fn queue_candidate(
     Ok(queued)
 }
 
-fn reminder_copy(candidate: &ReminderCandidate) -> (&'static str, String, &'static str) {
+fn reminder_copy(candidate: &ReminderCandidate) -> (&'static str, String, String) {
     let raw_title = candidate.raw_title.trim();
     let title = match candidate.item_type.as_str() {
         "task" => format!("곧 마감해요 · {raw_title}"),
-        _ => format!("곧 시작해요 · {raw_title}"),
+        "schedule" => format!("곧 시작해요 · {raw_title}"),
+        _ => format!("확인이 필요해요 · {raw_title}"),
     };
     let title = title.chars().take(120).collect();
     match (candidate.item_type.as_str(), candidate.project_id) {
         ("task", Some(_)) => (
             "projects",
             title,
-            "할 일 기한이 다가왔어요. 지금 진행 상황을 확인해 보세요.",
+            "할 일 기한이 다가왔어요. 지금 진행 상황을 확인해 보세요.".to_owned(),
         ),
         ("task", None) => (
             "calendar",
             title,
-            "할 일 기한이 다가왔어요. 지금 진행 상황을 확인해 보세요.",
+            "할 일 기한이 다가왔어요. 지금 진행 상황을 확인해 보세요.".to_owned(),
         ),
-        _ => ("calendar", title, "일정 내용을 확인하고 준비해 주세요."),
+        ("schedule", _) => (
+            "calendar",
+            title,
+            "일정 내용을 확인하고 준비해 주세요.".to_owned(),
+        ),
+        _ => {
+            let body = candidate
+                .raw_body
+                .as_deref()
+                .unwrap_or("지금 확인할 중요한 변화가 있어요.")
+                .trim()
+                .chars()
+                .take(240)
+                .collect();
+            ("home", title, body)
+        }
     }
 }
 
@@ -586,12 +649,33 @@ mod tests {
             item_version: 1,
             project_id: Some(Uuid::now_v7()),
             raw_title: "가".repeat(200),
+            raw_body: None,
             target_at: OffsetDateTime::now_utc(),
+            notify_at: OffsetDateTime::now_utc(),
         };
         let (destination, title, body) = reminder_copy(&candidate);
         assert_eq!(destination, "projects");
         assert_eq!(title.chars().count(), 120);
         assert!(body.chars().count() <= 240);
+    }
+
+    #[test]
+    fn high_priority_brief_copy_opens_home_and_keeps_the_reason() {
+        let candidate = ReminderCandidate {
+            user_id: Uuid::now_v7(),
+            item_type: "brief".to_owned(),
+            item_id: Uuid::now_v7(),
+            item_version: 1,
+            project_id: None,
+            raw_title: "내일 일정과 할 일을 미리 확인하세요".to_owned(),
+            raw_body: Some("내일 일정 2개와 마감할 일 3개가 있어요.".to_owned()),
+            target_at: OffsetDateTime::now_utc() + Duration::days(1),
+            notify_at: OffsetDateTime::now_utc(),
+        };
+        let (destination, title, body) = reminder_copy(&candidate);
+        assert_eq!(destination, "home");
+        assert!(title.starts_with("확인이 필요해요"));
+        assert_eq!(body, "내일 일정 2개와 마감할 일 3개가 있어요.");
     }
 
     #[test]

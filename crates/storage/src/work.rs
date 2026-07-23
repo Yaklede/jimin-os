@@ -49,6 +49,11 @@ pub struct Project {
     pub next_action: Option<String>,
     pub due_at: Option<OffsetDateTime>,
     pub open_task_count: i64,
+    pub total_task_count: i64,
+    pub completed_task_count: i64,
+    pub overdue_task_count: i64,
+    pub unassigned_task_count: i64,
+    pub progress_percent: i16,
     pub version: i64,
 }
 
@@ -162,6 +167,11 @@ struct ProjectRow {
     next_action: Option<String>,
     due_at: Option<OffsetDateTime>,
     open_task_count: i64,
+    total_task_count: i64,
+    completed_task_count: i64,
+    overdue_task_count: i64,
+    unassigned_task_count: i64,
+    progress_percent: i16,
     version: i64,
 }
 
@@ -203,6 +213,11 @@ impl TryFrom<ProjectRow> for Project {
             next_action: row.next_action,
             due_at: row.due_at,
             open_task_count: row.open_task_count,
+            total_task_count: row.total_task_count,
+            completed_task_count: row.completed_task_count,
+            overdue_task_count: row.overdue_task_count,
+            unassigned_task_count: row.unassigned_task_count,
+            progress_percent: row.progress_percent,
             version: row.version,
         })
     }
@@ -247,7 +262,13 @@ impl Database {
             FROM workspaces
             WHERE workspaces.id = $8 AND workspaces.user_id = $2
             RETURNING id, workspace_id, title, objective, status, risk_level, next_action, due_at,
-                0::BIGINT AS open_task_count, version",
+                0::BIGINT AS open_task_count,
+                0::BIGINT AS total_task_count,
+                0::BIGINT AS completed_task_count,
+                0::BIGINT AS overdue_task_count,
+                0::BIGINT AS unassigned_task_count,
+                0::SMALLINT AS progress_percent,
+                version",
         )
         .bind(project.id)
         .bind(project.user_id)
@@ -313,6 +334,51 @@ impl Database {
             RETURNING id, workspace_id, title, objective, status, risk_level, next_action, due_at,
                 (SELECT COUNT(*)::BIGINT FROM tasks
                  WHERE tasks.project_id = projects.id AND tasks.status = 'open') AS open_task_count,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.status IN ('open', 'completed')
+                   AND NOT EXISTS (
+                       SELECT 1 FROM tasks AS child
+                       WHERE child.parent_task_id = task.id AND child.status <> 'cancelled'
+                   )) AS total_task_count,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.status = 'completed'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM tasks AS child
+                       WHERE child.parent_task_id = task.id AND child.status <> 'cancelled'
+                   )) AS completed_task_count,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.status = 'open' AND task.due_at < NOW()
+                   AND NOT EXISTS (
+                       SELECT 1 FROM tasks AS child
+                       WHERE child.parent_task_id = task.id AND child.status <> 'cancelled'
+                   )) AS overdue_task_count,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.status = 'open' AND task.assignee_name IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM tasks AS child
+                       WHERE child.parent_task_id = task.id AND child.status <> 'cancelled'
+                   )) AS unassigned_task_count,
+                COALESCE((
+                    SELECT (
+                        COUNT(*) FILTER (WHERE task.status = 'completed') * 100
+                        / NULLIF(COUNT(*), 0)
+                    )::SMALLINT
+                    FROM tasks AS task
+                    WHERE task.project_id = projects.id
+                      AND task.status IN ('open', 'completed')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM tasks AS child
+                          WHERE child.parent_task_id = task.id AND child.status <> 'cancelled'
+                      )
+                ), 0::SMALLINT) AS progress_percent,
                 version",
         )
         .bind(update.title.trim())
@@ -465,13 +531,58 @@ impl Database {
         let rows = sqlx::query_as::<_, ProjectRow>(
             "\
             SELECT
-                projects.id, projects.workspace_id, projects.title, projects.objective, projects.status,
-                projects.risk_level, projects.next_action, projects.due_at, projects.version,
-                COUNT(tasks.id)::BIGINT AS open_task_count
+                projects.id, projects.workspace_id, projects.title, projects.objective,
+                projects.status, projects.risk_level, projects.next_action, projects.due_at,
+                projects.version,
+                (SELECT COUNT(*)::BIGINT FROM tasks AS task
+                 WHERE task.project_id = projects.id AND task.status = 'open') AS open_task_count,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.status IN ('open', 'completed')
+                   AND NOT EXISTS (
+                       SELECT 1 FROM tasks AS child
+                       WHERE child.parent_task_id = task.id AND child.status <> 'cancelled'
+                   )) AS total_task_count,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.status = 'completed'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM tasks AS child
+                       WHERE child.parent_task_id = task.id AND child.status <> 'cancelled'
+                   )) AS completed_task_count,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.status = 'open' AND task.due_at < NOW()
+                   AND NOT EXISTS (
+                       SELECT 1 FROM tasks AS child
+                       WHERE child.parent_task_id = task.id AND child.status <> 'cancelled'
+                   )) AS overdue_task_count,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.status = 'open' AND task.assignee_name IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM tasks AS child
+                       WHERE child.parent_task_id = task.id AND child.status <> 'cancelled'
+                   )) AS unassigned_task_count,
+                COALESCE((
+                    SELECT (
+                        COUNT(*) FILTER (WHERE task.status = 'completed') * 100
+                        / NULLIF(COUNT(*), 0)
+                    )::SMALLINT
+                    FROM tasks AS task
+                    WHERE task.project_id = projects.id
+                      AND task.status IN ('open', 'completed')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM tasks AS child
+                          WHERE child.parent_task_id = task.id AND child.status <> 'cancelled'
+                      )
+                ), 0::SMALLINT) AS progress_percent
             FROM projects
-            LEFT JOIN tasks ON tasks.project_id = projects.id AND tasks.status = 'open'
             WHERE projects.user_id = $1 AND projects.workspace_id = $2
-            GROUP BY projects.id
             ORDER BY
                 CASE projects.status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
                 projects.risk_level DESC,
@@ -501,11 +612,56 @@ impl Database {
             SELECT
                 projects.id, projects.workspace_id, projects.title, projects.objective,
                 projects.status, projects.risk_level, projects.next_action, projects.due_at,
-                projects.version, COUNT(tasks.id)::BIGINT AS open_task_count
+                projects.version,
+                (SELECT COUNT(*)::BIGINT FROM tasks AS task
+                 WHERE task.project_id = projects.id AND task.status = 'open') AS open_task_count,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.status IN ('open', 'completed')
+                   AND NOT EXISTS (
+                       SELECT 1 FROM tasks AS child
+                       WHERE child.parent_task_id = task.id AND child.status <> 'cancelled'
+                   )) AS total_task_count,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.status = 'completed'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM tasks AS child
+                       WHERE child.parent_task_id = task.id AND child.status <> 'cancelled'
+                   )) AS completed_task_count,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.status = 'open' AND task.due_at < NOW()
+                   AND NOT EXISTS (
+                       SELECT 1 FROM tasks AS child
+                       WHERE child.parent_task_id = task.id AND child.status <> 'cancelled'
+                   )) AS overdue_task_count,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.status = 'open' AND task.assignee_name IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM tasks AS child
+                       WHERE child.parent_task_id = task.id AND child.status <> 'cancelled'
+                   )) AS unassigned_task_count,
+                COALESCE((
+                    SELECT (
+                        COUNT(*) FILTER (WHERE task.status = 'completed') * 100
+                        / NULLIF(COUNT(*), 0)
+                    )::SMALLINT
+                    FROM tasks AS task
+                    WHERE task.project_id = projects.id
+                      AND task.status IN ('open', 'completed')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM tasks AS child
+                          WHERE child.parent_task_id = task.id AND child.status <> 'cancelled'
+                      )
+                ), 0::SMALLINT) AS progress_percent
             FROM projects
-            LEFT JOIN tasks ON tasks.project_id = projects.id AND tasks.status = 'open'
             WHERE projects.user_id = $1
-            GROUP BY projects.id
             ORDER BY
                 CASE projects.status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
                 projects.risk_level DESC,

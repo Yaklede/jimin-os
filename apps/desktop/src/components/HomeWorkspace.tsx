@@ -24,6 +24,10 @@ import { type Project } from "../api/projects";
 import { type ProjectInflowItem } from "../api/googleChat";
 import { presentationForMessage } from "../assistantPresentation";
 import { copy } from "../copy";
+import {
+  homeBriefPeriodForHour,
+  type HomeBriefPeriod,
+} from "../homeBriefPeriod";
 import { upcomingHomeSchedules } from "../homeSchedule";
 import { createUuidV7 } from "../uuid";
 import {
@@ -141,6 +145,7 @@ export function HomeWorkspace({
   const nextSchedule = upcomingSchedule[0];
   const scheduleCount = upcomingSchedule.length;
   const taskCount = snapshot?.tasks.length ?? 0;
+  const briefPeriod = homeBriefPeriodForHour(scheduleNow.getHours());
   const dueTasks = useMemo(
     () => deadlineAttentionTasks(snapshot?.dueTasks ?? []),
     [snapshot?.dueTasks],
@@ -350,6 +355,8 @@ export function HomeWorkspace({
           {!showingSkeleton && dueTasks.length > 0 && (
             <DeadlineBrief
               tasks={dueTasks}
+              completingTaskId={completingTaskId}
+              onCompleteTask={complete}
               onEditTask={onEditTask}
               onOpenTask={onOpenPlanningTask}
             />
@@ -358,6 +365,7 @@ export function HomeWorkspace({
           {!showingSkeleton && Boolean(snapshot?.recommendations.length) && (
             <NowBrief
               recommendations={snapshot?.recommendations ?? []}
+              period={briefPeriod}
               onDecide={onDecideRecommendation}
               onOpenTask={onOpenTask}
               onOpenProject={onOpenProject}
@@ -542,12 +550,14 @@ export function HomeWorkspace({
 
 function NowBrief({
   recommendations,
+  period,
   onDecide,
   onOpenTask,
   onOpenProject,
   onAnnounce,
 }: {
   recommendations: Recommendation[];
+  period: HomeBriefPeriod;
   onDecide(
     recommendation: Recommendation,
     decision: "approve" | "defer",
@@ -603,8 +613,8 @@ function NowBrief({
     <section className="home-now-brief" aria-labelledby="home-now-brief-title">
       <header>
         <div>
-          <span>{copy.home.nowBriefEyebrow}</span>
-          <h2 id="home-now-brief-title">{copy.home.nowBriefTitle}</h2>
+          <span>{nowBriefHeading(period).eyebrow}</span>
+          <h2 id="home-now-brief-title">{nowBriefHeading(period).title}</h2>
         </div>
         <strong>{copy.home.nowBriefCount(recommendations.length)}</strong>
       </header>
@@ -1071,10 +1081,14 @@ function ScheduleHighlight({
 
 function DeadlineBrief({
   tasks,
+  completingTaskId,
+  onCompleteTask,
   onEditTask,
   onOpenTask,
 }: {
   tasks: Task[];
+  completingTaskId: string | undefined;
+  onCompleteTask(task: Task): Promise<void>;
   onEditTask(task: Task): void;
   onOpenTask(task: Task): void | Promise<void>;
 }) {
@@ -1105,6 +1119,19 @@ function DeadlineBrief({
           const state = taskDueState(task);
           return (
             <li key={task.id} data-due-state={state}>
+              <button
+                className="home-deadline-brief__complete focus-visible-control"
+                type="button"
+                disabled={Boolean(completingTaskId)}
+                onClick={() => void onCompleteTask(task)}
+                aria-label={copy.home.completeTask(task.title)}
+              >
+                {completingTaskId === task.id ? (
+                  <span className="button-spinner" aria-hidden="true" />
+                ) : (
+                  <Circle aria-hidden="true" />
+                )}
+              </button>
               <button
                 className="home-deadline-brief__task focus-visible-control"
                 type="button"
@@ -1157,6 +1184,28 @@ function greetingForHour(hour: number): string {
   if (hour < 12) return copy.home.morningGreeting;
   if (hour < 18) return copy.home.afternoonGreeting;
   return copy.home.eveningGreeting;
+}
+
+function nowBriefHeading(period: HomeBriefPeriod): {
+  eyebrow: string;
+  title: string;
+} {
+  if (period === "morning") {
+    return {
+      eyebrow: copy.home.nowBriefMorningEyebrow,
+      title: copy.home.nowBriefMorningTitle,
+    };
+  }
+  if (period === "evening") {
+    return {
+      eyebrow: copy.home.nowBriefEveningEyebrow,
+      title: copy.home.nowBriefEveningTitle,
+    };
+  }
+  return {
+    eyebrow: copy.home.nowBriefEyebrow,
+    title: copy.home.nowBriefTitle,
+  };
 }
 
 function homeAssistantState(

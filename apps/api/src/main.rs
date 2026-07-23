@@ -13,6 +13,7 @@ use jimin_api::{
     push::PushRuntime,
     router, serve_with_shutdown, spawn_calendar_mutation_worker, spawn_calendar_sync_worker,
     spawn_google_chat_sync_worker, spawn_push_delivery_worker, spawn_webhook_delivery_worker,
+    spawn_work_brief_worker,
     webhook::WebhookRuntime,
 };
 use jimin_application::{PairingLifetime, SessionLifetime, SessionService};
@@ -215,6 +216,7 @@ async fn run_server() -> Result<(), &'static str> {
     let webhook_delivery_task = spawn_webhook_delivery_worker(&state);
     let google_chat_sync_task = spawn_google_chat_sync_worker(&state);
     let push_delivery_task = spawn_push_delivery_worker(&state);
+    let work_brief_task = spawn_work_brief_worker(&state);
     let result = serve_with_shutdown(listener, router(state), shutdown_signal())
         .await
         .map_err(|_| "api.serve_failed");
@@ -242,6 +244,10 @@ async fn run_server() -> Result<(), &'static str> {
     if let Some(push_delivery_task) = push_delivery_task {
         push_delivery_task.abort();
         let _ = push_delivery_task.await;
+    }
+    if let Some(work_brief_task) = work_brief_task {
+        work_brief_task.abort();
+        let _ = work_brief_task.await;
     }
     if let Some(database) = database {
         database.close().await;

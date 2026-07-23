@@ -19,6 +19,12 @@ describe("project client", () => {
       nextAction: "Webhook 계약 확정",
       dueAt: "2026-07-20T14:59:59.000Z",
       openTaskCount: 2,
+      totalTaskCount: 4,
+      completedTaskCount: 2,
+      overdueTaskCount: 1,
+      unassignedTaskCount: 0,
+      progressPercent: 50,
+      health: "at_risk",
       version: 4,
     };
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
@@ -68,6 +74,12 @@ describe("project client", () => {
       nextAction: null,
       dueAt: null,
       openTaskCount: 2,
+      totalTaskCount: 2,
+      completedTaskCount: 0,
+      overdueTaskCount: 0,
+      unassignedTaskCount: 2,
+      progressPercent: 0,
+      health: "needs_plan",
       version: 4,
     };
     const fetchMock = vi

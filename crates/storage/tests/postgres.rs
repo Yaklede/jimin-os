@@ -239,13 +239,36 @@ async fn push_registration_transfer_and_reminder_queue_are_device_safe_and_idemp
         })
         .await
         .expect("upcoming schedule should persist");
+    let recommendation = database
+        .create_recommendation(&NewRecommendation {
+            id: Uuid::now_v7(),
+            user_id,
+            workspace_id: None,
+            project_id: None,
+            goal_id: None,
+            signal_id: None,
+            title: "마감 위험을 먼저 확인하세요".to_owned(),
+            rationale: "오늘 안에 확인해야 할 변경 사항이 있어요.".to_owned(),
+            expected_effect: "프로젝트 지연 가능성을 줄일 수 있어요.".to_owned(),
+            risk_summary: None,
+            confidence: 95,
+            urgency: 2,
+            impact: 2,
+            risk_level: 1,
+            effort_minutes: Some(5),
+            suggested_action_kind: Some(SuggestedActionKind::Review),
+            suggested_entity_id: None,
+            valid_until: Some(now + TimeDuration::days(1)),
+        })
+        .await
+        .expect("high-priority recommendation should persist");
 
     assert_eq!(
         database
             .queue_due_push_reminders(now)
             .await
             .expect("due reminders should queue"),
-        2
+        3
     );
     assert_eq!(
         database
@@ -258,7 +281,7 @@ async fn push_registration_transfer_and_reminder_queue_are_device_safe_and_idemp
         .claim_push_deliveries("push-integration-worker", 10)
         .await
         .expect("queued reminders should be claimable");
-    assert_eq!(deliveries.len(), 2);
+    assert_eq!(deliveries.len(), 3);
     assert!(deliveries.iter().all(|delivery| {
         delivery.device_id == second.device.id
             && delivery.token_ciphertext == replacement_token.ciphertext
@@ -274,6 +297,11 @@ async fn push_registration_transfer_and_reminder_queue_are_device_safe_and_idemp
             .iter()
             .any(|delivery| delivery.item_id == schedule.id)
     );
+    assert!(deliveries.iter().any(|delivery| {
+        delivery.item_id == recommendation.id
+            && delivery.item_type == "brief"
+            && delivery.destination == "home"
+    }));
     for delivery in deliveries {
         database
             .complete_push_delivery(
@@ -2091,6 +2119,7 @@ async fn agent_task_reopen_and_webhook_message_commit_as_one_batch() {
                     AgentActionCommand::UpdateTask {
                         id: task.id,
                         project_id: task.project_id,
+                        parent_task_id: task.parent_task_id,
                         title: task.title.clone(),
                         notes: Some(
                             "BO 거래내역 조회 오류를 수정한다.\n아직도 권한 없다고 뜨잖아요 확인 제대로 안해요?"
@@ -2947,6 +2976,10 @@ async fn client_mutation_id_replays_one_voice_task_and_rejects_payload_reuse() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The regression test keeps hierarchy validation, project rollup, and completion ordering in one lifecycle."
+)]
 async fn task_hierarchy_is_one_level_and_parent_completion_waits_for_children() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;
@@ -2959,12 +2992,32 @@ async fn task_hierarchy_is_one_level_and_parent_completion_waits_for_children() 
         .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
         .await
         .expect("fixture owner should exist");
+    let workspace = database
+        .workspaces_for_user(owner.profile.id)
+        .await
+        .expect("owner workspaces should load")
+        .into_iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Personal)
+        .expect("personal workspace should exist");
+    let project = database
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            workspace_id: workspace.id,
+            title: "계층형 작업 프로젝트".to_owned(),
+            objective: Some("큰 작업을 실행 가능한 단계로 나눈다.".to_owned()),
+            risk_level: 0,
+            next_action: Some("하위 작업을 완료한다.".to_owned()),
+            due_at: None,
+        })
+        .await
+        .expect("hierarchy project should be created");
     let parent_due_at = OffsetDateTime::now_utc() + TimeDuration::days(14);
     let parent = database
         .create_task(&NewTask {
             id: Uuid::now_v7(),
             user_id: owner.profile.id,
-            project_id: None,
+            project_id: Some(project.id),
             parent_task_id: None,
             title: "A 작업 완료".to_owned(),
             notes: None,
@@ -2978,7 +3031,7 @@ async fn task_hierarchy_is_one_level_and_parent_completion_waits_for_children() 
         .create_task(&NewTask {
             id: Uuid::now_v7(),
             user_id: owner.profile.id,
-            project_id: None,
+            project_id: Some(project.id),
             parent_task_id: Some(parent.id),
             title: "A-1 상세 기능 구현".to_owned(),
             notes: None,
@@ -2989,12 +3042,24 @@ async fn task_hierarchy_is_one_level_and_parent_completion_waits_for_children() 
         .await
         .expect("child task should be created");
     assert_eq!(child.parent_task_id, Some(parent.id));
+    let project_after_split = database
+        .projects_for_workspace(owner.profile.id, workspace.id)
+        .await
+        .expect("project rollup should load")
+        .into_iter()
+        .find(|candidate| candidate.id == project.id)
+        .expect("hierarchy project should remain visible");
+    assert_eq!(project_after_split.open_task_count, 2);
+    assert_eq!(project_after_split.total_task_count, 1);
+    assert_eq!(project_after_split.completed_task_count, 0);
+    assert_eq!(project_after_split.unassigned_task_count, 1);
+    assert_eq!(project_after_split.progress_percent, 0);
 
     let too_late = database
         .create_task(&NewTask {
             id: Uuid::now_v7(),
             user_id: owner.profile.id,
-            project_id: None,
+            project_id: Some(project.id),
             parent_task_id: Some(parent.id),
             title: "A-2 늦은 상세 기능".to_owned(),
             notes: None,
@@ -3008,7 +3073,7 @@ async fn task_hierarchy_is_one_level_and_parent_completion_waits_for_children() 
         .create_task(&NewTask {
             id: Uuid::now_v7(),
             user_id: owner.profile.id,
-            project_id: None,
+            project_id: Some(project.id),
             parent_task_id: Some(child.id),
             title: "A-1-1 허용하지 않는 단계".to_owned(),
             notes: None,
@@ -3031,6 +3096,16 @@ async fn task_hierarchy_is_one_level_and_parent_completion_waits_for_children() 
         .expect("child completion should succeed")
         .expect("child should still be current");
     assert_eq!(child.status, TaskStatus::Completed);
+    let project_after_child = database
+        .projects_for_workspace(owner.profile.id, workspace.id)
+        .await
+        .expect("updated project rollup should load")
+        .into_iter()
+        .find(|candidate| candidate.id == project.id)
+        .expect("hierarchy project should remain visible");
+    assert_eq!(project_after_child.total_task_count, 1);
+    assert_eq!(project_after_child.completed_task_count, 1);
+    assert_eq!(project_after_child.progress_percent, 100);
     let parent = database
         .complete_task(owner.profile.id, parent.id, parent.version)
         .await
@@ -4207,6 +4282,7 @@ async fn structured_agent_action_and_completion_message_commit_together() {
                 &AgentActionCommand::CreateTask {
                     id: task_id,
                     project_id: None,
+                    parent_task_id: None,
                     title: "일어나기".to_owned(),
                     notes: None,
                     assignee_name: None,

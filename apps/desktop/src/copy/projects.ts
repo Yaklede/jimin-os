@@ -33,6 +33,23 @@ export const projectCopy = {
   backToList: "프로젝트 목록으로",
   projectCount: (count: number) => `${count}개`,
   openTaskCount: (count: number) => `열린 일 ${count}개`,
+  projectProgress: (progress: number) => `진행률 ${progress}%`,
+  progressTitle: "진행 상태",
+  progressSummary: (completed: number, total: number) =>
+    total
+      ? `실행할 일 ${total}개 중 ${completed}개 완료`
+      : "실행할 일을 정해 주세요",
+  progressPercent: (progress: number) => `${progress}%`,
+  overdueTaskCount: (count: number) => `기한 지난 일 ${count}개`,
+  unassignedTaskCount: (count: number) => `담당자 없는 일 ${count}개`,
+  projectHealth: {
+    on_track: "순조롭게 진행 중",
+    at_risk: "지금 확인이 필요해요",
+    needs_plan: "다음 계획이 필요해요",
+    ready_to_complete: "완료 여부를 확인해 주세요",
+    paused: "잠시 멈춘 상태",
+    completed: "완료한 프로젝트",
+  },
   noNextAction: "다음 행동을 정해 보세요.",
   emptyTitle: "아직 프로젝트가 없어요",
   emptyDescription: "반복해서 챙길 일을 프로젝트로 묶어 보세요.",

@@ -114,4 +114,13 @@ deadline from extending beyond its parent deadline. Rollback after child tasks
 are created requires the verified pre-migration backup so their hierarchy is
 not silently flattened.
 
+Migration `0034_priority_brief_notifications.sql` allows only high-priority
+assistant briefs to join the existing durable push queue. Apply it to an empty
+database and a restored version-33 backup, then verify existing task and
+schedule deliveries remain valid, one pending urgency-2 brief queues only once
+per active device and `jimin_schema_metadata.schema_version = 34`. Rollback
+before a brief delivery is written may restore the previous item-type
+constraint; after that point use the verified pre-migration backup so the
+delivery audit is not discarded.
+
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.

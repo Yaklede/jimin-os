@@ -415,6 +415,12 @@ pub struct ProjectResponse {
     next_action: Option<String>,
     due_at: Option<String>,
     open_task_count: i64,
+    total_task_count: i64,
+    completed_task_count: i64,
+    overdue_task_count: i64,
+    unassigned_task_count: i64,
+    progress_percent: i16,
+    health: String,
     version: i64,
 }
 
@@ -1777,6 +1783,40 @@ const CALENDAR_SYNC_INTERVAL: Duration = Duration::from_mins(5);
 const CALENDAR_MUTATION_INTERVAL: Duration = Duration::from_secs(2);
 const GOOGLE_CHAT_SYNC_INITIAL_DELAY: Duration = Duration::from_secs(20);
 const GOOGLE_CHAT_SYNC_INTERVAL: Duration = Duration::from_mins(1);
+const WORK_BRIEF_INITIAL_DELAY: Duration = Duration::from_secs(10);
+const WORK_BRIEF_INTERVAL: Duration = Duration::from_mins(15);
+
+/// Keeps the owner's decision inbox current even when no client is open.
+/// Work is evaluated per owner and only sanitized failure codes are logged.
+#[must_use]
+pub fn spawn_work_brief_worker(state: &ApiState) -> Option<tokio::task::JoinHandle<()>> {
+    let planning = state.planning()?.clone();
+    Some(tokio::spawn(async move {
+        tokio::time::sleep(WORK_BRIEF_INITIAL_DELAY).await;
+        loop {
+            if let Ok(user_ids) = planning.active_work_brief_user_ids().await {
+                for user_id in user_ids {
+                    if planning
+                        .refresh_work_brief(user_id, OffsetDateTime::now_utc())
+                        .await
+                        .is_err()
+                    {
+                        warn!(
+                            event = "work_brief.periodic_refresh_failed",
+                            error_code = "storage.persistence_unavailable"
+                        );
+                    }
+                }
+            } else {
+                warn!(
+                    event = "work_brief.periodic_refresh_deferred",
+                    error_code = "storage.persistence_unavailable"
+                );
+            }
+            tokio::time::sleep(WORK_BRIEF_INTERVAL).await;
+        }
+    }))
+}
 
 /// Starts the single-process Google Calendar reconciliation loop when both
 /// storage and provider configuration are available. The loop processes
@@ -7177,6 +7217,7 @@ fn goal_response(overview: GoalOverview) -> Result<GoalResponse, ()> {
 }
 
 fn project_response(project: Project) -> Result<ProjectResponse, ()> {
+    let health = project_health_name(&project).to_owned();
     Ok(ProjectResponse {
         id: project.id,
         workspace_id: project.workspace_id,
@@ -7194,8 +7235,35 @@ fn project_response(project: Project) -> Result<ProjectResponse, ()> {
             .map(|value| value.format(&Rfc3339).map_err(|_| ()))
             .transpose()?,
         open_task_count: project.open_task_count,
+        total_task_count: project.total_task_count,
+        completed_task_count: project.completed_task_count,
+        overdue_task_count: project.overdue_task_count,
+        unassigned_task_count: project.unassigned_task_count,
+        progress_percent: project.progress_percent,
+        health,
         version: project.version,
     })
+}
+
+fn project_health_name(project: &Project) -> &'static str {
+    match project.status {
+        ProjectStatus::Completed => "completed",
+        ProjectStatus::Paused => "paused",
+        ProjectStatus::Active
+            if project.risk_level >= 2
+                || project.overdue_task_count > 0
+                || project
+                    .due_at
+                    .is_some_and(|due_at| due_at < OffsetDateTime::now_utc()) =>
+        {
+            "at_risk"
+        }
+        ProjectStatus::Active if project.progress_percent == 100 => "ready_to_complete",
+        ProjectStatus::Active if project.total_task_count == 0 || project.next_action.is_none() => {
+            "needs_plan"
+        }
+        ProjectStatus::Active => "on_track",
+    }
 }
 
 fn project_webhook_response(webhook: ProjectWebhook) -> ProjectWebhookResponse {
@@ -7625,6 +7693,28 @@ mod tests {
         let available = calendar_connection_response(None, true);
         assert!(available.available);
         assert_eq!(available.status, "not_connected");
+    }
+
+    #[test]
+    fn completed_project_work_is_ready_for_owner_review() {
+        let project = Project {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            title: "개인 운영체제".to_owned(),
+            objective: Some("업무 운영 흐름 완성".to_owned()),
+            status: ProjectStatus::Active,
+            risk_level: 0,
+            next_action: None,
+            due_at: None,
+            open_task_count: 0,
+            total_task_count: 2,
+            completed_task_count: 2,
+            overdue_task_count: 0,
+            unassigned_task_count: 0,
+            progress_percent: 100,
+            version: 1,
+        };
+        assert_eq!(project_health_name(&project), "ready_to_complete");
     }
 
     #[test]

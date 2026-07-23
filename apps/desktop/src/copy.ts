@@ -132,12 +132,10 @@ export const copy = {
     resultCount: (count: number) => `${count}개`,
     resultOpening: "화면을 여는 중이에요",
     resultOpenFailed: "화면을 열지 못했어요. 아래 버튼을 다시 눌러 주세요.",
-    resultEditFailed:
-      "수정 화면을 열지 못했어요. 최신 내용을 확인한 뒤 다시 시도해 주세요.",
+    resultEditFailed: "수정 화면을 열지 못했어요. 다시 열어 주세요.",
     resultTaskComplete: "완료하기",
     resultTaskCompleting: "완료하는 중",
-    resultTaskCompleteFailed:
-      "완료하지 못했어요. 최신 내용을 확인한 뒤 다시 시도해 주세요.",
+    resultTaskCompleteFailed: "완료하지 못했어요. 확인하고 다시 눌러 주세요.",
     resultTasksHandled: "이 결과의 할 일을 모두 처리했어요.",
     taskGroupViewLabel: "보기 기준",
     groupTasksByAssignee: "담당자별",
@@ -230,6 +228,10 @@ export const copy = {
         : `곧 마감할 할 일 ${upcoming}개가 있어요.`,
     nowBriefEyebrow: "지금 확인하면 좋은 내용",
     nowBriefTitle: "지민의 제안",
+    nowBriefMorningEyebrow: "오늘을 시작하기 전에",
+    nowBriefMorningTitle: "먼저 확인할 내용",
+    nowBriefEveningEyebrow: "오늘을 마무리하기 전에",
+    nowBriefEveningTitle: "내일을 위한 제안",
     nowBriefCount: (count: number) => `${count}개`,
     recommendationEffect: "기대 효과",
     recommendationRisk: "확인할 점",
@@ -293,10 +295,8 @@ export const copy = {
     loading: "회의 기록을 불러오는 중이에요.",
     loadFailed: "회의 기록을 불러오지 못했어요. 다시 확인해 주세요.",
     detailFailed: "회의 내용을 불러오지 못했어요. 다시 선택해 주세요.",
-    createFailed:
-      "회의 분석을 시작하지 못했어요. 내용을 확인하고 다시 시도해 주세요.",
-    applyFailed:
-      "후속 일을 반영하지 못했어요. 연결된 프로젝트나 일정을 확인해 주세요.",
+    createFailed: "회의 분석을 시작하지 못했어요. 다시 눌러 주세요.",
+    applyFailed: "후속 일을 반영하지 못했어요. 연결 내용을 확인해 주세요.",
     rejectFailed: "이 항목을 제외하지 못했어요. 잠시 후 다시 시도해 주세요.",
     emptyTitle: "아직 정리한 회의가 없어요",
     emptyDescription:
@@ -324,8 +324,7 @@ export const copy = {
       "말을 멈춰도 계속 이어서 들을게요. 끝나면 중지를 눌러 주세요.",
     startDictation: "받아쓰기 시작",
     stopDictation: "받아쓰기 중지",
-    dictationFailed:
-      "음성을 계속 받아쓰지 못했어요. 직접 입력하거나 다시 시작해 주세요.",
+    dictationFailed: "받아쓰기가 멈췄어요. 직접 입력하거나 다시 시작해 주세요.",
     dictationUnsupported:
       "이 기기에서는 받아쓰기를 바로 사용할 수 없어요. 회의록을 직접 붙여 넣어 주세요.",
     dictationPermission:
@@ -335,9 +334,8 @@ export const copy = {
     analyzingTitle: "회의 내용을 정리하고 있어요",
     analyzingDescription:
       "원문을 바탕으로 요약, 결정사항, 실행 후보를 나누고 있어요. 잠시 후 자동으로 보여드릴게요.",
-    analysisFailedTitle: "회의를 정리하지 못했어요",
-    analysisFailedDescription:
-      "원문은 그대로 보관되어 있어요. 연결 상태를 확인한 뒤 다시 정리해 주세요.",
+    analysisFailedTitle: "회의를 정리하지 못했어요. 다시 시도해 주세요",
+    analysisFailedDescription: "원문은 보관했어요. 다시 정리해 주세요.",
     retryAnalysis: "다시 정리하기",
     retrying: "다시 정리하는 중",
     retryFailed: "회의를 다시 정리하지 못했어요. 연결 상태를 확인해 주세요.",
@@ -360,7 +358,7 @@ export const copy = {
       analyzing: "정리 중",
       review_ready: "확인 필요",
       applied: "검토 완료",
-      failed: "정리 실패",
+      failed: "다시 정리 필요",
     },
   },
   summary: {

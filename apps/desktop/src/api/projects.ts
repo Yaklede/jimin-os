@@ -17,6 +17,18 @@ export interface Project {
   nextAction: string | null;
   dueAt: string | null;
   openTaskCount: number;
+  totalTaskCount: number;
+  completedTaskCount: number;
+  overdueTaskCount: number;
+  unassignedTaskCount: number;
+  progressPercent: number;
+  health:
+    | "on_track"
+    | "at_risk"
+    | "needs_plan"
+    | "ready_to_complete"
+    | "paused"
+    | "completed";
   version: number;
 }
 
