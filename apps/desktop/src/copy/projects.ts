@@ -5,6 +5,11 @@ export const projectCopy = {
   title: "프로젝트",
   description: "개인과 회사의 일을 목적과 다음 행동으로 정리해요.",
   scopeLabel: "업무 범위 선택",
+  goalsSummary: "목표",
+  goalsSummaryDescription: (count: number) =>
+    count
+      ? `진행 중인 목표 ${count}개를 필요할 때 펼쳐 봐요.`
+      : "목표를 추가하거나 연결해요.",
   createTitle: "새 프로젝트 만들기",
   createDescription: "목적과 바로 이어서 할 일을 함께 적어 두세요.",
   projectNameLabel: "프로젝트 이름",
@@ -35,6 +40,13 @@ export const projectCopy = {
   selectDescription: "다음 행동과 연결된 일을 한곳에서 볼 수 있어요.",
   objectiveEmpty: "이 프로젝트의 목표를 아직 적지 않았어요.",
   projectDetailLabel: "프로젝트 현재 상태",
+  detailTabsLabel: "프로젝트에서 볼 내용",
+  detailTabs: {
+    tasks: "일감",
+    inflow: "확인할 대화",
+    integrations: "연결",
+    activity: "완료 기록",
+  },
   editProject: "프로젝트 수정하기",
   editTitle: "프로젝트 수정",
   editDescription: "목표와 현재 상태, 다음 행동을 최신 내용으로 바꿔요.",
@@ -54,6 +66,7 @@ export const projectCopy = {
     "완료한 프로젝트에는 새 일을 추가하지 않아요. 다시 진행하려면 프로젝트 상태를 바꿔 주세요.",
   workItemsTitle: "지금 할 일",
   completedWorkItemsTitle: "완료한 일",
+  completedWorkItemsEmpty: "아직 완료한 일이 없어요.",
   completedTaskCount: (count: number) => `${count}개`,
   completedTaskMeta: (meta: string) => `완료 · ${meta}`,
   taskAssignee: (name?: string) =>
@@ -62,6 +75,10 @@ export const projectCopy = {
   workItemsEmpty: "아직 연결된 일이 없어요. 바로 이어서 할 일을 추가해 보세요.",
   workItemLabel: "프로젝트에 추가할 일",
   workItemHint: "이 프로젝트에서 바로 할 일을 적어 보세요",
+  parentTaskLabel: "상위 일",
+  parentTaskNone: "독립된 일로 추가",
+  subtaskCount: (count: number) => `하위 일 ${count}개`,
+  completeChildrenFirst: "하위 일을 모두 완료한 뒤 끝낼 수 있어요.",
   editWorkItem: (title: string) => `${title} 내용 수정`,
   workItemDetail: (title: string) => `${title} 상세 내용`,
   workItemTitleLabel: "일 이름",

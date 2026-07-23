@@ -2390,16 +2390,20 @@ export default function App() {
     }
   }
 
-  async function createProjectTask(title: string): Promise<void> {
+  async function createProjectTask(input: {
+    title: string;
+    parentTaskId?: string;
+  }): Promise<void> {
     if (!selectedProjectId) throw new Error("project unavailable");
     setProjectsSaving(true);
     setProjectsError(undefined);
     try {
       const task = await withAuthenticatedSession((accessToken) =>
         createTask(apiBaseUrl, accessToken, {
-          title,
+          title: input.title,
           priority: 1,
           projectId: selectedProjectId,
+          parentTaskId: input.parentTaskId,
         }),
       );
       setProjectTasks((current) => [...current, task]);
@@ -2477,6 +2481,7 @@ export default function App() {
       status: Task["status"];
       priority: number;
       dueAt?: string;
+      parentTaskId?: string | null;
     },
   ): Promise<void> {
     setProjectsSaving(true);

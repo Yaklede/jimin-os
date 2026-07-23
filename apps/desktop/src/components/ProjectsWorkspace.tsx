@@ -8,11 +8,14 @@ import {
   RotateCcw,
   Trash2,
   FolderKanban,
+  History,
   ListTodo,
+  MessageSquareText,
   Pencil,
+  PlugZap,
   Plus,
 } from "lucide-react";
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 
 import { type Project, type Workspace } from "../api/projects";
 import {
@@ -44,6 +47,14 @@ import {
   ProjectInflowPanel,
   type PromoteInflowInput,
 } from "./ProjectInflowPanel";
+
+type ProjectDetailTab = "tasks" | "inflow" | "integrations" | "activity";
+const PROJECT_DETAIL_TABS: ProjectDetailTab[] = [
+  "tasks",
+  "inflow",
+  "integrations",
+  "activity",
+];
 
 type ProjectsWorkspaceProps = {
   workspaces: Workspace[];
@@ -105,7 +116,7 @@ type ProjectsWorkspaceProps = {
     },
   ): Promise<void>;
   onDeleteProject(project: Project): Promise<void>;
-  onCreateTask(title: string): Promise<void>;
+  onCreateTask(input: { title: string; parentTaskId?: string }): Promise<void>;
   onCompleteTask(task: Task): Promise<void>;
   onUpdateTask(
     task: Task,
@@ -116,6 +127,7 @@ type ProjectsWorkspaceProps = {
       status: Task["status"];
       priority: number;
       dueAt?: string;
+      parentTaskId?: string | null;
     },
   ): Promise<void>;
   onDeleteTask(task: Task): Promise<void>;
@@ -213,11 +225,14 @@ export function ProjectsWorkspace({
   const [riskLevel, setRiskLevel] = useState("0");
   const [dueDate, setDueDate] = useState("");
   const [taskTitle, setTaskTitle] = useState("");
+  const [taskParentId, setTaskParentId] = useState("");
   const [formError, setFormError] = useState<string>();
   const [editingProjectId, setEditingProjectId] = useState<string>();
   const [savedProjectId, setSavedProjectId] = useState<string>();
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const [editingTaskId, setEditingTaskId] = useState<string>();
+  const [activeProjectTab, setActiveProjectTab] =
+    useState<ProjectDetailTab>("tasks");
   const [restoreListFocus, setRestoreListFocus] = useState(false);
   const projectListHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const highlightedTaskRef = useRef<HTMLLIElement | null>(null);
@@ -229,13 +244,18 @@ export function ProjectsWorkspace({
   );
   const openTasks = tasks.filter((task) => task.status === "open");
   const completedTasks = tasks.filter((task) => task.status === "completed");
+  const rootTasks = tasks.filter((task) => !task.parentTaskId);
+  const rootOpenTasks = openTasks.filter((task) => !task.parentTaskId);
+  const openTaskRows = taskHierarchyRows(openTasks);
 
   useEffect(() => {
     setTaskTitle("");
+    setTaskParentId("");
     setEditingProjectId(undefined);
     setSavedProjectId(undefined);
     setSelectedTaskId(undefined);
     setEditingTaskId(undefined);
+    setActiveProjectTab("tasks");
   }, [selectedProjectId]);
 
   useEffect(() => {
@@ -285,8 +305,12 @@ export function ProjectsWorkspace({
     event.preventDefault();
     if (!taskTitle.trim()) return;
     try {
-      await onCreateTask(taskTitle.trim());
+      await onCreateTask({
+        title: taskTitle.trim(),
+        parentTaskId: taskParentId || undefined,
+      });
       setTaskTitle("");
+      setTaskParentId("");
     } catch {
       setFormError(copy.projects.taskSaveNotice);
     }
@@ -339,16 +363,25 @@ export function ProjectsWorkspace({
         ) : null}
       </div>
 
-      <GoalsPanel
-        goals={goals}
-        projects={projects}
-        workspaceId={selectedWorkspaceId}
-        saving={saving}
-        onCreate={onCreateGoal}
-        onUpdate={onUpdateGoal}
-        onOpenTask={onOpenGoalTask}
-        onOpenProject={onSelectProject}
-      />
+      <details className="project-goals-drawer">
+        <summary className="focus-visible-control">
+          <span>
+            <strong>{copy.projects.goalsSummary}</strong>
+            <small>{copy.projects.goalsSummaryDescription(goals.length)}</small>
+          </span>
+          <ChevronRight aria-hidden="true" />
+        </summary>
+        <GoalsPanel
+          goals={goals}
+          projects={projects}
+          workspaceId={selectedWorkspaceId}
+          saving={saving}
+          onCreate={onCreateGoal}
+          onUpdate={onUpdateGoal}
+          onOpenTask={onOpenGoalTask}
+          onOpenProject={onSelectProject}
+        />
+      </details>
 
       {(error || formError) && (
         <p className="inline-alert" role="alert">
@@ -554,6 +587,44 @@ export function ProjectsWorkspace({
                 <ArrowLeft aria-hidden="true" />
                 {copy.projects.backToList}
               </button>
+              <nav
+                className="project-detail-tabs"
+                role="tablist"
+                aria-label={copy.projects.detailTabsLabel}
+              >
+                <ProjectDetailTabButton
+                  id="tasks"
+                  active={activeProjectTab === "tasks"}
+                  label={copy.projects.detailTabs.tasks}
+                  count={openTasks.length}
+                  icon={<ListTodo aria-hidden="true" />}
+                  onSelect={setActiveProjectTab}
+                />
+                <ProjectDetailTabButton
+                  id="inflow"
+                  active={activeProjectTab === "inflow"}
+                  label={copy.projects.detailTabs.inflow}
+                  count={projectInflowItems.length}
+                  icon={<MessageSquareText aria-hidden="true" />}
+                  onSelect={setActiveProjectTab}
+                />
+                <ProjectDetailTabButton
+                  id="integrations"
+                  active={activeProjectTab === "integrations"}
+                  label={copy.projects.detailTabs.integrations}
+                  count={webhooks.length}
+                  icon={<PlugZap aria-hidden="true" />}
+                  onSelect={setActiveProjectTab}
+                />
+                <ProjectDetailTabButton
+                  id="activity"
+                  active={activeProjectTab === "activity"}
+                  label={copy.projects.detailTabs.activity}
+                  count={completedTasks.length}
+                  icon={<History aria-hidden="true" />}
+                  onSelect={setActiveProjectTab}
+                />
+              </nav>
               <section className="project-detail__panel project-detail__overview">
                 <div className="project-detail__heading">
                   <div>
@@ -641,166 +712,48 @@ export function ProjectsWorkspace({
                   </p>
                 )}
               </section>
-              <div className="project-detail__tasks">
-                <div className="projects-section-heading">
-                  <div>
-                    <ListTodo aria-hidden="true" />
-                    <h3>{copy.projects.workItemsTitle}</h3>
+              {activeProjectTab === "tasks" && (
+                <div
+                  className="project-detail__tasks"
+                  role="tabpanel"
+                  aria-label={copy.projects.detailTabs.tasks}
+                >
+                  <div className="projects-section-heading">
+                    <div>
+                      <ListTodo aria-hidden="true" />
+                      <h3>{copy.projects.workItemsTitle}</h3>
+                    </div>
+                    <span>{copy.projects.openTaskCount(openTasks.length)}</span>
                   </div>
-                  <span>{copy.projects.openTaskCount(openTasks.length)}</span>
-                </div>
-                {openTasks.length ? (
-                  <ul className="project-task-list">
-                    {openTasks.map((task) => (
-                      <li
-                        key={task.id}
-                        ref={
-                          highlightedTaskId === task.id
-                            ? highlightedTaskRef
-                            : undefined
-                        }
-                        data-highlighted={highlightedTaskId === task.id}
-                        tabIndex={
-                          highlightedTaskId === task.id ? -1 : undefined
-                        }
-                      >
-                        <button
-                          className="project-task-list__complete focus-visible-control"
-                          type="button"
-                          disabled={saving}
-                          aria-label={copy.home.completeTask(task.title)}
-                          onClick={() => void onCompleteTask(task)}
-                        >
-                          <Circle aria-hidden="true" />
-                        </button>
-                        <button
-                          className="project-task-list__content focus-visible-control"
-                          type="button"
-                          aria-expanded={selectedTaskId === task.id}
-                          onClick={() =>
-                            setSelectedTaskId((current) =>
-                              current === task.id ? undefined : task.id,
-                            )
+                  {openTasks.length ? (
+                    <ul className="project-task-list">
+                      {openTaskRows.map(({ task, depth, childCount }) => (
+                        <li
+                          key={task.id}
+                          data-task-depth={depth}
+                          ref={
+                            highlightedTaskId === task.id
+                              ? highlightedTaskRef
+                              : undefined
+                          }
+                          data-highlighted={highlightedTaskId === task.id}
+                          tabIndex={
+                            highlightedTaskId === task.id ? -1 : undefined
                           }
                         >
-                          <span className="project-task-list__details">
-                            <strong>{task.title}</strong>
-                            <span>{taskMeta(task)}</span>
-                          </span>
-                          <span
-                            className="project-task-list__assignee"
-                            data-assigned={Boolean(task.assigneeName)}
-                          >
-                            {copy.projects.taskAssignee(
-                              task.assigneeName ?? undefined,
-                            )}
-                          </span>
-                        </button>
-                        <button
-                          className="project-task-list__edit focus-visible-control"
-                          type="button"
-                          aria-label={copy.projects.editWorkItem(task.title)}
-                          onClick={() => {
-                            setSelectedTaskId(task.id);
-                            setEditingTaskId(task.id);
-                          }}
-                        >
-                          <Pencil aria-hidden="true" />
-                        </button>
-                        {selectedTaskId === task.id &&
-                          editingTaskId !== task.id && (
-                            <TaskDetail task={task} />
-                          )}
-                        {editingTaskId === task.id && (
-                          <TaskEditForm
-                            task={task}
-                            saving={saving}
-                            onCancel={() => setEditingTaskId(undefined)}
-                            onSave={async (input) => {
-                              await onUpdateTask(task, input);
-                              setEditingTaskId(undefined);
-                            }}
-                            onDelete={() => onDeleteTask(task)}
-                          />
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="project-detail__empty">
-                    {copy.projects.workItemsEmpty}
-                  </p>
-                )}
-                <form
-                  className="project-task-form"
-                  onSubmit={(event) => void submitTask(event)}
-                >
-                  <label className="sr-only" htmlFor="project-task-title">
-                    {copy.projects.workItemLabel}
-                  </label>
-                  <input
-                    id="project-task-title"
-                    value={taskTitle}
-                    onChange={(event) => setTaskTitle(event.target.value)}
-                    disabled={saving || selectedProject.status === "completed"}
-                    maxLength={200}
-                    placeholder={copy.projects.workItemHint}
-                  />
-                  <button
-                    className="secondary-button focus-visible-control"
-                    type="submit"
-                    disabled={
-                      saving ||
-                      selectedProject.status === "completed" ||
-                      !taskTitle.trim()
-                    }
-                  >
-                    {copy.actions.addWorkItem}
-                  </button>
-                </form>
-                {selectedProject.status === "completed" && (
-                  <p className="project-detail__empty">
-                    {copy.projects.completedProjectNotice}
-                  </p>
-                )}
-                {completedTasks.length > 0 && (
-                  <section
-                    className="project-completed-tasks"
-                    aria-labelledby="completed-tasks-title"
-                  >
-                    <div className="projects-section-heading">
-                      <div>
-                        <Circle aria-hidden="true" />
-                        <h3 id="completed-tasks-title">
-                          {copy.projects.completedWorkItemsTitle}
-                        </h3>
-                      </div>
-                      <span>
-                        {copy.projects.completedTaskCount(
-                          completedTasks.length,
-                        )}
-                      </span>
-                    </div>
-                    <ul className="project-task-list project-task-list--completed">
-                      {completedTasks.map((task) => (
-                        <li key={task.id}>
                           <button
                             className="project-task-list__complete focus-visible-control"
                             type="button"
-                            disabled={saving}
-                            aria-label={copy.projects.reopenTask(task.title)}
-                            onClick={() =>
-                              void onUpdateTask(task, {
-                                title: task.title,
-                                notes: task.notes ?? undefined,
-                                assigneeName: task.assigneeName ?? undefined,
-                                status: "open",
-                                priority: task.priority,
-                                dueAt: task.dueAt ?? undefined,
-                              })
+                            disabled={saving || childCount > 0}
+                            aria-label={copy.home.completeTask(task.title)}
+                            title={
+                              childCount > 0
+                                ? copy.projects.completeChildrenFirst
+                                : undefined
                             }
+                            onClick={() => void onCompleteTask(task)}
                           >
-                            <RotateCcw aria-hidden="true" />
+                            <Circle aria-hidden="true" />
                           </button>
                           <button
                             className="project-task-list__content focus-visible-control"
@@ -815,9 +768,9 @@ export function ProjectsWorkspace({
                             <span className="project-task-list__details">
                               <strong>{task.title}</strong>
                               <span>
-                                {copy.projects.completedTaskMeta(
-                                  taskMeta(task),
-                                )}
+                                {taskMeta(task)}
+                                {childCount > 0 &&
+                                  ` · ${copy.projects.subtaskCount(childCount)}`}
                               </span>
                             </span>
                             <span
@@ -842,11 +795,19 @@ export function ProjectsWorkspace({
                           </button>
                           {selectedTaskId === task.id &&
                             editingTaskId !== task.id && (
-                              <TaskDetail task={task} />
+                              <TaskDetail
+                                task={task}
+                                parentTask={tasks.find(
+                                  (item) => item.id === task.parentTaskId,
+                                )}
+                              />
                             )}
                           {editingTaskId === task.id && (
                             <TaskEditForm
                               task={task}
+                              parentCandidates={rootOpenTasks.filter(
+                                (item) => item.id !== task.id,
+                              )}
                               saving={saving}
                               onCancel={() => setEditingTaskId(undefined)}
                               onSave={async (input) => {
@@ -859,39 +820,215 @@ export function ProjectsWorkspace({
                         </li>
                       ))}
                     </ul>
-                  </section>
-                )}
-              </div>
-              <ProjectInflowPanel
-                accountsAvailable={googleChatAccountsAvailable}
-                accounts={googleChatAccounts}
-                spaces={googleChatSpaces}
-                sources={googleChatSources}
-                items={projectInflowItems}
-                loading={inflowLoading}
-                saving={saving}
-                problemMessage={inflowError}
-                onConnectAccount={onConnectGoogleChatAccount}
-                onLoadSpaces={onLoadGoogleChatSpaces}
-                onCreateSource={onCreateGoogleChatSource}
-                onDeleteSource={onDeleteGoogleChatSource}
-                onSyncSource={onSyncGoogleChatSource}
-                onPromote={onPromoteInflow}
-                onDismiss={onDismissInflow}
-                onRetryCompletion={onRetryInflowCompletion}
-              />
-              <ProjectWebhookPanel
-                projectId={selectedProject.id}
-                webhooks={webhooks}
-                deliveries={webhookDeliveries}
-                loading={webhookLoading}
-                saving={saving}
-                onCreate={onCreateWebhook}
-                onUpdate={onUpdateWebhook}
-                onTest={onTestWebhook}
-                onDelete={onDeleteWebhook}
-                onRetry={onRetryWebhookDelivery}
-              />
+                  ) : (
+                    <p className="project-detail__empty">
+                      {copy.projects.workItemsEmpty}
+                    </p>
+                  )}
+                  <form
+                    className="project-task-form"
+                    onSubmit={(event) => void submitTask(event)}
+                  >
+                    <label className="sr-only" htmlFor="project-task-title">
+                      {copy.projects.workItemLabel}
+                    </label>
+                    <input
+                      id="project-task-title"
+                      value={taskTitle}
+                      onChange={(event) => setTaskTitle(event.target.value)}
+                      disabled={
+                        saving || selectedProject.status === "completed"
+                      }
+                      maxLength={200}
+                      placeholder={copy.projects.workItemHint}
+                    />
+                    <label className="sr-only" htmlFor="project-task-parent">
+                      {copy.projects.parentTaskLabel}
+                    </label>
+                    <select
+                      id="project-task-parent"
+                      value={taskParentId}
+                      disabled={
+                        saving || selectedProject.status === "completed"
+                      }
+                      onChange={(event) => setTaskParentId(event.target.value)}
+                    >
+                      <option value="">{copy.projects.parentTaskNone}</option>
+                      {rootOpenTasks.map((task) => (
+                        <option value={task.id} key={task.id}>
+                          {task.title}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className="secondary-button focus-visible-control"
+                      type="submit"
+                      disabled={
+                        saving ||
+                        selectedProject.status === "completed" ||
+                        !taskTitle.trim()
+                      }
+                    >
+                      {copy.actions.addWorkItem}
+                    </button>
+                  </form>
+                  {selectedProject.status === "completed" && (
+                    <p className="project-detail__empty">
+                      {copy.projects.completedProjectNotice}
+                    </p>
+                  )}
+                </div>
+              )}
+              {activeProjectTab === "activity" && (
+                <div
+                  className="project-detail__tasks"
+                  role="tabpanel"
+                  aria-label={copy.projects.detailTabs.activity}
+                >
+                  {completedTasks.length > 0 && (
+                    <section
+                      className="project-completed-tasks"
+                      aria-labelledby="completed-tasks-title"
+                    >
+                      <div className="projects-section-heading">
+                        <div>
+                          <Circle aria-hidden="true" />
+                          <h3 id="completed-tasks-title">
+                            {copy.projects.completedWorkItemsTitle}
+                          </h3>
+                        </div>
+                        <span>
+                          {copy.projects.completedTaskCount(
+                            completedTasks.length,
+                          )}
+                        </span>
+                      </div>
+                      <ul className="project-task-list project-task-list--completed">
+                        {completedTasks.map((task) => (
+                          <li key={task.id}>
+                            <button
+                              className="project-task-list__complete focus-visible-control"
+                              type="button"
+                              disabled={saving}
+                              aria-label={copy.projects.reopenTask(task.title)}
+                              onClick={() =>
+                                void onUpdateTask(task, {
+                                  title: task.title,
+                                  notes: task.notes ?? undefined,
+                                  assigneeName: task.assigneeName ?? undefined,
+                                  status: "open",
+                                  priority: task.priority,
+                                  dueAt: task.dueAt ?? undefined,
+                                })
+                              }
+                            >
+                              <RotateCcw aria-hidden="true" />
+                            </button>
+                            <button
+                              className="project-task-list__content focus-visible-control"
+                              type="button"
+                              aria-expanded={selectedTaskId === task.id}
+                              onClick={() =>
+                                setSelectedTaskId((current) =>
+                                  current === task.id ? undefined : task.id,
+                                )
+                              }
+                            >
+                              <span className="project-task-list__details">
+                                <strong>{task.title}</strong>
+                                <span>
+                                  {copy.projects.completedTaskMeta(
+                                    taskMeta(task),
+                                  )}
+                                </span>
+                              </span>
+                              <span
+                                className="project-task-list__assignee"
+                                data-assigned={Boolean(task.assigneeName)}
+                              >
+                                {copy.projects.taskAssignee(
+                                  task.assigneeName ?? undefined,
+                                )}
+                              </span>
+                            </button>
+                            <button
+                              className="project-task-list__edit focus-visible-control"
+                              type="button"
+                              aria-label={copy.projects.editWorkItem(
+                                task.title,
+                              )}
+                              onClick={() => {
+                                setSelectedTaskId(task.id);
+                                setEditingTaskId(task.id);
+                              }}
+                            >
+                              <Pencil aria-hidden="true" />
+                            </button>
+                            {selectedTaskId === task.id &&
+                              editingTaskId !== task.id && (
+                                <TaskDetail task={task} />
+                              )}
+                            {editingTaskId === task.id && (
+                              <TaskEditForm
+                                task={task}
+                                parentCandidates={rootTasks.filter(
+                                  (item) => item.id !== task.id,
+                                )}
+                                saving={saving}
+                                onCancel={() => setEditingTaskId(undefined)}
+                                onSave={async (input) => {
+                                  await onUpdateTask(task, input);
+                                  setEditingTaskId(undefined);
+                                }}
+                                onDelete={() => onDeleteTask(task)}
+                              />
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
+                  )}
+                  {completedTasks.length === 0 && (
+                    <p className="project-detail__empty">
+                      {copy.projects.completedWorkItemsEmpty}
+                    </p>
+                  )}
+                </div>
+              )}
+              {activeProjectTab === "inflow" && (
+                <ProjectInflowPanel
+                  accountsAvailable={googleChatAccountsAvailable}
+                  accounts={googleChatAccounts}
+                  spaces={googleChatSpaces}
+                  sources={googleChatSources}
+                  items={projectInflowItems}
+                  loading={inflowLoading}
+                  saving={saving}
+                  problemMessage={inflowError}
+                  onConnectAccount={onConnectGoogleChatAccount}
+                  onLoadSpaces={onLoadGoogleChatSpaces}
+                  onCreateSource={onCreateGoogleChatSource}
+                  onDeleteSource={onDeleteGoogleChatSource}
+                  onSyncSource={onSyncGoogleChatSource}
+                  onPromote={onPromoteInflow}
+                  onDismiss={onDismissInflow}
+                  onRetryCompletion={onRetryInflowCompletion}
+                />
+              )}
+              {activeProjectTab === "integrations" && (
+                <ProjectWebhookPanel
+                  projectId={selectedProject.id}
+                  webhooks={webhooks}
+                  deliveries={webhookDeliveries}
+                  loading={webhookLoading}
+                  saving={saving}
+                  onCreate={onCreateWebhook}
+                  onUpdate={onUpdateWebhook}
+                  onTest={onTestWebhook}
+                  onDelete={onDeleteWebhook}
+                  onRetry={onRetryWebhookDelivery}
+                />
+              )}
             </>
           ) : (
             <div className="project-detail__panel project-detail__selection">
@@ -905,6 +1042,88 @@ export function ProjectsWorkspace({
       </div>
     </section>
   );
+}
+
+function ProjectDetailTabButton({
+  id,
+  active,
+  label,
+  count,
+  icon,
+  onSelect,
+}: {
+  id: ProjectDetailTab;
+  active: boolean;
+  label: string;
+  count: number;
+  icon: ReactNode;
+  onSelect(tab: ProjectDetailTab): void;
+}) {
+  return (
+    <button
+      className="project-detail-tabs__button focus-visible-control"
+      data-active={active}
+      type="button"
+      role="tab"
+      aria-selected={active}
+      tabIndex={active ? 0 : -1}
+      onClick={() => onSelect(id)}
+      onKeyDown={(event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+          return;
+        }
+        event.preventDefault();
+        const currentIndex = PROJECT_DETAIL_TABS.indexOf(id);
+        const nextIndex =
+          event.key === "Home"
+            ? 0
+            : event.key === "End"
+              ? PROJECT_DETAIL_TABS.length - 1
+              : (currentIndex +
+                  (event.key === "ArrowRight" ? 1 : -1) +
+                  PROJECT_DETAIL_TABS.length) %
+                PROJECT_DETAIL_TABS.length;
+        const nextTab = PROJECT_DETAIL_TABS[nextIndex];
+        onSelect(nextTab);
+        const buttons =
+          event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+            '[role="tab"]',
+          );
+        buttons?.[nextIndex]?.focus();
+      }}
+    >
+      {icon}
+      <span>{label}</span>
+      <small>{count}</small>
+    </button>
+  );
+}
+
+export function taskHierarchyRows(
+  tasks: Task[],
+): Array<{ task: Task; depth: 0 | 1; childCount: number }> {
+  const taskIds = new Set(tasks.map((task) => task.id));
+  const roots = tasks.filter(
+    (task) => !task.parentTaskId || !taskIds.has(task.parentTaskId),
+  );
+  const childrenByParent = new Map<string, Task[]>();
+  for (const task of tasks) {
+    if (!task.parentTaskId || !taskIds.has(task.parentTaskId)) continue;
+    const children = childrenByParent.get(task.parentTaskId) ?? [];
+    children.push(task);
+    childrenByParent.set(task.parentTaskId, children);
+  }
+  return roots.flatMap((task) => {
+    const children = childrenByParent.get(task.id) ?? [];
+    return [
+      { task, depth: 0 as const, childCount: children.length },
+      ...children.map((child) => ({
+        task: child,
+        depth: 1 as const,
+        childCount: 0,
+      })),
+    ];
+  });
 }
 
 function ProjectEditForm({
@@ -1152,7 +1371,7 @@ function ProjectEditForm({
   );
 }
 
-function TaskDetail({ task }: { task: Task }) {
+function TaskDetail({ task, parentTask }: { task: Task; parentTask?: Task }) {
   return (
     <section
       className="project-task-detail"
@@ -1163,6 +1382,12 @@ function TaskDetail({ task }: { task: Task }) {
         <p>{task.notes || copy.projects.workItemNotesEmpty}</p>
       </div>
       <dl>
+        {parentTask && (
+          <div>
+            <dt>{copy.projects.parentTaskLabel}</dt>
+            <dd>{parentTask.title}</dd>
+          </div>
+        )}
         <div>
           <dt>{copy.projects.workItemAssigneeLabel}</dt>
           <dd>{task.assigneeName || copy.projects.workItemAssigneeEmpty}</dd>
@@ -1189,12 +1414,14 @@ function TaskDetail({ task }: { task: Task }) {
 
 function TaskEditForm({
   task,
+  parentCandidates,
   saving,
   onCancel,
   onSave,
   onDelete,
 }: {
   task: Task;
+  parentCandidates: Task[];
   saving: boolean;
   onCancel(): void;
   onSave(input: {
@@ -1204,6 +1431,7 @@ function TaskEditForm({
     status: Task["status"];
     priority: number;
     dueAt?: string;
+    parentTaskId?: string | null;
   }): Promise<void>;
   onDelete(): Promise<void>;
 }) {
@@ -1212,6 +1440,7 @@ function TaskEditForm({
   const [assigneeName, setAssigneeName] = useState(task.assigneeName ?? "");
   const [priority, setPriority] = useState(String(task.priority));
   const [dueDate, setDueDate] = useState(isoToDateInput(task.dueAt));
+  const [parentTaskId, setParentTaskId] = useState(task.parentTaskId ?? "");
   const [confirmingRemoval, setConfirmingRemoval] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string>();
@@ -1250,6 +1479,7 @@ function TaskEditForm({
         status: task.status,
         priority: Number(priority),
         dueAt: dateInputToIso(dueDate),
+        parentTaskId: parentTaskId || null,
       });
     } catch {
       setError(copy.projects.taskUpdateNotice);
@@ -1305,6 +1535,22 @@ function TaskEditForm({
         />
       </label>
       <div className="project-task-edit-form__fields">
+        <label htmlFor={`task-parent-${task.id}`}>
+          <span>{copy.projects.parentTaskLabel}</span>
+          <select
+            id={`task-parent-${task.id}`}
+            value={parentTaskId}
+            disabled={busy}
+            onChange={(event) => setParentTaskId(event.target.value)}
+          >
+            <option value="">{copy.projects.parentTaskNone}</option>
+            {parentCandidates.map((candidate) => (
+              <option value={candidate.id} key={candidate.id}>
+                {candidate.title}
+              </option>
+            ))}
+          </select>
+        </label>
         <label htmlFor={`task-assignee-${task.id}`}>
           <span>{copy.projects.workItemAssigneeLabel}</span>
           <input
