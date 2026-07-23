@@ -2,10 +2,13 @@ import {
   ArrowRight,
   CalendarDays,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   Circle,
+  Clock3,
   FolderKanban,
   ListTodo,
+  UserRound,
 } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 
@@ -15,6 +18,12 @@ import {
   type AssistantPresentation,
   type AssistantPresentationSection,
 } from "../assistantPresentation";
+import {
+  groupTaskPresentationItems,
+  initialTaskGroupView,
+  taskGroupItemSummary,
+  type TaskGroupView,
+} from "../assistantTaskGrouping";
 import { copy } from "../copy";
 
 type AssistantInteractiveCanvasProps = {
@@ -46,6 +55,12 @@ export function AssistantInteractiveCanvas({
   const [selectedItemId, setSelectedItemId] = useState(
     presentation.focusItemId ?? initialSection?.items[0]?.id,
   );
+  const [taskGroupView, setTaskGroupView] = useState<TaskGroupView>(() =>
+    initialTaskGroupView(initialSection),
+  );
+  const [collapsedTaskGroups, setCollapsedTaskGroups] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState<string>();
 
@@ -58,6 +73,10 @@ export function AssistantInteractiveCanvas({
   const selectedItemCanOpen = selectedItem
     ? canOpenPresentationItem(selectedItem)
     : false;
+  const taskGroups =
+    activeSection?.kind === "tasks"
+      ? groupTaskPresentationItems(activeSection.items, taskGroupView)
+      : [];
 
   useEffect(() => {
     mountedRef.current = true;
@@ -73,7 +92,23 @@ export function AssistantInteractiveCanvas({
       (item) => item.id === presentation.focusItemId,
     );
     setSelectedItemId(focusedItem?.id ?? section.items[0]?.id);
+    setTaskGroupView(initialTaskGroupView(section));
+    setCollapsedTaskGroups(new Set());
     setOpenError(undefined);
+  }
+
+  function selectTaskGroupView(view: TaskGroupView) {
+    setTaskGroupView(view);
+    setCollapsedTaskGroups(new Set());
+  }
+
+  function toggleTaskGroup(groupId: string) {
+    setCollapsedTaskGroups((current) => {
+      const next = new Set(current);
+      if (next.has(groupId)) next.delete(groupId);
+      else next.add(groupId);
+      return next;
+    });
   }
 
   async function openSelectedItem() {
@@ -177,55 +212,165 @@ export function AssistantInteractiveCanvas({
           </div>
 
           {activeSection && selectedItem && (
-            <div
-              className="assistant-canvas__workspace"
-              data-layout={presentation.layout}
-              data-view={activeSection.view}
-              id={`assistant-panel-${activeSection.kind}`}
-              role="tabpanel"
-              aria-labelledby={`assistant-tab-${activeSection.kind}`}
-            >
-              <ul className="assistant-canvas__items">
-                {activeSection.items.map((item) => (
-                  <li key={item.id}>
+            <>
+              {activeSection.kind === "tasks" && (
+                <div className="assistant-canvas__view-controls">
+                  <span>{copy.home.taskGroupViewLabel}</span>
+                  <div
+                    role="group"
+                    aria-label={copy.home.taskGroupViewLabel}
+                    className="assistant-canvas__view-switch"
+                  >
                     <button
-                      className="assistant-canvas__item focus-visible-control"
                       type="button"
-                      data-selected={item.id === selectedItem.id}
-                      aria-current={item.id === selectedItem.id}
-                      onClick={() => {
-                        setSelectedItemId(item.id);
-                        setOpenError(undefined);
-                      }}
+                      className="focus-visible-control"
+                      aria-pressed={taskGroupView === "assignee"}
+                      onClick={() => selectTaskGroupView("assignee")}
                     >
-                      <ItemMarker section={activeSection} />
-                      <span>
-                        <strong>{item.title}</strong>
-                        <small>{itemSummary(item)}</small>
-                      </span>
-                      <ChevronRight aria-hidden="true" />
+                      <UserRound aria-hidden="true" />
+                      {copy.home.groupTasksByAssignee}
                     </button>
-                  </li>
-                ))}
-              </ul>
-              <article
-                className="assistant-canvas__detail"
-                aria-label={copy.home.resultDetailsLabel}
-                aria-live="polite"
+                    <button
+                      type="button"
+                      className="focus-visible-control"
+                      aria-pressed={taskGroupView === "date"}
+                      onClick={() => selectTaskGroupView("date")}
+                    >
+                      <CalendarDays aria-hidden="true" />
+                      {copy.home.groupTasksByDate}
+                    </button>
+                  </div>
+                </div>
+              )}
+              <div
+                className="assistant-canvas__workspace"
+                data-layout={presentation.layout}
+                data-view={activeSection.view}
+                data-grouped={activeSection.kind === "tasks"}
+                id={`assistant-panel-${activeSection.kind}`}
+                role="tabpanel"
+                aria-labelledby={`assistant-tab-${activeSection.kind}`}
               >
-                <ItemDetail
-                  item={selectedItem}
-                  opening={opening}
-                  error={openError}
-                  canOpen={selectedItemCanOpen}
-                  onOpen={() => void openSelectedItem()}
-                />
-              </article>
-            </div>
+                {activeSection.kind === "tasks" ? (
+                  <div className="assistant-canvas__groups">
+                    {taskGroups.map((group) => {
+                      const collapsed = collapsedTaskGroups.has(group.id);
+                      return (
+                        <section
+                          className="assistant-canvas__group"
+                          key={group.id}
+                        >
+                          <button
+                            type="button"
+                            className="assistant-canvas__group-heading focus-visible-control"
+                            aria-expanded={!collapsed}
+                            onClick={() => toggleTaskGroup(group.id)}
+                          >
+                            {taskGroupView === "assignee" ? (
+                              <UserRound aria-hidden="true" />
+                            ) : (
+                              <Clock3 aria-hidden="true" />
+                            )}
+                            <span>
+                              <strong>{group.title}</strong>
+                              <small>
+                                {copy.home.taskGroupCount(group.items.length)}
+                              </small>
+                            </span>
+                            <ChevronDown aria-hidden="true" />
+                          </button>
+                          {!collapsed && (
+                            <ul className="assistant-canvas__items">
+                              {group.items.map((item) => (
+                                <li key={item.id}>
+                                  <PresentationItemButton
+                                    item={item}
+                                    section={activeSection}
+                                    selected={item.id === selectedItem.id}
+                                    summary={taskGroupItemSummary(
+                                      item,
+                                      taskGroupView,
+                                    )}
+                                    onSelect={() => {
+                                      setSelectedItemId(item.id);
+                                      setOpenError(undefined);
+                                    }}
+                                  />
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </section>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <ul className="assistant-canvas__items">
+                    {activeSection.items.map((item) => (
+                      <li key={item.id}>
+                        <PresentationItemButton
+                          item={item}
+                          section={activeSection}
+                          selected={item.id === selectedItem.id}
+                          onSelect={() => {
+                            setSelectedItemId(item.id);
+                            setOpenError(undefined);
+                          }}
+                        />
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <article
+                  className="assistant-canvas__detail"
+                  aria-label={copy.home.resultDetailsLabel}
+                  aria-live="polite"
+                >
+                  <ItemDetail
+                    item={selectedItem}
+                    opening={opening}
+                    error={openError}
+                    canOpen={selectedItemCanOpen}
+                    onOpen={() => void openSelectedItem()}
+                  />
+                </article>
+              </div>
+            </>
           )}
         </>
       )}
     </section>
+  );
+}
+
+function PresentationItemButton({
+  item,
+  section,
+  selected,
+  summary,
+  onSelect,
+}: {
+  item: AssistantPresentationSection["items"][number];
+  section: AssistantPresentationSection;
+  selected: boolean;
+  summary?: string;
+  onSelect(): void;
+}) {
+  return (
+    <button
+      className="assistant-canvas__item focus-visible-control"
+      type="button"
+      data-selected={selected}
+      aria-current={selected}
+      onClick={onSelect}
+    >
+      <ItemMarker section={section} />
+      <span>
+        <strong>{item.title}</strong>
+        <small>{summary ?? itemSummary(item)}</small>
+      </span>
+      <ChevronRight aria-hidden="true" />
+    </button>
   );
 }
 

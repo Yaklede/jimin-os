@@ -1395,7 +1395,9 @@ async fn automatic_work_mutations_queue_safe_unique_webhook_deliveries() {
             user_id,
             project_id: Some(project.id),
             title: "자동 이벤트 할 일 수정".to_owned(),
-            notes: created_task.notes.clone(),
+            notes: Some(
+                "담당자: 김경주\n\n1. 요청 내용을 확인한다.\n2. 처리 결과를 공유한다.".to_owned(),
+            ),
             assignee_name: Some("김경주".to_owned()),
             status: TaskStatus::Open,
             priority: 2,
@@ -1406,6 +1408,12 @@ async fn automatic_work_mutations_queue_safe_unique_webhook_deliveries() {
         .expect("task update should succeed")
         .expect("current task should update");
     assert_eq!(updated_task.assignee_name.as_deref(), Some("김경주"));
+    assert!(
+        updated_task
+            .notes
+            .as_deref()
+            .is_some_and(|notes| notes.contains('\n'))
+    );
     let completed_task = database
         .complete_task(user_id, updated_task.id, updated_task.version)
         .await

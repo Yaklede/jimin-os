@@ -1366,6 +1366,9 @@ fn is_all_task_overview_request(input: &str) -> bool {
         "목록",
         "리스트",
         "리스트업",
+        "분리",
+        "구분",
+        "정리",
         "보여",
         "알려",
         "조회",
@@ -1377,7 +1380,24 @@ fn is_all_task_overview_request(input: &str) -> bool {
     let has_day_scope = ["오늘", "금일", "내일", "모레", "today", "tomorrow"]
         .iter()
         .any(|term| normalized.contains(term));
-    mentions_all && mentions_tasks && requests_overview && !has_day_scope
+    let requests_assignee_grouping = [
+        "담당자별",
+        "담당자마다",
+        "사람별",
+        "사람마다",
+        "assignee",
+        "byassignee",
+    ]
+    .iter()
+    .any(|term| normalized.contains(term));
+    let requests_date_grouping = ["일자별", "날짜별", "기한별", "bydate"]
+        .iter()
+        .any(|term| normalized.contains(term));
+    ((mentions_all && mentions_tasks)
+        || requests_assignee_grouping
+        || (mentions_tasks && requests_date_grouping))
+        && requests_overview
+        && !has_day_scope
 }
 
 fn requested_bulk_schedule_cancellation_ids(
@@ -4133,6 +4153,63 @@ mod tests {
                 ..
             } if name == "김경주"
         )));
+    }
+
+    #[test]
+    fn assignee_grouping_request_returns_tasks_for_every_assignee() {
+        let assignees = ["김경주", "김경주", "주홍석", "송인준"];
+        let tasks = assignees
+            .into_iter()
+            .enumerate()
+            .map(|(index, assignee)| Task {
+                id: Uuid::now_v7(),
+                project_id: None,
+                title: format!("{assignee}의 열린 일 {index}"),
+                notes: None,
+                assignee_name: Some(assignee.to_owned()),
+                status: TaskStatus::Open,
+                priority: 1,
+                due_at: None,
+                completed_at: None,
+                version: 1,
+            })
+            .collect::<Vec<_>>();
+        let context = TurnContext {
+            prompt: "<user_request>\n담당자별로 분리해서 보여줘\n</user_request>".to_owned(),
+            schedule: Vec::new(),
+            tasks: tasks.clone(),
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
+        };
+        let response = serde_json::json!({
+            "intent": { "mode": "read", "confidence": 99 },
+            "answer": "담당자별로 정리했어요.",
+            "presentation": {
+                "title": "담당자별 열린 일",
+                "layout": "stack",
+                "focusEntityId": "",
+                "sections": [{
+                    "kind": "tasks",
+                    "title": "김경주 · 2건",
+                    "view": "list",
+                    "entityIds": [tasks[0].id, tasks[1].id]
+                }]
+            },
+            "actions": []
+        })
+        .to_string();
+
+        let (answer, presentation, _) =
+            validated_assistant_response(&response, &context).expect("assignee result");
+        let presentation = presentation.expect("assignee result should be interactive");
+
+        assert!(answer.contains("현재 열린 일 4개를 모두 보여드려요."));
+        assert_eq!(presentation.sections.len(), 1);
+        assert_eq!(presentation.sections[0].item_ids.len(), 4);
+        assert_eq!(presentation.items.len(), 4);
     }
 
     #[test]

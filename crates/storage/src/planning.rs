@@ -1321,7 +1321,9 @@ fn is_v7(value: Uuid) -> bool {
 fn valid_text(value: &str, maximum: usize, allow_empty: bool) -> bool {
     (allow_empty || !value.trim().is_empty())
         && value.chars().count() <= maximum
-        && !value.chars().any(char::is_control)
+        && !value.chars().any(|character| {
+            character.is_control() && !(allow_empty && matches!(character, '\n' | '\r' | '\t'))
+        })
 }
 
 fn valid_time_zone(value: &str) -> bool {
@@ -1491,6 +1493,18 @@ fn truncate_with_ellipsis(value: &str, maximum: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_notes_allow_multiline_text_but_reject_unsafe_controls() {
+        assert!(valid_text(
+            "담당자: 김경주\n\n1. 처리 방향 확인\n2. 결과 공유",
+            MAX_NOTES_CHARS,
+            true,
+        ));
+        assert!(valid_text("표 형식\t내용도 저장", MAX_NOTES_CHARS, true,));
+        assert!(!valid_text("숨은 제어문자\u{0}포함", MAX_NOTES_CHARS, true,));
+        assert!(!valid_text("제목\n줄바꿈", MAX_TITLE_CHARS, false));
+    }
 
     #[test]
     fn assigned_task_webhook_message_contains_the_work_context() {
