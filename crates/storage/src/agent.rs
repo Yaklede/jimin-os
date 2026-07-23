@@ -17,7 +17,7 @@ use crate::{
         ScheduleCalendarMutationOperation, ScheduleCalendarMutationPayload,
         attach_schedule_to_active_primary_and_queue_create, queue_linked_schedule_mutation,
     },
-    planning::TaskStatus,
+    planning::{TaskStatus, queue_owned_task_webhook_by_id_in_transaction},
     webhook::{project_event_payload, queue_project_event_in_transaction},
     work::ProjectStatus,
 };
@@ -34,7 +34,7 @@ const MAX_REASONING_EFFORT_ID_CHARS: usize = 80;
 const MAX_REASONING_EFFORT_DESCRIPTION_CHARS: usize = 1_000;
 const MAX_REASONING_EFFORT_COUNT: usize = 16;
 const MAX_MODEL_COUNT: usize = 128;
-const MAX_PRESENTATION_ITEMS: usize = 32;
+const MAX_PRESENTATION_ITEMS: usize = 512;
 const MAX_PRESENTATION_SECTIONS: usize = 3;
 const MAX_PRESENTATION_DETAIL_CHARS: usize = 500;
 const MAX_PRESENTATION_TIMESTAMP_CHARS: usize = 80;
@@ -106,6 +106,7 @@ pub enum AgentActionCommand {
         project_id: Option<Uuid>,
         title: String,
         notes: Option<String>,
+        assignee_name: Option<String>,
         priority: i16,
         due_at: Option<OffsetDateTime>,
     },
@@ -114,6 +115,7 @@ pub enum AgentActionCommand {
         project_id: Option<Uuid>,
         title: String,
         notes: Option<String>,
+        assignee_name: Option<String>,
         priority: i16,
         due_at: Option<OffsetDateTime>,
         expected_version: i64,
@@ -189,6 +191,7 @@ impl AgentActionCommand {
                 project_id,
                 title,
                 notes,
+                assignee_name,
                 priority,
                 ..
             } => {
@@ -196,6 +199,7 @@ impl AgentActionCommand {
                     && project_id.is_none_or(is_v7)
                     && valid_text(title, MAX_TITLE_CHARS, false)
                     && valid_optional(notes.as_ref(), 10_000)
+                    && valid_optional(assignee_name.as_ref(), 80)
                     && (0..=3).contains(priority)
                 {
                     Ok(())
@@ -208,6 +212,7 @@ impl AgentActionCommand {
                 project_id,
                 title,
                 notes,
+                assignee_name,
                 priority,
                 expected_version,
                 ..
@@ -216,6 +221,7 @@ impl AgentActionCommand {
                     && project_id.is_none_or(is_v7)
                     && valid_text(title, MAX_TITLE_CHARS, false)
                     && valid_optional(notes.as_ref(), 10_000)
+                    && valid_optional(assignee_name.as_ref(), 80)
                     && (0..=3).contains(priority)
                     && *expected_version > 0
                 {
@@ -651,6 +657,8 @@ pub enum AssistantPresentationItem {
         project_id: Option<Uuid>,
         #[serde(rename = "projectTitle")]
         project_title: Option<String>,
+        #[serde(default, rename = "assigneeName")]
+        assignee_name: Option<String>,
         title: String,
         #[serde(default = "default_task_presentation_status")]
         status: String,
@@ -2891,15 +2899,16 @@ async fn persist_agent_action(
             project_id,
             title,
             notes,
+            assignee_name,
             priority,
             due_at,
         } => {
             let version = sqlx::query_scalar::<_, i64>(
                 "\
                 INSERT INTO tasks (
-                    id, user_id, project_id, title, notes, status, priority, due_at
+                    id, user_id, project_id, title, notes, assignee_name, status, priority, due_at
                 )
-                SELECT $1, $2, $3, $4, $5, 'open', $6, $7
+                SELECT $1, $2, $3, $4, $5, $6, 'open', $7, $8
                 WHERE $3::uuid IS NULL OR EXISTS (
                     SELECT 1 FROM projects WHERE id = $3 AND user_id = $2
                 )
@@ -2910,6 +2919,7 @@ async fn persist_agent_action(
             .bind(project_id)
             .bind(title.trim())
             .bind(trim_optional_text(notes.as_deref()))
+            .bind(trim_optional_text(assignee_name.as_deref()))
             .bind(priority)
             .bind(due_at)
             .fetch_optional(&mut **transaction)
@@ -2923,6 +2933,7 @@ async fn persist_agent_action(
             project_id,
             title,
             notes,
+            assignee_name,
             priority,
             due_at,
             expected_version,
@@ -2930,8 +2941,9 @@ async fn persist_agent_action(
             let version = sqlx::query_scalar::<_, i64>(
                 "\
                 UPDATE tasks
-                SET project_id = $3, title = $4, notes = $5, priority = $6, due_at = $7
-                WHERE id = $1 AND user_id = $2 AND status = 'open' AND version = $8
+                SET project_id = $3, title = $4, notes = $5, assignee_name = $6,
+                    priority = $7, due_at = $8
+                WHERE id = $1 AND user_id = $2 AND status = 'open' AND version = $9
                   AND ($3::uuid IS NULL OR EXISTS (
                       SELECT 1 FROM projects WHERE id = $3 AND user_id = $2
                   ))
@@ -2942,6 +2954,7 @@ async fn persist_agent_action(
             .bind(project_id)
             .bind(title.trim())
             .bind(trim_optional_text(notes.as_deref()))
+            .bind(trim_optional_text(assignee_name.as_deref()))
             .bind(priority)
             .bind(due_at)
             .bind(expected_version)
@@ -3274,33 +3287,29 @@ async fn queue_agent_action_webhook(
     user_id: Uuid,
     action: &AgentActionCommand,
 ) -> Result<(), StorageError> {
-    let (project_id, event_type, entity_id) = match action {
-        AgentActionCommand::CreateTask {
-            id,
-            project_id: Some(project_id),
-            ..
-        } => (Some(*project_id), "task.created", *id),
-        AgentActionCommand::UpdateTask {
-            id,
-            project_id: Some(project_id),
-            ..
-        } => (Some(*project_id), "task.updated", *id),
-        AgentActionCommand::SetTaskStatus { id, status, .. } => {
-            let project_id: Option<Uuid> =
-                sqlx::query_scalar("SELECT project_id FROM tasks WHERE id = $1 AND user_id = $2")
-                    .bind(id)
-                    .bind(user_id)
-                    .fetch_optional(&mut **transaction)
-                    .await
-                    .map_err(|error| classify(&error))?
-                    .flatten();
-            let event_type = match status {
+    let task_event = match action {
+        AgentActionCommand::CreateTask { id, .. } => Some((*id, "task.created")),
+        AgentActionCommand::UpdateTask { id, .. } => Some((*id, "task.updated")),
+        AgentActionCommand::SetTaskStatus { id, status, .. } => Some((
+            *id,
+            match status {
                 TaskStatus::Completed => "task.completed",
                 TaskStatus::Open => "task.restored",
                 TaskStatus::Cancelled => "task.deleted",
-            };
-            (project_id, event_type, *id)
-        }
+            },
+        )),
+        _ => None,
+    };
+    if let Some((task_id, event_type)) = task_event {
+        return queue_owned_task_webhook_by_id_in_transaction(
+            transaction,
+            user_id,
+            task_id,
+            event_type,
+        )
+        .await;
+    }
+    let (project_id, event_type, entity_id) = match action {
         AgentActionCommand::UpdateProject { id, .. } => (Some(*id), "project.updated", *id),
         AgentActionCommand::DeleteProject { id, .. } => (Some(*id), "project.deleted", *id),
         _ => (None, "", action.entity_id()),
@@ -3617,6 +3626,7 @@ fn valid_presentation_item(item: &AssistantPresentationItem) -> bool {
             id,
             project_id,
             project_title,
+            assignee_name,
             title,
             status,
             priority,
@@ -3627,6 +3637,9 @@ fn valid_presentation_item(item: &AssistantPresentationItem) -> bool {
                 && project_title
                     .as_deref()
                     .is_none_or(|value| valid_text(value, MAX_TITLE_CHARS, false))
+                && assignee_name
+                    .as_deref()
+                    .is_none_or(|value| valid_text(value, 80, false))
                 && valid_text(title, MAX_TITLE_CHARS, false)
                 && matches!(status.as_str(), "open" | "completed" | "cancelled")
                 && (0..=3).contains(priority)
@@ -3785,6 +3798,7 @@ mod tests {
                     id: task_id,
                     project_id: None,
                     project_title: None,
+                    assignee_name: None,
                     title: "회의록 정리".to_owned(),
                     status: "open".to_owned(),
                     priority: 2,
@@ -3830,6 +3844,7 @@ mod tests {
                 id: task_id,
                 project_id: None,
                 project_title: None,
+                assignee_name: None,
                 title: "회의록 정리".to_owned(),
                 status: "open".to_owned(),
                 priority: 2,

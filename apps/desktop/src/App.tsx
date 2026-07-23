@@ -27,6 +27,7 @@ import {
   updateTask,
   updateScheduleEntry,
   fetchPlanning,
+  PlanningRequestError,
   type PlanningSnapshot,
   type ScheduleEntry,
   type SessionTokens,
@@ -1942,15 +1943,38 @@ export default function App() {
     input: {
       title: string;
       notes?: string;
+      assigneeName?: string;
       status: Task["status"];
       priority: number;
       dueAt?: string;
     },
   ): Promise<void> {
     setPlanningError(undefined);
-    const updated = await withAuthenticatedSession((accessToken) =>
-      updateTask(apiBaseUrl, accessToken, task, input),
-    );
+    const updated = await withAuthenticatedSession(async (accessToken) => {
+      try {
+        return await updateTask(apiBaseUrl, accessToken, task, input);
+      } catch (error) {
+        if (
+          !(error instanceof PlanningRequestError) ||
+          error.code !== "conflict"
+        ) {
+          throw error;
+        }
+        const latestTasks = task.projectId
+          ? await fetchProjectTasks(apiBaseUrl, accessToken, task.projectId)
+          : (
+              await fetchPlanning(
+                apiBaseUrl,
+                accessToken,
+                planningRange.from,
+                planningRange.to,
+              )
+            ).tasks;
+        const latest = latestTasks.find((item) => item.id === task.id);
+        if (!latest) throw error;
+        return updateTask(apiBaseUrl, accessToken, latest, input);
+      }
+    });
     setPlanningSnapshot((current) =>
       current
         ? {
@@ -2421,6 +2445,7 @@ export default function App() {
     input: {
       title: string;
       notes?: string;
+      assigneeName?: string;
       status: Task["status"];
       priority: number;
       dueAt?: string;
@@ -2429,9 +2454,24 @@ export default function App() {
     setProjectsSaving(true);
     setProjectsError(undefined);
     try {
-      const updated = await withAuthenticatedSession((accessToken) =>
-        updateTask(apiBaseUrl, accessToken, task, input),
-      );
+      const updated = await withAuthenticatedSession(async (accessToken) => {
+        try {
+          return await updateTask(apiBaseUrl, accessToken, task, input);
+        } catch (error) {
+          if (
+            !(error instanceof PlanningRequestError) ||
+            error.code !== "conflict" ||
+            !task.projectId
+          ) {
+            throw error;
+          }
+          const latest = (
+            await fetchProjectTasks(apiBaseUrl, accessToken, task.projectId)
+          ).find((item) => item.id === task.id);
+          if (!latest) throw error;
+          return updateTask(apiBaseUrl, accessToken, latest, input);
+        }
+      });
       setProjectTasks((current) =>
         updated.status === "cancelled"
           ? current.filter((item) => item.id !== updated.id)

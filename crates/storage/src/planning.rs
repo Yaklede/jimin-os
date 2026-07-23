@@ -18,6 +18,7 @@ use crate::{
 
 const MAX_TITLE_CHARS: usize = 200;
 const MAX_NOTES_CHARS: usize = 10_000;
+const MAX_ASSIGNEE_NAME_CHARS: usize = 80;
 const MAX_WEBHOOK_TASK_CONTENT_CHARS: usize = 900;
 
 /// Validated manual schedule input. Provider-originated entries will use a
@@ -98,6 +99,7 @@ pub struct NewTask {
     pub project_id: Option<Uuid>,
     pub title: String,
     pub notes: Option<String>,
+    pub assignee_name: Option<String>,
     pub priority: i16,
     pub due_at: Option<OffsetDateTime>,
 }
@@ -109,6 +111,7 @@ pub struct TaskUpdate {
     pub project_id: Option<Uuid>,
     pub title: String,
     pub notes: Option<String>,
+    pub assignee_name: Option<String>,
     pub status: TaskStatus,
     pub priority: i16,
     pub due_at: Option<OffsetDateTime>,
@@ -129,6 +132,10 @@ impl NewTask {
                 .notes
                 .as_deref()
                 .is_none_or(|value| valid_text(value, MAX_NOTES_CHARS, true))
+            || !self
+                .assignee_name
+                .as_deref()
+                .is_none_or(|value| valid_text(value, MAX_ASSIGNEE_NAME_CHARS, false))
             || !(0..=3).contains(&self.priority)
         {
             return Err(StorageError::InvalidConfiguration);
@@ -153,6 +160,10 @@ impl TaskUpdate {
                 .notes
                 .as_deref()
                 .is_none_or(|value| valid_text(value, MAX_NOTES_CHARS, true))
+            || !self
+                .assignee_name
+                .as_deref()
+                .is_none_or(|value| valid_text(value, MAX_ASSIGNEE_NAME_CHARS, false))
             || !(0..=3).contains(&self.priority)
             || self.expected_version <= 0
         {
@@ -769,8 +780,10 @@ impl Database {
         let mut transaction = self.pool().begin().await.map_err(classify)?;
         let row = sqlx::query_as::<_, TaskRow>(
             "\
-            INSERT INTO tasks (id, user_id, project_id, title, notes, status, priority, due_at)
-            VALUES ($1, $2, $3, $4, $5, 'open', $6, $7)
+            INSERT INTO tasks (
+                id, user_id, project_id, title, notes, assignee_name, status, priority, due_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, 'open', $7, $8)
             RETURNING id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version",
         )
         .bind(task.id)
@@ -779,6 +792,12 @@ impl Database {
         .bind(task.title.trim())
         .bind(
             task.notes
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(
+            task.assignee_name
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty()),
@@ -817,8 +836,10 @@ impl Database {
         let mut transaction = self.pool().begin().await.map_err(classify)?;
         let row = sqlx::query_as::<_, TaskRow>(
             "\
-            INSERT INTO tasks (id, user_id, project_id, title, notes, status, priority, due_at)
-            VALUES ($1, $2, $3, $4, $5, 'open', $6, $7)
+            INSERT INTO tasks (
+                id, user_id, project_id, title, notes, assignee_name, status, priority, due_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, 'open', $7, $8)
             ON CONFLICT (id) DO NOTHING
             RETURNING id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version",
         )
@@ -828,6 +849,12 @@ impl Database {
         .bind(task.title.trim())
         .bind(
             task.notes
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(
+            task.assignee_name
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty()),
@@ -1101,11 +1128,12 @@ impl Database {
             SET project_id = $4,
                 title = $5,
                 notes = $6,
-                status = $7,
-                priority = $8,
-                due_at = $9,
+                assignee_name = $7,
+                status = $8,
+                priority = $9,
+                due_at = $10,
                 completed_at = CASE
-                    WHEN $7 = 'completed' THEN COALESCE(completed_at, NOW())
+                    WHEN $8 = 'completed' THEN COALESCE(completed_at, NOW())
                     ELSE NULL
                 END
             WHERE id = $1 AND user_id = $2 AND version = $3
@@ -1119,6 +1147,13 @@ impl Database {
         .bind(
             update
                 .notes
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(
+            update
+                .assignee_name
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty()),
@@ -1325,6 +1360,12 @@ fn task_matches_new(existing: &Task, requested: &NewTask) -> bool {
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
+        && existing.assignee_name.as_deref()
+            == requested
+                .assignee_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
         && existing.priority == requested.priority
         && existing.due_at == requested.due_at
 }
@@ -1377,6 +1418,29 @@ pub(crate) async fn queue_task_webhook_in_transaction(
     queue_project_event_in_transaction(transaction, user_id, project_id, event_type, &payload)
         .await?;
     Ok(())
+}
+
+pub(crate) async fn queue_owned_task_webhook_by_id_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    task_id: Uuid,
+    event_type: &str,
+) -> Result<(), StorageError> {
+    let row = sqlx::query_as::<_, TaskRow>(
+        "\
+        SELECT id, project_id, title, notes, assignee_name, status, priority, due_at,
+            completed_at, version
+        FROM tasks
+        WHERE id = $1 AND user_id = $2",
+    )
+    .bind(task_id)
+    .bind(user_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(classify)?
+    .ok_or(StorageError::IdentityConflict)?;
+    let task = Task::try_from(row)?;
+    queue_task_webhook_in_transaction(transaction, user_id, &task, event_type).await
 }
 
 fn task_event_message(event_type: &str, project_title: &str, task: &Task) -> String {

@@ -191,6 +191,7 @@ export async function createTask(
   input: {
     title: string;
     notes?: string;
+    assigneeName?: string;
     priority: number;
     dueAt?: string;
     projectId?: string;
@@ -200,6 +201,7 @@ export async function createTask(
     projectId: input.projectId || null,
     title: input.title,
     notes: input.notes || null,
+    assigneeName: input.assigneeName || null,
     priority: input.priority,
     dueAt: input.dueAt || null,
   });
@@ -228,6 +230,7 @@ export async function updateTask(
   input: {
     title: string;
     notes?: string;
+    assigneeName?: string;
     status: Task["status"];
     priority: number;
     dueAt?: string;
@@ -237,6 +240,7 @@ export async function updateTask(
     projectId: task.projectId,
     title: input.title,
     notes: input.notes || null,
+    assigneeName: input.assigneeName || null,
     status: input.status,
     priority: input.priority,
     dueAt: input.dueAt || null,

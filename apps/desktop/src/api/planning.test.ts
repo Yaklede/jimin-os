@@ -164,6 +164,7 @@ describe("task client", () => {
       projectId: null,
       title: created.title,
       notes: created.notes,
+      assigneeName: null,
       priority: created.priority,
       dueAt: created.dueAt,
     });
@@ -227,6 +228,7 @@ describe("task client", () => {
           projectId: "019f68cb-9400-7000-8000-000000000011",
           title: "계약서 검토",
           notes: "수정본 확인",
+          assigneeName: "김경주",
           status: "open",
           priority: 3,
           dueAt: null,
@@ -255,6 +257,7 @@ describe("task client", () => {
       {
         title: "계약서 검토",
         notes: "수정본 확인",
+        assigneeName: "김경주",
         status: "open",
         priority: 3,
       },
@@ -269,6 +272,7 @@ describe("task client", () => {
       projectId: "019f68cb-9400-7000-8000-000000000011",
       title: "계약서 검토",
       notes: "수정본 확인",
+      assigneeName: "김경주",
       status: "open",
       priority: 3,
       expectedVersion: 4,

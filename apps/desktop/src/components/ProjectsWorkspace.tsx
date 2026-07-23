@@ -112,6 +112,7 @@ type ProjectsWorkspaceProps = {
     input: {
       title: string;
       notes?: string;
+      assigneeName?: string;
       status: Task["status"];
       priority: number;
       dueAt?: string;
@@ -212,6 +213,7 @@ export function ProjectsWorkspace({
   const [formError, setFormError] = useState<string>();
   const [editingProjectId, setEditingProjectId] = useState<string>();
   const [savedProjectId, setSavedProjectId] = useState<string>();
+  const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const [editingTaskId, setEditingTaskId] = useState<string>();
   const [restoreListFocus, setRestoreListFocus] = useState(false);
   const projectListHeadingRef = useRef<HTMLHeadingElement | null>(null);
@@ -229,6 +231,7 @@ export function ProjectsWorkspace({
     setTaskTitle("");
     setEditingProjectId(undefined);
     setSavedProjectId(undefined);
+    setSelectedTaskId(undefined);
     setEditingTaskId(undefined);
   }, [selectedProjectId]);
 
@@ -670,9 +673,9 @@ export function ProjectsWorkspace({
                         <button
                           className="project-task-list__content focus-visible-control"
                           type="button"
-                          aria-expanded={editingTaskId === task.id}
+                          aria-expanded={selectedTaskId === task.id}
                           onClick={() =>
-                            setEditingTaskId((current) =>
+                            setSelectedTaskId((current) =>
                               current === task.id ? undefined : task.id,
                             )
                           }
@@ -690,6 +693,21 @@ export function ProjectsWorkspace({
                             )}
                           </span>
                         </button>
+                        <button
+                          className="project-task-list__edit focus-visible-control"
+                          type="button"
+                          aria-label={copy.projects.editWorkItem(task.title)}
+                          onClick={() => {
+                            setSelectedTaskId(task.id);
+                            setEditingTaskId(task.id);
+                          }}
+                        >
+                          <Pencil aria-hidden="true" />
+                        </button>
+                        {selectedTaskId === task.id &&
+                          editingTaskId !== task.id && (
+                            <TaskDetail task={task} />
+                          )}
                         {editingTaskId === task.id && (
                           <TaskEditForm
                             task={task}
@@ -772,6 +790,7 @@ export function ProjectsWorkspace({
                               void onUpdateTask(task, {
                                 title: task.title,
                                 notes: task.notes ?? undefined,
+                                assigneeName: task.assigneeName ?? undefined,
                                 status: "open",
                                 priority: task.priority,
                                 dueAt: task.dueAt ?? undefined,
@@ -783,9 +802,9 @@ export function ProjectsWorkspace({
                           <button
                             className="project-task-list__content focus-visible-control"
                             type="button"
-                            aria-expanded={editingTaskId === task.id}
+                            aria-expanded={selectedTaskId === task.id}
                             onClick={() =>
-                              setEditingTaskId((current) =>
+                              setSelectedTaskId((current) =>
                                 current === task.id ? undefined : task.id,
                               )
                             }
@@ -807,6 +826,21 @@ export function ProjectsWorkspace({
                               )}
                             </span>
                           </button>
+                          <button
+                            className="project-task-list__edit focus-visible-control"
+                            type="button"
+                            aria-label={copy.projects.editWorkItem(task.title)}
+                            onClick={() => {
+                              setSelectedTaskId(task.id);
+                              setEditingTaskId(task.id);
+                            }}
+                          >
+                            <Pencil aria-hidden="true" />
+                          </button>
+                          {selectedTaskId === task.id &&
+                            editingTaskId !== task.id && (
+                              <TaskDetail task={task} />
+                            )}
                           {editingTaskId === task.id && (
                             <TaskEditForm
                               task={task}
@@ -1114,6 +1148,41 @@ function ProjectEditForm({
   );
 }
 
+function TaskDetail({ task }: { task: Task }) {
+  return (
+    <section
+      className="project-task-detail"
+      aria-label={copy.projects.workItemDetail(task.title)}
+    >
+      <div>
+        <span>{copy.projects.workItemNotesLabel}</span>
+        <p>{task.notes || copy.projects.workItemNotesEmpty}</p>
+      </div>
+      <dl>
+        <div>
+          <dt>{copy.projects.workItemAssigneeLabel}</dt>
+          <dd>{task.assigneeName || copy.projects.workItemAssigneeEmpty}</dd>
+        </div>
+        <div>
+          <dt>{copy.projects.workItemPriorityLabel}</dt>
+          <dd>
+            {copy.projects.taskPriorities[task.priority] ??
+              copy.projects.taskPriorities[1]}
+          </dd>
+        </div>
+        <div>
+          <dt>{copy.projects.dueDateLabel}</dt>
+          <dd>
+            {task.dueAt
+              ? new Date(task.dueAt).toLocaleString("ko-KR")
+              : copy.projects.workItemDueEmpty}
+          </dd>
+        </div>
+      </dl>
+    </section>
+  );
+}
+
 function TaskEditForm({
   task,
   saving,
@@ -1127,6 +1196,7 @@ function TaskEditForm({
   onSave(input: {
     title: string;
     notes?: string;
+    assigneeName?: string;
     status: Task["status"];
     priority: number;
     dueAt?: string;
@@ -1135,6 +1205,7 @@ function TaskEditForm({
 }) {
   const [title, setTitle] = useState(task.title);
   const [notes, setNotes] = useState(task.notes ?? "");
+  const [assigneeName, setAssigneeName] = useState(task.assigneeName ?? "");
   const [priority, setPriority] = useState(String(task.priority));
   const [dueDate, setDueDate] = useState(isoToDateInput(task.dueAt));
   const [confirmingRemoval, setConfirmingRemoval] = useState(false);
@@ -1171,6 +1242,7 @@ function TaskEditForm({
       await onSave({
         title: title.trim(),
         notes: notes.trim() || undefined,
+        assigneeName: assigneeName.trim() || undefined,
         status: task.status,
         priority: Number(priority),
         dueAt: dateInputToIso(dueDate),
@@ -1229,6 +1301,17 @@ function TaskEditForm({
         />
       </label>
       <div className="project-task-edit-form__fields">
+        <label htmlFor={`task-assignee-${task.id}`}>
+          <span>{copy.projects.workItemAssigneeLabel}</span>
+          <input
+            id={`task-assignee-${task.id}`}
+            value={assigneeName}
+            maxLength={80}
+            disabled={busy}
+            placeholder={copy.projects.workItemAssigneeHint}
+            onChange={(event) => setAssigneeName(event.target.value)}
+          />
+        </label>
         <label htmlFor={`task-priority-${task.id}`}>
           <span>{copy.projects.workItemPriorityLabel}</span>
           <select

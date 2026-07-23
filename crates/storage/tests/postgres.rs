@@ -115,6 +115,7 @@ async fn sync_change_feed_pages_task_mutations_in_order() {
             project_id: None,
             title: "기기 간 동기화 검증".to_owned(),
             notes: None,
+            assignee_name: None,
             priority: 2,
             due_at: None,
         })
@@ -217,6 +218,7 @@ async fn push_registration_transfer_and_reminder_queue_are_device_safe_and_idemp
             project_id: None,
             title: "푸시 알림 할 일".to_owned(),
             notes: None,
+            assignee_name: None,
             priority: 1,
             due_at: Some(target_at),
         })
@@ -1381,6 +1383,7 @@ async fn automatic_work_mutations_queue_safe_unique_webhook_deliveries() {
             project_id: Some(project.id),
             title: "자동 이벤트 할 일".to_owned(),
             notes: Some("외부에 노출되면 안 되는 할 일 메모".to_owned()),
+            assignee_name: None,
             priority: 1,
             due_at: None,
         })
@@ -1393,6 +1396,7 @@ async fn automatic_work_mutations_queue_safe_unique_webhook_deliveries() {
             project_id: Some(project.id),
             title: "자동 이벤트 할 일 수정".to_owned(),
             notes: created_task.notes.clone(),
+            assignee_name: Some("김경주".to_owned()),
             status: TaskStatus::Open,
             priority: 2,
             due_at: None,
@@ -1401,6 +1405,7 @@ async fn automatic_work_mutations_queue_safe_unique_webhook_deliveries() {
         .await
         .expect("task update should succeed")
         .expect("current task should update");
+    assert_eq!(updated_task.assignee_name.as_deref(), Some("김경주"));
     let completed_task = database
         .complete_task(user_id, updated_task.id, updated_task.version)
         .await
@@ -1413,6 +1418,7 @@ async fn automatic_work_mutations_queue_safe_unique_webhook_deliveries() {
             project_id: Some(project.id),
             title: completed_task.title.clone(),
             notes: completed_task.notes.clone(),
+            assignee_name: completed_task.assignee_name.clone(),
             status: TaskStatus::Open,
             priority: completed_task.priority,
             due_at: completed_task.due_at,
@@ -2580,6 +2586,7 @@ async fn client_mutation_id_replays_one_voice_task_and_rejects_payload_reuse() {
         project_id: None,
         title: "  계약서 검토  ".to_owned(),
         notes: Some("  법무 의견 반영  ".to_owned()),
+        assignee_name: None,
         priority: 1,
         due_at: Some(due_at),
     };
@@ -2611,6 +2618,7 @@ async fn client_mutation_id_replays_one_voice_task_and_rejects_payload_reuse() {
             project_id: None,
             title: "계약서 검토".to_owned(),
             notes: Some("법무 의견 반영".to_owned()),
+            assignee_name: None,
             priority: 1,
             due_at: Some(due_at),
         })
@@ -2664,6 +2672,7 @@ async fn tasks_are_scoped_and_emit_current_state() {
             project_id: None,
             title: "오늘 할 일".to_owned(),
             notes: None,
+            assignee_name: None,
             priority: 3,
             due_at: Some(now + TimeDuration::days(1)),
         })
@@ -2754,6 +2763,7 @@ async fn task_update_reopens_soft_deletes_and_rejects_stale_versions() {
             project_id: None,
             title: "다시 열 일".to_owned(),
             notes: None,
+            assignee_name: None,
             priority: 1,
             due_at: None,
         })
@@ -2771,6 +2781,7 @@ async fn task_update_reopens_soft_deletes_and_rejects_stale_versions() {
             project_id: None,
             title: "다시 연 일".to_owned(),
             notes: Some("수정 내용".to_owned()),
+            assignee_name: None,
             status: TaskStatus::Open,
             priority: 2,
             due_at: None,
@@ -2796,6 +2807,7 @@ async fn task_update_reopens_soft_deletes_and_rejects_stale_versions() {
                 project_id: None,
                 title: "오래된 수정".to_owned(),
                 notes: None,
+                assignee_name: None,
                 status: TaskStatus::Cancelled,
                 priority: 0,
                 due_at: None,
@@ -2812,6 +2824,7 @@ async fn task_update_reopens_soft_deletes_and_rejects_stale_versions() {
             project_id: None,
             title: reopened.title.clone(),
             notes: reopened.notes.clone(),
+            assignee_name: None,
             status: TaskStatus::Cancelled,
             priority: reopened.priority,
             due_at: reopened.due_at,
@@ -2965,6 +2978,7 @@ async fn goal_crud_is_owner_scoped_and_versioned() {
             project_id: Some(project.id),
             title: "반복 업무 목록 정리".to_owned(),
             notes: None,
+            assignee_name: None,
             priority: 1,
             due_at: None,
         })
@@ -2982,6 +2996,7 @@ async fn goal_crud_is_owner_scoped_and_versioned() {
             project_id: Some(project.id),
             title: "자동화 후보 구현".to_owned(),
             notes: None,
+            assignee_name: None,
             priority: 3,
             due_at: Some(OffsetDateTime::now_utc() - TimeDuration::hours(1)),
         })
@@ -3119,6 +3134,7 @@ async fn project_and_task_deletions_are_scoped_versioned_and_idempotent() {
             project_id: Some(project.id),
             title: "연결된 할 일".to_owned(),
             notes: None,
+            assignee_name: None,
             priority: 1,
             due_at: None,
         })
@@ -3189,6 +3205,7 @@ async fn project_and_task_deletions_are_scoped_versioned_and_idempotent() {
             project_id: None,
             title: "삭제할 할 일".to_owned(),
             notes: None,
+            assignee_name: None,
             priority: 1,
             due_at: None,
         })
@@ -3789,6 +3806,7 @@ async fn structured_agent_action_and_completion_message_commit_together() {
                     project_id: None,
                     title: "일어나기".to_owned(),
                     notes: None,
+                    assignee_name: None,
                     priority: 1,
                     due_at: Some(due_at),
                 },
@@ -3879,6 +3897,7 @@ async fn structured_agent_project_delete_commits_a_sync_tombstone() {
             project_id: Some(project.id),
             title: "연결 일감".to_owned(),
             notes: None,
+            assignee_name: None,
             priority: 1,
             due_at: None,
         })
@@ -4022,6 +4041,7 @@ async fn structured_agent_batch_actions_commit_as_one_turn() {
             project_id: None,
             title: "회의록 정리".to_owned(),
             notes: None,
+            assignee_name: None,
             priority: 2,
             due_at: None,
         })
@@ -4034,6 +4054,7 @@ async fn structured_agent_batch_actions_commit_as_one_turn() {
             project_id: None,
             title: "배포 확인".to_owned(),
             notes: None,
+            assignee_name: None,
             priority: 2,
             due_at: None,
         })
@@ -5339,6 +5360,7 @@ async fn work_brief_refresh_generates_one_actionable_recommendation_per_active_s
             project_id: None,
             title: "마감된 계약서 검토".to_owned(),
             notes: None,
+            assignee_name: None,
             priority: 3,
             due_at: Some(now - TimeDuration::hours(1)),
         })

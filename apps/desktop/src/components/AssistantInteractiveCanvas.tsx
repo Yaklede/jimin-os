@@ -299,6 +299,9 @@ function ItemDetail({
           <p>{`${copy.home.taskStatus(item.status)} · ${copy.home.taskPriority(item.priority)}`}</p>
           <h4>{item.title}</h4>
           <span>{item.projectTitle || copy.home.unassignedTask}</span>
+          <span>
+            {copy.projects.taskAssignee(item.assigneeName ?? undefined)}
+          </span>
           {item.dueAt && (
             <time dateTime={item.dueAt}>{formatDate(item.dueAt)}</time>
           )}

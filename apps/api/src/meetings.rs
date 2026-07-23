@@ -388,6 +388,7 @@ async fn apply_action(
                 project_id: item.project_id,
                 title: item.title.clone(),
                 notes: item.notes.clone(),
+                assignee_name: None,
                 priority: item.priority,
                 due_at: item.due_at,
             })

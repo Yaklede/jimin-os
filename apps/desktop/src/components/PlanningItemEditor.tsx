@@ -10,6 +10,7 @@ export type PlanningEditTarget =
 type TaskEditInput = {
   title: string;
   notes?: string;
+  assigneeName?: string;
   status: Task["status"];
   priority: number;
   dueAt?: string;
@@ -47,6 +48,7 @@ export function PlanningItemEditor({
   const restoreDeleteTriggerRef = useRef(false);
   const [title, setTitle] = useState("");
   const [notes, setNotes] = useState("");
+  const [assigneeName, setAssigneeName] = useState("");
   const [priority, setPriority] = useState(1);
   const [dueAt, setDueAt] = useState("");
   const [startsAt, setStartsAt] = useState("");
@@ -64,6 +66,9 @@ export function PlanningItemEditor({
         : null;
     setTitle(target.item.title);
     setNotes(target.item.notes ?? "");
+    setAssigneeName(
+      target.kind === "task" ? (target.item.assigneeName ?? "") : "",
+    );
     setPriority(target.kind === "task" ? target.item.priority : 1);
     setDueAt(target.kind === "task" ? isoToLocalInput(target.item.dueAt) : "");
     setStartsAt(
@@ -138,6 +143,7 @@ export function PlanningItemEditor({
         await onSaveTask(activeTarget.item, {
           title: nextTitle,
           notes: notes.trim() || undefined,
+          assigneeName: assigneeName.trim() || undefined,
           status: activeTarget.item.status,
           priority,
           dueAt: dueAt ? localInputToIso(dueAt) : undefined,
@@ -263,35 +269,54 @@ export function PlanningItemEditor({
           </EditorField>
 
           {activeTarget.kind === "task" ? (
-            <div className="planning-editor__field-grid">
+            <>
               <EditorField
-                label={copy.forms.priority}
-                htmlFor="planning-edit-priority"
-              >
-                <select
-                  id="planning-edit-priority"
-                  value={priority}
-                  onChange={(event) => setPriority(Number(event.target.value))}
-                >
-                  <option value={0}>{copy.forms.priorityNormal}</option>
-                  <option value={1}>{copy.forms.prioritySoon}</option>
-                  <option value={2}>{copy.forms.priorityImportant}</option>
-                  <option value={3}>{copy.forms.priorityHighest}</option>
-                </select>
-              </EditorField>
-              <EditorField
-                label={copy.forms.dueAt}
-                htmlFor="planning-edit-due-at"
-                description={copy.forms.dueAtDescription}
+                label={copy.forms.assignee}
+                htmlFor="planning-edit-assignee"
               >
                 <input
-                  id="planning-edit-due-at"
-                  type="datetime-local"
-                  value={dueAt}
-                  onInput={(event) => setDueAt(event.currentTarget.value)}
+                  id="planning-edit-assignee"
+                  maxLength={80}
+                  value={assigneeName}
+                  placeholder={copy.forms.assigneePlaceholder}
+                  onChange={(event) => {
+                    setAssigneeName(event.target.value);
+                    setError(undefined);
+                  }}
                 />
               </EditorField>
-            </div>
+              <div className="planning-editor__field-grid">
+                <EditorField
+                  label={copy.forms.priority}
+                  htmlFor="planning-edit-priority"
+                >
+                  <select
+                    id="planning-edit-priority"
+                    value={priority}
+                    onChange={(event) =>
+                      setPriority(Number(event.target.value))
+                    }
+                  >
+                    <option value={0}>{copy.forms.priorityNormal}</option>
+                    <option value={1}>{copy.forms.prioritySoon}</option>
+                    <option value={2}>{copy.forms.priorityImportant}</option>
+                    <option value={3}>{copy.forms.priorityHighest}</option>
+                  </select>
+                </EditorField>
+                <EditorField
+                  label={copy.forms.dueAt}
+                  htmlFor="planning-edit-due-at"
+                  description={copy.forms.dueAtDescription}
+                >
+                  <input
+                    id="planning-edit-due-at"
+                    type="datetime-local"
+                    value={dueAt}
+                    onInput={(event) => setDueAt(event.currentTarget.value)}
+                  />
+                </EditorField>
+              </div>
+            </>
           ) : (
             <div className="planning-editor__field-grid">
               <EditorField

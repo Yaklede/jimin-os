@@ -31,13 +31,13 @@ use tokio::{
 use uuid::Uuid;
 
 const CONTEXT_SCHEDULE_LIMIT: usize = 32;
-const CONTEXT_TASK_LIMIT: usize = 32;
+const CONTEXT_TASK_LIMIT: usize = 128;
 const CONTEXT_PROJECT_LIMIT: usize = 32;
 const CONTEXT_GOAL_LIMIT: usize = 16;
 const CONTEXT_INBOX_LIMIT: usize = 16;
-const CONTEXT_MAX_BYTES: usize = 20 * 1024;
+const CONTEXT_MAX_BYTES: usize = 160 * 1024;
 const MAX_STREAMED_STRUCTURED_BYTES: usize = 512 * 1024;
-const MAX_PRESENTATION_ITEMS: usize = 32;
+const MAX_PRESENTATION_ITEMS: usize = 512;
 const MAX_PRESENTATION_SECTIONS: usize = 3;
 const MAX_PRESENTATION_DETAIL_CHARS: usize = 500;
 const MAX_AGENT_ACTIONS: usize = 32;
@@ -93,6 +93,7 @@ struct StructuredAssistantAction {
     project_id: String,
     title: String,
     notes: String,
+    assignee_name: String,
     priority: i16,
     due_at: String,
     starts_at: String,
@@ -1010,6 +1011,9 @@ fn render_contextualized_turn(
          to 100. A mutate intent below 80 confidence must become clarify and must not contain actions. \
          You may select up to 32 local planning actions in the actions array. Use an empty array for questions or ambiguous requests. \
          When the user asks to complete, cancel, or update several records, include one action for every matched record. \
+         For create_task and update_task, set assigneeName to the explicitly requested owner. For updates, preserve the \
+         current assigneeName unless the user asks to assign, reassign, or clear it. When task notes unambiguously name an \
+         owner and the user asks to apply those assignments, create one update_task action per matching task. \
          completed_tasks contains real completion history in newest-first order. For requests about work completed today, \
          use only records whose completed timestamp falls within the current Korea local day. Never infer completion from open_tasks. \
          When the user asks to undo an accidental completion or restore completed work, use reopen_task with the completed task ID. \
@@ -1076,14 +1080,17 @@ fn render_contextualized_turn(
                 .map_or_else(|| "no due date".to_owned(), korea_timestamp);
             let _ = writeln!(
                 prompt,
-                "- [id {} | project {} | priority {} | due {due} | version {}] {} | notes: {}",
+                "- [id {} | project {} | assignee {} | priority {} | due {due} | version {}] {} | notes: {}",
                 task.id,
                 task.project_id
                     .map_or_else(|| "none".to_owned(), |id| id.to_string()),
+                task.assignee_name.as_deref().unwrap_or("none"),
                 task.priority,
                 task.version,
                 task.title,
-                task.notes.as_deref().unwrap_or("none")
+                task.notes
+                    .as_deref()
+                    .map_or_else(|| "none".to_owned(), |value| truncate_chars(value, 800))
             );
         }
     }
@@ -1100,14 +1107,17 @@ fn render_contextualized_turn(
                 .map_or_else(|| "unknown".to_owned(), korea_timestamp);
             let _ = writeln!(
                 prompt,
-                "- [id {} | project {} | priority {} | due {due} | completed {completed} | version {}] {} | notes: {}",
+                "- [id {} | project {} | assignee {} | priority {} | due {due} | completed {completed} | version {}] {} | notes: {}",
                 task.id,
                 task.project_id
                     .map_or_else(|| "none".to_owned(), |id| id.to_string()),
+                task.assignee_name.as_deref().unwrap_or("none"),
                 task.priority,
                 task.version,
                 task.title,
-                task.notes.as_deref().unwrap_or("none")
+                task.notes
+                    .as_deref()
+                    .map_or_else(|| "none".to_owned(), |value| truncate_chars(value, 800))
             );
         }
     }
@@ -1340,6 +1350,36 @@ fn is_daily_completion_request(input: &str) -> bool {
     mentions_today && mentions_completion
 }
 
+fn is_all_task_overview_request(input: &str) -> bool {
+    let normalized = input
+        .to_lowercase()
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .collect::<String>();
+    let mentions_all = ["모든", "전체", "전부", "all", "every"]
+        .iter()
+        .any(|term| normalized.contains(term));
+    let mentions_tasks = ["일감", "할일", "작업", "태스크", "task", "todo"]
+        .iter()
+        .any(|term| normalized.contains(term));
+    let requests_overview = [
+        "목록",
+        "리스트",
+        "리스트업",
+        "보여",
+        "알려",
+        "조회",
+        "list",
+        "show",
+    ]
+    .iter()
+    .any(|term| normalized.contains(term));
+    let has_day_scope = ["오늘", "금일", "내일", "모레", "today", "tomorrow"]
+        .iter()
+        .any(|term| normalized.contains(term));
+    mentions_all && mentions_tasks && requests_overview && !has_day_scope
+}
+
 fn requested_bulk_schedule_cancellation_ids(
     input: &str,
     schedule: &[ScheduleEntry],
@@ -1506,6 +1546,11 @@ fn assistant_output_schema() -> Value {
                             "description": "For create_task, concise context, deliverables, and completion criteria from the request without invented facts.",
                             "maxLength": 10000
                         },
+                        "assigneeName": {
+                            "type": "string",
+                            "description": "For create_task or update_task, the explicit owner name. Preserve the current value on unrelated updates and use an empty string only to clear the owner.",
+                            "maxLength": 80
+                        },
                         "priority": { "type": "integer" },
                         "dueAt": { "type": "string" },
                         "startsAt": { "type": "string" },
@@ -1533,6 +1578,7 @@ fn assistant_output_schema() -> Value {
                         "projectId",
                         "title",
                         "notes",
+                        "assigneeName",
                         "priority",
                         "dueAt",
                         "startsAt",
@@ -1618,6 +1664,7 @@ fn validated_assistant_response(
     }
 
     let mut validated = validated_presentation_sections(structured.presentation.sections, context)?;
+    let all_task_coverage_reconciled = ensure_all_task_coverage(&mut validated, context);
     let daily_task_coverage_reconciled = ensure_daily_task_coverage(&mut validated, context);
     let daily_completion_coverage_reconciled =
         ensure_daily_completion_coverage(&mut validated, context);
@@ -1626,7 +1673,9 @@ fn validated_assistant_response(
         sections,
         seen_items,
     } = validated;
-    if daily_completion_coverage_reconciled {
+    if all_task_coverage_reconciled {
+        answer = corrected_all_task_answer(&answer, context);
+    } else if daily_completion_coverage_reconciled {
         answer = corrected_daily_completion_answer(&answer, context);
     } else if daily_task_coverage_reconciled {
         answer = corrected_daily_answer(&answer, context.daily_tasks.len());
@@ -1868,6 +1917,7 @@ fn validated_agent_action(
                     project_id,
                     title,
                     notes,
+                    assignee_name: optional_action_text(&action.assignee_name, 80)?,
                     priority: validated_level(action.priority)?,
                     due_at,
                 }
@@ -1890,6 +1940,7 @@ fn validated_agent_action(
                 project_id,
                 title: required_action_text(&action.title, 200)?,
                 notes: optional_action_text(&action.notes, 10_000)?,
+                assignee_name: optional_action_text(&action.assignee_name, 80)?,
                 priority: validated_level(action.priority)?,
                 due_at: parse_optional_timestamp(&action.due_at)?,
                 expected_version: task.version,
@@ -2445,6 +2496,7 @@ fn agent_action_result(
             id,
             project_id,
             title,
+            assignee_name,
             priority,
             due_at,
             ..
@@ -2456,12 +2508,15 @@ fn agent_action_result(
             AssistantPresentationSectionKind::Tasks,
             AssistantPresentationView::Checklist,
             task_action_presentation_item(
-                *id,
-                *project_id,
-                title,
-                TaskStatus::Open,
-                *priority,
-                *due_at,
+                TaskPresentationInput {
+                    id: *id,
+                    project_id: *project_id,
+                    assignee_name: assignee_name.as_deref(),
+                    title,
+                    status: TaskStatus::Open,
+                    priority: *priority,
+                    due_at: *due_at,
+                },
                 &context.projects,
             ),
         ),
@@ -2469,6 +2524,7 @@ fn agent_action_result(
             id,
             project_id,
             title,
+            assignee_name,
             priority,
             due_at,
             ..
@@ -2480,12 +2536,15 @@ fn agent_action_result(
             AssistantPresentationSectionKind::Tasks,
             AssistantPresentationView::Checklist,
             task_action_presentation_item(
-                *id,
-                *project_id,
-                title,
-                TaskStatus::Open,
-                *priority,
-                *due_at,
+                TaskPresentationInput {
+                    id: *id,
+                    project_id: *project_id,
+                    assignee_name: assignee_name.as_deref(),
+                    title,
+                    status: TaskStatus::Open,
+                    priority: *priority,
+                    due_at: *due_at,
+                },
                 &context.projects,
             ),
         ),
@@ -2508,12 +2567,15 @@ fn agent_action_result(
                 AssistantPresentationSectionKind::Tasks,
                 AssistantPresentationView::Checklist,
                 task_action_presentation_item(
-                    task.id,
-                    task.project_id,
-                    &task.title,
-                    *status,
-                    task.priority,
-                    task.due_at,
+                    TaskPresentationInput {
+                        id: task.id,
+                        project_id: task.project_id,
+                        assignee_name: task.assignee_name.as_deref(),
+                        title: &task.title,
+                        status: *status,
+                        priority: task.priority,
+                        due_at: task.due_at,
+                    },
                     &context.projects,
                 ),
             )
@@ -2702,28 +2764,35 @@ fn agent_action_result(
     Ok((answer, presentation))
 }
 
-fn task_action_presentation_item(
+#[derive(Clone, Copy)]
+struct TaskPresentationInput<'a> {
     id: Uuid,
     project_id: Option<Uuid>,
-    title: &str,
+    assignee_name: Option<&'a str>,
+    title: &'a str,
     status: TaskStatus,
     priority: i16,
     due_at: Option<OffsetDateTime>,
+}
+
+fn task_action_presentation_item(
+    task: TaskPresentationInput<'_>,
     projects: &[Project],
 ) -> AssistantPresentationItem {
     AssistantPresentationItem::Task {
-        id,
-        project_id,
-        project_title: project_id.and_then(|project_id| {
+        id: task.id,
+        project_id: task.project_id,
+        project_title: task.project_id.and_then(|project_id| {
             projects
                 .iter()
                 .find(|project| project.id == project_id)
                 .map(|project| project.title.clone())
         }),
-        title: title.to_owned(),
-        status: task_status_name(status).to_owned(),
-        priority,
-        due_at: due_at.and_then(format_timestamp),
+        assignee_name: task.assignee_name.map(str::to_owned),
+        title: task.title.to_owned(),
+        status: task_status_name(task.status).to_owned(),
+        priority: task.priority,
+        due_at: task.due_at.and_then(format_timestamp),
     }
 }
 
@@ -2743,6 +2812,45 @@ fn schedule_action_presentation_item(
         ends_at: ends_at.format(&Rfc3339).map_err(|_| ())?,
         time_zone: time_zone.to_owned(),
     })
+}
+
+fn ensure_all_task_coverage(
+    validated: &mut ValidatedPresentationSections,
+    context: &TurnContext,
+) -> bool {
+    if !is_all_task_overview_request(user_request_from_prompt(&context.prompt)) {
+        return false;
+    }
+    let open_tasks = context
+        .tasks
+        .iter()
+        .filter(|task| task.status == TaskStatus::Open)
+        .collect::<Vec<_>>();
+    let before_section_count = validated.sections.len();
+    let before_item_count = validated.items.len();
+    validated.sections.clear();
+    validated.items.clear();
+    validated.seen_items.clear();
+    if open_tasks.is_empty() {
+        return before_section_count != validated.sections.len()
+            || before_item_count != validated.items.len();
+    }
+    let mut item_ids = Vec::with_capacity(open_tasks.len().min(MAX_PRESENTATION_ITEMS));
+    for task in open_tasks.into_iter().take(MAX_PRESENTATION_ITEMS) {
+        if validated.seen_items.insert(task.id) {
+            item_ids.push(task.id);
+            validated
+                .items
+                .push(task_presentation_item(task, &context.projects));
+        }
+    }
+    validated.sections.push(AssistantPresentationSection {
+        kind: AssistantPresentationSectionKind::Tasks,
+        title: "모든 열린 일".to_owned(),
+        view: AssistantPresentationView::List,
+        item_ids,
+    });
+    true
 }
 
 fn ensure_daily_task_coverage(
@@ -2927,6 +3035,27 @@ fn corrected_daily_completion_answer(answer: &str, context: &TurnContext) -> Str
     }
 }
 
+fn corrected_all_task_answer(answer: &str, context: &TurnContext) -> String {
+    let task_count = context
+        .tasks
+        .iter()
+        .filter(|task| task.status == TaskStatus::Open)
+        .count();
+    let task_fact = if task_count <= MAX_PRESENTATION_ITEMS {
+        format!("현재 열린 일 {task_count}개를 모두 보여드려요.")
+    } else {
+        format!(
+            "현재 열린 일은 {task_count}개예요. 한 화면에서 안전하게 볼 수 있는 {MAX_PRESENTATION_ITEMS}개를 먼저 보여드려요."
+        )
+    };
+    let corrected = format!("{}\n\n{task_fact}", answer.trim());
+    if corrected.chars().count() <= 24_000 {
+        corrected
+    } else {
+        task_fact
+    }
+}
+
 fn corrected_daily_answer(answer: &str, task_count: usize) -> String {
     let task_fact = if task_count <= CONTEXT_TASK_LIMIT {
         format!("오늘 확인할 할 일은 {task_count}개 있어요.")
@@ -3061,6 +3190,7 @@ fn task_presentation_item(task: &Task, projects: &[Project]) -> AssistantPresent
                 .find(|project| project.id == project_id)
                 .map(|project| project.title.clone())
         }),
+        assignee_name: task.assignee_name.clone(),
         title: task.title.clone(),
         status: task_status_name(task.status).to_owned(),
         priority: task.priority,
@@ -3946,6 +4076,66 @@ mod tests {
     }
 
     #[test]
+    fn explicit_all_task_request_returns_every_open_task() {
+        let tasks = (0..40)
+            .map(|index| Task {
+                id: Uuid::now_v7(),
+                project_id: None,
+                title: format!("열린 일 {index}"),
+                notes: None,
+                assignee_name: Some("김경주".to_owned()),
+                status: TaskStatus::Open,
+                priority: 1,
+                due_at: None,
+                completed_at: None,
+                version: 1,
+            })
+            .collect::<Vec<_>>();
+        let context = TurnContext {
+            prompt: "<user_request>\n모든 일감 리스트업해 줘\n</user_request>".to_owned(),
+            schedule: Vec::new(),
+            tasks: tasks.clone(),
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
+        };
+        let response = serde_json::json!({
+            "intent": { "mode": "read", "confidence": 99 },
+            "answer": "열린 일을 정리했어요.",
+            "presentation": {
+                "title": "모든 열린 일",
+                "layout": "stack",
+                "focusEntityId": "",
+                "sections": [{
+                    "kind": "tasks",
+                    "title": "일감",
+                    "view": "list",
+                    "entityIds": [tasks[0].id, tasks[1].id]
+                }]
+            },
+            "actions": []
+        })
+        .to_string();
+
+        let (answer, presentation, _) =
+            validated_assistant_response(&response, &context).expect("all task result");
+        let presentation = presentation.expect("all tasks should be interactive");
+
+        assert!(answer.contains("현재 열린 일 40개를 모두 보여드려요."));
+        assert_eq!(presentation.items.len(), 40);
+        assert_eq!(presentation.sections[0].item_ids.len(), 40);
+        assert!(presentation.items.iter().all(|item| matches!(
+            item,
+            AssistantPresentationItem::Task {
+                assignee_name: Some(name),
+                ..
+            } if name == "김경주"
+        )));
+    }
+
+    #[test]
     fn daily_overview_excludes_future_dated_tasks_from_verified_results() {
         let now = OffsetDateTime::now_utc();
         let today = Task {
@@ -4043,6 +4233,53 @@ mod tests {
                 due_at: Some(actual_due_at),
                 ..
             } if title == "일어나기" && actual_due_at == due_at
+        ));
+    }
+
+    #[test]
+    fn structured_update_task_can_apply_an_assignee_from_notes() {
+        let task = Task {
+            id: Uuid::now_v7(),
+            project_id: None,
+            title: "이슈 3861 확인".to_owned(),
+            notes: Some("배정 대상: 김경주".to_owned()),
+            assignee_name: None,
+            status: TaskStatus::Open,
+            priority: 2,
+            due_at: None,
+            completed_at: None,
+            version: 3,
+        };
+        let context = TurnContext {
+            prompt: "<user_request>\n메모 기준으로 담당자를 배정해 줘\n</user_request>".to_owned(),
+            schedule: Vec::new(),
+            tasks: vec![task.clone()],
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
+        };
+        let action = StructuredAssistantAction {
+            kind: StructuredAssistantActionKind::UpdateTask,
+            entity_id: task.id.to_string(),
+            title: task.title.clone(),
+            notes: task.notes.clone().unwrap_or_default(),
+            assignee_name: "김경주".to_owned(),
+            priority: task.priority,
+            ..StructuredAssistantAction::default()
+        };
+
+        let command = validated_agent_action(&action, &context)
+            .expect("valid assignment")
+            .expect("assignment action");
+        assert!(matches!(
+            command,
+            AgentActionCommand::UpdateTask {
+                assignee_name: Some(ref name),
+                expected_version: 3,
+                ..
+            } if name == "김경주"
         ));
     }
 

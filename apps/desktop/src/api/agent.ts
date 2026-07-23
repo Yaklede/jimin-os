@@ -39,6 +39,7 @@ export type AssistantPresentationItem =
       id: string;
       projectId: string | null;
       projectTitle: string | null;
+      assigneeName?: string | null;
       title: string;
       status: "open" | "completed" | "cancelled";
       priority: number;
@@ -476,6 +477,9 @@ function isAssistantPresentationItem(
     return (
       (value.projectId === null || typeof value.projectId === "string") &&
       (value.projectTitle === null || typeof value.projectTitle === "string") &&
+      (value.assigneeName === undefined ||
+        value.assigneeName === null ||
+        typeof value.assigneeName === "string") &&
       typeof value.title === "string" &&
       (value.status === "open" ||
         value.status === "completed" ||
