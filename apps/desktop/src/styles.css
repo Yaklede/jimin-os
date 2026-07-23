@@ -4680,6 +4680,16 @@ svg {
   -webkit-line-clamp: 4;
 }
 
+.project-inflow-item__summary > span {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .project-inflow-item__context {
   border-radius: 12px;
   background: var(--surface-subtle);
@@ -4737,6 +4747,28 @@ svg {
 .project-inflow-item__promote > div {
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.project-inflow-item__analysis-state {
+  display: grid;
+  gap: 10px;
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+}
+
+.project-inflow-item__analysis-state p,
+.project-inflow-item__analysis-state > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.project-inflow-item__analysis-state svg {
+  width: 16px;
+  height: 16px;
 }
 
 .project-inflow-item__promote {

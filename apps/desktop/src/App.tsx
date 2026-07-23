@@ -995,6 +995,7 @@ export default function App() {
           "recommendation_decision",
           "recommendation_action_result",
           "project_inflow_item",
+          "project_inflow_analysis",
         ].some((entityType) => entityTypes.has(entityType));
       const affectsDecisions =
         forceFull ||
@@ -1017,7 +1018,8 @@ export default function App() {
         forceFull ||
         entityTypes.has("google_chat_account") ||
         entityTypes.has("project_google_chat_source") ||
-        entityTypes.has("project_inflow_item");
+        entityTypes.has("project_inflow_item") ||
+        entityTypes.has("project_inflow_analysis");
 
       if (affectsWork) {
         const [from, to] = currentLocalDayRange();
@@ -2898,6 +2900,31 @@ export default function App() {
     }
   }
 
+  async function retryWorkspaceInflowAnalysis(
+    item: ProjectInflowItem,
+  ): Promise<void> {
+    setInflowSaving(true);
+    setInflowError(undefined);
+    try {
+      await withAuthenticatedSession((accessToken) =>
+        decideProjectInflow(apiBaseUrl, accessToken, item, {
+          decision: "retry_analysis",
+        }),
+      );
+      await Promise.all([
+        loadHomeSnapshot(),
+        selectedProjectId === item.projectId
+          ? loadProjectInflow(item.projectId)
+          : Promise.resolve(),
+      ]);
+    } catch (error) {
+      setInflowError(copy.projects.inflowDecisionProblem);
+      throw error;
+    } finally {
+      setInflowSaving(false);
+    }
+  }
+
   function openNewAssistantRequest() {
     startConversation();
     setAssistantDraft(undefined);
@@ -3223,6 +3250,7 @@ export default function App() {
               inflowSaving={inflowSaving}
               onPromoteInflow={promoteWorkspaceInflow}
               onDismissInflow={dismissWorkspaceInflow}
+              onRetryInflowAnalysis={retryWorkspaceInflowAnalysis}
               onRetryInflowCompletion={retryWorkspaceInflowCompletion}
             />
           )}
@@ -3307,6 +3335,7 @@ export default function App() {
               onSyncGoogleChatSource={syncWorkspaceGoogleChatSource}
               onPromoteInflow={promoteWorkspaceInflow}
               onDismissInflow={dismissWorkspaceInflow}
+              onRetryInflowAnalysis={retryWorkspaceInflowAnalysis}
               onRetryInflowCompletion={retryWorkspaceInflowCompletion}
             />
           )}

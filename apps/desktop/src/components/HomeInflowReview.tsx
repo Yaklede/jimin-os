@@ -10,6 +10,7 @@ type HomeInflowReviewProps = {
   saving: boolean;
   onPromote(item: ProjectInflowItem, input: PromoteInflowInput): Promise<void>;
   onDismiss(item: ProjectInflowItem): Promise<void>;
+  onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
 };
 
@@ -18,6 +19,7 @@ export function HomeInflowReview({
   saving,
   onPromote,
   onDismiss,
+  onRetryAnalysis,
   onRetryCompletion,
 }: HomeInflowReviewProps) {
   const visibleItems = useMemo(() => items.slice(0, 5), [items]);
@@ -102,6 +104,7 @@ export function HomeInflowReview({
               saving={saving}
               onPromote={onPromote}
               onDismiss={onDismiss}
+              onRetryAnalysis={onRetryAnalysis}
               onRetryCompletion={onRetryCompletion}
             />
           </ul>

@@ -83,6 +83,7 @@ type HomeWorkspaceProps = {
     input: PromoteInflowInput,
   ): Promise<void>;
   onDismissInflow(item: ProjectInflowItem): Promise<void>;
+  onRetryInflowAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryInflowCompletion(item: ProjectInflowItem): Promise<void>;
 };
 
@@ -115,6 +116,7 @@ export function HomeWorkspace({
   inflowSaving,
   onPromoteInflow,
   onDismissInflow,
+  onRetryInflowAnalysis,
   onRetryInflowCompletion,
 }: HomeWorkspaceProps) {
   const [completingTaskId, setCompletingTaskId] = useState<string>();
@@ -340,6 +342,7 @@ export function HomeWorkspace({
               saving={inflowSaving}
               onPromote={onPromoteInflow}
               onDismiss={onDismissInflow}
+              onRetryAnalysis={onRetryInflowAnalysis}
               onRetryCompletion={onRetryInflowCompletion}
             />
           )}

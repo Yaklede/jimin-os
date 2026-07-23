@@ -109,7 +109,7 @@ export const projectCopy = {
   inflowHomeEyebrow: "새로 들어온 업무",
   inflowHomeTitle: "새로운 업무 요청을 정리했어요",
   inflowHomeDescription:
-    "Chat에서 해야 할 대화만 모았어요. 내용을 확인하고 담당자와 마감일을 정해 주세요.",
+    "AI가 대화 맥락을 읽고 새 업무만 정리했어요. 담당자와 마감일을 확인해 주세요.",
   inflowHomeQueueTitle: "확인할 요청",
   inflowHomeSelectedLabel: "선택한 업무",
   inflowHomeSelectedRequest: (senderName: string) =>
@@ -138,6 +138,11 @@ export const projectCopy = {
   inflowPromote: "할 일로 정리하기",
   inflowPromoteAndNotify: "할 일로 정리하고 알리기",
   inflowDismiss: "업무 아님",
+  inflowAnalyzing: "대화 맥락을 읽고 업무 내용을 정리하고 있어요.",
+  inflowAnalysisHelp:
+    "업무 내용을 정리하지 못했어요. 아래에서 다시 정리해 주세요.",
+  inflowAnalysisRetry: "다시 정리하기",
+  inflowAnalysisSummary: "AI가 정리한 요청",
   inflowTaskTitleLabel: "정리된 할 일",
   inflowTaskTitleHint: "대화에서 해야 할 행동이나 완료 결과를 확인해 주세요.",
   inflowTaskNotesLabel: "정리된 업무 내용",

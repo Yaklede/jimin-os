@@ -43,6 +43,15 @@ export interface ProjectGoogleChatSource {
 export type ProjectInflowStatus = "pending" | "promoted" | "dismissed";
 export type ProjectInflowCompletionStatus =
   "not_requested" | "pending" | "sent" | "failed";
+export type ProjectInflowAnalysisStatus =
+  "queued" | "claimed" | "running" | "ready" | "failed";
+export type ProjectInflowAnalysisClassification =
+  | "new_task"
+  | "follow_up"
+  | "question"
+  | "status_update"
+  | "noise"
+  | "duplicate";
 
 export interface ProjectInflowMessage {
   senderName: string | null;
@@ -62,6 +71,14 @@ export interface ProjectInflowItem {
   contentText: string;
   suggestedTaskTitle: string;
   suggestedTaskNotes: string;
+  suggestedAssigneeName: string | null;
+  suggestedDueAt: string | null;
+  suggestedPriority: number | null;
+  analysisStatus: ProjectInflowAnalysisStatus;
+  analysisClassification: ProjectInflowAnalysisClassification | null;
+  analysisConfidence: number | null;
+  analysisSummary: string | null;
+  analysisErrorCode: string | null;
   messageCount: number;
   firstReceivedAt: string;
   receivedAt: string;
@@ -209,9 +226,17 @@ export function normalizeProjectInflowItem(
     ...item,
     projectName: item.projectName || item.sourceName,
     sentByOwner: item.sentByOwner ?? false,
-    suggestedTaskNotes:
-      item.suggestedTaskNotes ||
-      `업무 목적\n${item.suggestedTaskTitle || "대화 내용 확인"}\n\n완료 기준\n요청 범위를 확인하고 처리 결과를 관계자에게 공유합니다.`,
+    suggestedTaskTitle:
+      item.suggestedTaskTitle || "대화를 업무로 정리하고 있어요",
+    suggestedTaskNotes: item.suggestedTaskNotes || "",
+    suggestedAssigneeName: item.suggestedAssigneeName ?? null,
+    suggestedDueAt: item.suggestedDueAt ?? null,
+    suggestedPriority: item.suggestedPriority ?? null,
+    analysisStatus: item.analysisStatus ?? "queued",
+    analysisClassification: item.analysisClassification ?? null,
+    analysisConfidence: item.analysisConfidence ?? null,
+    analysisSummary: item.analysisSummary ?? null,
+    analysisErrorCode: item.analysisErrorCode ?? null,
     completionStatus: item.completionStatus ?? "not_requested",
     completionReactionCompleted: item.completionReactionCompleted ?? false,
     completionReplyCompleted: item.completionReplyCompleted ?? false,
@@ -238,6 +263,7 @@ export async function decideProjectInflow(
   input:
     | { decision: "dismiss" }
     | { decision: "retry_completion" }
+    | { decision: "retry_analysis" }
     | {
         decision: "promote";
         title: string;

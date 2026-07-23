@@ -167,6 +167,7 @@ type ProjectsWorkspaceProps = {
     input: PromoteInflowInput,
   ): Promise<void>;
   onDismissInflow(item: ProjectInflowItem): Promise<void>;
+  onRetryInflowAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryInflowCompletion(item: ProjectInflowItem): Promise<void>;
 };
 
@@ -216,6 +217,7 @@ export function ProjectsWorkspace({
   onSyncGoogleChatSource,
   onPromoteInflow,
   onDismissInflow,
+  onRetryInflowAnalysis,
   onRetryInflowCompletion,
 }: ProjectsWorkspaceProps) {
   const [formOpen, setFormOpen] = useState(false);
@@ -1012,6 +1014,7 @@ export function ProjectsWorkspace({
                   onSyncSource={onSyncGoogleChatSource}
                   onPromote={onPromoteInflow}
                   onDismiss={onDismissInflow}
+                  onRetryAnalysis={onRetryInflowAnalysis}
                   onRetryCompletion={onRetryInflowCompletion}
                 />
               )}

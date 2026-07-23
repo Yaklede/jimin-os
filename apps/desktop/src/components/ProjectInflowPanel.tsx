@@ -40,6 +40,7 @@ type ProjectInflowPanelProps = {
   onSyncSource(source: ProjectGoogleChatSource): Promise<void>;
   onPromote(item: ProjectInflowItem, input: PromoteInflowInput): Promise<void>;
   onDismiss(item: ProjectInflowItem): Promise<void>;
+  onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
 };
 
@@ -67,6 +68,7 @@ export function ProjectInflowPanel({
   onSyncSource,
   onPromote,
   onDismiss,
+  onRetryAnalysis,
   onRetryCompletion,
 }: ProjectInflowPanelProps) {
   const activeAccounts = useMemo(
@@ -281,6 +283,7 @@ export function ProjectInflowPanel({
                 saving={saving}
                 onPromote={onPromote}
                 onDismiss={onDismiss}
+                onRetryAnalysis={onRetryAnalysis}
                 onRetryCompletion={onRetryCompletion}
               />
               <InflowItemList
@@ -289,6 +292,7 @@ export function ProjectInflowPanel({
                 saving={saving}
                 onPromote={onPromote}
                 onDismiss={onDismiss}
+                onRetryAnalysis={onRetryAnalysis}
                 onRetryCompletion={onRetryCompletion}
               />
             </>
@@ -305,6 +309,7 @@ function InflowItemList({
   saving,
   onPromote,
   onDismiss,
+  onRetryAnalysis,
   onRetryCompletion,
 }: {
   title: string;
@@ -312,6 +317,7 @@ function InflowItemList({
   saving: boolean;
   onPromote(item: ProjectInflowItem, input: PromoteInflowInput): Promise<void>;
   onDismiss(item: ProjectInflowItem): Promise<void>;
+  onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
 }) {
   if (items.length === 0) return null;
@@ -329,6 +335,7 @@ function InflowItemList({
             saving={saving}
             onPromote={onPromote}
             onDismiss={onDismiss}
+            onRetryAnalysis={onRetryAnalysis}
             onRetryCompletion={onRetryCompletion}
           />
         ))}
@@ -342,12 +349,14 @@ export function InflowItemRow({
   saving,
   onPromote,
   onDismiss,
+  onRetryAnalysis,
   onRetryCompletion,
 }: {
   item: ProjectInflowItem;
   saving: boolean;
   onPromote(item: ProjectInflowItem, input: PromoteInflowInput): Promise<void>;
   onDismiss(item: ProjectInflowItem): Promise<void>;
+  onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
@@ -359,23 +368,56 @@ export function InflowItemRow({
     },
   ];
   const suggestedTitle =
-    item.suggestedTaskTitle ?? legacySuggestedTaskTitle(item.contentText);
+    item.suggestedTaskTitle || "대화를 업무로 정리하고 있어요";
   const messageCount = item.messageCount ?? messages.length;
   const firstReceivedAt = item.firstReceivedAt ?? item.receivedAt;
   const [title, setTitle] = useState(() => suggestedTitle);
   const [notes, setNotes] = useState(() => item.suggestedTaskNotes);
-  const assigneeOptions = item.assigneeOptions ?? [];
+  const assigneeOptions = useMemo(
+    () => item.assigneeOptions ?? [],
+    [item.assigneeOptions],
+  );
   const [assigneeName, setAssigneeName] = useState(() =>
-    item.senderName && assigneeOptions.includes(item.senderName)
-      ? item.senderName
+    item.suggestedAssigneeName &&
+    assigneeOptions.includes(item.suggestedAssigneeName)
+      ? item.suggestedAssigneeName
       : "",
   );
-  const [dueAt, setDueAt] = useState("");
+  const [dueAt, setDueAt] = useState(() =>
+    isoToLocalInput(item.suggestedDueAt),
+  );
   const [dueProblem, setDueProblem] = useState(false);
-  const [priority, setPriority] = useState("1");
+  const [priority, setPriority] = useState(() =>
+    String(item.suggestedPriority ?? 1),
+  );
+  const analysisReady = item.analysisStatus === "ready";
+  const analysisFailed = item.analysisStatus === "failed";
   const canNotifyAssignee = Boolean(
     assigneeName && item.notifiableAssigneeNames?.includes(assigneeName),
   );
+
+  useEffect(() => {
+    if (editing || !analysisReady) return;
+    setTitle(suggestedTitle);
+    setNotes(item.suggestedTaskNotes);
+    setAssigneeName(
+      item.suggestedAssigneeName &&
+        assigneeOptions.includes(item.suggestedAssigneeName)
+        ? item.suggestedAssigneeName
+        : "",
+    );
+    setDueAt(isoToLocalInput(item.suggestedDueAt));
+    setPriority(String(item.suggestedPriority ?? 1));
+  }, [
+    analysisReady,
+    assigneeOptions,
+    editing,
+    item.suggestedAssigneeName,
+    item.suggestedDueAt,
+    item.suggestedPriority,
+    item.suggestedTaskNotes,
+    suggestedTitle,
+  ]);
 
   async function submitPromotion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -410,11 +452,22 @@ export function InflowItemRow({
       </div>
       <div className="project-inflow-item__summary">
         <strong>{suggestedTitle}</strong>
-        <p>{item.contentText}</p>
+        <p>
+          {item.analysisSummary ??
+            (analysisFailed
+              ? copy.projects.inflowAnalysisHelp
+              : copy.projects.inflowAnalyzing)}
+        </p>
+        {item.analysisConfidence !== null && analysisReady && (
+          <span>
+            {copy.projects.inflowAnalysisSummary} · 확신도{" "}
+            {item.analysisConfidence}%
+          </span>
+        )}
       </div>
-      {messages.length > 1 && (
+      {messages.length > 0 && (
         <details className="project-inflow-item__context">
-          <summary>대화 맥락 {messages.length}개 보기</summary>
+          <summary>원문 대화 {messages.length}개 보기</summary>
           <ol>
             {messages.map((message, index) => (
               <li key={`${message.receivedAt}-${index}`}>
@@ -472,6 +525,48 @@ export function InflowItemRow({
               )}
             </>
           )}
+        </div>
+      ) : analysisFailed ? (
+        <div className="project-inflow-item__analysis-state" role="status">
+          <p>{copy.projects.inflowAnalysisHelp}</p>
+          <div>
+            <button
+              className="primary-button focus-visible-control"
+              type="button"
+              disabled={saving}
+              onClick={() => void onRetryAnalysis(item)}
+            >
+              <RefreshCw aria-hidden="true" />
+              {copy.projects.inflowAnalysisRetry}
+            </button>
+            <button
+              className="secondary-button focus-visible-control"
+              type="button"
+              disabled={saving}
+              onClick={() => void onDismiss(item)}
+            >
+              <X aria-hidden="true" /> {copy.projects.inflowDismiss}
+            </button>
+          </div>
+        </div>
+      ) : !analysisReady ? (
+        <div
+          className="project-inflow-item__analysis-state"
+          role="status"
+          aria-live="polite"
+        >
+          <p>
+            <LoaderCircle className="spin" aria-hidden="true" />
+            {copy.projects.inflowAnalyzing}
+          </p>
+          <button
+            className="secondary-button focus-visible-control"
+            type="button"
+            disabled={saving}
+            onClick={() => void onDismiss(item)}
+          >
+            <X aria-hidden="true" /> {copy.projects.inflowDismiss}
+          </button>
         </div>
       ) : editing ? (
         <form
@@ -614,14 +709,12 @@ export function localInputToIso(value: string): string | undefined {
   return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
 }
 
-function legacySuggestedTaskTitle(content: string): string {
-  const firstLine = content
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find(Boolean);
-  return (firstLine ?? "대화 내용 확인")
-    .replace(/^[\-*•]+\s*/, "")
-    .slice(0, 100);
+function isoToLocalInput(value: string | null): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
 }
 
 function formatReceivedAt(value: string): string {
