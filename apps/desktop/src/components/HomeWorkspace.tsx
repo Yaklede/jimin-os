@@ -1094,10 +1094,13 @@ function DeadlineBrief({
   onEditTask(task: Task): void;
   onOpenTask(task: Task): void | Promise<void>;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const overdueCount = tasks.filter(
     (task) => taskDueState(task) === "overdue",
   ).length;
   const upcomingCount = tasks.length - overdueCount;
+  const visibleTasks = expanded ? tasks : tasks.slice(0, 4);
+  const hiddenCount = Math.max(0, tasks.length - visibleTasks.length);
   return (
     <section
       className="home-deadline-brief"
@@ -1114,7 +1117,7 @@ function DeadlineBrief({
         <strong>{copy.home.deadlineCount(tasks.length)}</strong>
       </header>
       <ul>
-        {tasks.slice(0, 4).map((task) => {
+        {visibleTasks.map((task) => {
           const state = taskDueState(task);
           return (
             <li key={task.id} data-due-state={state}>
@@ -1147,6 +1150,21 @@ function DeadlineBrief({
           );
         })}
       </ul>
+      {tasks.length > 4 && (
+        <button
+          className="home-deadline-brief__expand focus-visible-control"
+          type="button"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          <span>
+            {expanded
+              ? copy.home.collapseDeadlines
+              : copy.home.showRemainingDeadlines(hiddenCount)}
+          </span>
+          <ChevronRight aria-hidden="true" />
+        </button>
+      )}
     </section>
   );
 }

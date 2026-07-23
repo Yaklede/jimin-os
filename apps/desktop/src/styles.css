@@ -1981,6 +1981,36 @@ svg {
   height: 16px;
 }
 
+.home-deadline-brief__expand {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+}
+
+.home-deadline-brief__expand:hover {
+  background: var(--surface-subtle);
+  color: var(--text-strong);
+}
+
+.home-deadline-brief__expand svg {
+  width: 16px;
+  height: 16px;
+  transition: transform 160ms ease;
+}
+
+.home-deadline-brief__expand[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+
 .home-briefing:hover,
 .home-voice-callout:hover {
   border-color: var(--border-strong);

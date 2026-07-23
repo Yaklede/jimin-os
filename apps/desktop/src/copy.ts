@@ -222,6 +222,8 @@ export const copy = {
     loadingShort: "불러오는 중",
     deadlineTitle: "기한 확인",
     deadlineCount: (count: number) => `${count}개를 먼저 확인해 주세요`,
+    showRemainingDeadlines: (count: number) => `나머지 ${count}개 보기`,
+    collapseDeadlines: "간단히 보기",
     deadlineSummary: (overdue: number, upcoming: number) =>
       overdue
         ? `기한이 지난 할 일 ${overdue}개${upcoming ? `와 곧 마감할 일 ${upcoming}개` : ""}가 있어요.`
