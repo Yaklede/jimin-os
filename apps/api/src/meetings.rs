@@ -386,6 +386,7 @@ async fn apply_action(
                 id: item.target_entity_id,
                 user_id,
                 project_id: item.project_id,
+                parent_task_id: None,
                 title: item.title.clone(),
                 notes: item.notes.clone(),
                 assignee_name: None,

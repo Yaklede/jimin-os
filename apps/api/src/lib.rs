@@ -363,6 +363,7 @@ pub struct ScheduleListResponse {
 pub struct TaskResponse {
     id: uuid::Uuid,
     project_id: Option<uuid::Uuid>,
+    parent_task_id: Option<uuid::Uuid>,
     title: String,
     notes: Option<String>,
     assignee_name: Option<String>,
@@ -1090,6 +1091,7 @@ struct DeleteScheduleRequest {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CreateTaskRequest {
     project_id: Option<uuid::Uuid>,
+    parent_task_id: Option<uuid::Uuid>,
     title: String,
     notes: Option<String>,
     assignee_name: Option<String>,
@@ -1101,6 +1103,7 @@ struct CreateTaskRequest {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct UpdateTaskRequest {
     project_id: Option<uuid::Uuid>,
+    parent_task_id: Option<uuid::Uuid>,
     title: String,
     notes: Option<String>,
     assignee_name: Option<String>,
@@ -3735,6 +3738,7 @@ async fn create_task(
             id: uuid::Uuid::now_v7(),
             user_id,
             project_id: body.project_id,
+            parent_task_id: body.parent_task_id,
             title: body.title,
             notes: body.notes,
             assignee_name: body.assignee_name,
@@ -3831,6 +3835,7 @@ async fn update_task(
             id: task_id,
             user_id,
             project_id: body.project_id,
+            parent_task_id: body.parent_task_id,
             title: body.title,
             notes: body.notes,
             assignee_name: body.assignee_name,
@@ -4181,6 +4186,7 @@ async fn create_voice_task(
             id: client_mutation_id,
             user_id,
             project_id: None,
+            parent_task_id: None,
             title: title.clone(),
             notes: None,
             assignee_name: None,
@@ -7147,6 +7153,7 @@ fn task_response(task: Task) -> Result<TaskResponse, ()> {
     Ok(TaskResponse {
         id: task.id,
         project_id: task.project_id,
+        parent_task_id: task.parent_task_id,
         title: task.title,
         notes: task.notes,
         assignee_name: task.assignee_name,

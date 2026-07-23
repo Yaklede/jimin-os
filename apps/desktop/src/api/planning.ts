@@ -25,6 +25,7 @@ export interface ScheduleEntry {
 export interface Task {
   id: string;
   projectId: string | null;
+  parentTaskId?: string | null;
   title: string;
   notes: string | null;
   assigneeName?: string | null;
@@ -195,10 +196,12 @@ export async function createTask(
     priority: number;
     dueAt?: string;
     projectId?: string;
+    parentTaskId?: string;
   },
 ): Promise<Task> {
   return request<Task>(baseUrl, access, "/v1/tasks", "POST", {
     projectId: input.projectId || null,
+    parentTaskId: input.parentTaskId || null,
     title: input.title,
     notes: input.notes || null,
     assigneeName: input.assigneeName || null,
@@ -247,10 +250,15 @@ export async function updateTask(
     status: Task["status"];
     priority: number;
     dueAt?: string;
+    parentTaskId?: string | null;
   },
 ): Promise<Task> {
   return request<Task>(baseUrl, access, `/v1/tasks/${task.id}`, "PUT", {
     projectId: task.projectId,
+    parentTaskId:
+      input.parentTaskId === undefined
+        ? (task.parentTaskId ?? null)
+        : input.parentTaskId,
     title: input.title,
     notes: input.notes || null,
     assigneeName: input.assigneeName || null,

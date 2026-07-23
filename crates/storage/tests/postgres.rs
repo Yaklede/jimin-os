@@ -113,6 +113,7 @@ async fn sync_change_feed_pages_task_mutations_in_order() {
             id: Uuid::now_v7(),
             user_id,
             project_id: None,
+            parent_task_id: None,
             title: "기기 간 동기화 검증".to_owned(),
             notes: None,
             assignee_name: None,
@@ -216,6 +217,7 @@ async fn push_registration_transfer_and_reminder_queue_are_device_safe_and_idemp
             id: Uuid::now_v7(),
             user_id,
             project_id: None,
+            parent_task_id: None,
             title: "푸시 알림 할 일".to_owned(),
             notes: None,
             assignee_name: None,
@@ -1488,6 +1490,7 @@ async fn automatic_work_mutations_queue_safe_unique_webhook_deliveries() {
             id: Uuid::now_v7(),
             user_id,
             project_id: Some(project.id),
+            parent_task_id: None,
             title: "자동 이벤트 할 일".to_owned(),
             notes: Some("외부에 노출되면 안 되는 할 일 메모".to_owned()),
             assignee_name: None,
@@ -1501,6 +1504,7 @@ async fn automatic_work_mutations_queue_safe_unique_webhook_deliveries() {
             id: created_task.id,
             user_id,
             project_id: Some(project.id),
+            parent_task_id: None,
             title: "자동 이벤트 할 일 수정".to_owned(),
             notes: Some(
                 "담당자: 김경주\n\n1. 요청 내용을 확인한다.\n2. 처리 결과를 공유한다.".to_owned(),
@@ -1531,6 +1535,7 @@ async fn automatic_work_mutations_queue_safe_unique_webhook_deliveries() {
             id: completed_task.id,
             user_id,
             project_id: Some(project.id),
+            parent_task_id: None,
             title: completed_task.title.clone(),
             notes: completed_task.notes.clone(),
             assignee_name: completed_task.assignee_name.clone(),
@@ -1892,6 +1897,7 @@ async fn agent_task_reopen_and_webhook_message_commit_as_one_batch() {
             id: Uuid::now_v7(),
             user_id: owner.profile.id,
             project_id: Some(project.id),
+            parent_task_id: None,
             title: "#3863 BO 거래내역 권한 오류 수정".to_owned(),
             notes: Some("BO 거래내역 조회 오류를 수정한다.".to_owned()),
             assignee_name: Some("주홍석".to_owned()),
@@ -2746,6 +2752,7 @@ async fn client_mutation_id_replays_one_voice_task_and_rejects_payload_reuse() {
         id: mutation_id,
         user_id: owner.profile.id,
         project_id: None,
+        parent_task_id: None,
         title: "  계약서 검토  ".to_owned(),
         notes: Some("  법무 의견 반영  ".to_owned()),
         assignee_name: None,
@@ -2778,6 +2785,7 @@ async fn client_mutation_id_replays_one_voice_task_and_rejects_payload_reuse() {
             id: mutation_id,
             user_id: other.profile.id,
             project_id: None,
+            parent_task_id: None,
             title: "계약서 검토".to_owned(),
             notes: Some("법무 의견 반영".to_owned()),
             assignee_name: None,
@@ -2810,6 +2818,101 @@ async fn client_mutation_id_replays_one_voice_task_and_rejects_payload_reuse() {
 }
 
 #[tokio::test]
+async fn task_hierarchy_is_one_level_and_parent_completion_waits_for_children() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 2, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let parent_due_at = OffsetDateTime::now_utc() + TimeDuration::days(14);
+    let parent = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            project_id: None,
+            parent_task_id: None,
+            title: "A 작업 완료".to_owned(),
+            notes: None,
+            assignee_name: None,
+            priority: 2,
+            due_at: Some(parent_due_at),
+        })
+        .await
+        .expect("parent task should be created");
+    let child = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            project_id: None,
+            parent_task_id: Some(parent.id),
+            title: "A-1 상세 기능 구현".to_owned(),
+            notes: None,
+            assignee_name: None,
+            priority: 2,
+            due_at: Some(parent_due_at - TimeDuration::days(7)),
+        })
+        .await
+        .expect("child task should be created");
+    assert_eq!(child.parent_task_id, Some(parent.id));
+
+    let too_late = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            project_id: None,
+            parent_task_id: Some(parent.id),
+            title: "A-2 늦은 상세 기능".to_owned(),
+            notes: None,
+            assignee_name: None,
+            priority: 1,
+            due_at: Some(parent_due_at + TimeDuration::days(1)),
+        })
+        .await;
+    assert!(matches!(too_late, Err(StorageError::InvalidConfiguration)));
+    let too_deep = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            project_id: None,
+            parent_task_id: Some(child.id),
+            title: "A-1-1 허용하지 않는 단계".to_owned(),
+            notes: None,
+            assignee_name: None,
+            priority: 1,
+            due_at: None,
+        })
+        .await;
+    assert!(matches!(too_deep, Err(StorageError::InvalidConfiguration)));
+    assert!(matches!(
+        database
+            .complete_task(owner.profile.id, parent.id, parent.version)
+            .await,
+        Err(StorageError::InvalidConfiguration)
+    ));
+
+    let child = database
+        .complete_task(owner.profile.id, child.id, child.version)
+        .await
+        .expect("child completion should succeed")
+        .expect("child should still be current");
+    assert_eq!(child.status, TaskStatus::Completed);
+    let parent = database
+        .complete_task(owner.profile.id, parent.id, parent.version)
+        .await
+        .expect("parent completion should succeed after its child")
+        .expect("parent should still be current");
+    assert_eq!(parent.status, TaskStatus::Completed);
+
+    database.close().await;
+}
+
+#[tokio::test]
 async fn tasks_are_scoped_and_emit_current_state() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;
@@ -2832,6 +2935,7 @@ async fn tasks_are_scoped_and_emit_current_state() {
             id: Uuid::now_v7(),
             user_id: provisioned.profile.id,
             project_id: None,
+            parent_task_id: None,
             title: "오늘 할 일".to_owned(),
             notes: None,
             assignee_name: None,
@@ -2923,6 +3027,7 @@ async fn task_update_reopens_soft_deletes_and_rejects_stale_versions() {
             id: Uuid::now_v7(),
             user_id: provisioned.profile.id,
             project_id: None,
+            parent_task_id: None,
             title: "다시 열 일".to_owned(),
             notes: None,
             assignee_name: None,
@@ -2941,6 +3046,7 @@ async fn task_update_reopens_soft_deletes_and_rejects_stale_versions() {
             id: completed.id,
             user_id: provisioned.profile.id,
             project_id: None,
+            parent_task_id: None,
             title: "다시 연 일".to_owned(),
             notes: Some("수정 내용".to_owned()),
             assignee_name: None,
@@ -2967,6 +3073,7 @@ async fn task_update_reopens_soft_deletes_and_rejects_stale_versions() {
                 id: completed.id,
                 user_id: provisioned.profile.id,
                 project_id: None,
+                parent_task_id: None,
                 title: "오래된 수정".to_owned(),
                 notes: None,
                 assignee_name: None,
@@ -2984,6 +3091,7 @@ async fn task_update_reopens_soft_deletes_and_rejects_stale_versions() {
             id: reopened.id,
             user_id: provisioned.profile.id,
             project_id: None,
+            parent_task_id: None,
             title: reopened.title.clone(),
             notes: reopened.notes.clone(),
             assignee_name: None,
@@ -3138,6 +3246,7 @@ async fn goal_crud_is_owner_scoped_and_versioned() {
             id: Uuid::now_v7(),
             user_id: owner.profile.id,
             project_id: Some(project.id),
+            parent_task_id: None,
             title: "반복 업무 목록 정리".to_owned(),
             notes: None,
             assignee_name: None,
@@ -3156,6 +3265,7 @@ async fn goal_crud_is_owner_scoped_and_versioned() {
             id: Uuid::now_v7(),
             user_id: owner.profile.id,
             project_id: Some(project.id),
+            parent_task_id: None,
             title: "자동화 후보 구현".to_owned(),
             notes: None,
             assignee_name: None,
@@ -3294,6 +3404,7 @@ async fn project_and_task_deletions_are_scoped_versioned_and_idempotent() {
             id: Uuid::now_v7(),
             user_id: owner.profile.id,
             project_id: Some(project.id),
+            parent_task_id: None,
             title: "연결된 할 일".to_owned(),
             notes: None,
             assignee_name: None,
@@ -3365,6 +3476,7 @@ async fn project_and_task_deletions_are_scoped_versioned_and_idempotent() {
             id: Uuid::now_v7(),
             user_id: owner.profile.id,
             project_id: None,
+            parent_task_id: None,
             title: "삭제할 할 일".to_owned(),
             notes: None,
             assignee_name: None,
@@ -4057,6 +4169,7 @@ async fn structured_agent_project_delete_commits_a_sync_tombstone() {
             id: Uuid::now_v7(),
             user_id: provisioned.profile.id,
             project_id: Some(project.id),
+            parent_task_id: None,
             title: "연결 일감".to_owned(),
             notes: None,
             assignee_name: None,
@@ -4201,6 +4314,7 @@ async fn structured_agent_batch_actions_commit_as_one_turn() {
             id: Uuid::now_v7(),
             user_id: provisioned.profile.id,
             project_id: None,
+            parent_task_id: None,
             title: "회의록 정리".to_owned(),
             notes: None,
             assignee_name: None,
@@ -4214,6 +4328,7 @@ async fn structured_agent_batch_actions_commit_as_one_turn() {
             id: Uuid::now_v7(),
             user_id: provisioned.profile.id,
             project_id: None,
+            parent_task_id: None,
             title: "배포 확인".to_owned(),
             notes: None,
             assignee_name: None,
@@ -5520,6 +5635,7 @@ async fn work_brief_refresh_generates_one_actionable_recommendation_per_active_s
             id: Uuid::now_v7(),
             user_id: owner.profile.id,
             project_id: None,
+            parent_task_id: None,
             title: "마감된 계약서 검토".to_owned(),
             notes: None,
             assignee_name: None,

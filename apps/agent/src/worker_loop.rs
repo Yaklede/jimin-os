@@ -3612,6 +3612,7 @@ mod tests {
         let task = Task {
             id: Uuid::now_v7(),
             project_id: None,
+            parent_task_id: None,
             title: "장보기".to_owned(),
             notes: None,
             assignee_name: None,
@@ -3626,6 +3627,7 @@ mod tests {
         let completed_task = Task {
             id: Uuid::now_v7(),
             project_id: None,
+            parent_task_id: None,
             title: "배포 완료".to_owned(),
             notes: None,
             assignee_name: None,
@@ -3718,6 +3720,7 @@ mod tests {
         let completed_task = Task {
             id: Uuid::now_v7(),
             project_id: None,
+            parent_task_id: None,
             title: "이른 아침 할 일".to_owned(),
             notes: None,
             assignee_name: None,
@@ -3805,6 +3808,7 @@ mod tests {
         let urgent = Task {
             id: Uuid::now_v7(),
             project_id: None,
+            parent_task_id: None,
             title: "오늘 마감 확인".to_owned(),
             notes: None,
             assignee_name: None,
@@ -3817,6 +3821,7 @@ mod tests {
         let goal_task = Task {
             id: Uuid::now_v7(),
             project_id: Some(goal_project_id),
+            parent_task_id: None,
             title: "목표 다음 행동".to_owned(),
             notes: None,
             assignee_name: None,
@@ -3829,6 +3834,7 @@ mod tests {
         let unrelated = Task {
             id: Uuid::now_v7(),
             project_id: None,
+            parent_task_id: None,
             title: "연결되지 않은 일".to_owned(),
             notes: None,
             assignee_name: None,
@@ -3961,6 +3967,7 @@ mod tests {
         let task = Task {
             id: Uuid::now_v7(),
             project_id: None,
+            parent_task_id: None,
             title: "회의록 정리".to_owned(),
             notes: None,
             assignee_name: None,
@@ -4010,6 +4017,7 @@ mod tests {
         let task = Task {
             id: Uuid::now_v7(),
             project_id: None,
+            parent_task_id: None,
             title: "회의록 정리".to_owned(),
             notes: None,
             assignee_name: None,
@@ -4106,6 +4114,7 @@ mod tests {
         let completed_task = |title: &str, completed_at: OffsetDateTime| Task {
             id: Uuid::now_v7(),
             project_id: None,
+            parent_task_id: None,
             title: title.to_owned(),
             notes: None,
             assignee_name: None,
@@ -4166,6 +4175,7 @@ mod tests {
         let task = Task {
             id: Uuid::now_v7(),
             project_id: None,
+            parent_task_id: None,
             title: "회의록 정리".to_owned(),
             notes: None,
             assignee_name: None,
@@ -4214,6 +4224,7 @@ mod tests {
             .map(|index| Task {
                 id: Uuid::now_v7(),
                 project_id: None,
+                parent_task_id: None,
                 title: format!("열린 일 {index}"),
                 notes: None,
                 assignee_name: Some("김경주".to_owned()),
@@ -4277,6 +4288,7 @@ mod tests {
             .map(|(index, assignee)| Task {
                 id: Uuid::now_v7(),
                 project_id: None,
+                parent_task_id: None,
                 title: format!("{assignee}의 열린 일 {index}"),
                 notes: None,
                 assignee_name: Some(assignee.to_owned()),
@@ -4331,6 +4343,7 @@ mod tests {
         let today = Task {
             id: Uuid::now_v7(),
             project_id: None,
+            parent_task_id: None,
             title: "오늘 검토".to_owned(),
             notes: None,
             assignee_name: None,
@@ -4343,6 +4356,7 @@ mod tests {
         let tomorrow = Task {
             id: Uuid::now_v7(),
             project_id: None,
+            parent_task_id: None,
             title: "내일 검토".to_owned(),
             notes: None,
             assignee_name: None,
@@ -4431,6 +4445,7 @@ mod tests {
         let task = Task {
             id: Uuid::now_v7(),
             project_id: None,
+            parent_task_id: None,
             title: "이슈 3861 확인".to_owned(),
             notes: Some("배정 대상: 김경주".to_owned()),
             assignee_name: None,
@@ -4824,6 +4839,7 @@ mod tests {
         let task = Task {
             id: Uuid::now_v7(),
             project_id: None,
+            parent_task_id: None,
             title: "회의록 정리".to_owned(),
             notes: None,
             assignee_name: None,
@@ -4997,6 +5013,7 @@ mod tests {
         let completed = Task {
             id: Uuid::now_v7(),
             project_id: None,
+            parent_task_id: None,
             title: "실수로 완료한 일".to_owned(),
             notes: None,
             assignee_name: None,
@@ -5069,6 +5086,7 @@ mod tests {
         let first = Task {
             id: Uuid::now_v7(),
             project_id: None,
+            parent_task_id: None,
             title: "회의록 정리".to_owned(),
             notes: None,
             assignee_name: None,
@@ -5241,6 +5259,7 @@ mod tests {
         let task = Task {
             id: Uuid::now_v7(),
             project_id: Some(project_id),
+            parent_task_id: None,
             title: "#3863 BO 거래내역 권한 오류 수정".to_owned(),
             notes: Some("BO 거래내역 조회 오류를 수정한다.".to_owned()),
             assignee_name: Some("주홍석".to_owned()),

@@ -196,6 +196,7 @@ describe("task client", () => {
     const request = fetchMock.mock.calls[0]?.[1];
     expect(JSON.parse(String(request?.body))).toEqual({
       projectId: null,
+      parentTaskId: null,
       title: created.title,
       notes: created.notes,
       assigneeName: null,

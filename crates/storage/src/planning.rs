@@ -97,6 +97,7 @@ pub struct NewTask {
     pub id: Uuid,
     pub user_id: Uuid,
     pub project_id: Option<Uuid>,
+    pub parent_task_id: Option<Uuid>,
     pub title: String,
     pub notes: Option<String>,
     pub assignee_name: Option<String>,
@@ -109,6 +110,7 @@ pub struct TaskUpdate {
     pub id: Uuid,
     pub user_id: Uuid,
     pub project_id: Option<Uuid>,
+    pub parent_task_id: Option<Uuid>,
     pub title: String,
     pub notes: Option<String>,
     pub assignee_name: Option<String>,
@@ -127,6 +129,8 @@ impl NewTask {
     pub fn validate(&self) -> Result<(), StorageError> {
         if !is_v7(self.id)
             || !self.project_id.is_none_or(is_v7)
+            || !self.parent_task_id.is_none_or(is_v7)
+            || self.parent_task_id == Some(self.id)
             || !valid_text(&self.title, MAX_TITLE_CHARS, false)
             || !self
                 .notes
@@ -155,6 +159,8 @@ impl TaskUpdate {
         if !is_v7(self.id)
             || !is_v7(self.user_id)
             || !self.project_id.is_none_or(is_v7)
+            || !self.parent_task_id.is_none_or(is_v7)
+            || self.parent_task_id == Some(self.id)
             || !valid_text(&self.title, MAX_TITLE_CHARS, false)
             || !self
                 .notes
@@ -207,6 +213,7 @@ pub enum ScheduleSource {
 pub struct Task {
     pub id: Uuid,
     pub project_id: Option<Uuid>,
+    pub parent_task_id: Option<Uuid>,
     pub title: String,
     pub notes: Option<String>,
     pub assignee_name: Option<String>,
@@ -252,6 +259,7 @@ struct ScheduleRow {
 struct TaskRow {
     id: Uuid,
     project_id: Option<Uuid>,
+    parent_task_id: Option<Uuid>,
     title: String,
     notes: Option<String>,
     assignee_name: Option<String>,
@@ -304,6 +312,7 @@ impl TryFrom<TaskRow> for Task {
         Ok(Self {
             id: row.id,
             project_id: row.project_id,
+            parent_task_id: row.parent_task_id,
             title: row.title,
             notes: row.notes,
             assignee_name: row.assignee_name,
@@ -778,17 +787,29 @@ impl Database {
         }
         let user_id = task.user_id;
         let mut transaction = self.pool().begin().await.map_err(classify)?;
+        validate_task_hierarchy_in_transaction(
+            &mut transaction,
+            task.user_id,
+            task.id,
+            task.project_id,
+            task.parent_task_id,
+            task.due_at,
+        )
+        .await?;
         let row = sqlx::query_as::<_, TaskRow>(
             "\
             INSERT INTO tasks (
-                id, user_id, project_id, title, notes, assignee_name, status, priority, due_at
+                id, user_id, project_id, parent_task_id, title, notes, assignee_name,
+                status, priority, due_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, 'open', $7, $8)
-            RETURNING id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version",
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8, $9)
+            RETURNING id, project_id, parent_task_id, title, notes, assignee_name,
+                status, priority, due_at, completed_at, version",
         )
         .bind(task.id)
         .bind(task.user_id)
         .bind(task.project_id)
+        .bind(task.parent_task_id)
         .bind(task.title.trim())
         .bind(
             task.notes
@@ -834,18 +855,30 @@ impl Database {
             return Err(StorageError::InvalidConfiguration);
         }
         let mut transaction = self.pool().begin().await.map_err(classify)?;
+        validate_task_hierarchy_in_transaction(
+            &mut transaction,
+            task.user_id,
+            task.id,
+            task.project_id,
+            task.parent_task_id,
+            task.due_at,
+        )
+        .await?;
         let row = sqlx::query_as::<_, TaskRow>(
             "\
             INSERT INTO tasks (
-                id, user_id, project_id, title, notes, assignee_name, status, priority, due_at
+                id, user_id, project_id, parent_task_id, title, notes, assignee_name,
+                status, priority, due_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, 'open', $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8, $9)
             ON CONFLICT (id) DO NOTHING
-            RETURNING id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version",
+            RETURNING id, project_id, parent_task_id, title, notes, assignee_name,
+                status, priority, due_at, completed_at, version",
         )
         .bind(task.id)
         .bind(task.user_id)
         .bind(task.project_id)
+        .bind(task.parent_task_id)
         .bind(task.title.trim())
         .bind(
             task.notes
@@ -867,7 +900,8 @@ impl Database {
         let Some(row) = row else {
             let existing = sqlx::query_as::<_, TaskRow>(
                 "\
-                SELECT id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version
+                SELECT id, project_id, parent_task_id, title, notes, assignee_name,
+                    status, priority, due_at, completed_at, version
                 FROM tasks
                 WHERE id = $1 AND user_id = $2 AND status = 'open'",
             )
@@ -909,7 +943,8 @@ impl Database {
     pub async fn open_tasks_for_user(&self, user_id: Uuid) -> Result<Vec<Task>, StorageError> {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
-            SELECT id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version
+            SELECT id, project_id, parent_task_id, title, notes, assignee_name,
+                status, priority, due_at, completed_at, version
             FROM tasks
             WHERE user_id = $1 AND status = 'open'
             ORDER BY priority DESC, due_at NULLS LAST, created_at ASC, id ASC",
@@ -931,7 +966,8 @@ impl Database {
     pub async fn completed_tasks_for_user(&self, user_id: Uuid) -> Result<Vec<Task>, StorageError> {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
-            SELECT id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version
+            SELECT id, project_id, parent_task_id, title, notes, assignee_name,
+                status, priority, due_at, completed_at, version
             FROM tasks
             WHERE user_id = $1 AND status = 'completed'
             ORDER BY completed_at DESC NULLS LAST, id DESC",
@@ -959,7 +995,8 @@ impl Database {
         }
         let row = sqlx::query_as::<_, TaskRow>(
             "\
-            SELECT id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version
+            SELECT id, project_id, parent_task_id, title, notes, assignee_name,
+                status, priority, due_at, completed_at, version
             FROM tasks
             WHERE user_id = $1 AND id = $2",
         )
@@ -985,7 +1022,8 @@ impl Database {
     ) -> Result<Vec<Task>, StorageError> {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
-            SELECT id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version
+            SELECT id, project_id, parent_task_id, title, notes, assignee_name,
+                status, priority, due_at, completed_at, version
             FROM tasks
             WHERE user_id = $1
               AND status = 'open'
@@ -1013,7 +1051,8 @@ impl Database {
     ) -> Result<Vec<Task>, StorageError> {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
-            SELECT id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version
+            SELECT id, project_id, parent_task_id, title, notes, assignee_name,
+                status, priority, due_at, completed_at, version
             FROM tasks
             WHERE user_id = $1
               AND status = 'open'
@@ -1045,7 +1084,8 @@ impl Database {
         }
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
-            SELECT id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version
+            SELECT id, project_id, parent_task_id, title, notes, assignee_name,
+                status, priority, due_at, completed_at, version
             FROM tasks
             WHERE user_id = $1 AND project_id = $2 AND status = 'open'
             ORDER BY priority DESC, due_at NULLS LAST, created_at ASC, id ASC",
@@ -1076,7 +1116,8 @@ impl Database {
         }
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
-            SELECT id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version
+            SELECT id, project_id, parent_task_id, title, notes, assignee_name,
+                status, priority, due_at, completed_at, version
             FROM tasks
             WHERE user_id = $1 AND project_id = $2 AND status IN ('open', 'completed')
             ORDER BY
@@ -1122,27 +1163,42 @@ impl Database {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(classify)?;
+        validate_task_hierarchy_in_transaction(
+            &mut transaction,
+            update.user_id,
+            update.id,
+            update.project_id,
+            update.parent_task_id,
+            update.due_at,
+        )
+        .await?;
+        if update.status == TaskStatus::Completed {
+            ensure_no_open_child_tasks(&mut transaction, update.user_id, update.id).await?;
+        }
         let row = sqlx::query_as::<_, TaskRow>(
             "\
             UPDATE tasks
             SET project_id = $4,
-                title = $5,
-                notes = $6,
-                assignee_name = $7,
-                status = $8,
-                priority = $9,
-                due_at = $10,
+                parent_task_id = $5,
+                title = $6,
+                notes = $7,
+                assignee_name = $8,
+                status = $9,
+                priority = $10,
+                due_at = $11,
                 completed_at = CASE
-                    WHEN $8 = 'completed' THEN COALESCE(completed_at, NOW())
+                    WHEN $9 = 'completed' THEN COALESCE(completed_at, NOW())
                     ELSE NULL
                 END
             WHERE id = $1 AND user_id = $2 AND version = $3
-            RETURNING id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version",
+            RETURNING id, project_id, parent_task_id, title, notes, assignee_name,
+                status, priority, due_at, completed_at, version",
         )
         .bind(update.id)
         .bind(update.user_id)
         .bind(update.expected_version)
         .bind(update.project_id)
+        .bind(update.parent_task_id)
         .bind(update.title.trim())
         .bind(
             update
@@ -1204,7 +1260,8 @@ impl Database {
         let mut transaction = self.pool().begin().await.map_err(classify)?;
         let current = sqlx::query_as::<_, TaskRow>(
             "\
-            SELECT id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version
+            SELECT id, project_id, parent_task_id, title, notes, assignee_name,
+                status, priority, due_at, completed_at, version
             FROM tasks
             WHERE id = $1 AND user_id = $2
             FOR UPDATE",
@@ -1227,13 +1284,15 @@ impl Database {
             transaction.commit().await.map_err(classify)?;
             return Ok(DeleteTaskOutcome::VersionConflict);
         }
+        ensure_no_active_child_tasks(&mut transaction, user_id, task_id).await?;
 
         let deleted = sqlx::query_as::<_, TaskRow>(
             "\
             UPDATE tasks
             SET status = 'cancelled', completed_at = NULL
             WHERE id = $1 AND user_id = $2 AND version = $3
-            RETURNING id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version",
+            RETURNING id, project_id, parent_task_id, title, notes, assignee_name,
+                status, priority, due_at, completed_at, version",
         )
         .bind(task_id)
         .bind(user_id)
@@ -1288,12 +1347,14 @@ impl Database {
             return Err(StorageError::InvalidConfiguration);
         }
         let mut transaction = self.pool().begin().await.map_err(classify)?;
+        ensure_no_open_child_tasks(&mut transaction, user_id, task_id).await?;
         let row = sqlx::query_as::<_, TaskRow>(
             "\
             UPDATE tasks
             SET status = 'completed', completed_at = NOW()
             WHERE id = $1 AND user_id = $2 AND status = 'open' AND version = $3
-            RETURNING id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version",
+            RETURNING id, project_id, parent_task_id, title, notes, assignee_name,
+                status, priority, due_at, completed_at, version",
         )
         .bind(task_id)
         .bind(user_id)
@@ -1312,6 +1373,124 @@ impl Database {
         transaction.commit().await.map_err(classify)?;
         Ok(Some(task))
     }
+}
+
+async fn validate_task_hierarchy_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    task_id: Uuid,
+    project_id: Option<Uuid>,
+    parent_task_id: Option<Uuid>,
+    due_at: Option<OffsetDateTime>,
+) -> Result<(), StorageError> {
+    if let Some(parent_id) = parent_task_id {
+        let parent =
+            sqlx::query_as::<_, (Option<Uuid>, Option<Uuid>, Option<OffsetDateTime>, String)>(
+                "\
+            SELECT project_id, parent_task_id, due_at, status
+            FROM tasks
+            WHERE id = $1 AND user_id = $2
+            FOR SHARE",
+            )
+            .bind(parent_id)
+            .bind(user_id)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(classify)?;
+        let Some((parent_project_id, parent_parent_id, parent_due_at, parent_status)) = parent
+        else {
+            return Err(StorageError::InvalidConfiguration);
+        };
+        if parent_project_id != project_id
+            || parent_parent_id.is_some()
+            || parent_status == "cancelled"
+            || due_at
+                .zip(parent_due_at)
+                .is_some_and(|(child_due_at, parent_due_at)| child_due_at > parent_due_at)
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+    }
+
+    let invalid_child = sqlx::query_scalar::<_, bool>(
+        "\
+        SELECT EXISTS (
+            SELECT 1
+            FROM tasks
+            WHERE user_id = $1
+              AND parent_task_id = $2
+              AND status <> 'cancelled'
+              AND (
+                  $3::uuid IS NOT NULL
+                  OR project_id IS DISTINCT FROM $4::uuid
+                  OR (
+                      $5::timestamptz IS NOT NULL
+                      AND due_at IS NOT NULL
+                      AND due_at > $5::timestamptz
+                  )
+              )
+        )",
+    )
+    .bind(user_id)
+    .bind(task_id)
+    .bind(parent_task_id)
+    .bind(project_id)
+    .bind(due_at)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(classify)?;
+    if invalid_child {
+        return Err(StorageError::InvalidConfiguration);
+    }
+    Ok(())
+}
+
+async fn ensure_no_open_child_tasks(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    task_id: Uuid,
+) -> Result<(), StorageError> {
+    let has_open_children = sqlx::query_scalar::<_, bool>(
+        "\
+        SELECT EXISTS (
+            SELECT 1 FROM tasks
+            WHERE user_id = $1 AND parent_task_id = $2 AND status = 'open'
+        )",
+    )
+    .bind(user_id)
+    .bind(task_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(classify)?;
+    if has_open_children {
+        return Err(StorageError::InvalidConfiguration);
+    }
+    Ok(())
+}
+
+async fn ensure_no_active_child_tasks(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    task_id: Uuid,
+) -> Result<(), StorageError> {
+    let has_active_children = sqlx::query_scalar::<_, bool>(
+        "\
+        SELECT EXISTS (
+            SELECT 1 FROM tasks
+            WHERE user_id = $1
+              AND parent_task_id = $2
+              AND status IN ('open', 'completed')
+        )",
+    )
+    .bind(user_id)
+    .bind(task_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(classify)?;
+    if has_active_children {
+        return Err(StorageError::InvalidConfiguration);
+    }
+    Ok(())
 }
 
 fn is_v7(value: Uuid) -> bool {
@@ -1355,6 +1534,7 @@ fn schedule_matches_new(existing: &ScheduleEntry, requested: &NewScheduleEntry) 
 
 fn task_matches_new(existing: &Task, requested: &NewTask) -> bool {
     existing.project_id == requested.project_id
+        && existing.parent_task_id == requested.parent_task_id
         && existing.title == requested.title.trim()
         && existing.notes.as_deref()
             == requested
@@ -1430,8 +1610,8 @@ pub(crate) async fn queue_owned_task_webhook_by_id_in_transaction(
 ) -> Result<(), StorageError> {
     let row = sqlx::query_as::<_, TaskRow>(
         "\
-        SELECT id, project_id, title, notes, assignee_name, status, priority, due_at,
-            completed_at, version
+        SELECT id, project_id, parent_task_id, title, notes, assignee_name,
+            status, priority, due_at, completed_at, version
         FROM tasks
         WHERE id = $1 AND user_id = $2",
     )
@@ -1537,6 +1717,7 @@ mod tests {
         let task = Task {
             id: Uuid::now_v7(),
             project_id: Some(Uuid::now_v7()),
+            parent_task_id: None,
             title: "가맹점 권한 이슈 확인".to_owned(),
             notes: Some("고객 요청을 확인하고 처리 결과를 공유합니다.".to_owned()),
             assignee_name: Some("조지민".to_owned()),
@@ -1563,6 +1744,7 @@ mod tests {
         let task = Task {
             id: Uuid::now_v7(),
             project_id: Some(Uuid::now_v7()),
+            parent_task_id: None,
             title: "요청 확인".to_owned(),
             notes: Some("가".repeat(MAX_NOTES_CHARS)),
             assignee_name: None,

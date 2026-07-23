@@ -1865,6 +1865,7 @@ impl PromotedTaskRow {
         Ok(crate::planning::Task {
             id: self.id,
             project_id: self.project_id,
+            parent_task_id: None,
             title: self.title,
             notes: self.notes,
             assignee_name: self.assignee_name,

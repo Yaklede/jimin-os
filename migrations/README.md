@@ -105,4 +105,13 @@ completion delivery, and `jimin_schema_metadata.schema_version = 31`.
 Rollback after a completion delivery is requested requires the verified
 pre-migration backup so provider delivery history is not discarded.
 
+Migration `0032_task_hierarchy.sql` adds an optional parent relationship for
+one-level task decomposition. Apply it to an empty database and a restored
+version-31 backup, then verify existing tasks remain root tasks and
+`jimin_schema_metadata.schema_version = 32`. The service only accepts a parent
+owned by the same user and project, rejects deeper nesting, and prevents a child
+deadline from extending beyond its parent deadline. Rollback after child tasks
+are created requires the verified pre-migration backup so their hierarchy is
+not silently flattened.
+
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.
