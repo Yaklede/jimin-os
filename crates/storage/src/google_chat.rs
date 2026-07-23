@@ -26,6 +26,7 @@ const MAX_DISPLAY_NAME_CHARS: usize = 500;
 const MAX_MESSAGE_NAME_BYTES: usize = 1_024;
 const MAX_MESSAGE_TEXT_CHARS: usize = 32_768;
 const MAX_TASK_NOTES_CHARS: usize = 10_000;
+const MAX_ASSIGNEE_NAME_CHARS: usize = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoogleChatAccountStatus {
@@ -192,6 +193,7 @@ pub struct PromoteProjectInflowItem {
     pub expected_version: i64,
     pub task_id: Uuid,
     pub title: String,
+    pub assignee_name: Option<String>,
     pub priority: i16,
     pub due_at: Option<OffsetDateTime>,
 }
@@ -218,10 +220,13 @@ impl ProjectInflowStatus {
 pub struct ProjectInflowItem {
     pub id: Uuid,
     pub project_id: Uuid,
+    pub project_name: String,
     pub source_id: Uuid,
     pub source_name: String,
     pub provider_thread_name: Option<String>,
+    pub sender_provider_name: Option<String>,
     pub sender_name: Option<String>,
+    pub sent_by_owner: bool,
     pub content_text: String,
     pub received_at: OffsetDateTime,
     pub status: ProjectInflowStatus,
@@ -234,10 +239,13 @@ pub struct ProjectInflowItem {
 struct ProjectInflowItemRow {
     id: Uuid,
     project_id: Uuid,
+    project_name: String,
     source_id: Uuid,
     source_name: String,
     provider_thread_name: Option<String>,
+    sender_provider_name: Option<String>,
     sender_name: Option<String>,
+    sent_by_owner: bool,
     content_text: String,
     received_at: OffsetDateTime,
     status: String,
@@ -253,10 +261,13 @@ impl TryFrom<ProjectInflowItemRow> for ProjectInflowItem {
         Ok(Self {
             id: row.id,
             project_id: row.project_id,
+            project_name: row.project_name,
             source_id: row.source_id,
             source_name: row.source_name,
             provider_thread_name: row.provider_thread_name,
+            sender_provider_name: row.sender_provider_name,
             sender_name: row.sender_name,
+            sent_by_owner: row.sent_by_owner,
             content_text: row.content_text,
             received_at: row.received_at,
             status: ProjectInflowStatus::parse(&row.status)?,
@@ -270,6 +281,7 @@ impl TryFrom<ProjectInflowItemRow> for ProjectInflowItem {
 pub struct ProviderGoogleChatMessage {
     pub provider_message_name: String,
     pub provider_thread_name: Option<String>,
+    pub sender_provider_name: Option<String>,
     pub sender_name: Option<String>,
     pub content_text: String,
     pub received_at: OffsetDateTime,
@@ -797,8 +809,9 @@ impl Database {
             let inserted = sqlx::query_scalar::<_, Uuid>(
                 "INSERT INTO project_inflow_items (
                     id, user_id, project_id, source_id, provider_message_name,
-                    provider_thread_name, sender_name, content_text, received_at
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    provider_thread_name, sender_provider_name, sender_name,
+                    content_text, received_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                  ON CONFLICT (source_id, provider_message_name) DO NOTHING
                  RETURNING id",
             )
@@ -808,6 +821,7 @@ impl Database {
             .bind(connection.source_id)
             .bind(&message.provider_message_name)
             .bind(&message.provider_thread_name)
+            .bind(&message.sender_provider_name)
             .bind(&message.sender_name)
             .bind(message.content_text.trim())
             .bind(message.received_at)
@@ -827,6 +841,33 @@ impl Database {
                     inflow_id,
                     provider_message_name: message.provider_message_name.clone(),
                 });
+            } else if message.sender_provider_name.is_some() || message.sender_name.is_some() {
+                let repaired = sqlx::query_as::<_, (Uuid, i64)>(
+                    "UPDATE project_inflow_items
+                     SET sender_provider_name = COALESCE(sender_provider_name, $3),
+                         sender_name = COALESCE(sender_name, $4)
+                     WHERE source_id = $1 AND provider_message_name = $2
+                       AND ((sender_provider_name IS NULL AND $3::TEXT IS NOT NULL)
+                         OR (sender_name IS NULL AND $4::TEXT IS NOT NULL))
+                     RETURNING id, version",
+                )
+                .bind(connection.source_id)
+                .bind(&message.provider_message_name)
+                .bind(&message.sender_provider_name)
+                .bind(&message.sender_name)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(classify)?;
+                if let Some((inflow_id, version)) = repaired {
+                    append_change(
+                        &mut transaction,
+                        connection.user_id,
+                        "project_inflow_item",
+                        inflow_id,
+                        version,
+                    )
+                    .await?;
+                }
             }
         }
         let latest = messages.iter().map(|message| message.received_at).max();
@@ -987,13 +1028,31 @@ impl Database {
     ) -> Result<Vec<ProjectInflowItem>, StorageError> {
         let status = status.map(status_name);
         let rows = sqlx::query_as::<_, ProjectInflowItemRow>(
-            "SELECT item.id, item.project_id, item.source_id,
-                source.display_name AS source_name, item.provider_thread_name,
-                item.sender_name, item.content_text,
+            "SELECT item.id, item.project_id, project.title AS project_name,
+                item.source_id, source.display_name AS source_name,
+                item.provider_thread_name, item.sender_provider_name,
+                COALESCE(item.sender_name, (
+                    SELECT mention.name
+                    FROM project_webhooks AS sender_webhook
+                    CROSS JOIN LATERAL jsonb_each_text(
+                        sender_webhook.mention_directory -> 'users'
+                    ) AS mention(name, resource_name)
+                    WHERE sender_webhook.project_id = item.project_id
+                      AND mention.resource_name = item.sender_provider_name
+                    ORDER BY sender_webhook.created_at, mention.name
+                    LIMIT 1
+                )) AS sender_name,
+                COALESCE(
+                    item.sender_provider_name = CONCAT('users/', account.provider_subject),
+                    FALSE
+                ) AS sent_by_owner,
+                item.content_text,
                 item.received_at, item.status, item.promoted_task_id,
                 item.acknowledged_at, item.version
              FROM project_inflow_items AS item
              JOIN project_google_chat_sources AS source ON source.id = item.source_id
+             JOIN google_chat_accounts AS account ON account.id = source.account_id
+             JOIN projects AS project ON project.id = item.project_id
              WHERE item.user_id = $1 AND item.project_id = $2
                AND ($3::TEXT IS NULL OR item.status = $3)
              ORDER BY item.received_at DESC, item.id DESC
@@ -1002,6 +1061,57 @@ impl Database {
         .bind(user_id)
         .bind(project_id)
         .bind(status)
+        .fetch_all(self.pool())
+        .await
+        .map_err(classify)?;
+        rows.into_iter().map(ProjectInflowItem::try_from).collect()
+    }
+
+    /// Lists pending Chat inflow across every owned project for the home brief.
+    /// Provider identifiers remain server-side; sender labels are resolved from
+    /// the project's registered Google Chat mention directory when available.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the bounded owner-scoped read fails.
+    pub async fn pending_project_inflow_for_user(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<ProjectInflowItem>, StorageError> {
+        if !is_v7(user_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let rows = sqlx::query_as::<_, ProjectInflowItemRow>(
+            "SELECT item.id, item.project_id, project.title AS project_name,
+                item.source_id, source.display_name AS source_name,
+                item.provider_thread_name, item.sender_provider_name,
+                COALESCE(item.sender_name, (
+                    SELECT mention.name
+                    FROM project_webhooks AS sender_webhook
+                    CROSS JOIN LATERAL jsonb_each_text(
+                        sender_webhook.mention_directory -> 'users'
+                    ) AS mention(name, resource_name)
+                    WHERE sender_webhook.project_id = item.project_id
+                      AND mention.resource_name = item.sender_provider_name
+                    ORDER BY sender_webhook.created_at, mention.name
+                    LIMIT 1
+                )) AS sender_name,
+                COALESCE(
+                    item.sender_provider_name = CONCAT('users/', account.provider_subject),
+                    FALSE
+                ) AS sent_by_owner,
+                item.content_text,
+                item.received_at, item.status, item.promoted_task_id,
+                item.acknowledged_at, item.version
+             FROM project_inflow_items AS item
+             JOIN project_google_chat_sources AS source ON source.id = item.source_id
+             JOIN google_chat_accounts AS account ON account.id = source.account_id
+             JOIN projects AS project ON project.id = item.project_id
+             WHERE item.user_id = $1 AND item.status = 'pending'
+             ORDER BY item.received_at DESC, item.id DESC
+             LIMIT 200",
+        )
+        .bind(user_id)
         .fetch_all(self.pool())
         .await
         .map_err(classify)?;
@@ -1051,9 +1161,29 @@ impl Database {
                AND (($4::TEXT IS NULL AND item.id = $1)
                  OR ($4::TEXT IS NOT NULL AND item.source_id = $5
                    AND item.provider_thread_name = $4))
-             RETURNING item.id, item.project_id, item.source_id,
-                source.display_name AS source_name, item.provider_thread_name,
-                item.sender_name, item.content_text,
+             RETURNING item.id, item.project_id,
+                (SELECT title FROM projects WHERE id = item.project_id) AS project_name,
+                item.source_id, source.display_name AS source_name,
+                item.provider_thread_name, item.sender_provider_name,
+                COALESCE(item.sender_name, (
+                    SELECT mention.name
+                    FROM project_webhooks AS sender_webhook
+                    CROSS JOIN LATERAL jsonb_each_text(
+                        sender_webhook.mention_directory -> 'users'
+                    ) AS mention(name, resource_name)
+                    WHERE sender_webhook.project_id = item.project_id
+                      AND mention.resource_name = item.sender_provider_name
+                    ORDER BY sender_webhook.created_at, mention.name
+                    LIMIT 1
+                )) AS sender_name,
+                COALESCE(item.sender_provider_name = (
+                    SELECT CONCAT('users/', account.provider_subject)
+                    FROM project_google_chat_sources AS owner_source
+                    JOIN google_chat_accounts AS account
+                      ON account.id = owner_source.account_id
+                    WHERE owner_source.id = item.source_id
+                ), FALSE) AS sent_by_owner,
+                item.content_text,
                 item.received_at, item.status, item.promoted_task_id,
                 item.acknowledged_at, item.version",
         )
@@ -1103,6 +1233,10 @@ impl Database {
         .all(is_v7)
             || command.expected_version <= 0
             || !valid_text(&command.title, 300, false)
+            || !command
+                .assignee_name
+                .as_deref()
+                .is_none_or(|value| valid_text(value, MAX_ASSIGNEE_NAME_CHARS, false))
             || !(0..=3).contains(&command.priority)
         {
             return Err(StorageError::InvalidConfiguration);
@@ -1177,15 +1311,19 @@ async fn insert_promoted_task(
     task_notes: &str,
 ) -> Result<(), StorageError> {
     let row = sqlx::query_as::<_, PromotedTaskRow>(
-        "INSERT INTO tasks (id, user_id, project_id, title, notes, status, priority, due_at)
-         VALUES ($1, $2, $3, $4, $5, 'open', $6, $7)
-         RETURNING id, project_id, title, notes, status, priority, due_at, completed_at, version",
+        "INSERT INTO tasks (
+            id, user_id, project_id, title, notes, assignee_name,
+            status, priority, due_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, 'open', $7, $8)
+         RETURNING id, project_id, title, notes, assignee_name,
+            status, priority, due_at, completed_at, version",
     )
     .bind(command.task_id)
     .bind(command.user_id)
     .bind(command.project_id)
     .bind(command.title.trim())
     .bind(task_notes)
+    .bind(command.assignee_name.as_deref().map(str::trim))
     .bind(command.priority)
     .bind(command.due_at)
     .fetch_one(&mut **transaction)
@@ -1211,9 +1349,29 @@ async fn mark_inflow_group_promoted(
            AND (($5::TEXT IS NULL AND item.id = $1)
              OR ($5::TEXT IS NOT NULL AND item.source_id = $6
                AND item.provider_thread_name = $5))
-         RETURNING item.id, item.project_id, item.source_id,
-            source.display_name AS source_name, item.provider_thread_name,
-            item.sender_name, item.content_text,
+         RETURNING item.id, item.project_id,
+            (SELECT title FROM projects WHERE id = item.project_id) AS project_name,
+            item.source_id, source.display_name AS source_name,
+            item.provider_thread_name, item.sender_provider_name,
+            COALESCE(item.sender_name, (
+                SELECT mention.name
+                FROM project_webhooks AS sender_webhook
+                CROSS JOIN LATERAL jsonb_each_text(
+                    sender_webhook.mention_directory -> 'users'
+                ) AS mention(name, resource_name)
+                WHERE sender_webhook.project_id = item.project_id
+                  AND mention.resource_name = item.sender_provider_name
+                ORDER BY sender_webhook.created_at, mention.name
+                LIMIT 1
+            )) AS sender_name,
+            COALESCE(item.sender_provider_name = (
+                SELECT CONCAT('users/', account.provider_subject)
+                FROM project_google_chat_sources AS owner_source
+                JOIN google_chat_accounts AS account
+                  ON account.id = owner_source.account_id
+                WHERE owner_source.id = item.source_id
+            ), FALSE) AS sent_by_owner,
+            item.content_text,
             item.received_at, item.status, item.promoted_task_id,
             item.acknowledged_at, item.version",
     )
@@ -1250,6 +1408,7 @@ struct PromotedTaskRow {
     project_id: Option<Uuid>,
     title: String,
     notes: Option<String>,
+    assignee_name: Option<String>,
     status: String,
     priority: i16,
     due_at: Option<OffsetDateTime>,
@@ -1267,6 +1426,7 @@ impl PromotedTaskRow {
             project_id: self.project_id,
             title: self.title,
             notes: self.notes,
+            assignee_name: self.assignee_name,
             status: crate::planning::TaskStatus::Open,
             priority: self.priority,
             due_at: self.due_at,
@@ -1420,10 +1580,23 @@ fn valid_provider_message(message: &ProviderGoogleChatMessage) -> bool {
         .as_deref()
         .is_none_or(|value| valid_text(value, MAX_MESSAGE_NAME_BYTES, false))
         && message
+            .sender_provider_name
+            .as_deref()
+            .is_none_or(valid_google_chat_user_name)
+        && message
             .sender_name
             .as_deref()
             .is_none_or(|value| valid_text(value, MAX_DISPLAY_NAME_CHARS, false))
         && valid_text(&message.content_text, MAX_MESSAGE_TEXT_CHARS, true)
+}
+
+fn valid_google_chat_user_name(value: &str) -> bool {
+    value.strip_prefix("users/").is_some_and(|identifier| {
+        identifier == "app"
+            || (!identifier.is_empty()
+                && identifier.len() <= 40
+                && identifier.bytes().all(|byte| byte.is_ascii_digit()))
+    })
 }
 
 fn google_chat_task_notes(messages: &[(Uuid, Option<String>, String, OffsetDateTime)]) -> String {
@@ -1539,6 +1712,7 @@ mod tests {
         let message = ProviderGoogleChatMessage {
             provider_message_name: "spaces/AAAAAAAAAAA/messages/BBBBBBBBBBB.BBBBBBBBBBB".to_owned(),
             provider_thread_name: Some("spaces/AAAAAAAAAAA/threads/CCCCCCCCCCC".to_owned()),
+            sender_provider_name: Some("users/123456789012345678901".to_owned()),
             sender_name: Some("업무 담당자".to_owned()),
             content_text: "첫 번째 요청\n\t후속 확인 사항".to_owned(),
             received_at: OffsetDateTime::UNIX_EPOCH,
@@ -1552,6 +1726,7 @@ mod tests {
         let message = ProviderGoogleChatMessage {
             provider_message_name: "spaces/AAAAAAAAAAA/messages/BBBBBBBBBBB.BBBBBBBBBBB".to_owned(),
             provider_thread_name: None,
+            sender_provider_name: None,
             sender_name: None,
             content_text: "업무 요청\u{0000}".to_owned(),
             received_at: OffsetDateTime::UNIX_EPOCH,

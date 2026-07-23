@@ -2,7 +2,7 @@
 //! calendar provider is linked.
 
 use sqlx::{Postgres, Transaction};
-use time::OffsetDateTime;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::{
@@ -197,6 +197,7 @@ pub struct Task {
     pub project_id: Option<Uuid>,
     pub title: String,
     pub notes: Option<String>,
+    pub assignee_name: Option<String>,
     pub status: TaskStatus,
     pub priority: i16,
     pub due_at: Option<OffsetDateTime>,
@@ -241,6 +242,7 @@ struct TaskRow {
     project_id: Option<Uuid>,
     title: String,
     notes: Option<String>,
+    assignee_name: Option<String>,
     status: String,
     priority: i16,
     due_at: Option<OffsetDateTime>,
@@ -292,6 +294,7 @@ impl TryFrom<TaskRow> for Task {
             project_id: row.project_id,
             title: row.title,
             notes: row.notes,
+            assignee_name: row.assignee_name,
             status,
             priority: row.priority,
             due_at: row.due_at,
@@ -767,7 +770,7 @@ impl Database {
             "\
             INSERT INTO tasks (id, user_id, project_id, title, notes, status, priority, due_at)
             VALUES ($1, $2, $3, $4, $5, 'open', $6, $7)
-            RETURNING id, project_id, title, notes, status, priority, due_at, completed_at, version",
+            RETURNING id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version",
         )
         .bind(task.id)
         .bind(task.user_id)
@@ -816,7 +819,7 @@ impl Database {
             INSERT INTO tasks (id, user_id, project_id, title, notes, status, priority, due_at)
             VALUES ($1, $2, $3, $4, $5, 'open', $6, $7)
             ON CONFLICT (id) DO NOTHING
-            RETURNING id, project_id, title, notes, status, priority, due_at, completed_at, version",
+            RETURNING id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version",
         )
         .bind(task.id)
         .bind(task.user_id)
@@ -836,7 +839,7 @@ impl Database {
         let Some(row) = row else {
             let existing = sqlx::query_as::<_, TaskRow>(
                 "\
-                SELECT id, project_id, title, notes, status, priority, due_at, completed_at, version
+                SELECT id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version
                 FROM tasks
                 WHERE id = $1 AND user_id = $2 AND status = 'open'",
             )
@@ -878,7 +881,7 @@ impl Database {
     pub async fn open_tasks_for_user(&self, user_id: Uuid) -> Result<Vec<Task>, StorageError> {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
-            SELECT id, project_id, title, notes, status, priority, due_at, completed_at, version
+            SELECT id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version
             FROM tasks
             WHERE user_id = $1 AND status = 'open'
             ORDER BY priority DESC, due_at NULLS LAST, created_at ASC, id ASC",
@@ -900,7 +903,7 @@ impl Database {
     pub async fn completed_tasks_for_user(&self, user_id: Uuid) -> Result<Vec<Task>, StorageError> {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
-            SELECT id, project_id, title, notes, status, priority, due_at, completed_at, version
+            SELECT id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version
             FROM tasks
             WHERE user_id = $1 AND status = 'completed'
             ORDER BY completed_at DESC NULLS LAST, id DESC",
@@ -928,7 +931,7 @@ impl Database {
         }
         let row = sqlx::query_as::<_, TaskRow>(
             "\
-            SELECT id, project_id, title, notes, status, priority, due_at, completed_at, version
+            SELECT id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version
             FROM tasks
             WHERE user_id = $1 AND id = $2",
         )
@@ -954,7 +957,7 @@ impl Database {
     ) -> Result<Vec<Task>, StorageError> {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
-            SELECT id, project_id, title, notes, status, priority, due_at, completed_at, version
+            SELECT id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version
             FROM tasks
             WHERE user_id = $1
               AND status = 'open'
@@ -982,7 +985,7 @@ impl Database {
     ) -> Result<Vec<Task>, StorageError> {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
-            SELECT id, project_id, title, notes, status, priority, due_at, completed_at, version
+            SELECT id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version
             FROM tasks
             WHERE user_id = $1
               AND status = 'open'
@@ -1014,7 +1017,7 @@ impl Database {
         }
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
-            SELECT id, project_id, title, notes, status, priority, due_at, completed_at, version
+            SELECT id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version
             FROM tasks
             WHERE user_id = $1 AND project_id = $2 AND status = 'open'
             ORDER BY priority DESC, due_at NULLS LAST, created_at ASC, id ASC",
@@ -1045,7 +1048,7 @@ impl Database {
         }
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
-            SELECT id, project_id, title, notes, status, priority, due_at, completed_at, version
+            SELECT id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version
             FROM tasks
             WHERE user_id = $1 AND project_id = $2 AND status IN ('open', 'completed')
             ORDER BY
@@ -1105,7 +1108,7 @@ impl Database {
                     ELSE NULL
                 END
             WHERE id = $1 AND user_id = $2 AND version = $3
-            RETURNING id, project_id, title, notes, status, priority, due_at, completed_at, version",
+            RETURNING id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version",
         )
         .bind(update.id)
         .bind(update.user_id)
@@ -1165,7 +1168,7 @@ impl Database {
         let mut transaction = self.pool().begin().await.map_err(classify)?;
         let current = sqlx::query_as::<_, TaskRow>(
             "\
-            SELECT id, project_id, title, notes, status, priority, due_at, completed_at, version
+            SELECT id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version
             FROM tasks
             WHERE id = $1 AND user_id = $2
             FOR UPDATE",
@@ -1194,7 +1197,7 @@ impl Database {
             UPDATE tasks
             SET status = 'cancelled', completed_at = NULL
             WHERE id = $1 AND user_id = $2 AND version = $3
-            RETURNING id, project_id, title, notes, status, priority, due_at, completed_at, version",
+            RETURNING id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version",
         )
         .bind(task_id)
         .bind(user_id)
@@ -1254,7 +1257,7 @@ impl Database {
             UPDATE tasks
             SET status = 'completed', completed_at = NOW()
             WHERE id = $1 AND user_id = $2 AND status = 'open' AND version = $3
-            RETURNING id, project_id, title, notes, status, priority, due_at, completed_at, version",
+            RETURNING id, project_id, title, notes, assignee_name, status, priority, due_at, completed_at, version",
         )
         .bind(task_id)
         .bind(user_id)
@@ -1334,10 +1337,49 @@ pub(crate) async fn queue_task_webhook_in_transaction(
     let Some(project_id) = task.project_id else {
         return Ok(());
     };
-    let payload = project_event_payload(event_type, project_id, task.id)?;
+    let mut payload = project_event_payload(event_type, project_id, task.id)?;
+    let object = payload
+        .as_object_mut()
+        .ok_or(StorageError::PersistenceUnavailable)?;
+    object.insert("title".to_owned(), serde_json::json!(task.title));
+    object.insert(
+        "dueAt".to_owned(),
+        task.due_at
+            .map(|value| value.format(&Rfc3339))
+            .transpose()
+            .map_err(|_| StorageError::PersistenceUnavailable)?
+            .map_or(serde_json::Value::Null, serde_json::Value::String),
+    );
+    object.insert(
+        "assigneeName".to_owned(),
+        task.assignee_name
+            .clone()
+            .map_or(serde_json::Value::Null, serde_json::Value::String),
+    );
+    object.insert(
+        "message".to_owned(),
+        serde_json::Value::String(task_event_message(event_type, task)),
+    );
     queue_project_event_in_transaction(transaction, user_id, project_id, event_type, &payload)
         .await?;
     Ok(())
+}
+
+fn task_event_message(event_type: &str, task: &Task) -> String {
+    let action = match event_type {
+        "task.created" => "새 할 일이 등록됐어요.",
+        "task.completed" => "할 일을 완료했어요.",
+        "task.restored" => "완료한 일을 다시 열었어요.",
+        "task.deleted" => "할 일이 삭제됐어요.",
+        _ => "할 일이 변경됐어요.",
+    };
+    let mut lines = vec![action.to_owned(), task.title.clone()];
+    if let Some(due_at) = task.due_at
+        && let Ok(value) = due_at.format(&Rfc3339)
+    {
+        lines.push(format!("기한: {value}"));
+    }
+    lines.join("\n")
 }
 
 fn task_update_event_type(

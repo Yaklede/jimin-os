@@ -615,6 +615,7 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         ProviderGoogleChatMessage {
             provider_message_name: "spaces/company-room/messages/message-1.message-1".to_owned(),
             provider_thread_name: Some("spaces/company-room/threads/thread-1".to_owned()),
+            sender_provider_name: Some("users/123456789012345678901".to_owned()),
             sender_name: Some("업무 담당자".to_owned()),
             content_text: long_message.clone(),
             received_at,
@@ -622,6 +623,7 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         ProviderGoogleChatMessage {
             provider_message_name: "spaces/company-room/messages/message-2.message-2".to_owned(),
             provider_thread_name: Some("spaces/company-room/threads/thread-1".to_owned()),
+            sender_provider_name: Some("users/223456789012345678901".to_owned()),
             sender_name: Some("개발 담당자".to_owned()),
             content_text: "개발 범위와 예상 일정을 확인해 주세요.".to_owned(),
             received_at: received_at + TimeDuration::seconds(1),
@@ -681,6 +683,7 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             expected_version: pending[0].version,
             task_id: Uuid::now_v7(),
             title: "회사 요청 확인".to_owned(),
+            assignee_name: Some("개발 담당자".to_owned()),
             priority: 2,
             due_at: None,
         })
@@ -704,17 +707,19 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
     let pool = sqlx::PgPool::connect(&database_url)
         .await
         .expect("test database should accept direct checks");
-    let notes_length =
-        sqlx::query_scalar::<_, i32>("SELECT char_length(notes) FROM tasks WHERE id = $1")
-            .bind(
-                promoted
-                    .promoted_task_id
-                    .expect("promoted task should exist"),
-            )
-            .fetch_one(&pool)
-            .await
-            .expect("promoted task notes should load");
+    let (notes_length, assignee_name) = sqlx::query_as::<_, (i32, Option<String>)>(
+        "SELECT char_length(notes), assignee_name FROM tasks WHERE id = $1",
+    )
+    .bind(
+        promoted
+            .promoted_task_id
+            .expect("promoted task should exist"),
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("promoted task notes should load");
     assert_eq!(notes_length, 10_000);
+    assert_eq!(assignee_name.as_deref(), Some("개발 담당자"));
     pool.close().await;
     database.close().await;
 }

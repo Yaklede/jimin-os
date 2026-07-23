@@ -263,7 +263,14 @@ fn provider_payload(
         .filter(|value| !value.is_empty())
         .map_or_else(|| default_event_message(event_type), str::to_owned);
     let message = match provider {
-        WebhookProvider::GoogleChat => expand_google_chat_mentions(&message, mention_directory),
+        WebhookProvider::GoogleChat => {
+            let message = payload
+                .get("assigneeName")
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| mention_directory.users.contains_key(*name))
+                .map_or_else(|| message.clone(), |name| format!("@{{{name}}} {message}"));
+            expand_google_chat_mentions(&message, mention_directory)
+        }
         WebhookProvider::Discord => message,
     };
     if message.is_empty() || message.chars().count() > MAX_CHAT_MESSAGE_CHARS {
@@ -467,6 +474,35 @@ mod tests {
             payload,
             serde_json::json!({
                 "text": "<users/123456789012345678901> 확인해 주세요. 김개발 님에게는 공유만 하고, <users/987654321098765432109>도 확인해 주세요."
+            })
+        );
+    }
+
+    #[test]
+    fn assigned_task_notification_mentions_the_registered_assignee_once() {
+        let directory = GoogleChatMentionDirectory {
+            users: [(
+                "조지민".to_owned(),
+                "users/113145855577166216187".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let payload = provider_payload(
+            WebhookProvider::GoogleChat,
+            "task.created",
+            &serde_json::json!({
+                "message": "새 할 일이 등록됐어요.\n권한 이슈 확인",
+                "assigneeName": "조지민"
+            }),
+            &directory,
+        )
+        .expect("assigned task payload should render");
+
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "text": "<users/113145855577166216187> 새 할 일이 등록됐어요.\n권한 이슈 확인"
             })
         );
     }

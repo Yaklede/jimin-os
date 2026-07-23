@@ -219,6 +219,7 @@ impl GoogleChatOAuthRuntime {
     pub async fn list_source_messages(
         &self,
         connection: &GoogleChatSourceSyncConnection,
+        reconcile_recent_senders: bool,
     ) -> Result<Vec<ProviderGoogleChatMessage>, GoogleChatOAuthError> {
         let refresh_token = self.crypto.decrypt(
             &connection.refresh_token,
@@ -229,9 +230,16 @@ impl GoogleChatOAuthRuntime {
             .refresh_access_token(&refresh_token)
             .await
             .map_err(GoogleChatOAuthError::from_google)?;
-        let created_after = connection
-            .last_provider_message_at
-            .or_else(|| Some(OffsetDateTime::now_utc() - INITIAL_SYNC_LOOKBACK));
+        let created_after = connection.last_provider_message_at.map_or_else(
+            || Some(OffsetDateTime::now_utc() - INITIAL_SYNC_LOOKBACK),
+            |last| {
+                Some(if reconcile_recent_senders {
+                    last - time::Duration::days(7)
+                } else {
+                    last
+                })
+            },
+        );
         let messages = self
             .chat
             .list_messages(&access_token, &connection.space_name, created_after)
@@ -430,6 +438,7 @@ fn provider_message(entry: GoogleChatMessageEntry) -> ProviderGoogleChatMessage 
     ProviderGoogleChatMessage {
         provider_message_name: entry.name,
         provider_thread_name: entry.thread_name,
+        sender_provider_name: entry.sender_provider_name,
         sender_name: entry.sender_name,
         content_text: entry.text,
         received_at: entry.create_time,

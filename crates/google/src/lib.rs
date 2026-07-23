@@ -277,6 +277,7 @@ pub struct GoogleChatSpaceEntry {
 pub struct GoogleChatMessageEntry {
     pub name: String,
     pub thread_name: Option<String>,
+    pub sender_provider_name: Option<String>,
     pub sender_name: Option<String>,
     pub text: String,
     pub create_time: OffsetDateTime,
@@ -1773,6 +1774,7 @@ struct GoogleChatMessageResource {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GoogleChatSender {
+    name: Option<String>,
     display_name: Option<String>,
 }
 
@@ -1878,11 +1880,21 @@ fn normalize_chat_message(
         .and_then(|thread| thread.name)
         .map(|value| validate_text(value, 1_024))
         .transpose()?;
-    let sender_name = resource
+    let (sender_provider_name, sender_name) = resource
         .sender
-        .and_then(|sender| sender.display_name)
-        .map(|value| validate_text(value, 500))
-        .transpose()?;
+        .map(|sender| {
+            let provider_name = sender
+                .name
+                .map(|value| validate_chat_user_name(value))
+                .transpose()?;
+            let display_name = sender
+                .display_name
+                .map(|value| validate_text(value, 500))
+                .transpose()?;
+            Ok::<_, GoogleAuthError>((provider_name, display_name))
+        })
+        .transpose()?
+        .unwrap_or((None, None));
     let create_time = OffsetDateTime::parse(
         &resource.create_time,
         &time::format_description::well_known::Rfc3339,
@@ -1891,10 +1903,26 @@ fn normalize_chat_message(
     Ok(Some(GoogleChatMessageEntry {
         name,
         thread_name,
+        sender_provider_name,
         sender_name,
         text,
         create_time,
     }))
+}
+
+fn validate_chat_user_name(value: String) -> Result<String, GoogleAuthError> {
+    let value = validate_text(value, 64)?;
+    let Some(identifier) = value.strip_prefix("users/") else {
+        return Err(GoogleAuthError::ProviderRejected);
+    };
+    if identifier != "app"
+        && (identifier.is_empty()
+            || identifier.len() > 40
+            || !identifier.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(GoogleAuthError::ProviderRejected);
+    }
+    Ok(value)
 }
 
 fn normalize_calendar_list_item(
@@ -2444,6 +2472,46 @@ fn classify_calendar_mutation_status(status: u16) -> GoogleAuthError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_message_keeps_user_resource_name_when_display_name_is_omitted() {
+        let message = normalize_chat_message(GoogleChatMessageResource {
+            name: "spaces/AAAAAAAAAAA/messages/BBBBBBBBBBB.BBBBBBBBBBB".to_owned(),
+            text: Some("확인 부탁드립니다.".to_owned()),
+            create_time: "2026-07-23T00:00:00Z".to_owned(),
+            sender: Some(GoogleChatSender {
+                name: Some("users/123456789012345678901".to_owned()),
+                display_name: None,
+            }),
+            thread: None,
+        })
+        .expect("message should normalize")
+        .expect("text message should remain");
+
+        assert_eq!(
+            message.sender_provider_name.as_deref(),
+            Some("users/123456789012345678901")
+        );
+        assert_eq!(message.sender_name, None);
+    }
+
+    #[test]
+    fn chat_message_accepts_the_google_chat_app_sender() {
+        let message = normalize_chat_message(GoogleChatMessageResource {
+            name: "spaces/AAAAAAAAAAA/messages/CCCCCCCCCCC.CCCCCCCCCCC".to_owned(),
+            text: Some("자동 알림".to_owned()),
+            create_time: "2026-07-23T00:00:00Z".to_owned(),
+            sender: Some(GoogleChatSender {
+                name: Some("users/app".to_owned()),
+                display_name: None,
+            }),
+            thread: None,
+        })
+        .expect("app message should normalize")
+        .expect("app text message should remain");
+
+        assert_eq!(message.sender_provider_name.as_deref(), Some("users/app"));
+    }
 
     #[test]
     fn calendar_authorization_requests_calendar_scopes_without_gmail() {

@@ -8,7 +8,13 @@ pub mod push;
 mod voice_command;
 pub mod webhook;
 
-use std::{collections::BTreeMap, convert::Infallible, future::Future, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    convert::Infallible,
+    future::Future,
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use axum::{
@@ -357,6 +363,7 @@ pub struct TaskResponse {
     project_id: Option<uuid::Uuid>,
     title: String,
     notes: Option<String>,
+    assignee_name: Option<String>,
     status: String,
     priority: i16,
     due_at: Option<String>,
@@ -504,6 +511,7 @@ pub struct HomeSnapshotResponse {
     schedule: Vec<ScheduleEntryResponse>,
     tasks: Vec<TaskResponse>,
     due_tasks: Vec<TaskResponse>,
+    inflow: Vec<ProjectInflowItemResponse>,
     recommendations: Vec<RecommendationResponse>,
 }
 
@@ -659,9 +667,11 @@ pub struct ProjectGoogleChatSourceListResponse {
 pub struct ProjectInflowItemResponse {
     id: uuid::Uuid,
     project_id: uuid::Uuid,
+    project_name: String,
     source_id: uuid::Uuid,
     source_name: String,
     sender_name: Option<String>,
+    sent_by_owner: bool,
     content_text: String,
     suggested_task_title: String,
     message_count: usize,
@@ -671,6 +681,9 @@ pub struct ProjectInflowItemResponse {
     status: String,
     promoted_task_id: Option<uuid::Uuid>,
     acknowledged: bool,
+    assignee_options: Vec<String>,
+    notifiable_assignee_names: Vec<String>,
+    assignee_notification_available: bool,
     version: i64,
 }
 
@@ -678,6 +691,7 @@ pub struct ProjectInflowItemResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectInflowMessageResponse {
     sender_name: Option<String>,
+    sent_by_owner: bool,
     content_text: String,
     received_at: String,
 }
@@ -709,6 +723,7 @@ pub struct ProjectInflowDecisionRequest {
     decision: String,
     expected_version: i64,
     title: Option<String>,
+    assignee_name: Option<String>,
     priority: Option<i16>,
     due_at: Option<String>,
 }
@@ -2307,11 +2322,13 @@ async fn get_home_snapshot(
         return invalid_request_response(request_id);
     };
     let user_id = principal.identity().user_id();
-    let (schedule, tasks, due_tasks, recommendations) = match tokio::try_join!(
+    let (schedule, tasks, due_tasks, recommendations, inflow_items, webhooks) = match tokio::try_join!(
         planning.schedule_entries_in_range(user_id, from, to),
         planning.home_tasks_for_user(user_id, to),
         planning.deadline_tasks_for_user(user_id, deadline_boundary),
         planning.active_recommendations_for_user(user_id, OffsetDateTime::now_utc(), 5),
+        planning.pending_project_inflow_for_user(user_id),
+        planning.user_project_webhooks(user_id),
     ) {
         Ok(values) => values,
         Err(error) => return storage_error_response(&error, request_id),
@@ -2344,11 +2361,23 @@ async fn get_home_snapshot(
     else {
         return unavailable_response(request_id);
     };
+    let contexts = inflow_assignment_contexts(webhooks);
+    let Ok(mut inflow) = group_project_inflow_candidates(inflow_items)
+        .into_iter()
+        .map(project_inflow_item_response)
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return unavailable_response(request_id);
+    };
+    for item in &mut inflow {
+        apply_inflow_assignment_context(item, &contexts);
+    }
 
     Json(HomeSnapshotResponse {
         schedule,
         tasks,
         due_tasks,
+        inflow,
         recommendations,
     })
     .into_response()
@@ -5671,15 +5700,23 @@ async fn list_project_inflow_items(
     let Some(planning) = state.planning() else {
         return unavailable_response(request_id);
     };
-    match planning
-        .project_inflow_items(principal.identity().user_id(), project_id, status)
-        .await
-    {
-        Ok(items) => {
+    let user_id = principal.identity().user_id();
+    match tokio::try_join!(
+        planning.project_inflow_items(user_id, project_id, status),
+        planning.project_webhooks(user_id, project_id),
+    ) {
+        Ok((items, webhooks)) => {
+            let contexts = inflow_assignment_contexts(webhooks);
             let items = group_project_inflow_candidates(items)
                 .into_iter()
                 .map(project_inflow_item_response)
-                .collect::<Result<Vec<_>, _>>();
+                .collect::<Result<Vec<_>, _>>()
+                .map(|mut items| {
+                    for item in &mut items {
+                        apply_inflow_assignment_context(item, &contexts);
+                    }
+                    items
+                });
             match items {
                 Ok(items) => no_store_json(ProjectInflowItemListResponse { items }),
                 Err(()) => unavailable_response(request_id),
@@ -5738,6 +5775,12 @@ async fn decide_project_inflow_item(
                     expected_version: request.expected_version,
                     task_id: uuid::Uuid::now_v7(),
                     title: title.to_owned(),
+                    assignee_name: request
+                        .assignee_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned),
                     priority: request.priority.unwrap_or(1),
                     due_at,
                 })
@@ -5779,7 +5822,9 @@ async fn synchronize_google_chat_source(
     }) {
         return Err(GoogleChatOAuthError::ProviderRejected);
     }
-    let messages = runtime.list_source_messages(&connection).await?;
+    let messages = runtime
+        .list_source_messages(&connection, expected_owner.is_some())
+        .await?;
     let acknowledgements = planning
         .apply_google_chat_messages(&connection, &messages)
         .await
@@ -6132,6 +6177,46 @@ struct ProjectInflowCandidate {
     messages: Vec<ProjectInflowItem>,
 }
 
+#[derive(Default)]
+struct InflowAssignmentContext {
+    names: BTreeSet<String>,
+    notifiable_names: BTreeSet<String>,
+}
+
+fn inflow_assignment_contexts(
+    webhooks: Vec<ProjectWebhook>,
+) -> BTreeMap<uuid::Uuid, InflowAssignmentContext> {
+    let mut contexts: BTreeMap<uuid::Uuid, InflowAssignmentContext> = BTreeMap::new();
+    for webhook in webhooks
+        .into_iter()
+        .filter(|webhook| webhook.provider == WebhookProvider::GoogleChat)
+    {
+        let context = contexts.entry(webhook.project_id).or_default();
+        let names = webhook
+            .mention_directory
+            .users
+            .into_keys()
+            .collect::<BTreeSet<_>>();
+        context.names.extend(names.iter().cloned());
+        if webhook.enabled && webhook.events.iter().any(|event| event == "task.created") {
+            context.notifiable_names.extend(names);
+        }
+    }
+    contexts
+}
+
+fn apply_inflow_assignment_context(
+    response: &mut ProjectInflowItemResponse,
+    contexts: &BTreeMap<uuid::Uuid, InflowAssignmentContext>,
+) {
+    let Some(context) = contexts.get(&response.project_id) else {
+        return;
+    };
+    response.assignee_options = context.names.iter().cloned().collect();
+    response.notifiable_assignee_names = context.notifiable_names.iter().cloned().collect();
+    response.assignee_notification_available = !context.notifiable_names.is_empty();
+}
+
 fn single_project_inflow_candidate(item: ProjectInflowItem) -> ProjectInflowCandidate {
     ProjectInflowCandidate {
         representative: item.clone(),
@@ -6161,6 +6246,7 @@ fn group_project_inflow_candidates(items: Vec<ProjectInflowItem>) -> Vec<Project
             messages.sort_by_key(|item| (item.received_at, item.id));
             let focus = messages
                 .iter()
+                .filter(|item| !item.sent_by_owner)
                 .max_by_key(|item| {
                     (
                         inflow_actionability_score(&item.content_text),
@@ -6200,6 +6286,15 @@ fn inflow_actionability_score(content: &str) -> u8 {
         .filter(|character| character.is_alphanumeric())
         .count();
     if meaningful_chars < 4 {
+        return 0;
+    }
+    let compact_follow_up = meaningful_chars < 18
+        && !normalized.contains('?')
+        && !normalized.contains('？')
+        && ["확인일자", "리마인드", "리체크", "먼저", "금일", "메모"]
+            .iter()
+            .any(|term| normalized.contains(term));
+    if compact_follow_up {
         return 0;
     }
     let request_terms = [
@@ -6300,7 +6395,11 @@ fn project_inflow_item_response(
         .into_iter()
         .map(|item| {
             Ok(ProjectInflowMessageResponse {
-                sender_name: item.sender_name,
+                sender_name: item
+                    .sent_by_owner
+                    .then(|| "나".to_owned())
+                    .or(item.sender_name),
+                sent_by_owner: item.sent_by_owner,
                 content_text: item.content_text,
                 received_at: item.received_at.format(&Rfc3339).map_err(|_| ())?,
             })
@@ -6309,9 +6408,14 @@ fn project_inflow_item_response(
     Ok(ProjectInflowItemResponse {
         id: representative.id,
         project_id: representative.project_id,
+        project_name: representative.project_name,
         source_id: representative.source_id,
         source_name: representative.source_name,
-        sender_name: focus.sender_name,
+        sender_name: focus
+            .sent_by_owner
+            .then(|| "나".to_owned())
+            .or(focus.sender_name),
+        sent_by_owner: focus.sent_by_owner,
         suggested_task_title: suggested_inflow_task_title(&focus.content_text),
         content_text: focus.content_text,
         message_count,
@@ -6324,6 +6428,9 @@ fn project_inflow_item_response(
         status: project_inflow_status_name(representative.status).to_owned(),
         promoted_task_id: representative.promoted_task_id,
         acknowledged,
+        assignee_options: Vec::new(),
+        notifiable_assignee_names: Vec::new(),
+        assignee_notification_available: false,
         version: representative.version,
     })
 }
@@ -6654,6 +6761,7 @@ fn task_response(task: Task) -> Result<TaskResponse, ()> {
         project_id: task.project_id,
         title: task.title,
         notes: task.notes,
+        assignee_name: task.assignee_name,
         status: match task.status {
             TaskStatus::Open => "open".to_owned(),
             TaskStatus::Completed => "completed".to_owned(),
@@ -8000,6 +8108,42 @@ mod tests {
     }
 
     #[test]
+    fn inflow_assignment_context_only_marks_names_on_active_task_webhooks() {
+        let project_id = uuid::Uuid::now_v7();
+        let webhook = |name: &str, event: &str, enabled: bool| ProjectWebhook {
+            id: uuid::Uuid::now_v7(),
+            project_id,
+            provider: WebhookProvider::GoogleChat,
+            destination_hint: "Google Chat".to_owned(),
+            mention_directory: GoogleChatMentionDirectory {
+                users: [(name.to_owned(), "users/123456789012345678901".to_owned())]
+                    .into_iter()
+                    .collect(),
+            },
+            events: vec![event.to_owned()],
+            enabled,
+            version: 1,
+        };
+        let contexts = inflow_assignment_contexts(vec![
+            webhook("김담당", "task.created", true),
+            webhook("박담당", "project.updated", true),
+            webhook("이담당", "task.created", false),
+        ]);
+        let context = contexts
+            .get(&project_id)
+            .expect("project assignment context should exist");
+
+        assert_eq!(
+            context.names.iter().cloned().collect::<Vec<_>>(),
+            vec!["김담당", "박담당", "이담당"]
+        );
+        assert_eq!(
+            context.notifiable_names.iter().cloned().collect::<Vec<_>>(),
+            vec!["김담당"]
+        );
+    }
+
+    #[test]
     fn google_chat_mention_directory_rejects_invalid_ids_and_discord_entries() {
         let valid = WebhookMentionDirectory {
             users: [(
@@ -8063,10 +8207,13 @@ mod tests {
                 ProjectInflowItem {
                     id: Uuid::now_v7(),
                     project_id,
+                    project_name: "비스킷링크".to_owned(),
                     source_id,
                     source_name: "PAYMENTS CS".to_owned(),
                     provider_thread_name,
+                    sender_provider_name: Some("users/223456789012345678901".to_owned()),
                     sender_name: Some("업무 담당자".to_owned()),
+                    sent_by_owner: false,
                     content_text: content.to_owned(),
                     received_at,
                     status: ProjectInflowStatus::Pending,
@@ -8106,6 +8253,16 @@ mod tests {
             "혹시 이 기능은 개발에 얼마나 걸릴까요?"
         );
         assert_eq!(response.suggested_task_title, "개발 범위와 예상 일정 확인");
+
+        let mut owner_comment = make_item(
+            "권한이슈 확인일자: 금일",
+            OffsetDateTime::UNIX_EPOCH + TimeDuration::seconds(3),
+            None,
+        );
+        owner_comment.sent_by_owner = true;
+        assert!(group_project_inflow_candidates(vec![owner_comment]).is_empty());
+        assert_eq!(inflow_actionability_score("ip전달 먼저"), 0);
+        assert_eq!(inflow_actionability_score("리체크용 해야함"), 0);
     }
 
     #[tokio::test]
