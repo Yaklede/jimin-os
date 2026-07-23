@@ -37,10 +37,7 @@ import {
   useDelayedSkeleton,
 } from "./ContentSkeleton";
 import { AssistantInteractiveCanvas } from "./AssistantInteractiveCanvas";
-import {
-  InflowItemRow,
-  type PromoteInflowInput,
-} from "./ProjectInflowPanel";
+import { InflowItemRow, type PromoteInflowInput } from "./ProjectInflowPanel";
 
 type HomeWorkspaceProps = {
   snapshot: HomeSnapshot | undefined;
@@ -504,7 +501,14 @@ export function HomeWorkspace({
                           disabled={Boolean(completingTaskId)}
                           aria-label={copy.home.openTaskInSchedule(task.title)}
                         >
-                          <span>{task.title}</span>
+                          <span className="home-task-list__content">
+                            <strong>{task.title}</strong>
+                            <small data-assigned={Boolean(task.assigneeName)}>
+                              {copy.projects.taskAssignee(
+                                task.assigneeName ?? undefined,
+                              )}
+                            </small>
+                          </span>
                           {task.dueAt && (
                             <time
                               dateTime={task.dueAt}
@@ -1093,7 +1097,12 @@ function DeadlineBrief({
                 onClick={() => void onOpenTask(task)}
               >
                 <span>{dueStateLabel(state)}</span>
-                <strong>{task.title}</strong>
+                <span className="home-deadline-brief__copy">
+                  <strong>{task.title}</strong>
+                  <small data-assigned={Boolean(task.assigneeName)}>
+                    {copy.projects.taskAssignee(task.assigneeName ?? undefined)}
+                  </small>
+                </span>
                 {task.dueAt && (
                   <time dateTime={task.dueAt}>{formatDueTime(task.dueAt)}</time>
                 )}

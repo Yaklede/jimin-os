@@ -56,6 +56,8 @@ export const projectCopy = {
   completedWorkItemsTitle: "완료한 일",
   completedTaskCount: (count: number) => `${count}개`,
   completedTaskMeta: (meta: string) => `완료 · ${meta}`,
+  taskAssignee: (name?: string) =>
+    name?.trim() ? `담당자: ${name.trim()}` : "담당자: 미정",
   reopenTask: (title: string) => `${title} 다시 진행하기`,
   workItemsEmpty: "아직 연결된 일이 없어요. 바로 이어서 할 일을 추가해 보세요.",
   workItemLabel: "프로젝트에 추가할 일",

@@ -1723,7 +1723,13 @@ svg {
   color: var(--danger);
 }
 
-.home-deadline-brief__task strong {
+.home-deadline-brief__copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.home-deadline-brief__copy strong {
   overflow: hidden;
   color: var(--text-strong);
   font-size: 14px;
@@ -2058,13 +2064,32 @@ svg {
   background: var(--surface-subtle);
 }
 
-.home-task-list__open > span {
+.home-task-list__content {
+  display: grid;
+  gap: 2px;
   min-width: 0;
+}
+
+.home-task-list__content strong {
   color: var(--text);
   font-size: 14px;
+  font-weight: 600;
   line-height: 20px;
   overflow-wrap: anywhere;
   white-space: normal;
+}
+
+.home-task-list__content small,
+.home-deadline-brief__copy small {
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.home-task-list__content small[data-assigned="true"],
+.home-deadline-brief__copy small[data-assigned="true"] {
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .home-task-list time {
@@ -4916,10 +4941,12 @@ svg {
 
 .project-task-list__content {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
   min-width: 0;
   min-height: 44px;
   align-content: center;
-  gap: 2px;
   border: 0;
   padding: 2px 4px;
   background: transparent;
@@ -4927,7 +4954,13 @@ svg {
   text-align: left;
 }
 
-.project-task-list__content strong {
+.project-task-list__details {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.project-task-list__details strong {
   color: var(--text-strong);
   font-size: 15px;
   font-weight: 600;
@@ -4935,12 +4968,29 @@ svg {
   white-space: normal;
 }
 
-.project-task-list__content span {
+.project-task-list__details > span {
   color: var(--muted);
   font-size: 12px;
 }
 
-.project-task-list--completed .project-task-list__content strong {
+.project-task-list__assignee {
+  align-self: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: var(--faint);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.project-task-list__assignee[data-assigned="true"] {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.project-task-list--completed .project-task-list__details strong {
   color: var(--muted);
   text-decoration: line-through;
   text-decoration-thickness: 1px;
@@ -7657,6 +7707,15 @@ svg {
 
   .home-task-list__open time {
     margin-top: -2px;
+  }
+
+  .project-task-list__content {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  .project-task-list__assignee {
+    justify-self: start;
   }
 
   .home-task-list__edit {

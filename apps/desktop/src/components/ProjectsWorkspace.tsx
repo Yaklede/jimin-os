@@ -677,8 +677,18 @@ export function ProjectsWorkspace({
                             )
                           }
                         >
-                          <strong>{task.title}</strong>
-                          <span>{taskMeta(task)}</span>
+                          <span className="project-task-list__details">
+                            <strong>{task.title}</strong>
+                            <span>{taskMeta(task)}</span>
+                          </span>
+                          <span
+                            className="project-task-list__assignee"
+                            data-assigned={Boolean(task.assigneeName)}
+                          >
+                            {copy.projects.taskAssignee(
+                              task.assigneeName ?? undefined,
+                            )}
+                          </span>
                         </button>
                         {editingTaskId === task.id && (
                           <TaskEditForm
@@ -780,9 +790,21 @@ export function ProjectsWorkspace({
                               )
                             }
                           >
-                            <strong>{task.title}</strong>
-                            <span>
-                              {copy.projects.completedTaskMeta(taskMeta(task))}
+                            <span className="project-task-list__details">
+                              <strong>{task.title}</strong>
+                              <span>
+                                {copy.projects.completedTaskMeta(
+                                  taskMeta(task),
+                                )}
+                              </span>
+                            </span>
+                            <span
+                              className="project-task-list__assignee"
+                              data-assigned={Boolean(task.assigneeName)}
+                            >
+                              {copy.projects.taskAssignee(
+                                task.assigneeName ?? undefined,
+                              )}
                             </span>
                           </button>
                           {editingTaskId === task.id && (
@@ -1399,11 +1421,10 @@ function taskMeta(task: Task): string {
   const priority =
     copy.projects.taskPriorities[task.priority] ??
     copy.projects.taskPriorities[0];
-  const assignment = task.assigneeName ? ` · ${task.assigneeName}` : "";
-  if (!task.dueAt) return `${priority}${assignment}`;
+  if (!task.dueAt) return priority;
   const date = new Date(task.dueAt);
-  if (Number.isNaN(date.getTime())) return `${priority}${assignment}`;
-  return `${priority}${assignment} · ${new Intl.DateTimeFormat("ko-KR", {
+  if (Number.isNaN(date.getTime())) return priority;
+  return `${priority} · ${new Intl.DateTimeFormat("ko-KR", {
     month: "short",
     day: "numeric",
   }).format(date)}까지`;

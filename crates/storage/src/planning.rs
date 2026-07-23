@@ -18,6 +18,7 @@ use crate::{
 
 const MAX_TITLE_CHARS: usize = 200;
 const MAX_NOTES_CHARS: usize = 10_000;
+const MAX_WEBHOOK_TASK_CONTENT_CHARS: usize = 900;
 
 /// Validated manual schedule input. Provider-originated entries will use a
 /// separate adapter path so clients cannot spoof a provider source.
@@ -1337,11 +1338,24 @@ pub(crate) async fn queue_task_webhook_in_transaction(
     let Some(project_id) = task.project_id else {
         return Ok(());
     };
+    let project_title = sqlx::query_scalar::<_, String>(
+        "SELECT title FROM projects WHERE id = $1 AND user_id = $2",
+    )
+    .bind(project_id)
+    .bind(user_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(classify)?
+    .ok_or(StorageError::PersistenceUnavailable)?;
     let mut payload = project_event_payload(event_type, project_id, task.id)?;
     let object = payload
         .as_object_mut()
         .ok_or(StorageError::PersistenceUnavailable)?;
     object.insert("title".to_owned(), serde_json::json!(task.title));
+    object.insert(
+        "projectTitle".to_owned(),
+        serde_json::Value::String(project_title.clone()),
+    );
     object.insert(
         "dueAt".to_owned(),
         task.due_at
@@ -1358,28 +1372,112 @@ pub(crate) async fn queue_task_webhook_in_transaction(
     );
     object.insert(
         "message".to_owned(),
-        serde_json::Value::String(task_event_message(event_type, task)),
+        serde_json::Value::String(task_event_message(event_type, &project_title, task)),
     );
     queue_project_event_in_transaction(transaction, user_id, project_id, event_type, &payload)
         .await?;
     Ok(())
 }
 
-fn task_event_message(event_type: &str, task: &Task) -> String {
+fn task_event_message(event_type: &str, project_title: &str, task: &Task) -> String {
     let action = match event_type {
+        "task.created" if task.assignee_name.is_some() => "새 할 일이 배정됐어요.",
         "task.created" => "새 할 일이 등록됐어요.",
         "task.completed" => "할 일을 완료했어요.",
         "task.restored" => "완료한 일을 다시 열었어요.",
         "task.deleted" => "할 일이 삭제됐어요.",
         _ => "할 일이 변경됐어요.",
     };
-    let mut lines = vec![action.to_owned(), task.title.clone()];
+    let assignee = task.assignee_name.as_deref().unwrap_or("미정");
+    let mut lines = vec![
+        action.to_owned(),
+        format!("프로젝트: {project_title}"),
+        format!("할 일: {}", task.title),
+        format!("담당자: {assignee}"),
+    ];
     if let Some(due_at) = task.due_at
         && let Ok(value) = due_at.format(&Rfc3339)
     {
-        lines.push(format!("기한: {value}"));
+        lines.push(format!("마감: {value}"));
+    }
+    if let Some(content) = task
+        .notes
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(String::new());
+        lines.push("요청 내용:".to_owned());
+        lines.push(truncate_with_ellipsis(
+            content,
+            MAX_WEBHOOK_TASK_CONTENT_CHARS,
+        ));
     }
     lines.join("\n")
+}
+
+fn truncate_with_ellipsis(value: &str, maximum: usize) -> String {
+    if value.chars().count() <= maximum {
+        return value.to_owned();
+    }
+    let keep = maximum.saturating_sub(1);
+    format!("{}…", value.chars().take(keep).collect::<String>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assigned_task_webhook_message_contains_the_work_context() {
+        let due_at = OffsetDateTime::from_unix_timestamp(1_785_289_400)
+            .expect("fixture timestamp should be valid");
+        let task = Task {
+            id: Uuid::now_v7(),
+            project_id: Some(Uuid::now_v7()),
+            title: "가맹점 권한 이슈 확인".to_owned(),
+            notes: Some("고객 요청을 확인하고 처리 결과를 공유합니다.".to_owned()),
+            assignee_name: Some("조지민".to_owned()),
+            status: TaskStatus::Open,
+            priority: 2,
+            due_at: Some(due_at),
+            completed_at: None,
+            version: 1,
+        };
+
+        let message = task_event_message("task.created", "비스킷링크", &task);
+
+        assert!(message.starts_with("새 할 일이 배정됐어요."));
+        assert!(message.contains("프로젝트: 비스킷링크"));
+        assert!(message.contains("할 일: 가맹점 권한 이슈 확인"));
+        assert!(message.contains("담당자: 조지민"));
+        assert!(message.contains("마감: "));
+        assert!(message.contains("요청 내용:\n고객 요청을 확인하고 처리 결과를 공유합니다."));
+        assert!(message.chars().count() <= 1_800);
+    }
+
+    #[test]
+    fn task_webhook_message_bounds_long_request_content() {
+        let task = Task {
+            id: Uuid::now_v7(),
+            project_id: Some(Uuid::now_v7()),
+            title: "요청 확인".to_owned(),
+            notes: Some("가".repeat(MAX_NOTES_CHARS)),
+            assignee_name: None,
+            status: TaskStatus::Open,
+            priority: 1,
+            due_at: None,
+            completed_at: None,
+            version: 1,
+        };
+
+        let message = task_event_message("task.created", "프로젝트", &task);
+
+        assert!(message.starts_with("새 할 일이 등록됐어요."));
+        assert!(message.contains("담당자: 미정"));
+        assert!(message.ends_with('…'));
+        assert!(message.chars().count() <= 1_800);
+    }
 }
 
 fn task_update_event_type(

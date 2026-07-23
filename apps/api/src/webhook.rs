@@ -492,7 +492,7 @@ mod tests {
             WebhookProvider::GoogleChat,
             "task.created",
             &serde_json::json!({
-                "message": "새 할 일이 등록됐어요.\n권한 이슈 확인",
+                "message": "새 할 일이 배정됐어요.\n프로젝트: 비스킷링크\n할 일: 권한 이슈 확인\n담당자: 조지민\n\n요청 내용:\n가맹점 권한을 확인하고 결과를 공유해 주세요.",
                 "assigneeName": "조지민"
             }),
             &directory,
@@ -502,7 +502,7 @@ mod tests {
         assert_eq!(
             payload,
             serde_json::json!({
-                "text": "<users/113145855577166216187> 새 할 일이 등록됐어요.\n권한 이슈 확인"
+                "text": "<users/113145855577166216187> 새 할 일이 배정됐어요.\n프로젝트: 비스킷링크\n할 일: 권한 이슈 확인\n담당자: 조지민\n\n요청 내용:\n가맹점 권한을 확인하고 결과를 공유해 주세요."
             })
         );
     }
