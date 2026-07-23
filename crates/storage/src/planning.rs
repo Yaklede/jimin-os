@@ -1490,6 +1490,30 @@ fn truncate_with_ellipsis(value: &str, maximum: usize) -> String {
     format!("{}…", value.chars().take(keep).collect::<String>())
 }
 
+fn task_update_event_type(
+    previous_status: Option<&str>,
+    current_status: TaskStatus,
+) -> &'static str {
+    match (previous_status, current_status) {
+        (Some("completed"), TaskStatus::Open) => "task.restored",
+        (_, TaskStatus::Completed) => "task.completed",
+        (_, TaskStatus::Cancelled) => "task.deleted",
+        _ => "task.updated",
+    }
+}
+
+fn task_status_name(status: TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Open => "open",
+        TaskStatus::Completed => "completed",
+        TaskStatus::Cancelled => "cancelled",
+    }
+}
+
+fn classify(_error: sqlx::Error) -> StorageError {
+    StorageError::PersistenceUnavailable
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1556,28 +1580,4 @@ mod tests {
         assert!(message.ends_with('…'));
         assert!(message.chars().count() <= 1_800);
     }
-}
-
-fn task_update_event_type(
-    previous_status: Option<&str>,
-    current_status: TaskStatus,
-) -> &'static str {
-    match (previous_status, current_status) {
-        (Some("completed"), TaskStatus::Open) => "task.restored",
-        (_, TaskStatus::Completed) => "task.completed",
-        (_, TaskStatus::Cancelled) => "task.deleted",
-        _ => "task.updated",
-    }
-}
-
-fn task_status_name(status: TaskStatus) -> &'static str {
-    match status {
-        TaskStatus::Open => "open",
-        TaskStatus::Completed => "completed",
-        TaskStatus::Cancelled => "cancelled",
-    }
-}
-
-fn classify(_error: sqlx::Error) -> StorageError {
-    StorageError::PersistenceUnavailable
 }

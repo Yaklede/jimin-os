@@ -232,6 +232,11 @@ pub struct ProjectInflowItem {
     pub status: ProjectInflowStatus,
     pub promoted_task_id: Option<Uuid>,
     pub acknowledged_at: Option<OffsetDateTime>,
+    pub completion_requested_at: Option<OffsetDateTime>,
+    pub completion_reaction_at: Option<OffsetDateTime>,
+    pub completion_reply_at: Option<OffsetDateTime>,
+    pub completion_delivery_error_code: Option<String>,
+    pub completion_delivery_attempt_count: i32,
     pub version: i64,
 }
 
@@ -251,6 +256,11 @@ struct ProjectInflowItemRow {
     status: String,
     promoted_task_id: Option<Uuid>,
     acknowledged_at: Option<OffsetDateTime>,
+    completion_requested_at: Option<OffsetDateTime>,
+    completion_reaction_at: Option<OffsetDateTime>,
+    completion_reply_at: Option<OffsetDateTime>,
+    completion_delivery_error_code: Option<String>,
+    completion_delivery_attempt_count: i32,
     version: i64,
 }
 
@@ -273,8 +283,64 @@ impl TryFrom<ProjectInflowItemRow> for ProjectInflowItem {
             status: ProjectInflowStatus::parse(&row.status)?,
             promoted_task_id: row.promoted_task_id,
             acknowledged_at: row.acknowledged_at,
+            completion_requested_at: row.completion_requested_at,
+            completion_reaction_at: row.completion_reaction_at,
+            completion_reply_at: row.completion_reply_at,
+            completion_delivery_error_code: row.completion_delivery_error_code,
+            completion_delivery_attempt_count: row.completion_delivery_attempt_count,
             version: row.version,
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoogleChatCompletionDelivery {
+    pub inflow_id: Uuid,
+    pub user_id: Uuid,
+    pub source_id: Uuid,
+    pub provider_message_name: String,
+    pub provider_thread_name: Option<String>,
+    pub task_id: Uuid,
+    pub task_title: String,
+    pub assignee_name: Option<String>,
+    pub due_at: Option<OffsetDateTime>,
+    pub reaction_completed: bool,
+    pub reply_completed: bool,
+    pub attempt_count: i32,
+}
+
+#[derive(sqlx::FromRow)]
+struct GoogleChatCompletionDeliveryRow {
+    inflow_id: Uuid,
+    user_id: Uuid,
+    source_id: Uuid,
+    provider_message_name: String,
+    provider_thread_name: Option<String>,
+    task_id: Uuid,
+    task_title: String,
+    assignee_name: Option<String>,
+    due_at: Option<OffsetDateTime>,
+    reaction_completed: bool,
+    reply_completed: bool,
+    attempt_count: i32,
+}
+
+impl From<GoogleChatCompletionDeliveryRow> for GoogleChatCompletionDelivery {
+    fn from(row: GoogleChatCompletionDeliveryRow) -> Self {
+        Self {
+            inflow_id: row.inflow_id,
+            user_id: row.user_id,
+            source_id: row.source_id,
+            provider_message_name: row.provider_message_name,
+            provider_thread_name: row.provider_thread_name,
+            task_id: row.task_id,
+            task_title: row.task_title,
+            assignee_name: row.assignee_name,
+            due_at: row.due_at,
+            reaction_completed: row.reaction_completed,
+            reply_completed: row.reply_completed,
+            attempt_count: row.attempt_count,
+        }
     }
 }
 
@@ -293,6 +359,7 @@ pub struct GoogleChatSourceSyncConnection {
     pub user_id: Uuid,
     pub project_id: Uuid,
     pub provider_subject: String,
+    pub granted_scopes: Vec<String>,
     pub space_name: String,
     pub acknowledge_with_reaction: bool,
     pub last_provider_message_at: Option<OffsetDateTime>,
@@ -308,6 +375,7 @@ struct GoogleChatSourceSyncConnectionRow {
     user_id: Uuid,
     project_id: Uuid,
     provider_subject: String,
+    granted_scopes: Vec<String>,
     space_name: String,
     acknowledge_with_reaction: bool,
     last_provider_message_at: Option<OffsetDateTime>,
@@ -765,7 +833,7 @@ impl Database {
         let row = sqlx::query_as::<_, GoogleChatSourceSyncConnectionRow>(
             "SELECT source.id AS source_id, account.id AS account_id,
                 source.user_id, source.project_id,
-                account.provider_subject,
+                account.provider_subject, account.granted_scopes,
                 source.space_name, source.acknowledge_with_reaction,
                 source.last_provider_message_at,
                 source.last_error_code IS NOT NULL AS source_had_error,
@@ -790,6 +858,10 @@ impl Database {
     /// # Errors
     ///
     /// Returns a validation or persistence error when provider data cannot be applied safely.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The ingestion transaction keeps message validation, deduplication, sender recovery, and acknowledgement projection atomic."
+    )]
     pub async fn apply_google_chat_messages(
         &self,
         connection: &GoogleChatSourceSyncConnection,
@@ -943,6 +1015,150 @@ impl Database {
         Ok(())
     }
 
+    /// Lists bounded completion deliveries that are ready for an idempotent
+    /// provider retry. A caller can narrow the read to the item promoted in the
+    /// current request while the periodic source sync drains the remaining
+    /// queue.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when identifiers, bounds, or persistence are invalid.
+    pub async fn pending_google_chat_completion_deliveries(
+        &self,
+        source_id: Uuid,
+        inflow_id: Option<Uuid>,
+        limit: i64,
+    ) -> Result<Vec<GoogleChatCompletionDelivery>, StorageError> {
+        if !is_v7(source_id)
+            || inflow_id.is_some_and(|value| !is_v7(value))
+            || !(1..=20).contains(&limit)
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let rows = sqlx::query_as::<_, GoogleChatCompletionDeliveryRow>(
+            "SELECT item.id AS inflow_id, item.user_id, item.source_id,
+                item.provider_message_name, item.provider_thread_name,
+                task.id AS task_id, task.title AS task_title,
+                task.assignee_name, task.due_at,
+                item.completion_reaction_at IS NOT NULL AS reaction_completed,
+                item.completion_reply_at IS NOT NULL AS reply_completed,
+                item.completion_delivery_attempt_count AS attempt_count
+             FROM project_inflow_items AS item
+             JOIN tasks AS task
+               ON task.id = item.promoted_task_id
+              AND task.user_id = item.user_id
+             WHERE item.source_id = $1
+               AND ($2::UUID IS NULL OR item.id = $2)
+               AND item.status = 'promoted'
+               AND item.completion_requested_at IS NOT NULL
+               AND (
+                   item.completion_reaction_at IS NULL
+                   OR item.completion_reply_at IS NULL
+               )
+               AND item.completion_delivery_attempt_count < 10
+               AND item.completion_delivery_next_attempt_at <= NOW()
+             ORDER BY item.completion_delivery_next_attempt_at, item.id
+             LIMIT $3",
+        )
+        .bind(source_id)
+        .bind(inflow_id)
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await
+        .map_err(classify)?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    /// Persists one provider attempt without clearing a part that already
+    /// succeeded. Incomplete deliveries receive bounded exponential backoff
+    /// and are retried by the source sync worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the result shape or persistence is invalid.
+    pub async fn record_google_chat_completion_delivery(
+        &self,
+        delivery: &GoogleChatCompletionDelivery,
+        reaction_completed: bool,
+        reply_completed: bool,
+        failure_code: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let complete = (delivery.reaction_completed || reaction_completed)
+            && (delivery.reply_completed || reply_completed);
+        if ![
+            delivery.inflow_id,
+            delivery.user_id,
+            delivery.source_id,
+            delivery.task_id,
+        ]
+        .into_iter()
+        .all(is_v7)
+            || (!complete && !failure_code.is_some_and(valid_failure_code))
+            || failure_code.is_some_and(|code| !valid_failure_code(code))
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let next_attempt_seconds = i64::from(30_u32.saturating_mul(
+            2_u32.saturating_pow(u32::try_from(delivery.attempt_count.clamp(0, 7)).unwrap_or(7)),
+        ))
+        .min(3_600);
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let version = sqlx::query_scalar::<_, i64>(
+            "UPDATE project_inflow_items
+             SET completion_reaction_at = CASE
+                     WHEN $3 THEN COALESCE(completion_reaction_at, NOW())
+                     ELSE completion_reaction_at
+                 END,
+                 completion_reply_at = CASE
+                     WHEN $4 THEN COALESCE(completion_reply_at, NOW())
+                     ELSE completion_reply_at
+                 END,
+                 completion_delivery_attempt_count =
+                     completion_delivery_attempt_count + 1,
+                 completion_delivery_error_code = CASE
+                     WHEN (completion_reaction_at IS NOT NULL OR $3)
+                      AND (completion_reply_at IS NOT NULL OR $4)
+                     THEN NULL
+                     ELSE $5
+                 END,
+                 completion_delivery_next_attempt_at = CASE
+                     WHEN (completion_reaction_at IS NOT NULL OR $3)
+                      AND (completion_reply_at IS NOT NULL OR $4)
+                     THEN NULL
+                     ELSE NOW() + make_interval(secs => $6)
+                 END
+             WHERE id = $1 AND user_id = $2
+               AND source_id = $7 AND promoted_task_id = $8
+               AND completion_requested_at IS NOT NULL
+             RETURNING version",
+        )
+        .bind(delivery.inflow_id)
+        .bind(delivery.user_id)
+        .bind(reaction_completed)
+        .bind(reply_completed)
+        .bind(failure_code)
+        .bind(next_attempt_seconds)
+        .bind(delivery.source_id)
+        .bind(delivery.task_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some(version) = version else {
+            transaction.rollback().await.map_err(classify)?;
+            return Err(StorageError::InvalidConfiguration);
+        };
+        append_change(
+            &mut transaction,
+            delivery.user_id,
+            "project_inflow_item",
+            delivery.inflow_id,
+            version,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        Ok(())
+    }
+
     /// Records a sanitized source failure and moves its account into the matching health state.
     ///
     /// # Errors
@@ -1048,7 +1264,10 @@ impl Database {
                 ) AS sent_by_owner,
                 item.content_text,
                 item.received_at, item.status, item.promoted_task_id,
-                item.acknowledged_at, item.version
+                item.acknowledged_at, item.completion_requested_at,
+                item.completion_reaction_at, item.completion_reply_at,
+                item.completion_delivery_error_code,
+                item.completion_delivery_attempt_count, item.version
              FROM project_inflow_items AS item
              JOIN project_google_chat_sources AS source ON source.id = item.source_id
              JOIN google_chat_accounts AS account ON account.id = source.account_id
@@ -1102,7 +1321,10 @@ impl Database {
                 ) AS sent_by_owner,
                 item.content_text,
                 item.received_at, item.status, item.promoted_task_id,
-                item.acknowledged_at, item.version
+                item.acknowledged_at, item.completion_requested_at,
+                item.completion_reaction_at, item.completion_reply_at,
+                item.completion_delivery_error_code,
+                item.completion_delivery_attempt_count, item.version
              FROM project_inflow_items AS item
              JOIN project_google_chat_sources AS source ON source.id = item.source_id
              JOIN google_chat_accounts AS account ON account.id = source.account_id
@@ -1110,6 +1332,60 @@ impl Database {
              WHERE item.user_id = $1 AND item.status = 'pending'
              ORDER BY item.received_at DESC, item.id DESC
              LIMIT 200",
+        )
+        .bind(user_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(classify)?;
+        rows.into_iter().map(ProjectInflowItem::try_from).collect()
+    }
+
+    /// Lists the most recently handled Chat conversations for the home brief.
+    /// This keeps a promoted or dismissed source message visible after it
+    /// leaves the decision queue without exposing provider resource names.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the bounded owner-scoped read fails.
+    pub async fn recent_project_inflow_decisions_for_user(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<ProjectInflowItem>, StorageError> {
+        if !is_v7(user_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let rows = sqlx::query_as::<_, ProjectInflowItemRow>(
+            "SELECT item.id, item.project_id, project.title AS project_name,
+                item.source_id, source.display_name AS source_name,
+                item.provider_thread_name, item.sender_provider_name,
+                COALESCE(item.sender_name, (
+                    SELECT mention.name
+                    FROM project_webhooks AS sender_webhook
+                    CROSS JOIN LATERAL jsonb_each_text(
+                        sender_webhook.mention_directory -> 'users'
+                    ) AS mention(name, resource_name)
+                    WHERE sender_webhook.project_id = item.project_id
+                      AND mention.resource_name = item.sender_provider_name
+                    ORDER BY sender_webhook.created_at, mention.name
+                    LIMIT 1
+                )) AS sender_name,
+                COALESCE(
+                    item.sender_provider_name = CONCAT('users/', account.provider_subject),
+                    FALSE
+                ) AS sent_by_owner,
+                item.content_text,
+                item.received_at, item.status, item.promoted_task_id,
+                item.acknowledged_at, item.completion_requested_at,
+                item.completion_reaction_at, item.completion_reply_at,
+                item.completion_delivery_error_code,
+                item.completion_delivery_attempt_count, item.version
+             FROM project_inflow_items AS item
+             JOIN project_google_chat_sources AS source ON source.id = item.source_id
+             JOIN google_chat_accounts AS account ON account.id = source.account_id
+             JOIN projects AS project ON project.id = item.project_id
+             WHERE item.user_id = $1 AND item.status <> 'pending'
+             ORDER BY item.updated_at DESC, item.id DESC
+             LIMIT 12",
         )
         .bind(user_id)
         .fetch_all(self.pool())
@@ -1185,7 +1461,10 @@ impl Database {
                 ), FALSE) AS sent_by_owner,
                 item.content_text,
                 item.received_at, item.status, item.promoted_task_id,
-                item.acknowledged_at, item.version",
+                item.acknowledged_at, item.completion_requested_at,
+                item.completion_reaction_at, item.completion_reply_at,
+                item.completion_delivery_error_code,
+                item.completion_delivery_attempt_count, item.version",
         )
         .bind(item_id)
         .bind(user_id)
@@ -1342,7 +1621,15 @@ async fn mark_inflow_group_promoted(
 ) -> Result<Option<ProjectInflowItem>, StorageError> {
     let rows = sqlx::query_as::<_, ProjectInflowItemRow>(
         "UPDATE project_inflow_items AS item
-         SET status = 'promoted', promoted_task_id = $2
+         SET status = 'promoted', promoted_task_id = $2,
+             completion_requested_at = CASE
+                 WHEN item.id = $1 THEN NOW()
+                 ELSE item.completion_requested_at
+             END,
+             completion_delivery_next_attempt_at = CASE
+                 WHEN item.id = $1 THEN NOW()
+                 ELSE item.completion_delivery_next_attempt_at
+             END
          FROM project_google_chat_sources AS source
          WHERE item.user_id = $3 AND item.project_id = $4
            AND item.status = 'pending' AND source.id = item.source_id
@@ -1373,7 +1660,10 @@ async fn mark_inflow_group_promoted(
             ), FALSE) AS sent_by_owner,
             item.content_text,
             item.received_at, item.status, item.promoted_task_id,
-            item.acknowledged_at, item.version",
+            item.acknowledged_at, item.completion_requested_at,
+            item.completion_reaction_at, item.completion_reply_at,
+            item.completion_delivery_error_code,
+            item.completion_delivery_attempt_count, item.version",
     )
     .bind(command.item_id)
     .bind(command.task_id)
@@ -1545,6 +1835,7 @@ fn source_sync_connection(
         user_id: row.user_id,
         project_id: row.project_id,
         provider_subject: row.provider_subject,
+        granted_scopes: row.granted_scopes,
         space_name: row.space_name,
         acknowledge_with_reaction: row.acknowledge_with_reaction,
         last_provider_message_at: row.last_provider_message_at,

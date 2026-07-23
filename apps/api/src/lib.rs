@@ -50,8 +50,8 @@ use jimin_storage::{
     goals::{GoalHealth, GoalNextActionKind, GoalOverview, GoalStatus, GoalUpdate, NewGoal},
     google_chat::{
         CreateGoogleChatOAuthAuthorization, GoogleChatAccount, GoogleChatAccountStatus,
-        NewProjectGoogleChatSource, ProjectGoogleChatSource, ProjectInflowItem,
-        ProjectInflowStatus, PromoteProjectInflowItem,
+        GoogleChatCompletionDelivery, GoogleChatSourceSyncConnection, NewProjectGoogleChatSource,
+        ProjectGoogleChatSource, ProjectInflowItem, ProjectInflowStatus, PromoteProjectInflowItem,
     },
     intelligence::{
         DecideRecommendation, DecideRecommendationOutcome, Recommendation, RecommendationDecision,
@@ -74,7 +74,9 @@ use jimin_storage::{
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use time::{Duration as TimeDuration, OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{
+    Duration as TimeDuration, OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339,
+};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tracing::warn;
@@ -512,6 +514,7 @@ pub struct HomeSnapshotResponse {
     tasks: Vec<TaskResponse>,
     due_tasks: Vec<TaskResponse>,
     inflow: Vec<ProjectInflowItemResponse>,
+    recent_inflow: Vec<ProjectInflowItemResponse>,
     recommendations: Vec<RecommendationResponse>,
 }
 
@@ -664,6 +667,10 @@ pub struct ProjectGoogleChatSourceListResponse {
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "The read model exposes independent sender, acknowledgement, assignment, reaction, and reply facets to shared clients."
+)]
 pub struct ProjectInflowItemResponse {
     id: uuid::Uuid,
     project_id: uuid::Uuid,
@@ -681,6 +688,11 @@ pub struct ProjectInflowItemResponse {
     status: String,
     promoted_task_id: Option<uuid::Uuid>,
     acknowledged: bool,
+    completion_status: String,
+    completion_reaction_completed: bool,
+    completion_reply_completed: bool,
+    completion_error_code: Option<String>,
+    completion_attempt_count: i32,
     assignee_options: Vec<String>,
     notifiable_assignee_names: Vec<String>,
     assignee_notification_available: bool,
@@ -2325,17 +2337,19 @@ async fn get_home_snapshot(
         return invalid_request_response(request_id);
     };
     let user_id = principal.identity().user_id();
-    let (schedule, tasks, due_tasks, recommendations, inflow_items, webhooks) = match tokio::try_join!(
-        planning.schedule_entries_in_range(user_id, from, to),
-        planning.home_tasks_for_user(user_id, to),
-        planning.deadline_tasks_for_user(user_id, deadline_boundary),
-        planning.active_recommendations_for_user(user_id, OffsetDateTime::now_utc(), 5),
-        planning.pending_project_inflow_for_user(user_id),
-        planning.user_project_webhooks(user_id),
-    ) {
-        Ok(values) => values,
-        Err(error) => return storage_error_response(&error, request_id),
-    };
+    let (schedule, tasks, due_tasks, recommendations, inflow_items, recent_inflow_items, webhooks) =
+        match tokio::try_join!(
+            planning.schedule_entries_in_range(user_id, from, to),
+            planning.home_tasks_for_user(user_id, to),
+            planning.deadline_tasks_for_user(user_id, deadline_boundary),
+            planning.active_recommendations_for_user(user_id, OffsetDateTime::now_utc(), 5),
+            planning.pending_project_inflow_for_user(user_id),
+            planning.recent_project_inflow_decisions_for_user(user_id),
+            planning.user_project_webhooks(user_id),
+        ) {
+            Ok(values) => values,
+            Err(error) => return storage_error_response(&error, request_id),
+        };
     let Ok(schedule) = schedule
         .into_iter()
         .map(schedule_entry_response)
@@ -2375,12 +2389,23 @@ async fn get_home_snapshot(
     for item in &mut inflow {
         apply_inflow_assignment_context(item, &contexts);
     }
+    let Ok(mut recent_inflow) = group_project_inflow_candidates(recent_inflow_items)
+        .into_iter()
+        .map(project_inflow_item_response)
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return unavailable_response(request_id);
+    };
+    for item in &mut recent_inflow {
+        apply_inflow_assignment_context(item, &contexts);
+    }
 
     Json(HomeSnapshotResponse {
         schedule,
         tasks,
         due_tasks,
         inflow,
+        recent_inflow,
         recommendations,
     })
     .into_response()
@@ -5795,11 +5820,38 @@ async fn decide_project_inflow_item(
         _ => return invalid_request_response(request_id),
     };
     match result {
-        Ok(Some(item)) => match project_inflow_item_response(single_project_inflow_candidate(item))
-        {
-            Ok(response) => no_store_json(response),
-            Err(()) => unavailable_response(request_id),
-        },
+        Ok(Some(mut item)) => {
+            if request.decision == "promote"
+                && let Some(runtime) = state.google_chat_oauth()
+                && let Ok(Some(connection)) = planning
+                    .google_chat_source_sync_connection(item.source_id)
+                    .await
+            {
+                if let Err(error) =
+                    deliver_google_chat_completions(planning, runtime, &connection, Some(item.id))
+                        .await
+                {
+                    warn!(
+                        event = "google_chat.completion_delivery_deferred",
+                        source_id = %item.source_id,
+                        error_code = error.failure_code(),
+                        "Google Chat completion delivery will be retried"
+                    );
+                }
+                if let Ok(items) = planning
+                    .project_inflow_items(user_id, project_id, Some(ProjectInflowStatus::Promoted))
+                    .await
+                    && let Some(refreshed) =
+                        items.into_iter().find(|candidate| candidate.id == item.id)
+                {
+                    item = refreshed;
+                }
+            }
+            match project_inflow_item_response(single_project_inflow_candidate(item)) {
+                Ok(response) => no_store_json(response),
+                Err(()) => unavailable_response(request_id),
+            }
+        }
         Ok(_) => error_response(
             StatusCode::CONFLICT,
             "project.inflow_changed",
@@ -5850,7 +5902,69 @@ async fn synchronize_google_chat_source(
             }
         }
     }
+    deliver_google_chat_completions(planning, runtime, &connection, None).await?;
     Ok(())
+}
+
+async fn deliver_google_chat_completions(
+    planning: &Database,
+    runtime: &GoogleChatOAuthRuntime,
+    connection: &GoogleChatSourceSyncConnection,
+    inflow_id: Option<uuid::Uuid>,
+) -> Result<(), GoogleChatOAuthError> {
+    let deliveries = planning
+        .pending_google_chat_completion_deliveries(connection.source_id, inflow_id, 20)
+        .await
+        .map_err(|_| GoogleChatOAuthError::ProviderUnavailable)?;
+    for delivery in deliveries {
+        let reply = google_chat_completion_reply(&delivery);
+        let outcome = runtime
+            .deliver_completion(connection, &delivery, &reply)
+            .await;
+        planning
+            .record_google_chat_completion_delivery(
+                &delivery,
+                outcome.reaction_completed,
+                outcome.reply_completed,
+                outcome.failure_code,
+            )
+            .await
+            .map_err(|_| GoogleChatOAuthError::ProviderUnavailable)?;
+        if let Some(error_code) = outcome.failure_code {
+            warn!(
+                event = "google_chat.completion_delivery_failed",
+                source_id = %connection.source_id,
+                attempt = delivery.attempt_count + 1,
+                error_code,
+                "Google Chat completion delivery is incomplete"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn google_chat_completion_reply(delivery: &GoogleChatCompletionDelivery) -> String {
+    let assignee = delivery.assignee_name.as_deref().unwrap_or("정하지 않음");
+    let due_at = delivery
+        .due_at
+        .map_or_else(|| "정하지 않음".to_owned(), format_google_chat_due_at);
+    format!(
+        "✅ Jimin OS에서 할 일로 정리했어요.\n할 일: {}\n담당자: {assignee}\n마감일: {due_at}",
+        delivery.task_title
+    )
+}
+
+fn format_google_chat_due_at(value: OffsetDateTime) -> String {
+    let korea_offset = UtcOffset::from_hms(9, 0, 0).expect("Korea offset should be valid");
+    let value = value.to_offset(korea_offset);
+    format!(
+        "{}년 {}월 {}일 {:02}:{:02}",
+        value.year(),
+        u8::from(value.month()),
+        value.day(),
+        value.hour(),
+        value.minute()
+    )
 }
 
 async fn synchronize_google_calendar(
@@ -6134,8 +6248,11 @@ fn calendar_connection_response(
 }
 
 fn google_chat_account_response(account: GoogleChatAccount) -> GoogleChatAccountResponse {
+    let write_scope_missing =
+        !GoogleChatOAuthRuntime::completion_scope_granted(&account.granted_scopes);
     let status = match account.status {
         GoogleChatAccountStatus::Connecting => "connecting",
+        GoogleChatAccountStatus::Active if write_scope_missing => "reauth_required",
         GoogleChatAccountStatus::Active => "active",
         GoogleChatAccountStatus::ReauthRequired => "reauth_required",
         GoogleChatAccountStatus::Revoking => "revoking",
@@ -6149,8 +6266,13 @@ fn google_chat_account_response(account: GoogleChatAccount) -> GoogleChatAccount
         last_successful_sync_at: account
             .last_successful_sync_at
             .and_then(|value| value.format(&Rfc3339).ok()),
-        last_error_code: account.last_error_code,
-        reauth_required: account.status == GoogleChatAccountStatus::ReauthRequired,
+        last_error_code: if write_scope_missing {
+            Some("google_chat.write_scope_missing".to_owned())
+        } else {
+            account.last_error_code
+        },
+        reauth_required: account.status == GoogleChatAccountStatus::ReauthRequired
+            || write_scope_missing,
         version: account.version,
     }
 }
@@ -6396,6 +6518,26 @@ fn project_inflow_item_response(
     } = candidate;
     let first_received_at = messages.first().ok_or(())?.received_at;
     let acknowledged = messages.iter().all(|item| item.acknowledged_at.is_some());
+    let completion = messages
+        .iter()
+        .find(|item| item.completion_requested_at.is_some());
+    let completion_reaction_completed =
+        completion.is_some_and(|item| item.completion_reaction_at.is_some());
+    let completion_reply_completed =
+        completion.is_some_and(|item| item.completion_reply_at.is_some());
+    let completion_error_code =
+        completion.and_then(|item| item.completion_delivery_error_code.clone());
+    let completion_attempt_count =
+        completion.map_or(0, |item| item.completion_delivery_attempt_count);
+    let completion_status = if completion.is_none() {
+        "not_requested"
+    } else if completion_reaction_completed && completion_reply_completed {
+        "sent"
+    } else if completion_error_code.is_some() {
+        "failed"
+    } else {
+        "pending"
+    };
     let message_count = messages.len();
     let messages = messages
         .into_iter()
@@ -6434,6 +6576,11 @@ fn project_inflow_item_response(
         status: project_inflow_status_name(representative.status).to_owned(),
         promoted_task_id: representative.promoted_task_id,
         acknowledged,
+        completion_status: completion_status.to_owned(),
+        completion_reaction_completed,
+        completion_reply_completed,
+        completion_error_code,
+        completion_attempt_count,
         assignee_options: Vec::new(),
         notifiable_assignee_names: Vec::new(),
         assignee_notification_available: false,
@@ -8227,6 +8374,11 @@ mod tests {
                     status: ProjectInflowStatus::Pending,
                     promoted_task_id: None,
                     acknowledged_at: Some(received_at),
+                    completion_requested_at: None,
+                    completion_reaction_at: None,
+                    completion_reply_at: None,
+                    completion_delivery_error_code: None,
+                    completion_delivery_attempt_count: 0,
                     version: 1,
                 }
             };
@@ -8271,6 +8423,31 @@ mod tests {
         assert!(group_project_inflow_candidates(vec![owner_comment]).is_empty());
         assert_eq!(inflow_actionability_score("ip전달 먼저"), 0);
         assert_eq!(inflow_actionability_score("리체크용 해야함"), 0);
+    }
+
+    #[test]
+    fn google_chat_completion_reply_contains_task_owner_and_korea_deadline() {
+        let due_at =
+            OffsetDateTime::parse("2026-07-24T02:30:00Z", &Rfc3339).expect("deadline should parse");
+        let reply = google_chat_completion_reply(&GoogleChatCompletionDelivery {
+            inflow_id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            source_id: Uuid::now_v7(),
+            provider_message_name: "spaces/company/messages/message-1.message-1".to_owned(),
+            provider_thread_name: Some("spaces/company/threads/thread-1".to_owned()),
+            task_id: Uuid::now_v7(),
+            task_title: "정산 오류 원인 확인".to_owned(),
+            assignee_name: Some("김경주".to_owned()),
+            due_at: Some(due_at),
+            reaction_completed: false,
+            reply_completed: false,
+            attempt_count: 0,
+        });
+
+        assert_eq!(
+            reply,
+            "✅ Jimin OS에서 할 일로 정리했어요.\n할 일: 정산 오류 원인 확인\n담당자: 김경주\n마감일: 2026년 7월 24일 11:30"
+        );
     }
 
     #[tokio::test]

@@ -1017,6 +1017,8 @@ fn render_contextualized_turn(
          completed_tasks contains real completion history in newest-first order. For requests about work completed today, \
          use only records whose completed timestamp falls within the current Korea local day. Never infer completion from open_tasks. \
          When the user asks to undo an accidental completion or restore completed work, use reopen_task with the completed task ID. \
+         When the user asks to reopen a completed task and also change its fields, use one update_task action with status open, \
+         preserving every unchanged replacement field. Do not emit a separate reopen_task for the same entity. \
          For updates, copy every replacement field from server context and change only what the user requested. \
          For create_task, act like a chief of staff instead of copying the request. Rewrite the user's speech into one concise, \
          action-oriented title that states the outcome, keeps proper nouns and numbers, and removes dates, filler, request verbs, \
@@ -1028,13 +1030,18 @@ fn render_contextualized_turn(
          Set allowScheduleConflict to false by default. Set it to true only when the user's current message explicitly says \
          to keep or add the schedule despite a conflict that recent_conversation says was already disclosed. Never infer consent. \
          When the user explicitly asks to delete or remove an existing project, use delete_project; its linked tasks become unassigned. \
-         When the user explicitly asks to post or send a message to a configured project channel, use exactly one \
-         send_webhook_message action with that webhook ID, its project ID, and a concise message. Never send when the \
-         destination or intended message is ambiguous, and never mix a webhook message with other actions. \
+         When the user explicitly asks to post or send a message to a configured project channel, use one \
+         send_webhook_message action with that webhook ID, its project ID, and a concise message. It may be combined with \
+         local task or project actions in the same atomic batch when the user requests them together. Include the referenced \
+         task number or title and the user's requested wording when the message concerns a task. Never send when the destination \
+         or intended message is ambiguous. \
          For Google Chat, project_webhooks exposes matching registered mention_names without user IDs. When the user explicitly \
          asks to mention a listed person, include exactly @{Name} in the message. Do not add a mention merely because a \
          person's name appears, and leave names that are not listed as plain text. \
          Use exact existing entity, workspace, and project IDs; the server creates IDs for new records. \
+         If the current request is a short affirmative confirmation such as 네, 넵, 응, 진행해, or 해줘, execute the exact \
+         bounded action plan proposed by the immediately preceding assistant message and requested by the user just before it. \
+         Do not ask again. If that immediate plan lacks an exact target, destination, or message, clarify instead. \
          Use RFC3339 timestamps with the current +09:00 offset. An empty optional string means no value. \
          Never modify a Google Calendar entry; ask the user to change it in Google Calendar. \
          If actions is not empty, answer only that the request is being processed; the server writes the final completion message after the whole batch commits.\n\n",
@@ -1580,7 +1587,10 @@ fn assistant_output_schema() -> Value {
                             "type": "boolean",
                             "description": "True only when the user explicitly asks to keep or add the requested schedule despite a conflict already disclosed in the confirmed conversation history."
                         },
-                        "status": { "type": "string" },
+                        "status": {
+                            "type": "string",
+                            "description": "For update_task, use open when reopening a completed task while changing it; otherwise preserve the current status. For update_project, use active, paused, or completed."
+                        },
                         "riskLevel": { "type": "integer" },
                         "objective": { "type": "string" },
                         "nextAction": { "type": "string" }
@@ -1620,6 +1630,10 @@ fn assistant_output_schema() -> Value {
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "The validation gate keeps the complete assistant response contract together."
+)]
 fn validated_assistant_response(
     response: &str,
     context: &TurnContext,
@@ -1801,9 +1815,9 @@ fn validated_agent_actions(
     }
     if actions
         .iter()
-        .any(|action| matches!(action, AgentActionCommand::SendWebhookMessage { .. }))
-        && (actions.len() != 1
-            || !matches!(actions[0], AgentActionCommand::SendWebhookMessage { .. }))
+        .filter(|action| matches!(action, AgentActionCommand::SendWebhookMessage { .. }))
+        .count()
+        > 1
     {
         return Err(());
     }
@@ -1903,7 +1917,7 @@ fn validated_agent_action(
                 return Err(());
             }
             let title = required_action_text(&action.title, 200)?;
-            let notes = optional_action_text(&action.notes, 10_000)?;
+            let notes = optional_action_document(&action.notes, 10_000)?;
             let due_at = parse_optional_timestamp(&action.due_at)?;
             if task_action_is_clock_bound_schedule(&context.prompt, &title) {
                 let starts_at = due_at
@@ -1945,11 +1959,13 @@ fn validated_agent_action(
         }
         StructuredAssistantActionKind::UpdateTask => {
             let id = parse_existing_id(&action.entity_id)?;
-            let task = context
-                .tasks
-                .iter()
-                .find(|task| task.id == id && task.status == TaskStatus::Open)
-                .ok_or(())?;
+            let task = context.tasks.iter().find(|task| task.id == id).ok_or(())?;
+            let status = match (task.status, action.status.trim()) {
+                (TaskStatus::Open, "" | "open") | (TaskStatus::Completed, "open") => {
+                    TaskStatus::Open
+                }
+                _ => return Err(()),
+            };
             let project_id = parse_optional_id(&action.project_id)?;
             if project_id.is_some_and(|id| !context.projects.iter().any(|project| project.id == id))
             {
@@ -1959,10 +1975,12 @@ fn validated_agent_action(
                 id,
                 project_id,
                 title: required_action_text(&action.title, 200)?,
-                notes: optional_action_text(&action.notes, 10_000)?,
+                notes: optional_action_document(&action.notes, 10_000)?,
                 assignee_name: optional_action_text(&action.assignee_name, 80)?,
                 priority: validated_level(action.priority)?,
                 due_at: parse_optional_timestamp(&action.due_at)?,
+                status,
+                expected_status: task.status,
                 expected_version: task.version,
             }
         }
@@ -2014,7 +2032,7 @@ fn validated_agent_action(
             AgentActionCommand::CreateSchedule {
                 id: Uuid::now_v7(),
                 title: required_action_text(&action.title, 200)?,
-                notes: optional_action_text(&action.notes, 10_000)?,
+                notes: optional_action_document(&action.notes, 10_000)?,
                 starts_at,
                 ends_at,
                 time_zone,
@@ -2036,7 +2054,7 @@ fn validated_agent_action(
             AgentActionCommand::UpdateSchedule {
                 id,
                 title: required_action_text(&action.title, 200)?,
-                notes: optional_action_text(&action.notes, 10_000)?,
+                notes: optional_action_document(&action.notes, 10_000)?,
                 starts_at,
                 ends_at,
                 time_zone: required_action_text(&action.time_zone, 80)?,
@@ -2069,7 +2087,7 @@ fn validated_agent_action(
                 id: Uuid::now_v7(),
                 workspace_id,
                 title: required_action_text(&action.title, 200)?,
-                objective: optional_action_text(&action.objective, 10_000)?,
+                objective: optional_action_document(&action.objective, 10_000)?,
                 risk_level: validated_level(action.risk_level)?,
                 next_action: optional_action_text(&action.next_action, 500)?,
                 due_at: parse_optional_timestamp(&action.due_at)?,
@@ -2085,7 +2103,7 @@ fn validated_agent_action(
             AgentActionCommand::UpdateProject {
                 id,
                 title: required_action_text(&action.title, 200)?,
-                objective: optional_action_text(&action.objective, 10_000)?,
+                objective: optional_action_document(&action.objective, 10_000)?,
                 status: match action.status.trim() {
                     "active" => ProjectStatus::Active,
                     "paused" => ProjectStatus::Paused,
@@ -2120,7 +2138,7 @@ fn validated_agent_action(
                 id: Uuid::now_v7(),
                 project_id,
                 webhook_id,
-                message: required_action_text(&action.message, 1_800)?,
+                message: required_action_document(&action.message, 1_800)?,
             }
         }
     };
@@ -2163,6 +2181,25 @@ fn optional_action_text(value: &str, maximum: usize) -> Result<Option<String>, (
     }
 }
 
+fn optional_action_document(value: &str, maximum: usize) -> Result<Option<String>, ()> {
+    let value = value.trim();
+    if value.is_empty() {
+        Ok(None)
+    } else if value.chars().count() > maximum
+        || value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        Err(())
+    } else {
+        Ok(Some(value.to_owned()))
+    }
+}
+
+fn required_action_document(value: &str, maximum: usize) -> Result<String, ()> {
+    optional_action_document(value, maximum)?.ok_or(())
+}
+
 fn user_request_from_prompt(prompt: &str) -> &str {
     let request = prompt
         .rsplit_once("<user_request>\n")
@@ -2187,7 +2224,7 @@ fn validated_created_task_copy(
     notes: &str,
 ) -> Result<(String, Option<String>), ()> {
     let title = required_action_text(title, 80)?;
-    let notes = optional_action_text(notes, 2_000)?;
+    let notes = optional_action_document(notes, 2_000)?;
     let request = user_request_from_prompt(prompt);
     if request.is_empty() {
         return Ok((title, notes));
@@ -2288,6 +2325,13 @@ fn agent_action_results(
     if actions.is_empty() || actions.len() > MAX_AGENT_ACTIONS {
         return Err(());
     }
+    let webhook_count = actions
+        .iter()
+        .filter(|action| matches!(action, AgentActionCommand::SendWebhookMessage { .. }))
+        .count();
+    if webhook_count > 1 {
+        return Err(());
+    }
     if let [AgentActionCommand::SendWebhookMessage { .. }] = actions {
         return Ok((
             "연결된 채널로 메시지 전송을 시작했어요.".to_owned(),
@@ -2310,6 +2354,9 @@ fn agent_action_results(
     let mut schedule_ids = Vec::new();
     let mut project_ids = Vec::new();
     for action in actions {
+        if matches!(action, AgentActionCommand::SendWebhookMessage { .. }) {
+            continue;
+        }
         let (_, result) = agent_action_result(action, context)?;
         let [item] = result.items.as_slice() else {
             return Err(());
@@ -2323,57 +2370,78 @@ fn agent_action_results(
         items.push(item.clone());
     }
 
-    let all_completed_tasks = actions.iter().all(|action| {
-        matches!(
-            action,
-            AgentActionCommand::SetTaskStatus {
-                status: TaskStatus::Completed,
-                ..
-            }
-        )
-    });
-    let all_cancelled_tasks = actions.iter().all(|action| {
-        matches!(
-            action,
-            AgentActionCommand::SetTaskStatus {
-                status: TaskStatus::Cancelled,
-                ..
-            }
-        )
-    });
-    let all_reopened_tasks = actions.iter().all(|action| {
-        matches!(
-            action,
-            AgentActionCommand::SetTaskStatus {
-                status: TaskStatus::Open,
-                ..
-            }
-        )
-    });
+    let all_completed_tasks = actions
+        .iter()
+        .filter(|action| !matches!(action, AgentActionCommand::SendWebhookMessage { .. }))
+        .all(|action| {
+            matches!(
+                action,
+                AgentActionCommand::SetTaskStatus {
+                    status: TaskStatus::Completed,
+                    ..
+                }
+            )
+        });
+    let all_cancelled_tasks = actions
+        .iter()
+        .filter(|action| !matches!(action, AgentActionCommand::SendWebhookMessage { .. }))
+        .all(|action| {
+            matches!(
+                action,
+                AgentActionCommand::SetTaskStatus {
+                    status: TaskStatus::Cancelled,
+                    ..
+                }
+            )
+        });
+    let all_reopened_tasks = actions
+        .iter()
+        .filter(|action| !matches!(action, AgentActionCommand::SendWebhookMessage { .. }))
+        .all(|action| {
+            matches!(
+                action,
+                AgentActionCommand::SetTaskStatus {
+                    status: TaskStatus::Open,
+                    ..
+                } | AgentActionCommand::UpdateTask {
+                    status: TaskStatus::Open,
+                    expected_status: TaskStatus::Completed,
+                    ..
+                }
+            )
+        });
     let all_created_tasks = actions
         .iter()
+        .filter(|action| !matches!(action, AgentActionCommand::SendWebhookMessage { .. }))
         .all(|action| matches!(action, AgentActionCommand::CreateTask { .. }));
     let all_created_schedules = actions
         .iter()
+        .filter(|action| !matches!(action, AgentActionCommand::SendWebhookMessage { .. }))
         .all(|action| matches!(action, AgentActionCommand::CreateSchedule { .. }));
     let all_cancelled_schedules = actions
         .iter()
+        .filter(|action| !matches!(action, AgentActionCommand::SendWebhookMessage { .. }))
         .all(|action| matches!(action, AgentActionCommand::CancelSchedule { .. }));
-    let all_schedule_actions = actions.iter().all(|action| {
-        matches!(
-            action,
-            AgentActionCommand::CreateSchedule { .. }
-                | AgentActionCommand::UpdateSchedule { .. }
-                | AgentActionCommand::CancelSchedule { .. }
-        )
-    });
+    let all_schedule_actions = actions
+        .iter()
+        .filter(|action| !matches!(action, AgentActionCommand::SendWebhookMessage { .. }))
+        .all(|action| {
+            matches!(
+                action,
+                AgentActionCommand::CreateSchedule { .. }
+                    | AgentActionCommand::UpdateSchedule { .. }
+                    | AgentActionCommand::CancelSchedule { .. }
+            )
+        });
     let all_created_projects = actions
         .iter()
+        .filter(|action| !matches!(action, AgentActionCommand::SendWebhookMessage { .. }))
         .all(|action| matches!(action, AgentActionCommand::CreateProject { .. }));
     let all_deleted_projects = actions
         .iter()
+        .filter(|action| !matches!(action, AgentActionCommand::SendWebhookMessage { .. }))
         .all(|action| matches!(action, AgentActionCommand::DeleteProject { .. }));
-    let count = actions.len();
+    let count = actions.len() - webhook_count;
     let (answer, title, task_section_title, schedule_section_title, project_section_title) =
         if all_completed_tasks {
             (
@@ -2456,6 +2524,32 @@ fn agent_action_results(
                 "처리한 프로젝트",
             )
         };
+    let (answer, title) = if webhook_count == 1 {
+        let reopened_and_updated = count == 1
+            && actions.iter().any(|action| {
+                matches!(
+                    action,
+                    AgentActionCommand::UpdateTask {
+                        status: TaskStatus::Open,
+                        expected_status: TaskStatus::Completed,
+                        ..
+                    }
+                )
+            });
+        if reopened_and_updated {
+            (
+                "할 일을 다시 열어 변경하고 연결된 채널로 메시지 전송을 시작했어요.".to_owned(),
+                "할 일을 변경하고 메시지 전송을 시작했어요".to_owned(),
+            )
+        } else {
+            (
+                "요청한 변경을 저장하고 연결된 채널로 메시지 전송을 시작했어요.".to_owned(),
+                "변경하고 메시지 전송을 시작했어요".to_owned(),
+            )
+        }
+    } else {
+        (answer, title)
+    };
 
     let mut sections = Vec::with_capacity(MAX_PRESENTATION_SECTIONS);
     if !task_ids.is_empty() {
@@ -2547,27 +2641,44 @@ fn agent_action_result(
             assignee_name,
             priority,
             due_at,
+            status,
+            expected_status,
             ..
-        } => (
-            format!("{title} 할 일을 수정했어요."),
-            "할 일을 수정했어요",
-            "수정한 할 일",
-            AssistantPresentationKind::Tasks,
-            AssistantPresentationSectionKind::Tasks,
-            AssistantPresentationView::Checklist,
-            task_action_presentation_item(
-                TaskPresentationInput {
-                    id: *id,
-                    project_id: *project_id,
-                    assignee_name: assignee_name.as_deref(),
-                    title,
-                    status: TaskStatus::Open,
-                    priority: *priority,
-                    due_at: *due_at,
+        } => {
+            let reopened = *expected_status == TaskStatus::Completed && *status == TaskStatus::Open;
+            (
+                if reopened {
+                    format!("{title} 할 일을 다시 열고 수정했어요.")
+                } else {
+                    format!("{title} 할 일을 수정했어요.")
                 },
-                &context.projects,
-            ),
-        ),
+                if reopened {
+                    "할 일을 다시 열고 수정했어요"
+                } else {
+                    "할 일을 수정했어요"
+                },
+                if reopened {
+                    "다시 진행할 할 일"
+                } else {
+                    "수정한 할 일"
+                },
+                AssistantPresentationKind::Tasks,
+                AssistantPresentationSectionKind::Tasks,
+                AssistantPresentationView::Checklist,
+                task_action_presentation_item(
+                    TaskPresentationInput {
+                        id: *id,
+                        project_id: *project_id,
+                        assignee_name: assignee_name.as_deref(),
+                        title,
+                        status: *status,
+                        priority: *priority,
+                        due_at: *due_at,
+                    },
+                    &context.projects,
+                ),
+            )
+        }
         AgentActionCommand::SetTaskStatus { id, status, .. } => {
             let task = context.tasks.iter().find(|task| task.id == *id).ok_or(())?;
             let (verb, title, section_title) = match status {
@@ -3593,6 +3704,8 @@ mod tests {
         assert!(prompt.contains("<recent_conversation>"));
         assert!(prompt.contains("오후 3시에는 회사 회의가 있어"));
         assert!(prompt.contains("server-confirmed outcomes"));
+        assert!(prompt.contains("It may be combined with"));
+        assert!(prompt.contains("short affirmative confirmation"));
         assert!(prompt.contains("<user_request>\n내일 일정 알려줘"));
     }
 
@@ -5106,6 +5219,138 @@ mod tests {
             ..action
         };
         assert!(validated_agent_action(&unconfigured, &context).is_err());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Keep the complete user-reported compound request in one regression fixture.
+    fn completed_task_can_be_reopened_updated_and_sent_to_chat_in_one_batch() {
+        let webhook_id = Uuid::now_v7();
+        let project_id = Uuid::now_v7();
+        let project = Project {
+            id: project_id,
+            workspace_id: Uuid::now_v7(),
+            title: "비스킷링크".to_owned(),
+            objective: None,
+            status: ProjectStatus::Active,
+            risk_level: 1,
+            next_action: None,
+            due_at: None,
+            open_task_count: 0,
+            version: 4,
+        };
+        let task = Task {
+            id: Uuid::now_v7(),
+            project_id: Some(project_id),
+            title: "#3863 BO 거래내역 권한 오류 수정".to_owned(),
+            notes: Some("BO 거래내역 조회 오류를 수정한다.".to_owned()),
+            assignee_name: Some("주홍석".to_owned()),
+            status: TaskStatus::Completed,
+            priority: 2,
+            due_at: None,
+            completed_at: Some(OffsetDateTime::now_utc()),
+            version: 7,
+        };
+        let context = TurnContext {
+            prompt: format!(
+                "<project_webhooks>\n- [id {webhook_id} | project {project_id} | provider google_chat | enabled true | mention_names 주홍석] Google Chat\n</project_webhooks>\n<user_request>\n해당 건 다시 활성화하고 담당자 주홍석으로 한 다음 문구를 추가해서 챗 전송\n</user_request>"
+            ),
+            schedule: Vec::new(),
+            tasks: vec![task.clone()],
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: vec![project],
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
+        };
+        let response = serde_json::json!({
+            "intent": { "mode": "mutate", "confidence": 99 },
+            "answer": "요청을 처리 중입니다.",
+            "presentation": {
+                "title": "",
+                "layout": "stack",
+                "focusEntityId": "",
+                "sections": []
+            },
+            "actions": [
+                {
+                    "kind": "update_task",
+                    "entityId": task.id,
+                    "workspaceId": "",
+                    "projectId": project_id,
+                    "title": task.title,
+                    "notes": "BO 거래내역 조회 오류를 수정한다.\n아직도 권한 없다고 뜨잖아요 확인 제대로 안해요?",
+                    "assigneeName": "주홍석",
+                    "priority": 2,
+                    "dueAt": "",
+                    "startsAt": "",
+                    "endsAt": "",
+                    "timeZone": "",
+                    "allowScheduleConflict": false,
+                    "status": "open",
+                    "riskLevel": 0,
+                    "objective": "",
+                    "nextAction": "",
+                    "message": ""
+                },
+                {
+                    "kind": "send_webhook_message",
+                    "entityId": webhook_id,
+                    "workspaceId": "",
+                    "projectId": project_id,
+                    "title": "",
+                    "notes": "",
+                    "assigneeName": "",
+                    "priority": 0,
+                    "dueAt": "",
+                    "startsAt": "",
+                    "endsAt": "",
+                    "timeZone": "",
+                    "allowScheduleConflict": false,
+                    "status": "",
+                    "riskLevel": 0,
+                    "objective": "",
+                    "nextAction": "",
+                    "message": "#3863 아직도 권한 없다고 뜨잖아요 확인 제대로 안해요?"
+                }
+            ]
+        })
+        .to_string();
+
+        let structured: super::StructuredAssistantTurn =
+            serde_json::from_str(&response).expect("structured response");
+        assert!(
+            validated_agent_action(&structured.actions[0], &context).is_ok(),
+            "task update should validate"
+        );
+        assert!(
+            validated_agent_action(&structured.actions[1], &context).is_ok(),
+            "webhook message should validate"
+        );
+        let (_, _, actions) =
+            validated_assistant_response(&response, &context).expect("compound action batch");
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(
+            &actions[0],
+            AgentActionCommand::UpdateTask {
+                status: TaskStatus::Open,
+                expected_status: TaskStatus::Completed,
+                assignee_name: Some(name),
+                expected_version: 7,
+                ..
+            } if name == "주홍석"
+        ));
+        assert!(matches!(
+            &actions[1],
+            AgentActionCommand::SendWebhookMessage { message, .. }
+                if message.contains("#3863") && message.contains("권한 없다고")
+        ));
+
+        let (answer, presentation) =
+            agent_action_results(&actions, &context).expect("compound action result");
+        assert!(answer.contains("다시 열어 변경"));
+        assert!(answer.contains("메시지 전송을 시작"));
+        assert_eq!(presentation.items.len(), 1);
+        assert_eq!(presentation.focus_item_id, None);
     }
 
     #[test]

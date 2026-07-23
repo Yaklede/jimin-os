@@ -571,6 +571,7 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
                     "https://www.googleapis.com/auth/chat.spaces.readonly".to_owned(),
                     "https://www.googleapis.com/auth/chat.messages.readonly".to_owned(),
                     "https://www.googleapis.com/auth/chat.messages.reactions.create".to_owned(),
+                    "https://www.googleapis.com/auth/chat.messages.create".to_owned(),
                 ],
                 refresh_token: Some(EncryptedCalendarSecret {
                     ciphertext: vec![marker; 64],
@@ -677,6 +678,8 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             .expect("cross-project decision should be rejected safely")
             .is_none()
     );
+    let due_at = OffsetDateTime::parse("2026-07-27T03:00:00Z", &Rfc3339)
+        .expect("task deadline should parse");
     let promoted = database
         .promote_project_inflow_item(&PromoteProjectInflowItem {
             user_id: owner.profile.id,
@@ -687,7 +690,7 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             title: "회사 요청 확인".to_owned(),
             assignee_name: Some("개발 담당자".to_owned()),
             priority: 2,
-            due_at: None,
+            due_at: Some(due_at),
         })
         .await
         .expect("owned inflow should promote")
@@ -706,22 +709,64 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         item.promoted_task_id == promoted.promoted_task_id
             && item.provider_thread_name == promoted.provider_thread_name
     }));
+    let completion_deliveries = database
+        .pending_google_chat_completion_deliveries(source.id, Some(promoted.id), 20)
+        .await
+        .expect("completion delivery should load");
+    assert_eq!(completion_deliveries.len(), 1);
+    assert_eq!(completion_deliveries[0].due_at, Some(due_at));
+    assert_eq!(
+        completion_deliveries[0].assignee_name.as_deref(),
+        Some("개발 담당자")
+    );
+    database
+        .record_google_chat_completion_delivery(&completion_deliveries[0], true, true, None)
+        .await
+        .expect("successful completion delivery should persist");
+    let completed_group = database
+        .project_inflow_items(
+            owner.profile.id,
+            first_project.id,
+            Some(ProjectInflowStatus::Promoted),
+        )
+        .await
+        .expect("completed Chat thread should load");
+    let selected_completion = completed_group
+        .iter()
+        .find(|item| item.id == promoted.id)
+        .expect("selected promoted message should remain available");
+    assert!(selected_completion.completion_reaction_at.is_some());
+    assert!(selected_completion.completion_reply_at.is_some());
+    assert!(selected_completion.completion_delivery_error_code.is_none());
+    assert_eq!(selected_completion.completion_delivery_attempt_count, 1);
+    assert!(
+        database
+            .recent_project_inflow_decisions_for_user(owner.profile.id)
+            .await
+            .expect("recent decision history should load")
+            .iter()
+            .any(|item| item.id == promoted.id)
+    );
     let pool = sqlx::PgPool::connect(&database_url)
         .await
         .expect("test database should accept direct checks");
-    let (notes_length, assignee_name) = sqlx::query_as::<_, (i32, Option<String>)>(
-        "SELECT char_length(notes), assignee_name FROM tasks WHERE id = $1",
-    )
-    .bind(
-        promoted
-            .promoted_task_id
-            .expect("promoted task should exist"),
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("promoted task notes should load");
-    assert_eq!(notes_length, 10_000);
+    let (notes, assignee_name, stored_due_at) =
+        sqlx::query_as::<_, (Option<String>, Option<String>, Option<OffsetDateTime>)>(
+            "SELECT notes, assignee_name, due_at FROM tasks WHERE id = $1",
+        )
+        .bind(
+            promoted
+                .promoted_task_id
+                .expect("promoted task should exist"),
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("promoted task notes should load");
+    let notes = notes.expect("promoted task should keep source evidence");
+    assert!(notes.contains("확인이 필요한 회사 요청입니다."));
+    assert!(notes.contains("개발 범위와 예상 일정을 확인해 주세요."));
     assert_eq!(assignee_name.as_deref(), Some("개발 담당자"));
+    assert_eq!(stored_due_at, Some(due_at));
     pool.close().await;
     database.close().await;
 }
@@ -753,10 +798,17 @@ fn assert_automatic_webhook_delivery(
         .expect("automatic webhook payload should be an object");
     let expected_project_id = project_id.to_string();
     let expected_entity_id = entity_id.to_string();
-    assert_eq!(
-        payload.len(),
-        4,
-        "payload must not leak mutable entity data"
+    let base_keys = ["event", "projectId", "entityId", "occurredAt"];
+    let base_keys = base_keys.into_iter().collect::<HashSet<_>>();
+    let task_keys = base_keys
+        .iter()
+        .copied()
+        .chain(["title", "projectTitle", "dueAt", "assigneeName", "message"])
+        .collect::<HashSet<_>>();
+    let actual_keys = payload.keys().map(String::as_str).collect::<HashSet<_>>();
+    assert!(
+        actual_keys == base_keys || (event_type.starts_with("task.") && actual_keys == task_keys),
+        "automatic webhooks should expose only their documented projection"
     );
     assert_eq!(
         payload.get("event").and_then(serde_json::Value::as_str),
@@ -1485,9 +1537,9 @@ async fn automatic_work_mutations_queue_safe_unique_webhook_deliveries() {
     }
     assert!(deliveries.iter().all(|delivery| {
         let payload = delivery.payload.to_string();
-        !payload.contains("노출되면 안 되는")
-            && !payload.contains("자동 웹훅 검증 수정")
-            && !payload.contains("자동 이벤트 할 일 수정")
+        !payload.contains("ciphertext")
+            && !payload.contains("nonce")
+            && !payload.contains("authorization")
     }));
 
     // The worker sends this immutable delivery ID as both X-Jimin-Delivery
@@ -1726,9 +1778,9 @@ async fn project_webhook_update_preserves_secrets_and_queued_mention_snapshots()
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
-    reason = "The test verifies that an Agent webhook action, its audit rows, and its delivery commit atomically."
+    reason = "The test verifies that an Agent task restoration, webhook action, audit rows, and delivery commit atomically."
 )]
-async fn agent_webhook_message_commits_with_its_action_audit() {
+async fn agent_task_reopen_and_webhook_message_commit_as_one_batch() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;
     };
@@ -1780,6 +1832,24 @@ async fn agent_webhook_message_commits_with_its_action_audit() {
         })
         .await
         .expect("webhook should persist");
+    let task = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            project_id: Some(project.id),
+            title: "#3863 BO 거래내역 권한 오류 수정".to_owned(),
+            notes: Some("BO 거래내역 조회 오류를 수정한다.".to_owned()),
+            assignee_name: Some("주홍석".to_owned()),
+            priority: 2,
+            due_at: None,
+        })
+        .await
+        .expect("task should persist");
+    let task = database
+        .complete_task(owner.profile.id, task.id, task.version)
+        .await
+        .expect("task completion should succeed")
+        .expect("task should be completed");
     let conversation_id = Uuid::now_v7();
     database
         .create_conversation(&NewConversation {
@@ -1796,7 +1866,7 @@ async fn agent_webhook_message_commits_with_its_action_audit() {
             client_message_id: Uuid::now_v7(),
             user_id: owner.profile.id,
             conversation_id,
-            content: "확인해야 할 일감을 Google Chat으로 보내 줘".to_owned(),
+            content: "#3863을 다시 열고 담당자를 지정한 뒤 Google Chat으로 보내 줘".to_owned(),
         })
         .await
         .expect("turn should queue");
@@ -1825,14 +1895,32 @@ async fn agent_webhook_message_commits_with_its_action_audit() {
                 job.id,
                 runner_id,
                 Uuid::now_v7(),
-                "연결된 Google Chat 공간으로 메시지 전송을 시작했어요.",
+                "할 일을 다시 열어 변경하고 연결된 채널로 메시지 전송을 시작했어요.",
                 None,
-                &[AgentActionCommand::SendWebhookMessage {
-                    id: delivery_id,
-                    project_id: project.id,
-                    webhook_id: webhook.id,
-                    message: "@{조지민} 확인해야 할 일감을 검토해 주세요.".to_owned(),
-                }],
+                &[
+                    AgentActionCommand::UpdateTask {
+                        id: task.id,
+                        project_id: task.project_id,
+                        title: task.title.clone(),
+                        notes: Some(
+                            "BO 거래내역 조회 오류를 수정한다.\n아직도 권한 없다고 뜨잖아요 확인 제대로 안해요?"
+                                .to_owned(),
+                        ),
+                        assignee_name: Some("주홍석".to_owned()),
+                        priority: task.priority,
+                        due_at: task.due_at,
+                        status: TaskStatus::Open,
+                        expected_status: TaskStatus::Completed,
+                        expected_version: task.version,
+                    },
+                    AgentActionCommand::SendWebhookMessage {
+                        id: delivery_id,
+                        project_id: project.id,
+                        webhook_id: webhook.id,
+                        message: "#3863 아직도 권한 없다고 뜨잖아요 확인 제대로 안해요?"
+                            .to_owned(),
+                    },
+                ],
             )
             .await
             .expect("Agent webhook action should commit")
@@ -1849,26 +1937,35 @@ async fn agent_webhook_message_commits_with_its_action_audit() {
     .fetch_one(&pool)
     .await
     .expect("job action audit should load");
-    assert_eq!(
-        job_audit,
-        (
-            "completed".to_owned(),
-            1,
-            Some("send_webhook_message".to_owned()),
-            Some(delivery_id),
-        )
-    );
-    let ordered_audit: (i16, String, Uuid) = sqlx::query_as(
+    assert_eq!(job_audit, ("completed".to_owned(), 2, None, None));
+    let ordered_audit: Vec<(i16, String, Uuid)> = sqlx::query_as(
         "SELECT action_index, action_type, entity_id
-         FROM agent_job_action_executions WHERE job_id = $1",
+         FROM agent_job_action_executions WHERE job_id = $1 ORDER BY action_index",
     )
     .bind(job.id)
-    .fetch_one(&pool)
+    .fetch_all(&pool)
     .await
     .expect("ordered Agent action audit should load");
     assert_eq!(
         ordered_audit,
-        (0, "send_webhook_message".to_owned(), delivery_id)
+        vec![
+            (0, "update_task".to_owned(), task.id),
+            (1, "send_webhook_message".to_owned(), delivery_id),
+        ]
+    );
+    let reopened = database
+        .open_tasks_for_user(owner.profile.id)
+        .await
+        .expect("reopened task should load")
+        .into_iter()
+        .find(|candidate| candidate.id == task.id)
+        .expect("task should be open again");
+    assert_eq!(reopened.assignee_name.as_deref(), Some("주홍석"));
+    assert!(
+        reopened
+            .notes
+            .as_deref()
+            .is_some_and(|notes| notes.contains("권한 없다고"))
     );
     let delivery: (String, String, serde_json::Value) =
         sqlx::query_as("SELECT status, event_type, payload FROM webhook_deliveries WHERE id = $1")
@@ -1880,7 +1977,9 @@ async fn agent_webhook_message_commits_with_its_action_audit() {
     assert_eq!(delivery.1, "chat.message");
     assert_eq!(
         delivery.2["message"],
-        serde_json::Value::String("@{조지민} 확인해야 할 일감을 검토해 주세요.".to_owned())
+        serde_json::Value::String(
+            "#3863 아직도 권한 없다고 뜨잖아요 확인 제대로 안해요?".to_owned()
+        )
     );
     let mention_snapshot: serde_json::Value =
         sqlx::query_scalar("SELECT mention_directory FROM webhook_deliveries WHERE id = $1")

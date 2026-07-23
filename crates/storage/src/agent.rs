@@ -118,6 +118,8 @@ pub enum AgentActionCommand {
         assignee_name: Option<String>,
         priority: i16,
         due_at: Option<OffsetDateTime>,
+        status: TaskStatus,
+        expected_status: TaskStatus,
         expected_version: i64,
     },
     SetTaskStatus {
@@ -183,7 +185,10 @@ impl AgentActionCommand {
     #[allow(clippy::too_many_lines)] // Keep every action variant's storage boundary validation explicit and adjacent.
     fn validate(&self) -> Result<(), StorageError> {
         let valid_optional = |value: Option<&String>, maximum| {
-            value.is_none_or(|value| valid_text(value, maximum, true))
+            value.is_none_or(|value| valid_text(value, maximum, false))
+        };
+        let valid_optional_document = |value: Option<&String>, maximum| {
+            value.is_none_or(|value| valid_document(value, maximum, false))
         };
         match self {
             Self::CreateTask {
@@ -198,7 +203,7 @@ impl AgentActionCommand {
                 if is_v7(*id)
                     && project_id.is_none_or(is_v7)
                     && valid_text(title, MAX_TITLE_CHARS, false)
-                    && valid_optional(notes.as_ref(), 10_000)
+                    && valid_optional_document(notes.as_ref(), 10_000)
                     && valid_optional(assignee_name.as_ref(), 80)
                     && (0..=3).contains(priority)
                 {
@@ -214,15 +219,21 @@ impl AgentActionCommand {
                 notes,
                 assignee_name,
                 priority,
+                status,
+                expected_status,
                 expected_version,
                 ..
             } => {
                 if is_v7(*id)
                     && project_id.is_none_or(is_v7)
                     && valid_text(title, MAX_TITLE_CHARS, false)
-                    && valid_optional(notes.as_ref(), 10_000)
+                    && valid_optional_document(notes.as_ref(), 10_000)
                     && valid_optional(assignee_name.as_ref(), 80)
                     && (0..=3).contains(priority)
+                    && matches!(
+                        (*expected_status, *status),
+                        (TaskStatus::Open | TaskStatus::Completed, TaskStatus::Open)
+                    )
                     && *expected_version > 0
                 {
                     Ok(())
@@ -260,7 +271,7 @@ impl AgentActionCommand {
             } => {
                 if is_v7(*id)
                     && valid_text(title, MAX_TITLE_CHARS, false)
-                    && valid_optional(notes.as_ref(), 10_000)
+                    && valid_optional_document(notes.as_ref(), 10_000)
                     && valid_time_zone(time_zone)
                     && ends_at > starts_at
                 {
@@ -281,7 +292,7 @@ impl AgentActionCommand {
             } => {
                 if is_v7(*id)
                     && valid_text(title, MAX_TITLE_CHARS, false)
-                    && valid_optional(notes.as_ref(), 10_000)
+                    && valid_optional_document(notes.as_ref(), 10_000)
                     && valid_time_zone(time_zone)
                     && ends_at > starts_at
                     && *expected_version > 0
@@ -303,7 +314,7 @@ impl AgentActionCommand {
                 if is_v7(*id)
                     && is_v7(*workspace_id)
                     && valid_text(title, MAX_TITLE_CHARS, false)
-                    && valid_optional(objective.as_ref(), 10_000)
+                    && valid_optional_document(objective.as_ref(), 10_000)
                     && valid_optional(next_action.as_ref(), 500)
                     && (0..=3).contains(risk_level)
                 {
@@ -323,7 +334,7 @@ impl AgentActionCommand {
             } => {
                 if is_v7(*id)
                     && valid_text(title, MAX_TITLE_CHARS, false)
-                    && valid_optional(objective.as_ref(), 10_000)
+                    && valid_optional_document(objective.as_ref(), 10_000)
                     && valid_optional(next_action.as_ref(), 500)
                     && (0..=3).contains(risk_level)
                     && *expected_version > 0
@@ -342,7 +353,7 @@ impl AgentActionCommand {
                 if is_v7(*id)
                     && is_v7(*project_id)
                     && is_v7(*webhook_id)
-                    && valid_text(message, 1_800, false)
+                    && valid_document(message, 1_800, false)
                 {
                     Ok(())
                 } else {
@@ -2936,14 +2947,27 @@ async fn persist_agent_action(
             assignee_name,
             priority,
             due_at,
+            status,
+            expected_status,
             expected_version,
         } => {
+            let status = match status {
+                TaskStatus::Open => "open",
+                TaskStatus::Completed => "completed",
+                TaskStatus::Cancelled => "cancelled",
+            };
+            let expected_status = match expected_status {
+                TaskStatus::Open => "open",
+                TaskStatus::Completed => "completed",
+                TaskStatus::Cancelled => "cancelled",
+            };
             let version = sqlx::query_scalar::<_, i64>(
                 "\
                 UPDATE tasks
                 SET project_id = $3, title = $4, notes = $5, assignee_name = $6,
-                    priority = $7, due_at = $8
-                WHERE id = $1 AND user_id = $2 AND status = 'open' AND version = $9
+                    priority = $7, due_at = $8, status = $9,
+                    completed_at = CASE WHEN $9 = 'completed' THEN completed_at ELSE NULL END
+                WHERE id = $1 AND user_id = $2 AND status = $10 AND version = $11
                   AND ($3::uuid IS NULL OR EXISTS (
                       SELECT 1 FROM projects WHERE id = $3 AND user_id = $2
                   ))
@@ -2957,6 +2981,8 @@ async fn persist_agent_action(
             .bind(trim_optional_text(assignee_name.as_deref()))
             .bind(priority)
             .bind(due_at)
+            .bind(status)
+            .bind(expected_status)
             .bind(expected_version)
             .fetch_optional(&mut **transaction)
             .await
@@ -3289,6 +3315,12 @@ async fn queue_agent_action_webhook(
 ) -> Result<(), StorageError> {
     let task_event = match action {
         AgentActionCommand::CreateTask { id, .. } => Some((*id, "task.created")),
+        AgentActionCommand::UpdateTask {
+            id,
+            status: TaskStatus::Open,
+            expected_status: TaskStatus::Completed,
+            ..
+        } => Some((*id, "task.restored")),
         AgentActionCommand::UpdateTask { id, .. } => Some((*id, "task.updated")),
         AgentActionCommand::SetTaskStatus { id, status, .. } => Some((
             *id,
@@ -3549,6 +3581,14 @@ fn valid_text(value: &str, maximum: usize, allow_empty: bool) -> bool {
     (allow_empty || !value.trim().is_empty())
         && value.chars().count() <= maximum
         && !value.chars().any(char::is_control)
+}
+
+fn valid_document(value: &str, maximum: usize, allow_empty: bool) -> bool {
+    (allow_empty || !value.trim().is_empty())
+        && value.chars().count() <= maximum
+        && !value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
 }
 
 fn valid_time_zone(value: &str) -> bool {

@@ -1261,6 +1261,34 @@ impl GoogleChatAdapter {
         access_token: &SecretString,
         message_name: &str,
     ) -> Result<(), GoogleAuthError> {
+        self.add_message_reaction(access_token, message_name, "👀")
+            .await
+    }
+
+    /// Adds the task-completion reaction to a source message. Repeating the
+    /// same reaction is treated as success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized validation or provider error.
+    pub async fn complete_message(
+        &self,
+        access_token: &SecretString,
+        message_name: &str,
+    ) -> Result<(), GoogleAuthError> {
+        self.add_message_reaction(access_token, message_name, "✅")
+            .await
+    }
+
+    async fn add_message_reaction(
+        &self,
+        access_token: &SecretString,
+        message_name: &str,
+        unicode: &str,
+    ) -> Result<(), GoogleAuthError> {
+        if !matches!(unicode, "👀" | "✅") {
+            return Err(GoogleAuthError::InvalidRequest);
+        }
         let token = validate_access_token(access_token)?;
         let segments = validated_chat_message_segments(message_name)?;
         let mut url = reqwest::Url::parse("https://chat.googleapis.com/v1")
@@ -1278,7 +1306,64 @@ impl GoogleChatAdapter {
             .post(url)
             .bearer_auth(token)
             .json(&GoogleChatReactionBody {
-                emoji: GoogleChatEmoji { unicode: "👀" },
+                emoji: GoogleChatEmoji { unicode },
+            })
+            .send()
+            .await
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        if response.status().is_success() || response.status().as_u16() == 409 {
+            Ok(())
+        } else {
+            Err(classify_provider_status(response.status().as_u16()))
+        }
+    }
+
+    /// Replies in the source message thread with plain text as the connected
+    /// Google Chat user. `request_id` makes a retry idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized validation or provider error.
+    pub async fn reply_to_thread(
+        &self,
+        access_token: &SecretString,
+        space_name: &str,
+        thread_name: &str,
+        text: &str,
+        request_id: &str,
+    ) -> Result<(), GoogleAuthError> {
+        let token = validate_access_token(access_token)?;
+        let space_id = validated_chat_space_id(space_name)?;
+        let _ = validated_chat_thread_segments(thread_name, space_id)?;
+        let text = validate_provider_free_text(text.to_owned(), 32_000)?;
+        if request_id.is_empty()
+            || request_id.len() > 64
+            || !request_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(GoogleAuthError::InvalidRequest);
+        }
+        let mut url = reqwest::Url::parse("https://chat.googleapis.com/v1")
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        {
+            let mut path = url
+                .path_segments_mut()
+                .map_err(|()| GoogleAuthError::ProviderUnavailable)?;
+            path.push("spaces");
+            path.push(space_id);
+            path.push("messages");
+        }
+        url.query_pairs_mut()
+            .append_pair("requestId", request_id)
+            .append_pair("messageReplyOption", "REPLY_MESSAGE_OR_FAIL");
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(token)
+            .json(&GoogleChatThreadReplyBody {
+                text: &text,
+                thread: GoogleChatReplyThread { name: thread_name },
             })
             .send()
             .await
@@ -1388,7 +1473,7 @@ impl GoogleIdentityAdapter {
             state,
             code_challenge,
             force_consent,
-            "openid email https://www.googleapis.com/auth/chat.spaces.readonly https://www.googleapis.com/auth/chat.messages.readonly https://www.googleapis.com/auth/chat.messages.reactions.create",
+            "openid email https://www.googleapis.com/auth/chat.spaces.readonly https://www.googleapis.com/auth/chat.messages.readonly https://www.googleapis.com/auth/chat.messages.reactions.create https://www.googleapis.com/auth/chat.messages.create",
             true,
         )
     }
@@ -1793,6 +1878,18 @@ struct GoogleChatEmoji<'a> {
     unicode: &'a str,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleChatThreadReplyBody<'a> {
+    text: &'a str,
+    thread: GoogleChatReplyThread<'a>,
+}
+
+#[derive(Serialize)]
+struct GoogleChatReplyThread<'a> {
+    name: &'a str,
+}
+
 #[derive(Deserialize)]
 struct GoogleIdClaims {
     iss: String,
@@ -1883,10 +1980,7 @@ fn normalize_chat_message(
     let (sender_provider_name, sender_name) = resource
         .sender
         .map(|sender| {
-            let provider_name = sender
-                .name
-                .map(|value| validate_chat_user_name(value))
-                .transpose()?;
+            let provider_name = sender.name.map(validate_chat_user_name).transpose()?;
             let display_name = sender
                 .display_name
                 .map(|value| validate_text(value, 500))
@@ -2442,6 +2536,29 @@ fn validated_chat_message_segments(message_name: &str) -> Result<[&str; 4], Goog
     Ok([spaces, space_id, messages, message_id])
 }
 
+fn validated_chat_thread_segments<'a>(
+    thread_name: &'a str,
+    expected_space_id: &str,
+) -> Result<[&'a str; 4], GoogleAuthError> {
+    let segments = thread_name.split('/').collect::<Vec<_>>();
+    let [spaces, space_id, threads, thread_id] = segments.as_slice() else {
+        return Err(GoogleAuthError::InvalidRequest);
+    };
+    if *spaces != "spaces"
+        || *space_id != expected_space_id
+        || *threads != "threads"
+        || thread_id.is_empty()
+        || thread_id.len() > 240
+        || matches!(*thread_id, "." | "..")
+        || !thread_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(GoogleAuthError::InvalidRequest);
+    }
+    Ok([spaces, space_id, threads, thread_id])
+}
+
 fn classify_provider_status(status: u16) -> GoogleAuthError {
     if status == 429 || status >= 500 {
         GoogleAuthError::ProviderUnavailable
@@ -2575,6 +2692,7 @@ mod tests {
         assert!(scope.contains("https://www.googleapis.com/auth/chat.spaces.readonly"));
         assert!(scope.contains("https://www.googleapis.com/auth/chat.messages.readonly"));
         assert!(scope.contains("https://www.googleapis.com/auth/chat.messages.reactions.create"));
+        assert!(scope.contains("https://www.googleapis.com/auth/chat.messages.create"));
         assert_eq!(
             query.get("prompt").map(AsRef::as_ref),
             Some("consent select_account")
@@ -2594,6 +2712,27 @@ mod tests {
         );
         assert!(validated_chat_message_segments("spaces/AAAAAAAAAAA/messages/.").is_err());
         assert!(validated_chat_message_segments("spaces/AAAAAAAAAAA/messages/..").is_err());
+    }
+
+    #[test]
+    fn chat_thread_names_stay_within_the_selected_space() {
+        assert!(
+            validated_chat_thread_segments(
+                "spaces/AAAAAAAAAAA/threads/BBBBBBBBBBB.BBBBBBBBBBB",
+                "AAAAAAAAAAA",
+            )
+            .is_ok()
+        );
+        assert!(
+            validated_chat_thread_segments(
+                "spaces/OTHER/threads/BBBBBBBBBBB.BBBBBBBBBBB",
+                "AAAAAAAAAAA",
+            )
+            .is_err()
+        );
+        assert!(
+            validated_chat_thread_segments("spaces/AAAAAAAAAAA/threads/..", "AAAAAAAAAAA").is_err()
+        );
     }
 
     #[test]

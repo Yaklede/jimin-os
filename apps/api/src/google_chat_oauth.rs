@@ -15,7 +15,8 @@ use jimin_storage::{
     calendar::EncryptedCalendarSecret,
     google_chat::{
         ClaimedGoogleChatOAuthAuthorization, CompleteGoogleChatOAuthAuthorization,
-        GoogleChatAccountConnection, GoogleChatSourceSyncConnection, ProviderGoogleChatMessage,
+        GoogleChatAccountConnection, GoogleChatCompletionDelivery, GoogleChatSourceSyncConnection,
+        ProviderGoogleChatMessage,
     },
 };
 use rand::Rng;
@@ -35,6 +36,7 @@ const XCHACHA_NONCE_BYTES: usize = 24;
 const CHAT_SPACES_SCOPE: &str = "https://www.googleapis.com/auth/chat.spaces.readonly";
 const CHAT_MESSAGES_SCOPE: &str = "https://www.googleapis.com/auth/chat.messages.readonly";
 const CHAT_REACTIONS_SCOPE: &str = "https://www.googleapis.com/auth/chat.messages.reactions.create";
+const CHAT_MESSAGES_CREATE_SCOPE: &str = "https://www.googleapis.com/auth/chat.messages.create";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -51,6 +53,12 @@ pub struct NewGoogleChatOAuthAuthorization {
     pub pkce_verifier: EncryptedCalendarSecret,
     pub authorization_url: String,
     pub expires_at: OffsetDateTime,
+}
+
+pub struct GoogleChatCompletionOutcome {
+    pub reaction_completed: bool,
+    pub reply_completed: bool,
+    pub failure_code: Option<&'static str>,
 }
 
 impl GoogleChatOAuthRuntime {
@@ -282,6 +290,86 @@ impl GoogleChatOAuthRuntime {
         Ok(outcomes)
     }
 
+    /// Adds a completion reaction and posts one idempotent reply to the source
+    /// thread. A partial success is returned so the durable retry only repeats
+    /// the missing provider action.
+    pub async fn deliver_completion(
+        &self,
+        connection: &GoogleChatSourceSyncConnection,
+        delivery: &GoogleChatCompletionDelivery,
+        reply_text: &str,
+    ) -> GoogleChatCompletionOutcome {
+        let refresh_token = match self.crypto.decrypt(
+            &connection.refresh_token,
+            &refresh_token_aad(connection.user_id, &connection.provider_subject),
+        ) {
+            Ok(token) => token,
+            Err(error) => {
+                return GoogleChatCompletionOutcome {
+                    reaction_completed: false,
+                    reply_completed: false,
+                    failure_code: Some(error.failure_code()),
+                };
+            }
+        };
+        let access_token = match self.chat.refresh_access_token(&refresh_token).await {
+            Ok(token) => token,
+            Err(error) => {
+                let error = GoogleChatOAuthError::from_google(error);
+                return GoogleChatCompletionOutcome {
+                    reaction_completed: false,
+                    reply_completed: false,
+                    failure_code: Some(error.failure_code()),
+                };
+            }
+        };
+        let reaction_completed = delivery.reaction_completed
+            || self
+                .chat
+                .complete_message(&access_token, &delivery.provider_message_name)
+                .await
+                .is_ok();
+        let (reply_completed, reply_failure) = if delivery.reply_completed {
+            (true, None)
+        } else if !Self::completion_scope_granted(&connection.granted_scopes) {
+            (false, Some("google_chat.write_scope_missing"))
+        } else if let Some(thread_name) = delivery.provider_thread_name.as_deref() {
+            match self
+                .chat
+                .reply_to_thread(
+                    &access_token,
+                    &connection.space_name,
+                    thread_name,
+                    reply_text,
+                    &delivery.task_id.to_string(),
+                )
+                .await
+            {
+                Ok(()) => (true, None),
+                Err(_) => (false, Some("google_chat.completion_reply_failed")),
+            }
+        } else {
+            (false, Some("google_chat.thread_unavailable"))
+        };
+        let failure_code = if reaction_completed && reply_completed {
+            None
+        } else {
+            reply_failure.or(Some("google_chat.completion_reaction_failed"))
+        };
+        GoogleChatCompletionOutcome {
+            reaction_completed,
+            reply_completed,
+            failure_code,
+        }
+    }
+
+    #[must_use]
+    pub fn completion_scope_granted(scopes: &[String]) -> bool {
+        scopes
+            .iter()
+            .any(|scope| scope == CHAT_MESSAGES_CREATE_SCOPE)
+    }
+
     fn decrypt_account_refresh_token(
         &self,
         connection: &GoogleChatAccountConnection,
@@ -424,7 +512,12 @@ impl GoogleChatCrypto {
 }
 
 fn required_chat_scopes(scopes: &[String]) -> Result<Vec<String>, GoogleChatOAuthError> {
-    let required = [CHAT_SPACES_SCOPE, CHAT_MESSAGES_SCOPE, CHAT_REACTIONS_SCOPE];
+    let required = [
+        CHAT_SPACES_SCOPE,
+        CHAT_MESSAGES_SCOPE,
+        CHAT_REACTIONS_SCOPE,
+        CHAT_MESSAGES_CREATE_SCOPE,
+    ];
     if required
         .iter()
         .any(|required| !scopes.iter().any(|scope| scope == required))
@@ -472,20 +565,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chat_consent_requires_read_and_acknowledgement_scopes() {
+    fn chat_consent_requires_read_acknowledgement_and_reply_scopes() {
         assert!(required_chat_scopes(&[CHAT_MESSAGES_SCOPE.to_owned()]).is_err());
         assert_eq!(
             required_chat_scopes(&[
                 CHAT_SPACES_SCOPE.to_owned(),
                 CHAT_MESSAGES_SCOPE.to_owned(),
                 CHAT_REACTIONS_SCOPE.to_owned(),
+                CHAT_MESSAGES_CREATE_SCOPE.to_owned(),
             ])
             .expect("required scopes"),
             vec![
                 CHAT_SPACES_SCOPE.to_owned(),
                 CHAT_MESSAGES_SCOPE.to_owned(),
                 CHAT_REACTIONS_SCOPE.to_owned(),
+                CHAT_MESSAGES_CREATE_SCOPE.to_owned(),
             ]
         );
+        assert!(!GoogleChatOAuthRuntime::completion_scope_granted(&[
+            CHAT_MESSAGES_SCOPE.to_owned(),
+        ]));
+        assert!(GoogleChatOAuthRuntime::completion_scope_granted(&[
+            CHAT_MESSAGES_CREATE_SCOPE.to_owned(),
+        ]));
     }
 }

@@ -95,4 +95,14 @@ source, or inflow item is written requires the verified pre-migration backup;
 dropping the tables would also discard encrypted credentials and decision
 history.
 
+Migration `0031_google_chat_inflow_completion.sql` adds durable completion
+delivery state to the selected Google Chat inflow item when a conversation is
+promoted. The source message reaction and one idempotent thread reply can be
+retried independently without rolling back the task or its webhook delivery.
+Apply it to an empty database and a restored version-30 backup, then verify
+that legacy promoted rows remain untouched, a new promotion queues exactly one
+completion delivery, and `jimin_schema_metadata.schema_version = 31`.
+Rollback after a completion delivery is requested requires the verified
+pre-migration backup so provider delivery history is not discarded.
+
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.
