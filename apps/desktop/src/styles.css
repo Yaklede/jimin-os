@@ -1258,16 +1258,15 @@ svg {
 
 .assistant-canvas__item {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) 16px;
+  grid-template-columns: 32px minmax(0, 1fr);
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
   min-height: 64px;
   border: 0;
   padding: 10px 12px;
   background: transparent;
   color: var(--text);
-  text-align: left;
   transition:
     background-color 160ms ease,
     color 160ms ease;
@@ -1285,14 +1284,55 @@ svg {
 
 .assistant-canvas__item > svg,
 .assistant-canvas__marker {
+  justify-self: center;
   width: 18px;
   height: 18px;
 }
 
-.assistant-canvas__item > span:not(.assistant-canvas__timeline-dot) {
+.assistant-canvas__complete {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+}
+
+.assistant-canvas__complete:hover {
+  background: var(--surface);
+  color: var(--accent);
+}
+
+.assistant-canvas__complete svg {
+  width: 20px;
+  height: 20px;
+}
+
+.assistant-canvas__item-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 44px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.assistant-canvas__item-main > span {
   display: grid;
   min-width: 0;
   gap: 3px;
+}
+
+.assistant-canvas__item-main > svg {
+  width: 16px;
+  height: 16px;
 }
 
 .assistant-canvas__item strong,
@@ -1371,15 +1411,29 @@ svg {
   line-height: 1.55;
 }
 
-.assistant-canvas__detail > .primary-button {
+.assistant-canvas__detail-actions {
+  display: flex;
   grid-column: 2;
-  justify-self: start;
+  flex-wrap: wrap;
+  gap: 8px;
   margin-top: 4px;
 }
 
-.assistant-canvas__detail > .primary-button svg {
+.assistant-canvas__detail-actions button {
+  justify-content: center;
+}
+
+.assistant-canvas__detail-actions button svg {
   width: 16px;
   height: 16px;
+}
+
+.assistant-canvas__empty {
+  min-height: 190px;
+  margin: 0;
+  padding: 32px;
+  color: var(--muted);
+  line-height: 1.6;
 }
 
 .assistant-canvas__open-error {

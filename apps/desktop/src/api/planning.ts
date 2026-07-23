@@ -207,6 +207,19 @@ export async function createTask(
   });
 }
 
+export async function fetchTask(
+  baseUrl: string,
+  access: string,
+  taskId: string,
+): Promise<Task> {
+  return request<Task>(
+    baseUrl,
+    access,
+    `/v1/tasks/${encodeURIComponent(taskId)}`,
+    "GET",
+  );
+}
+
 export async function completeTask(
   baseUrl: string,
   access: string,
@@ -347,17 +360,17 @@ async function request<T>(
   baseUrl: string,
   access: string,
   path: string,
-  method: "POST" | "PUT",
-  body: unknown,
+  method: "GET" | "POST" | "PUT",
+  body?: unknown,
 ): Promise<T> {
   const response = await fetch(`${normalizeBaseUrl(baseUrl)}${path}`, {
     method,
     headers: {
       Accept: "application/json",
       Authorization: `Bearer ${access}`,
-      "Content-Type": "application/json",
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
     },
-    body: JSON.stringify(body),
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   const payload = await readJson(response);
   if (!response.ok || !isRecord(payload))

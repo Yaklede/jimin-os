@@ -23,6 +23,7 @@ import {
   createTask,
   deleteTask,
   deleteScheduleEntry,
+  fetchTask,
   refreshDeviceSession,
   updateTask,
   updateScheduleEntry,
@@ -1796,50 +1797,77 @@ export default function App() {
       const completed = await withAuthenticatedSession((accessToken) =>
         completeTask(apiBaseUrl, accessToken, task),
       );
-      await cancelLocalReminder("task", task.id).catch(() => false);
-      setHomeSnapshot((current) =>
-        current
-          ? {
-              ...current,
-              tasks: current.tasks.filter((item) => item.id !== task.id),
-            }
-          : current,
-      );
-      setPlanningSnapshot((current) =>
-        current
-          ? {
-              ...current,
-              tasks: current.tasks.filter((item) => item.id !== task.id),
-              completedTasks: [
-                completed,
-                ...current.completedTasks.filter(
-                  (item) => item.id !== completed.id,
-                ),
-              ],
-            }
-          : current,
-      );
-      setProjectTasks((current) =>
-        current.map((item) => (item.id === completed.id ? completed : item)),
-      );
-      if (task.projectId) {
-        setProjects((current) =>
-          current.map((project) =>
-            project.id === task.projectId
-              ? {
-                  ...project,
-                  openTaskCount: Math.max(0, project.openTaskCount - 1),
-                }
-              : project,
-          ),
-        );
-      }
-      void loadGoals();
+      applyCompletedTask(task, completed);
     } catch {
       setHomeError(copy.messages.taskCompletionNotice);
       setPlanningError(copy.messages.taskCompletionNotice);
       void loadHomeSnapshot();
       void loadPlanningSnapshot();
+    }
+  }
+
+  function applyCompletedTask(task: Task, completed: Task) {
+    void cancelLocalReminder("task", task.id).catch(() => false);
+    setHomeSnapshot((current) =>
+      current
+        ? {
+            ...current,
+            tasks: current.tasks.filter((item) => item.id !== task.id),
+            dueTasks: current.dueTasks.filter((item) => item.id !== task.id),
+          }
+        : current,
+    );
+    setPlanningSnapshot((current) =>
+      current
+        ? {
+            ...current,
+            tasks: current.tasks.filter((item) => item.id !== task.id),
+            completedTasks: [
+              completed,
+              ...current.completedTasks.filter(
+                (item) => item.id !== completed.id,
+              ),
+            ],
+          }
+        : current,
+    );
+    setProjectTasks((current) =>
+      current.map((item) => (item.id === completed.id ? completed : item)),
+    );
+    if (task.projectId) {
+      setProjects((current) =>
+        current.map((project) =>
+          project.id === task.projectId
+            ? {
+                ...project,
+                openTaskCount: Math.max(0, project.openTaskCount - 1),
+              }
+            : project,
+        ),
+      );
+    }
+    void loadGoals();
+  }
+
+  async function completeTaskFromAssistant(
+    task: Pick<Task, "id" | "projectId">,
+  ): Promise<Task> {
+    setHomeError(undefined);
+    try {
+      const currentTask = await withAuthenticatedSession((accessToken) =>
+        fetchTask(apiBaseUrl, accessToken, task.id),
+      );
+      if (currentTask.status !== "open") return currentTask;
+      const completed = await withAuthenticatedSession((accessToken) =>
+        completeTask(apiBaseUrl, accessToken, currentTask),
+      );
+      applyCompletedTask(currentTask, completed);
+      return completed;
+    } catch (error) {
+      setHomeError(copy.messages.taskCompletionNotice);
+      void loadHomeSnapshot();
+      void loadPlanningSnapshot();
+      throw error;
     }
   }
 
@@ -3140,6 +3168,7 @@ export default function App() {
                 })
               }
               onCompleteTask={completeHomeTask}
+              onCompleteAssistantTask={completeTaskFromAssistant}
               onEditTask={(task) =>
                 setPlanningEditTarget({ kind: "task", item: task })
               }

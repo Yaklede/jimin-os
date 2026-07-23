@@ -9,6 +9,7 @@ import {
   deleteScheduleEntry,
   deleteTask,
   fetchPlanning,
+  fetchTask,
   refreshDeviceSession,
   updateScheduleEntry,
   updateTask,
@@ -130,6 +131,39 @@ describe("device session client", () => {
 });
 
 describe("task client", () => {
+  it("loads one task before applying a result action", async () => {
+    const task = {
+      id: "019f68cb-9400-7000-8000-000000000010",
+      projectId: "019f68cb-9400-7000-8000-000000000011",
+      title: "계약서 검토",
+      notes: "수정본 확인",
+      status: "open" as const,
+      priority: 2,
+      dueAt: "2026-07-15T09:00:00.000Z",
+      completedAt: null,
+      version: 3,
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(task), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchTask("https://jimin-os.example/", "access", task.id),
+    ).resolves.toEqual(task);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `https://jimin-os.example/v1/tasks/${task.id}`,
+      expect.objectContaining({
+        method: "GET",
+        body: undefined,
+      }),
+    );
+  });
+
   it("creates an unassigned task with optional planning details", async () => {
     const created = {
       id: "019f68cb-9400-7000-8000-000000000010",

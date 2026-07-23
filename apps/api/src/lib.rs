@@ -1355,6 +1355,7 @@ pub(crate) fn error_response(
         retry_webhook_delivery,
         list_open_tasks,
         create_task,
+        get_task,
         update_task,
         delete_task,
         complete_task,
@@ -1539,7 +1540,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/tasks", get(list_open_tasks).post(create_task))
         .route(
             "/v1/tasks/{task_id}",
-            axum::routing::put(update_task).delete(delete_task),
+            get(get_task).put(update_task).delete(delete_task),
         )
         .route(
             "/v1/tasks/{task_id}/complete",
@@ -2341,19 +2342,17 @@ async fn get_home_snapshot(
         return invalid_request_response(request_id);
     };
     let user_id = principal.identity().user_id();
-    let (schedule, tasks, due_tasks, recommendations, inflow_items, recent_inflow_items, webhooks) =
-        match tokio::try_join!(
-            planning.schedule_entries_in_range(user_id, from, to),
-            planning.home_tasks_for_user(user_id, to),
-            planning.deadline_tasks_for_user(user_id, deadline_boundary),
-            planning.active_recommendations_for_user(user_id, OffsetDateTime::now_utc(), 5),
-            planning.pending_project_inflow_for_user(user_id),
-            planning.recent_project_inflow_decisions_for_user(user_id),
-            planning.user_project_webhooks(user_id),
-        ) {
-            Ok(values) => values,
-            Err(error) => return storage_error_response(&error, request_id),
-        };
+    let (schedule, tasks, due_tasks, recommendations, inflow_items, webhooks) = match tokio::try_join!(
+        planning.schedule_entries_in_range(user_id, from, to),
+        planning.home_tasks_for_user(user_id, to),
+        planning.deadline_tasks_for_user(user_id, deadline_boundary),
+        planning.active_recommendations_for_user(user_id, OffsetDateTime::now_utc(), 5),
+        planning.pending_project_inflow_for_user(user_id),
+        planning.user_project_webhooks(user_id),
+    ) {
+        Ok(values) => values,
+        Err(error) => return storage_error_response(&error, request_id),
+    };
     let Ok(schedule) = schedule
         .into_iter()
         .map(schedule_entry_response)
@@ -2393,23 +2392,15 @@ async fn get_home_snapshot(
     for item in &mut inflow {
         apply_inflow_assignment_context(item, &contexts);
     }
-    let Ok(mut recent_inflow) = group_project_inflow_candidates(recent_inflow_items)
-        .into_iter()
-        .map(project_inflow_item_response)
-        .collect::<Result<Vec<_>, _>>()
-    else {
-        return unavailable_response(request_id);
-    };
-    for item in &mut recent_inflow {
-        apply_inflow_assignment_context(item, &contexts);
-    }
-
     Json(HomeSnapshotResponse {
         schedule,
         tasks,
         due_tasks,
         inflow,
-        recent_inflow,
+        // Handled Chat decisions live in project history. Preserve the
+        // response field for installed clients without putting completed
+        // source messages back on the attention-focused home screen.
+        recent_inflow: Vec::new(),
         recommendations,
     })
     .into_response()
@@ -3756,6 +3747,45 @@ async fn create_task(
             Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
             Err(()) => unavailable_response(request_id),
         },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/tasks/{task_id}",
+    tag = "planning",
+    params(("task_id" = String, Path)),
+    responses((status = 200, body = TaskResponse), (status = 401), (status = 404), (status = 503))
+)]
+async fn get_task(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(task_id): Path<uuid::Uuid>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .task_for_user(principal.identity().user_id(), task_id)
+        .await
+    {
+        Ok(Some(task)) => match task_response(task) {
+            Ok(response) => Json(response).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Ok(None) => error_response(
+            StatusCode::NOT_FOUND,
+            "task.not_found",
+            "이 할 일을 찾지 못했어요. 목록을 새로 확인해 주세요.",
+            request_id,
+            false,
+        ),
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -8050,6 +8080,7 @@ mod tests {
                 .delete
                 .is_some()
         );
+        assert!(document.paths.paths["/v1/tasks/{task_id}"].get.is_some());
         assert!(document.paths.paths["/v1/tasks/{task_id}"].delete.is_some());
         assert!(
             document.paths.paths["/v1/projects/{project_id}/webhooks/{webhook_id}"]

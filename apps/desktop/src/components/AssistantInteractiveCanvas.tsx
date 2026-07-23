@@ -29,6 +29,7 @@ import { copy } from "../copy";
 type AssistantInteractiveCanvasProps = {
   presentation: AssistantPresentation;
   onContinue(): void;
+  onCompleteTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
   onOpenTask(task: Pick<Task, "id" | "projectId">): void | Promise<void>;
   onOpenProject(
     project: Pick<Project, "id" | "workspaceId">,
@@ -41,6 +42,7 @@ type AssistantInteractiveCanvasProps = {
 export function AssistantInteractiveCanvas({
   presentation,
   onContinue,
+  onCompleteTask,
   onOpenTask,
   onOpenProject,
   onOpenSchedule,
@@ -62,20 +64,31 @@ export function AssistantInteractiveCanvas({
     () => new Set(),
   );
   const [opening, setOpening] = useState(false);
+  const [completingTaskId, setCompletingTaskId] = useState<string>();
+  const [completedTaskIds, setCompletedTaskIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [openError, setOpenError] = useState<string>();
 
   const activeSection =
     presentation.sections.find((section) => section.kind === activeKind) ??
     presentation.sections[0];
+  const activeTaskItems =
+    activeSection?.kind === "tasks"
+      ? activeSection.items.filter((item) => !completedTaskIds.has(item.id))
+      : [];
+  const activeItems =
+    activeSection?.kind === "tasks"
+      ? activeTaskItems
+      : (activeSection?.items ?? []);
   const selectedItem =
-    activeSection?.items.find((item) => item.id === selectedItemId) ??
-    activeSection?.items[0];
+    activeItems.find((item) => item.id === selectedItemId) ?? activeItems[0];
   const selectedItemCanOpen = selectedItem
     ? canOpenPresentationItem(selectedItem)
     : false;
   const taskGroups =
     activeSection?.kind === "tasks"
-      ? groupTaskPresentationItems(activeSection.items, taskGroupView)
+      ? groupTaskPresentationItems(activeTaskItems, taskGroupView)
       : [];
 
   useEffect(() => {
@@ -127,6 +140,25 @@ export function AssistantInteractiveCanvas({
       if (mountedRef.current) setOpenError(copy.home.resultOpenFailed);
     } finally {
       if (mountedRef.current) setOpening(false);
+    }
+  }
+
+  async function completePresentationTask(
+    task: Pick<Task, "id" | "projectId">,
+  ) {
+    if (completingTaskId) return;
+    setCompletingTaskId(task.id);
+    setOpenError(undefined);
+    try {
+      await onCompleteTask(task);
+      if (!mountedRef.current) return;
+      setCompletedTaskIds((current) => new Set(current).add(task.id));
+    } catch {
+      if (mountedRef.current) {
+        setOpenError(copy.home.resultTaskCompleteFailed);
+      }
+    } finally {
+      if (mountedRef.current) setCompletingTaskId(undefined);
     }
   }
 
@@ -211,7 +243,7 @@ export function AssistantInteractiveCanvas({
             })}
           </div>
 
-          {activeSection && selectedItem && (
+          {activeSection && (
             <>
               {activeSection.kind === "tasks" && (
                 <div className="assistant-canvas__view-controls">
@@ -251,7 +283,7 @@ export function AssistantInteractiveCanvas({
                 role="tabpanel"
                 aria-labelledby={`assistant-tab-${activeSection.kind}`}
               >
-                {activeSection.kind === "tasks" ? (
+                {activeSection.kind === "tasks" && taskGroups.length ? (
                   <div className="assistant-canvas__groups">
                     {taskGroups.map((group) => {
                       const collapsed = collapsedTaskGroups.has(group.id);
@@ -291,6 +323,10 @@ export function AssistantInteractiveCanvas({
                                       item,
                                       taskGroupView,
                                     )}
+                                    completing={completingTaskId === item.id}
+                                    onComplete={() =>
+                                      void completePresentationTask(item)
+                                    }
                                     onSelect={() => {
                                       setSelectedItemId(item.id);
                                       setOpenError(undefined);
@@ -304,6 +340,14 @@ export function AssistantInteractiveCanvas({
                       );
                     })}
                   </div>
+                ) : activeSection.kind === "tasks" ? (
+                  <p
+                    className="assistant-canvas__empty"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    {copy.home.resultTasksHandled}
+                  </p>
                 ) : (
                   <ul className="assistant-canvas__items">
                     {activeSection.items.map((item) => (
@@ -312,6 +356,7 @@ export function AssistantInteractiveCanvas({
                           item={item}
                           section={activeSection}
                           selected={item.id === selectedItem.id}
+                          completing={false}
                           onSelect={() => {
                             setSelectedItemId(item.id);
                             setOpenError(undefined);
@@ -321,19 +366,27 @@ export function AssistantInteractiveCanvas({
                     ))}
                   </ul>
                 )}
-                <article
-                  className="assistant-canvas__detail"
-                  aria-label={copy.home.resultDetailsLabel}
-                  aria-live="polite"
-                >
-                  <ItemDetail
-                    item={selectedItem}
-                    opening={opening}
-                    error={openError}
-                    canOpen={selectedItemCanOpen}
-                    onOpen={() => void openSelectedItem()}
-                  />
-                </article>
+                {selectedItem && (
+                  <article
+                    className="assistant-canvas__detail"
+                    aria-label={copy.home.resultDetailsLabel}
+                    aria-live="polite"
+                  >
+                    <ItemDetail
+                      item={selectedItem}
+                      opening={opening}
+                      completing={completingTaskId === selectedItem.id}
+                      error={openError}
+                      canOpen={selectedItemCanOpen}
+                      onComplete={() =>
+                        selectedItem.type === "task"
+                          ? void completePresentationTask(selectedItem)
+                          : undefined
+                      }
+                      onOpen={() => void openSelectedItem()}
+                    />
+                  </article>
+                )}
               </div>
             </>
           )}
@@ -348,29 +401,50 @@ function PresentationItemButton({
   section,
   selected,
   summary,
+  completing,
+  onComplete,
   onSelect,
 }: {
   item: AssistantPresentationSection["items"][number];
   section: AssistantPresentationSection;
   selected: boolean;
   summary?: string;
+  completing: boolean;
+  onComplete?: () => void;
   onSelect(): void;
 }) {
   return (
-    <button
-      className="assistant-canvas__item focus-visible-control"
-      type="button"
-      data-selected={selected}
-      aria-current={selected}
-      onClick={onSelect}
-    >
-      <ItemMarker section={section} />
-      <span>
-        <strong>{item.title}</strong>
-        <small>{summary ?? itemSummary(item)}</small>
-      </span>
-      <ChevronRight aria-hidden="true" />
-    </button>
+    <div className="assistant-canvas__item" data-selected={selected}>
+      {item.type === "task" && item.status === "open" && onComplete ? (
+        <button
+          className="assistant-canvas__complete focus-visible-control"
+          type="button"
+          disabled={completing}
+          aria-label={copy.home.completeTask(item.title)}
+          onClick={onComplete}
+        >
+          {completing ? (
+            <span className="button-spinner" aria-hidden="true" />
+          ) : (
+            <Circle aria-hidden="true" />
+          )}
+        </button>
+      ) : (
+        <ItemMarker section={section} />
+      )}
+      <button
+        className="assistant-canvas__item-main focus-visible-control"
+        type="button"
+        aria-current={selected}
+        onClick={onSelect}
+      >
+        <span>
+          <strong>{item.title}</strong>
+          <small>{summary ?? itemSummary(item)}</small>
+        </span>
+        <ChevronRight aria-hidden="true" />
+      </button>
+    </div>
   );
 }
 
@@ -424,14 +498,18 @@ function itemSummary(
 function ItemDetail({
   item,
   opening,
+  completing,
   error,
   canOpen,
+  onComplete,
   onOpen,
 }: {
   item: AssistantPresentationSection["items"][number];
   opening: boolean;
+  completing: boolean;
   error: string | undefined;
   canOpen: boolean;
+  onComplete(): void;
   onOpen(): void;
 }) {
   if (item.type === "task") {
@@ -451,20 +529,43 @@ function ItemDetail({
             <time dateTime={item.dueAt}>{formatDate(item.dueAt)}</time>
           )}
         </div>
-        {canOpen && (
-          <button
-            className="primary-button focus-visible-control"
-            type="button"
-            disabled={opening}
-            aria-busy={opening}
-            onClick={onOpen}
-          >
-            <DestinationActionContent
-              opening={opening}
-              label={copy.home.openTaskAction}
-            />
-          </button>
-        )}
+        <div className="assistant-canvas__detail-actions">
+          {item.status === "open" && (
+            <button
+              className="primary-button focus-visible-control"
+              type="button"
+              disabled={completing || opening}
+              aria-busy={completing}
+              onClick={onComplete}
+            >
+              {completing ? (
+                <>
+                  <span className="button-spinner" aria-hidden="true" />
+                  {copy.home.resultTaskCompleting}
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 aria-hidden="true" />
+                  {copy.home.resultTaskComplete}
+                </>
+              )}
+            </button>
+          )}
+          {canOpen && (
+            <button
+              className="secondary-button focus-visible-control"
+              type="button"
+              disabled={opening || completing}
+              aria-busy={opening}
+              onClick={onOpen}
+            >
+              <DestinationActionContent
+                opening={opening}
+                label={copy.home.openTaskAction}
+              />
+            </button>
+          )}
+        </div>
         {error && <ResultOpenError message={error} />}
       </>
     );

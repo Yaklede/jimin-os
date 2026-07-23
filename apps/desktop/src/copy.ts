@@ -132,6 +132,11 @@ export const copy = {
     resultCount: (count: number) => `${count}개`,
     resultOpening: "화면을 여는 중이에요",
     resultOpenFailed: "화면을 열지 못했어요. 아래 버튼을 다시 눌러 주세요.",
+    resultTaskComplete: "완료하기",
+    resultTaskCompleting: "완료하는 중",
+    resultTaskCompleteFailed:
+      "완료하지 못했어요. 최신 내용을 확인한 뒤 다시 시도해 주세요.",
+    resultTasksHandled: "이 결과의 할 일을 모두 처리했어요.",
     taskGroupViewLabel: "보기 기준",
     groupTasksByAssignee: "담당자별",
     groupTasksByDate: "일자별",

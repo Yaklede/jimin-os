@@ -52,6 +52,7 @@ type HomeWorkspaceProps = {
   onStartNewAssistant(): void;
   onSendAssistant(text: string, clientMessageId: string): Promise<boolean>;
   onCompleteTask(task: Task): Promise<void>;
+  onCompleteAssistantTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
   onEditTask(task: Task): void;
   onEditSchedule(entry: ScheduleEntry): void;
   onOpenPlanningTask(task: Task): void | Promise<void>;
@@ -91,6 +92,7 @@ export function HomeWorkspace({
   onStartNewAssistant,
   onSendAssistant,
   onCompleteTask,
+  onCompleteAssistantTask,
   onEditTask,
   onEditSchedule,
   onOpenPlanningTask,
@@ -304,6 +306,7 @@ export function HomeWorkspace({
         onOpenAssistant={onOpenAssistant}
         onStartNew={onStartNewAssistant}
         onSend={onSendAssistant}
+        onCompleteTask={onCompleteAssistantTask}
         onOpenTask={async (task) => {
           if (task.projectId) {
             await onOpenTask(task);
@@ -337,35 +340,6 @@ export function HomeWorkspace({
               </header>
               <ul className="home-inflow__list">
                 {(snapshot?.inflow ?? []).slice(0, 3).map((item) => (
-                  <InflowItemRow
-                    key={item.id}
-                    item={item}
-                    saving={inflowSaving}
-                    onPromote={onPromoteInflow}
-                    onDismiss={onDismissInflow}
-                    onRetryCompletion={onRetryInflowCompletion}
-                  />
-                ))}
-              </ul>
-            </section>
-          )}
-
-          {!showingSkeleton && Boolean(snapshot?.recentInflow.length) && (
-            <section
-              className="home-inflow home-inflow--recent"
-              aria-labelledby="home-recent-inflow-title"
-            >
-              <header className="home-inflow__heading">
-                <div>
-                  <span>{copy.projects.inflowRecentHomeEyebrow}</span>
-                  <h2 id="home-recent-inflow-title">
-                    {copy.projects.inflowRecentHomeTitle}
-                  </h2>
-                  <p>{copy.projects.inflowRecentHomeDescription}</p>
-                </div>
-              </header>
-              <ul className="home-inflow__list">
-                {(snapshot?.recentInflow ?? []).slice(0, 3).map((item) => (
                   <InflowItemRow
                     key={item.id}
                     item={item}
@@ -719,6 +693,7 @@ function HomeAssistantCommand({
   onOpenAssistant,
   onStartNew,
   onSend,
+  onCompleteTask,
   onOpenTask,
   onOpenProject,
   onOpenSchedule,
@@ -733,6 +708,7 @@ function HomeAssistantCommand({
   onOpenAssistant(): void;
   onStartNew(): void;
   onSend(text: string, clientMessageId: string): Promise<boolean>;
+  onCompleteTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
   onOpenTask(task: Pick<Task, "id" | "projectId">): void | Promise<void>;
   onOpenProject(
     project: Pick<Project, "id" | "workspaceId">,
@@ -906,6 +882,7 @@ function HomeAssistantCommand({
           key={message?.id}
           presentation={presentation}
           onContinue={() => inputRef.current?.focus()}
+          onCompleteTask={onCompleteTask}
           onOpenTask={onOpenTask}
           onOpenProject={onOpenProject}
           onOpenSchedule={onOpenSchedule}
