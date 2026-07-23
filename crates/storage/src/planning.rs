@@ -2,7 +2,7 @@
 //! calendar provider is linked.
 
 use sqlx::{Postgres, Transaction};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
 const MAX_TITLE_CHARS: usize = 200;
 const MAX_NOTES_CHARS: usize = 10_000;
 const MAX_ASSIGNEE_NAME_CHARS: usize = 80;
-const MAX_WEBHOOK_TASK_CONTENT_CHARS: usize = 900;
+const MAX_WEBHOOK_TASK_SUMMARY_CHARS: usize = 240;
 
 /// Validated manual schedule input. Provider-originated entries will use a
 /// separate adapter path so clients cannot spoof a provider source.
@@ -1635,39 +1635,67 @@ fn task_event_message(event_type: &str, project_title: &str, task: &Task) -> Str
         _ => "할 일이 변경됐어요.",
     };
     let assignee = task.assignee_name.as_deref().unwrap_or("미정");
+    let title =
+        concise_webhook_text(&task.title, MAX_TITLE_CHARS).unwrap_or_else(|| "새 할 일".to_owned());
     let mut lines = vec![
         action.to_owned(),
         format!("프로젝트: {project_title}"),
-        format!("할 일: {}", task.title),
+        format!("할 일: {title}"),
         format!("담당자: {assignee}"),
     ];
-    if let Some(due_at) = task.due_at
-        && let Ok(value) = due_at.format(&Rfc3339)
-    {
-        lines.push(format!("마감: {value}"));
+    if let Some(due_at) = task.due_at {
+        lines.push(format!("마감: {}", korean_deadline(due_at)));
     }
-    if let Some(content) = task
-        .notes
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        lines.push(String::new());
-        lines.push("요청 내용:".to_owned());
-        lines.push(truncate_with_ellipsis(
-            content,
-            MAX_WEBHOOK_TASK_CONTENT_CHARS,
-        ));
+    if let Some(summary) = task.notes.as_deref().and_then(task_summary_for_webhook) {
+        lines.push(format!("요약: {summary}"));
     }
     lines.join("\n")
 }
 
-fn truncate_with_ellipsis(value: &str, maximum: usize) -> String {
-    if value.chars().count() <= maximum {
-        return value.to_owned();
+fn task_summary_for_webhook(notes: &str) -> Option<String> {
+    let mut lines = notes.lines().map(str::trim).filter(|line| !line.is_empty());
+    let first = lines.next()?;
+    let candidate = if matches!(first, "업무 목적" | "요약" | "목적") {
+        lines.next()?
+    } else {
+        first
+    };
+    concise_webhook_text(candidate, MAX_WEBHOOK_TASK_SUMMARY_CHARS)
+}
+
+fn concise_webhook_text(value: &str, maximum: usize) -> Option<String> {
+    let compact = value
+        .split_whitespace()
+        .filter(|part| {
+            !part.starts_with("http://")
+                && !part.starts_with("https://")
+                && !part.starts_with('@')
+                && !part.starts_with("보낸")
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let compact = compact.trim();
+    if compact.is_empty() {
+        return None;
     }
-    let keep = maximum.saturating_sub(1);
-    format!("{}…", value.chars().take(keep).collect::<String>())
+    let mut result = compact.chars().take(maximum).collect::<String>();
+    if compact.chars().count() > maximum {
+        result.push('…');
+    }
+    Some(result)
+}
+
+fn korean_deadline(value: OffsetDateTime) -> String {
+    let offset = UtcOffset::from_hms(9, 0, 0).unwrap_or(UtcOffset::UTC);
+    let value = value.to_offset(offset);
+    format!(
+        "{}년 {}월 {}일 {:02}:{:02}",
+        value.year(),
+        u8::from(value.month()),
+        value.day(),
+        value.hour(),
+        value.minute()
+    )
 }
 
 fn task_update_event_type(
@@ -1734,9 +1762,10 @@ mod tests {
         assert!(message.contains("프로젝트: 비스킷링크"));
         assert!(message.contains("할 일: 가맹점 권한 이슈 확인"));
         assert!(message.contains("담당자: 조지민"));
-        assert!(message.contains("마감: "));
-        assert!(message.contains("요청 내용:\n고객 요청을 확인하고 처리 결과를 공유합니다."));
-        assert!(message.chars().count() <= 1_800);
+        assert!(message.contains("마감: 2026년"));
+        assert!(message.contains("요약: 고객 요청을 확인하고 처리 결과를 공유합니다."));
+        assert!(!message.contains("요청 내용:"));
+        assert!(message.chars().count() <= 800);
     }
 
     #[test]
@@ -1760,6 +1789,32 @@ mod tests {
         assert!(message.starts_with("새 할 일이 등록됐어요."));
         assert!(message.contains("담당자: 미정"));
         assert!(message.ends_with('…'));
-        assert!(message.chars().count() <= 1_800);
+        assert!(message.chars().count() <= 800);
+    }
+
+    #[test]
+    fn task_webhook_drops_transport_urls_and_mentions_from_summary() {
+        let task = Task {
+            id: Uuid::now_v7(),
+            project_id: Some(Uuid::now_v7()),
+            parent_task_id: None,
+            title: "거래내역 정산방식 표시 추가".to_owned(),
+            notes: Some(
+                "업무 목적\nhttps://itsm.example/issues/3876 @조지민 거래내역에 정산방식을 표시한다.\n\n처리할 내용\n- 화면을 수정한다."
+                    .to_owned(),
+            ),
+            assignee_name: Some("이의현".to_owned()),
+            status: TaskStatus::Open,
+            priority: 1,
+            due_at: None,
+            completed_at: None,
+            version: 1,
+        };
+
+        let message = task_event_message("task.created", "비스킷링크", &task);
+
+        assert!(message.contains("요약: 거래내역에 정산방식을 표시한다."));
+        assert!(!message.contains("https://"));
+        assert!(!message.contains("@조지민"));
     }
 }
