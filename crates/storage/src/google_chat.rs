@@ -184,6 +184,7 @@ pub struct NewProjectGoogleChatSource {
     pub space_name: String,
     pub display_name: String,
     pub acknowledge_with_reaction: bool,
+    pub import_history: bool,
 }
 
 pub struct PromoteProjectInflowItem {
@@ -193,6 +194,7 @@ pub struct PromoteProjectInflowItem {
     pub expected_version: i64,
     pub task_id: Uuid,
     pub title: String,
+    pub notes: Option<String>,
     pub assignee_name: Option<String>,
     pub priority: i16,
     pub due_at: Option<OffsetDateTime>,
@@ -363,6 +365,7 @@ pub struct GoogleChatSourceSyncConnection {
     pub space_name: String,
     pub acknowledge_with_reaction: bool,
     pub last_provider_message_at: Option<OffsetDateTime>,
+    pub last_successful_sync_at: Option<OffsetDateTime>,
     pub source_had_error: bool,
     pub account_needs_recovery: bool,
     pub refresh_token: EncryptedCalendarSecret,
@@ -379,6 +382,7 @@ struct GoogleChatSourceSyncConnectionRow {
     space_name: String,
     acknowledge_with_reaction: bool,
     last_provider_message_at: Option<OffsetDateTime>,
+    last_successful_sync_at: Option<OffsetDateTime>,
     source_had_error: bool,
     account_needs_recovery: bool,
     refresh_token_ciphertext: Option<Vec<u8>>,
@@ -725,9 +729,10 @@ impl Database {
         let row = sqlx::query_as::<_, ProjectGoogleChatSourceRow>(
             "INSERT INTO project_google_chat_sources (
                 id, user_id, project_id, account_id, space_name, display_name,
-                acknowledge_with_reaction
+                acknowledge_with_reaction, last_provider_message_at
              )
-             SELECT $1, $2, project.id, account.id, $5, $6, $7
+             SELECT $1, $2, project.id, account.id, $5, $6, $7,
+                CASE WHEN $8 THEN NULL ELSE NOW() END
              FROM projects AS project
              JOIN google_chat_accounts AS account
                ON account.id = $4 AND account.user_id = $2 AND account.status = 'active'
@@ -744,6 +749,7 @@ impl Database {
         .bind(command.space_name.trim())
         .bind(command.display_name.trim())
         .bind(command.acknowledge_with_reaction)
+        .bind(command.import_history)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(classify)?
@@ -836,6 +842,7 @@ impl Database {
                 account.provider_subject, account.granted_scopes,
                 source.space_name, source.acknowledge_with_reaction,
                 source.last_provider_message_at,
+                source.last_successful_sync_at,
                 source.last_error_code IS NOT NULL AS source_had_error,
                 (account.status <> 'active' OR account.last_error_code IS NOT NULL)
                     AS account_needs_recovery,
@@ -1513,6 +1520,10 @@ impl Database {
             || command.expected_version <= 0
             || !valid_text(&command.title, 300, false)
             || !command
+                .notes
+                .as_deref()
+                .is_none_or(|value| valid_text(value, MAX_TASK_NOTES_CHARS, true))
+            || !command
                 .assignee_name
                 .as_deref()
                 .is_none_or(|value| valid_text(value, MAX_ASSIGNEE_NAME_CHARS, false))
@@ -1542,7 +1553,15 @@ impl Database {
         let source_messages =
             inflow_group_messages(&mut transaction, command, source_id, thread_name.as_deref())
                 .await?;
-        let task_notes = google_chat_task_notes(&source_messages);
+        let task_notes = command
+            .notes
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map_or_else(
+                || default_google_chat_task_notes(&command.title, &source_messages),
+                str::to_owned,
+            );
         insert_promoted_task(&mut transaction, command, &task_notes).await?;
         let selected = mark_inflow_group_promoted(
             &mut transaction,
@@ -1551,6 +1570,138 @@ impl Database {
             thread_name.as_deref(),
         )
         .await?;
+        transaction.commit().await.map_err(classify)?;
+        Ok(selected)
+    }
+
+    /// Retargets an incomplete Google Chat completion delivery to one promoted
+    /// message in the same thread and makes it immediately retryable.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation or persistence error when the promoted item cannot
+    /// be locked or the retry state cannot be committed.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The atomic retry keeps the ownership lock, delivery retarget, and returned read model in one transaction."
+    )]
+    pub async fn retry_project_inflow_completion(
+        &self,
+        user_id: Uuid,
+        project_id: Uuid,
+        item_id: Uuid,
+        expected_version: i64,
+    ) -> Result<Option<ProjectInflowItem>, StorageError> {
+        if ![user_id, project_id, item_id].into_iter().all(is_v7) || expected_version <= 0 {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let group = sqlx::query_as::<_, (Uuid, Option<String>, Uuid)>(
+            "SELECT source_id, provider_thread_name, promoted_task_id
+             FROM project_inflow_items
+             WHERE id = $1 AND user_id = $2 AND project_id = $3
+               AND version = $4 AND status = 'promoted'
+               AND promoted_task_id IS NOT NULL
+             FOR UPDATE",
+        )
+        .bind(item_id)
+        .bind(user_id)
+        .bind(project_id)
+        .bind(expected_version)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some((source_id, thread_name, promoted_task_id)) = group else {
+            transaction.rollback().await.map_err(classify)?;
+            return Ok(None);
+        };
+        let rows = sqlx::query_as::<_, ProjectInflowItemRow>(
+            "UPDATE project_inflow_items AS item
+             SET completion_requested_at = CASE
+                     WHEN item.id = $1 THEN NOW()
+                     ELSE NULL
+                 END,
+                 completion_reaction_at = CASE
+                     WHEN item.id = $1 THEN NULL
+                     ELSE item.completion_reaction_at
+                 END,
+                 completion_reply_at = CASE
+                     WHEN item.id = $1 THEN NULL
+                     ELSE item.completion_reply_at
+                 END,
+                 completion_delivery_error_code = CASE
+                     WHEN item.id = $1 THEN NULL
+                     ELSE item.completion_delivery_error_code
+                 END,
+                 completion_delivery_attempt_count = CASE
+                     WHEN item.id = $1 THEN 0
+                     ELSE item.completion_delivery_attempt_count
+                 END,
+                 completion_delivery_next_attempt_at = CASE
+                     WHEN item.id = $1 THEN NOW()
+                     ELSE item.completion_delivery_next_attempt_at
+                 END
+             FROM project_google_chat_sources AS source
+             WHERE item.user_id = $2 AND item.project_id = $3
+               AND item.status = 'promoted'
+               AND item.promoted_task_id = $4
+               AND source.id = item.source_id
+               AND (($5::TEXT IS NULL AND item.id = $1)
+                 OR ($5::TEXT IS NOT NULL AND item.source_id = $6
+                   AND item.provider_thread_name = $5))
+             RETURNING item.id, item.project_id,
+                (SELECT title FROM projects WHERE id = item.project_id) AS project_name,
+                item.source_id, source.display_name AS source_name,
+                item.provider_thread_name, item.sender_provider_name,
+                COALESCE(item.sender_name, (
+                    SELECT mention.name
+                    FROM project_webhooks AS sender_webhook
+                    CROSS JOIN LATERAL jsonb_each_text(
+                        sender_webhook.mention_directory -> 'users'
+                    ) AS mention(name, resource_name)
+                    WHERE sender_webhook.project_id = item.project_id
+                      AND mention.resource_name = item.sender_provider_name
+                    ORDER BY sender_webhook.created_at, mention.name
+                    LIMIT 1
+                )) AS sender_name,
+                COALESCE(item.sender_provider_name = (
+                    SELECT CONCAT('users/', account.provider_subject)
+                    FROM project_google_chat_sources AS owner_source
+                    JOIN google_chat_accounts AS account
+                      ON account.id = owner_source.account_id
+                    WHERE owner_source.id = item.source_id
+                ), FALSE) AS sent_by_owner,
+                item.content_text,
+                item.received_at, item.status, item.promoted_task_id,
+                item.acknowledged_at, item.completion_requested_at,
+                item.completion_reaction_at, item.completion_reply_at,
+                item.completion_delivery_error_code,
+                item.completion_delivery_attempt_count, item.version",
+        )
+        .bind(item_id)
+        .bind(user_id)
+        .bind(project_id)
+        .bind(promoted_task_id)
+        .bind(&thread_name)
+        .bind(source_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let mut selected = None;
+        for row in rows {
+            let item = ProjectInflowItem::try_from(row)?;
+            append_change(
+                &mut transaction,
+                user_id,
+                "project_inflow_item",
+                item.id,
+                item.version,
+            )
+            .await?;
+            if item.id == item_id {
+                selected = Some(item);
+            }
+        }
         transaction.commit().await.map_err(classify)?;
         Ok(selected)
     }
@@ -1839,6 +1990,7 @@ fn source_sync_connection(
         space_name: row.space_name,
         acknowledge_with_reaction: row.acknowledge_with_reaction,
         last_provider_message_at: row.last_provider_message_at,
+        last_successful_sync_at: row.last_successful_sync_at,
         source_had_error: row.source_had_error,
         account_needs_recovery: row.account_needs_recovery,
         refresh_token,
@@ -1890,16 +2042,17 @@ fn valid_google_chat_user_name(value: &str) -> bool {
     })
 }
 
-fn google_chat_task_notes(messages: &[(Uuid, Option<String>, String, OffsetDateTime)]) -> String {
-    let mut notes = String::from("Google Chat 대화에서 정리한 업무입니다.\n\n");
-    for (_, sender_name, content_text, _) in messages {
-        let sender = sender_name.as_deref().unwrap_or("보낸 사람 정보 없음");
-        notes.push_str(sender);
-        notes.push_str(":\n");
-        notes.push_str(content_text.trim());
-        notes.push_str("\n\n");
-    }
-    truncate_chars(notes.trim_end(), MAX_TASK_NOTES_CHARS)
+fn default_google_chat_task_notes(
+    title: &str,
+    _messages: &[(Uuid, Option<String>, String, OffsetDateTime)],
+) -> String {
+    truncate_chars(
+        &format!(
+            "업무 목적\n{}\n\n완료 기준\n요청 범위를 확인하고 처리 결과를 관계자에게 공유합니다.",
+            title.trim()
+        ),
+        MAX_TASK_NOTES_CHARS,
+    )
 }
 
 fn valid_secret(secret: &EncryptedCalendarSecret) -> bool {

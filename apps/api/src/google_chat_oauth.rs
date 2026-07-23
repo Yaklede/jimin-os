@@ -238,16 +238,11 @@ impl GoogleChatOAuthRuntime {
             .refresh_access_token(&refresh_token)
             .await
             .map_err(GoogleChatOAuthError::from_google)?;
-        let created_after = connection.last_provider_message_at.map_or_else(
-            || Some(OffsetDateTime::now_utc() - INITIAL_SYNC_LOOKBACK),
-            |last| {
-                Some(if reconcile_recent_senders {
-                    last - time::Duration::days(7)
-                } else {
-                    last
-                })
-            },
-        );
+        let created_after = Some(source_messages_created_after(
+            connection,
+            reconcile_recent_senders,
+            OffsetDateTime::now_utc(),
+        ));
         let messages = self
             .chat
             .list_messages(&access_token, &connection.space_name, created_after)
@@ -379,6 +374,23 @@ impl GoogleChatOAuthRuntime {
             &refresh_token_aad(connection.user_id, &connection.provider_subject),
         )
     }
+}
+
+fn source_messages_created_after(
+    connection: &GoogleChatSourceSyncConnection,
+    reconcile_recent_senders: bool,
+    now: OffsetDateTime,
+) -> OffsetDateTime {
+    connection.last_provider_message_at.map_or_else(
+        || now - INITIAL_SYNC_LOOKBACK,
+        |last| {
+            if reconcile_recent_senders && connection.last_successful_sync_at.is_some() {
+                last - INITIAL_SYNC_LOOKBACK
+            } else {
+                last
+            }
+        },
+    )
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -588,5 +600,41 @@ mod tests {
         assert!(GoogleChatOAuthRuntime::completion_scope_granted(&[
             CHAT_MESSAGES_CREATE_SCOPE.to_owned(),
         ]));
+    }
+
+    #[test]
+    fn first_manual_sync_respects_fresh_only_connection_cursor() {
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20);
+        let connected_at = now - Duration::minutes(2);
+        let connection = GoogleChatSourceSyncConnection {
+            source_id: Uuid::now_v7(),
+            account_id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            project_id: Uuid::now_v7(),
+            provider_subject: "provider-user".to_owned(),
+            granted_scopes: vec![],
+            space_name: "spaces/company".to_owned(),
+            acknowledge_with_reaction: true,
+            last_provider_message_at: Some(connected_at),
+            last_successful_sync_at: None,
+            source_had_error: false,
+            account_needs_recovery: false,
+            refresh_token: EncryptedCalendarSecret {
+                ciphertext: vec![1],
+                nonce: vec![2; XCHACHA_NONCE_BYTES],
+                key_version: 1,
+            },
+        };
+
+        assert_eq!(
+            source_messages_created_after(&connection, true, now),
+            connected_at
+        );
+        let mut existing = connection;
+        existing.last_successful_sync_at = Some(now - Duration::minutes(1));
+        assert_eq!(
+            source_messages_created_after(&existing, true, now),
+            connected_at - INITIAL_SYNC_LOOKBACK
+        );
     }
 }

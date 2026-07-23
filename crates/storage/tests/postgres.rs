@@ -601,6 +601,7 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             space_name: "spaces/company-room".to_owned(),
             display_name: "운영 요청".to_owned(),
             acknowledge_with_reaction: true,
+            import_history: true,
         })
         .await
         .expect("project source should persist");
@@ -609,6 +610,30 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         .await
         .expect("source connection should load")
         .expect("source connection should exist");
+    assert!(connection.last_successful_sync_at.is_none());
+    let fresh_only_source = database
+        .create_project_google_chat_source(&NewProjectGoogleChatSource {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            project_id: second_project.id,
+            account_id: account_ids[1],
+            space_name: "spaces/company-room".to_owned(),
+            display_name: "신규 요청만".to_owned(),
+            acknowledge_with_reaction: true,
+            import_history: false,
+        })
+        .await
+        .expect("fresh-only source should persist");
+    let fresh_only_connection = database
+        .google_chat_source_sync_connection(fresh_only_source.id)
+        .await
+        .expect("fresh-only connection should load")
+        .expect("fresh-only connection should exist");
+    assert!(
+        fresh_only_connection.last_provider_message_at.is_some(),
+        "fresh-only linking should start its provider cursor at connection time"
+    );
+    assert!(fresh_only_connection.last_successful_sync_at.is_none());
     let long_message = format!(
         "확인이 필요한 회사 요청입니다.\n\t{}",
         "후속 내용 ".repeat(600)
@@ -688,6 +713,10 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             expected_version: pending[0].version,
             task_id: Uuid::now_v7(),
             title: "회사 요청 확인".to_owned(),
+            notes: Some(
+                "업무 목적\n회사 요청 확인\n\n확인할 내용\n- 개발 범위와 예상 일정을 확인합니다."
+                    .to_owned(),
+            ),
             assignee_name: Some("개발 담당자".to_owned()),
             priority: 2,
             due_at: Some(due_at),
@@ -739,6 +768,31 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
     assert!(selected_completion.completion_reply_at.is_some());
     assert!(selected_completion.completion_delivery_error_code.is_none());
     assert_eq!(selected_completion.completion_delivery_attempt_count, 1);
+    let retry_target = completed_group
+        .iter()
+        .find(|item| item.id != promoted.id)
+        .expect("another message in the promoted thread should remain available");
+    let retried = database
+        .retry_project_inflow_completion(
+            owner.profile.id,
+            first_project.id,
+            retry_target.id,
+            retry_target.version,
+        )
+        .await
+        .expect("completion delivery retry should persist")
+        .expect("promoted message should accept a retry");
+    assert_eq!(retried.id, retry_target.id);
+    assert!(retried.completion_requested_at.is_some());
+    assert!(retried.completion_reaction_at.is_none());
+    assert!(retried.completion_reply_at.is_none());
+    assert_eq!(retried.completion_delivery_attempt_count, 0);
+    let retry_deliveries = database
+        .pending_google_chat_completion_deliveries(source.id, Some(retried.id), 20)
+        .await
+        .expect("retargeted completion delivery should load");
+    assert_eq!(retry_deliveries.len(), 1);
+    assert_eq!(retry_deliveries[0].inflow_id, retried.id);
     assert!(
         database
             .recent_project_inflow_decisions_for_user(owner.profile.id)
@@ -762,9 +816,10 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         .fetch_one(&pool)
         .await
         .expect("promoted task notes should load");
-    let notes = notes.expect("promoted task should keep source evidence");
-    assert!(notes.contains("확인이 필요한 회사 요청입니다."));
-    assert!(notes.contains("개발 범위와 예상 일정을 확인해 주세요."));
+    let notes = notes.expect("promoted task should keep the organized work description");
+    assert!(notes.contains("업무 목적"));
+    assert!(notes.contains("개발 범위와 예상 일정을 확인합니다."));
+    assert!(!notes.contains("보낸 사람 정보 없음"));
     assert_eq!(assignee_name.as_deref(), Some("개발 담당자"));
     assert_eq!(stored_due_at, Some(due_at));
     pool.close().await;

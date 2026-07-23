@@ -681,6 +681,7 @@ pub struct ProjectInflowItemResponse {
     sent_by_owner: bool,
     content_text: String,
     suggested_task_title: String,
+    suggested_task_notes: String,
     message_count: usize,
     first_received_at: String,
     received_at: String,
@@ -721,6 +722,8 @@ pub struct CreateProjectGoogleChatSourceRequest {
     space_name: String,
     display_name: String,
     acknowledge_with_reaction: bool,
+    #[serde(default)]
+    import_history: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema, PartialEq, Eq)]
@@ -735,6 +738,7 @@ pub struct ProjectInflowDecisionRequest {
     decision: String,
     expected_version: i64,
     title: Option<String>,
+    notes: Option<String>,
     assignee_name: Option<String>,
     priority: Option<i16>,
     due_at: Option<String>,
@@ -5599,6 +5603,7 @@ async fn create_project_google_chat_source(
         space_name: request.space_name,
         display_name: request.display_name,
         acknowledge_with_reaction: request.acknowledge_with_reaction,
+        import_history: request.import_history,
     };
     match planning.create_project_google_chat_source(&command).await {
         Ok(source) => match project_google_chat_source_response(source) {
@@ -5780,48 +5785,11 @@ async fn decide_project_inflow_item(
         return unavailable_response(request_id);
     };
     let user_id = principal.identity().user_id();
-    let result = match request.decision.as_str() {
-        "dismiss" => {
-            planning
-                .dismiss_project_inflow_item(user_id, project_id, item_id, request.expected_version)
-                .await
-        }
-        "promote" => {
-            let Some(title) = request.title.as_deref() else {
-                return invalid_request_response(request_id);
-            };
-            let Ok(due_at) = request
-                .due_at
-                .as_deref()
-                .map(|value| OffsetDateTime::parse(value, &Rfc3339).map_err(|_| ()))
-                .transpose()
-            else {
-                return invalid_request_response(request_id);
-            };
-            planning
-                .promote_project_inflow_item(&PromoteProjectInflowItem {
-                    user_id,
-                    project_id,
-                    item_id,
-                    expected_version: request.expected_version,
-                    task_id: uuid::Uuid::now_v7(),
-                    title: title.to_owned(),
-                    assignee_name: request
-                        .assignee_name
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_owned),
-                    priority: request.priority.unwrap_or(1),
-                    due_at,
-                })
-                .await
-        }
-        _ => return invalid_request_response(request_id),
-    };
+    let result =
+        apply_project_inflow_decision(planning, user_id, project_id, item_id, &request).await;
     match result {
         Ok(Some(mut item)) => {
-            if request.decision == "promote"
+            if matches!(request.decision.as_str(), "promote" | "retry_completion")
                 && let Some(runtime) = state.google_chat_oauth()
                 && let Ok(Some(connection)) = planning
                     .google_chat_source_sync_connection(item.source_id)
@@ -5852,15 +5820,84 @@ async fn decide_project_inflow_item(
                 Err(()) => unavailable_response(request_id),
             }
         }
-        Ok(_) => error_response(
-            StatusCode::CONFLICT,
-            "project.inflow_changed",
-            "이 항목은 이미 처리되었어요. 들어오는 업무를 다시 불러와 주세요.",
-            request_id,
-            false,
-        ),
+        Ok(_) => {
+            let (code, message) = if request.decision == "retry_completion" {
+                (
+                    "project.inflow_completion_changed",
+                    "반영 상태가 바뀌었어요. 들어오는 업무를 다시 불러온 뒤 재시도해 주세요.",
+                )
+            } else {
+                (
+                    "project.inflow_changed",
+                    "이 항목은 이미 처리되었어요. 들어오는 업무를 다시 불러와 주세요.",
+                )
+            };
+            error_response(StatusCode::CONFLICT, code, message, request_id, false)
+        }
         Err(StorageError::InvalidConfiguration) => invalid_request_response(request_id),
         Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+async fn apply_project_inflow_decision(
+    planning: &Database,
+    user_id: uuid::Uuid,
+    project_id: uuid::Uuid,
+    item_id: uuid::Uuid,
+    request: &ProjectInflowDecisionRequest,
+) -> Result<Option<ProjectInflowItem>, StorageError> {
+    match request.decision.as_str() {
+        "dismiss" => {
+            planning
+                .dismiss_project_inflow_item(user_id, project_id, item_id, request.expected_version)
+                .await
+        }
+        "promote" => {
+            let Some(title) = request.title.as_deref() else {
+                return Err(StorageError::InvalidConfiguration);
+            };
+            let due_at = request
+                .due_at
+                .as_deref()
+                .map(|value| OffsetDateTime::parse(value, &Rfc3339).map_err(|_| ()))
+                .transpose()
+                .map_err(|()| StorageError::InvalidConfiguration)?;
+            planning
+                .promote_project_inflow_item(&PromoteProjectInflowItem {
+                    user_id,
+                    project_id,
+                    item_id,
+                    expected_version: request.expected_version,
+                    task_id: uuid::Uuid::now_v7(),
+                    title: title.to_owned(),
+                    notes: request
+                        .notes
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned),
+                    assignee_name: request
+                        .assignee_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned),
+                    priority: request.priority.unwrap_or(1),
+                    due_at,
+                })
+                .await
+        }
+        "retry_completion" => {
+            planning
+                .retry_project_inflow_completion(
+                    user_id,
+                    project_id,
+                    item_id,
+                    request.expected_version,
+                )
+                .await
+        }
+        _ => Err(StorageError::InvalidConfiguration),
     }
 }
 
@@ -6508,6 +6545,170 @@ fn suggested_inflow_task_title(content: &str) -> String {
     }
 }
 
+fn suggested_inflow_task_notes(title: &str, messages: &[ProjectInflowItem]) -> String {
+    let normalized_messages = messages
+        .iter()
+        .map(|item| item.content_text.to_lowercase())
+        .collect::<Vec<_>>();
+    let combined = normalized_messages.join("\n");
+    let mut points = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    if combined.contains("qr")
+        && combined.contains("결제")
+        && (combined.contains("배송") || combined.contains("통지") || combined.contains("통보"))
+    {
+        add_unique_inflow_summary_point(
+            &mut points,
+            &mut seen,
+            "QR 결제 거래·배송 정보 통지 연동 범위를 확인합니다.",
+        );
+    }
+    if combined.contains("가이드") {
+        add_unique_inflow_summary_point(
+            &mut points,
+            &mut seen,
+            "제공된 연동 가이드와 테스트 조건을 확인합니다.",
+        );
+    }
+    if combined.contains("url") && combined.contains("회신") {
+        add_unique_inflow_summary_point(
+            &mut points,
+            &mut seen,
+            "거래 통지 수신 URL을 개발하고 연동처에 회신합니다.",
+        );
+    }
+    if combined.contains("거래내역")
+        && (combined.contains("목적")
+            || combined.contains("쌓")
+            || combined.contains("저장")
+            || combined.contains("보는"))
+    {
+        add_unique_inflow_summary_point(
+            &mut points,
+            &mut seen,
+            "거래내역 조회·저장 목적과 처리 범위를 정합니다.",
+        );
+    }
+    if combined.contains("테스트 페이지") || combined.contains("테스트 환경") {
+        add_unique_inflow_summary_point(
+            &mut points,
+            &mut seen,
+            "제공된 테스트 환경에서 확인 가능한 기능과 검증 방법을 점검합니다.",
+        );
+    }
+
+    if points.is_empty() {
+        for message in messages {
+            for line in message
+                .content_text
+                .split(['\n', '\r'])
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+            {
+                if sensitive_inflow_summary_line(line) {
+                    add_unique_inflow_summary_point(
+                        &mut points,
+                        &mut seen,
+                        "제공된 테스트 환경과 계정으로 연동 동작을 확인합니다.",
+                    );
+                    continue;
+                }
+                let Some(line) = concise_inflow_summary_line(line) else {
+                    continue;
+                };
+                add_unique_inflow_summary_point(&mut points, &mut seen, &line);
+            }
+        }
+    }
+    if points.is_empty() {
+        add_unique_inflow_summary_point(
+            &mut points,
+            &mut seen,
+            "요청 범위와 필요한 결과를 확인합니다.",
+        );
+    }
+
+    format!(
+        "업무 목적\n{}\n\n확인할 내용\n{}\n\n완료 기준\n요청 범위를 확정하고 처리 결과를 관계자에게 공유합니다.",
+        title.trim(),
+        points
+            .into_iter()
+            .map(|point| format!("- {point}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
+fn add_unique_inflow_summary_point(
+    points: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+    value: &str,
+) {
+    if points.len() >= 5 {
+        return;
+    }
+    let value = value.trim();
+    if !value.is_empty() && seen.insert(value.to_owned()) {
+        points.push(value.to_owned());
+    }
+}
+
+fn sensitive_inflow_summary_line(line: &str) -> bool {
+    let normalized = line.to_lowercase();
+    [
+        "비밀번호",
+        "password",
+        "passwd",
+        "테스트 계정",
+        "계정 정보",
+        "access token",
+        "api key",
+        "secret",
+    ]
+    .iter()
+    .any(|term| normalized.contains(term))
+}
+
+fn concise_inflow_summary_line(line: &str) -> Option<String> {
+    let mut value = line
+        .trim()
+        .trim_start_matches("보낸 사람 정보 없음:")
+        .trim_start_matches("안녕하세요.")
+        .trim_start_matches("안녕하세요,")
+        .trim()
+        .trim_start_matches(['-', '*', '•'])
+        .trim()
+        .to_owned();
+    for suffix in [
+        "확인 부탁드립니다.",
+        "확인 부탁드립니다",
+        "부탁드립니다.",
+        "부탁드립니다",
+    ] {
+        if value.ends_with(suffix) {
+            value.truncate(value.len() - suffix.len());
+            value = value.trim_end().to_owned();
+        }
+    }
+    if value.starts_with("URL:")
+        || value.starts_with("http://")
+        || value.starts_with("https://")
+        || value
+            .chars()
+            .filter(|character| character.is_alphanumeric())
+            .count()
+            < 8
+    {
+        return None;
+    }
+    let mut value = value.chars().take(140).collect::<String>();
+    if !value.ends_with(['.', '!', '?', '요', '다']) {
+        value.push('.');
+    }
+    Some(value)
+}
+
 fn project_inflow_item_response(
     candidate: ProjectInflowCandidate,
 ) -> Result<ProjectInflowItemResponse, ()> {
@@ -6539,6 +6740,9 @@ fn project_inflow_item_response(
         "pending"
     };
     let message_count = messages.len();
+    let suggested_task_title = suggested_inflow_task_title(&focus.content_text);
+    let suggested_task_notes =
+        suggested_inflow_task_notes(&suggested_task_title, messages.as_slice());
     let messages = messages
         .into_iter()
         .map(|item| {
@@ -6554,7 +6758,7 @@ fn project_inflow_item_response(
         })
         .collect::<Result<Vec<_>, ()>>()?;
     Ok(ProjectInflowItemResponse {
-        id: representative.id,
+        id: focus.id,
         project_id: representative.project_id,
         project_name: representative.project_name,
         source_id: representative.source_id,
@@ -6564,7 +6768,8 @@ fn project_inflow_item_response(
             .then(|| "나".to_owned())
             .or(focus.sender_name),
         sent_by_owner: focus.sent_by_owner,
-        suggested_task_title: suggested_inflow_task_title(&focus.content_text),
+        suggested_task_title,
+        suggested_task_notes,
         content_text: focus.content_text,
         message_count,
         first_received_at: first_received_at.format(&Rfc3339).map_err(|_| ())?,
@@ -6584,7 +6789,7 @@ fn project_inflow_item_response(
         assignee_options: Vec::new(),
         notifiable_assignee_names: Vec::new(),
         assignee_notification_available: false,
-        version: representative.version,
+        version: focus.version,
     })
 }
 
@@ -8382,16 +8587,29 @@ mod tests {
                     version: 1,
                 }
             };
+        let actionable_request = make_item(
+            "혹시 이 기능은 개발에 얼마나 걸릴까요?",
+            OffsetDateTime::UNIX_EPOCH + TimeDuration::seconds(1),
+            thread_name.clone(),
+        );
+        let actionable_request_id = actionable_request.id;
+        let mut owner_follow_up = make_item(
+            "담당자를 정해서 진행해 주세요.",
+            OffsetDateTime::UNIX_EPOCH + TimeDuration::seconds(2),
+            thread_name,
+        );
+        owner_follow_up.sent_by_owner = true;
         let items = vec![
-            make_item("ㅠ", OffsetDateTime::UNIX_EPOCH, thread_name.clone()),
             make_item(
-                "혹시 이 기능은 개발에 얼마나 걸릴까요?",
-                OffsetDateTime::UNIX_EPOCH + TimeDuration::seconds(1),
-                thread_name,
+                "ㅠ",
+                OffsetDateTime::UNIX_EPOCH,
+                owner_follow_up.provider_thread_name.clone(),
             ),
+            actionable_request,
+            owner_follow_up,
             make_item(
                 "ㅇㅇ",
-                OffsetDateTime::UNIX_EPOCH + TimeDuration::seconds(2),
+                OffsetDateTime::UNIX_EPOCH + TimeDuration::seconds(3),
                 None,
             ),
         ];
@@ -8406,13 +8624,20 @@ mod tests {
                 .expect("one candidate should remain"),
         )
         .expect("candidate should serialize");
-        assert_eq!(response.message_count, 2);
-        assert_eq!(response.messages.len(), 2);
+        assert_eq!(response.id, actionable_request_id);
+        assert_eq!(response.message_count, 3);
+        assert_eq!(response.messages.len(), 3);
         assert_eq!(
             response.content_text,
             "혹시 이 기능은 개발에 얼마나 걸릴까요?"
         );
         assert_eq!(response.suggested_task_title, "개발 범위와 예상 일정 확인");
+        assert!(response.suggested_task_notes.contains("업무 목적"));
+        assert!(
+            !response
+                .suggested_task_notes
+                .contains("보낸 사람 정보 없음")
+        );
 
         let mut owner_comment = make_item(
             "권한이슈 확인일자: 금일",
@@ -8423,6 +8648,52 @@ mod tests {
         assert!(group_project_inflow_candidates(vec![owner_comment]).is_empty());
         assert_eq!(inflow_actionability_score("ip전달 먼저"), 0);
         assert_eq!(inflow_actionability_score("리체크용 해야함"), 0);
+    }
+
+    #[test]
+    fn inflow_work_description_summarizes_qr_request_without_sender_or_credentials() {
+        let project_id = Uuid::now_v7();
+        let source_id = Uuid::now_v7();
+        let message = |content: &str| ProjectInflowItem {
+            id: Uuid::now_v7(),
+            project_id,
+            project_name: "비스킷링크".to_owned(),
+            source_id,
+            source_name: "PAYMENTS CS".to_owned(),
+            provider_thread_name: Some("spaces/company/threads/qr".to_owned()),
+            sender_provider_name: None,
+            sender_name: None,
+            sent_by_owner: false,
+            content_text: content.to_owned(),
+            received_at: OffsetDateTime::UNIX_EPOCH,
+            status: ProjectInflowStatus::Pending,
+            promoted_task_id: None,
+            acknowledged_at: None,
+            completion_requested_at: None,
+            completion_reaction_at: None,
+            completion_reply_at: None,
+            completion_delivery_error_code: None,
+            completion_delivery_attempt_count: 0,
+            version: 1,
+        };
+        let messages = vec![
+            message(
+                "상위 QR 결제 거래·배송 정보 통지 연동을 요청드립니다.\n연동 가이드와 테스트 계정 정보: dalqtest / 1234",
+            ),
+            message("수신 URL을 개발한 후 당사로 회신해 주세요."),
+            message("거래내역을 쌓는 것이 주 목적인지 판단이 필요합니다."),
+            message("테스트 페이지에서 확인 가능한 기능도 점검해 주세요."),
+        ];
+
+        let notes = suggested_inflow_task_notes("페이시스 QR 결제 통보 연동 개발", &messages);
+
+        assert!(notes.contains("QR 결제 거래·배송 정보 통지 연동 범위"));
+        assert!(notes.contains("거래 통지 수신 URL"));
+        assert!(notes.contains("거래내역 조회·저장 목적"));
+        assert!(notes.contains("테스트 환경"));
+        assert!(!notes.contains("보낸 사람 정보 없음"));
+        assert!(!notes.contains("dalqtest"));
+        assert!(!notes.contains("1234"));
     }
 
     #[test]
