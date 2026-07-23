@@ -2689,6 +2689,7 @@ export default function App() {
     spaceName: string;
     displayName: string;
     acknowledgeWithReaction: boolean;
+    importHistory: boolean;
   }): Promise<void> {
     if (!selectedProjectId) throw new Error("project unavailable");
     setInflowSaving(true);
@@ -2806,6 +2807,26 @@ export default function App() {
       if (selectedProjectId === item.projectId) {
         await loadProjectInflow(item.projectId);
       }
+    } catch (error) {
+      setInflowError(copy.projects.inflowDecisionProblem);
+      throw error;
+    } finally {
+      setInflowSaving(false);
+    }
+  }
+
+  async function retryWorkspaceInflowCompletion(
+    item: ProjectInflowItem,
+  ): Promise<void> {
+    setInflowSaving(true);
+    setInflowError(undefined);
+    try {
+      await withAuthenticatedSession((accessToken) =>
+        decideProjectInflow(apiBaseUrl, accessToken, item, {
+          decision: "retry_completion",
+        }),
+      );
+      await loadProjectInflow(item.projectId);
     } catch (error) {
       setInflowError(copy.projects.inflowDecisionProblem);
       throw error;
@@ -3136,6 +3157,7 @@ export default function App() {
               inflowSaving={inflowSaving}
               onPromoteInflow={promoteWorkspaceInflow}
               onDismissInflow={dismissWorkspaceInflow}
+              onRetryInflowCompletion={retryWorkspaceInflowCompletion}
             />
           )}
           {destination === "calendar" && (
@@ -3219,6 +3241,7 @@ export default function App() {
               onSyncGoogleChatSource={syncWorkspaceGoogleChatSource}
               onPromoteInflow={promoteWorkspaceInflow}
               onDismissInflow={dismissWorkspaceInflow}
+              onRetryInflowCompletion={retryWorkspaceInflowCompletion}
             />
           )}
           {destination === "decisions" && (

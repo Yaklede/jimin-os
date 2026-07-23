@@ -34,15 +34,18 @@ type ProjectInflowPanelProps = {
     spaceName: string;
     displayName: string;
     acknowledgeWithReaction: boolean;
+    importHistory: boolean;
   }): Promise<void>;
   onDeleteSource(source: ProjectGoogleChatSource): Promise<void>;
   onSyncSource(source: ProjectGoogleChatSource): Promise<void>;
   onPromote(item: ProjectInflowItem, input: PromoteInflowInput): Promise<void>;
   onDismiss(item: ProjectInflowItem): Promise<void>;
+  onRetryCompletion(item: ProjectInflowItem): Promise<void>;
 };
 
 export type PromoteInflowInput = {
   title: string;
+  notes: string;
   assigneeName?: string;
   priority: number;
   dueAt?: string;
@@ -64,6 +67,7 @@ export function ProjectInflowPanel({
   onSyncSource,
   onPromote,
   onDismiss,
+  onRetryCompletion,
 }: ProjectInflowPanelProps) {
   const activeAccounts = useMemo(
     () => accounts.filter((account) => account.status === "active"),
@@ -72,6 +76,7 @@ export function ProjectInflowPanel({
   const [accountId, setAccountId] = useState("");
   const [spaceName, setSpaceName] = useState("");
   const [acknowledge, setAcknowledge] = useState(true);
+  const [importHistory, setImportHistory] = useState(false);
   const pendingItems = items.filter((item) => item.status === "pending");
   const handledItems = items
     .filter((item) => item.status !== "pending")
@@ -98,6 +103,7 @@ export function ProjectInflowPanel({
       spaceName: space.name,
       displayName: space.displayName,
       acknowledgeWithReaction: acknowledge,
+      importHistory,
     });
     setSpaceName("");
   }
@@ -183,6 +189,15 @@ export function ProjectInflowPanel({
               />
               <span>{copy.projects.inflowAckLabel}</span>
             </label>
+            <label className="project-inflow__acknowledge">
+              <input
+                type="checkbox"
+                checked={importHistory}
+                disabled={saving}
+                onChange={(event) => setImportHistory(event.target.checked)}
+              />
+              <span>{copy.projects.inflowImportHistoryLabel}</span>
+            </label>
             <button
               className="secondary-button focus-visible-control"
               type="submit"
@@ -266,6 +281,7 @@ export function ProjectInflowPanel({
                 saving={saving}
                 onPromote={onPromote}
                 onDismiss={onDismiss}
+                onRetryCompletion={onRetryCompletion}
               />
               <InflowItemList
                 title={copy.projects.inflowRecentTitle}
@@ -273,6 +289,7 @@ export function ProjectInflowPanel({
                 saving={saving}
                 onPromote={onPromote}
                 onDismiss={onDismiss}
+                onRetryCompletion={onRetryCompletion}
               />
             </>
           )}
@@ -288,12 +305,14 @@ function InflowItemList({
   saving,
   onPromote,
   onDismiss,
+  onRetryCompletion,
 }: {
   title: string;
   items: ProjectInflowItem[];
   saving: boolean;
   onPromote(item: ProjectInflowItem, input: PromoteInflowInput): Promise<void>;
   onDismiss(item: ProjectInflowItem): Promise<void>;
+  onRetryCompletion(item: ProjectInflowItem): Promise<void>;
 }) {
   if (items.length === 0) return null;
   return (
@@ -310,6 +329,7 @@ function InflowItemList({
             saving={saving}
             onPromote={onPromote}
             onDismiss={onDismiss}
+            onRetryCompletion={onRetryCompletion}
           />
         ))}
       </ul>
@@ -322,11 +342,13 @@ export function InflowItemRow({
   saving,
   onPromote,
   onDismiss,
+  onRetryCompletion,
 }: {
   item: ProjectInflowItem;
   saving: boolean;
   onPromote(item: ProjectInflowItem, input: PromoteInflowInput): Promise<void>;
   onDismiss(item: ProjectInflowItem): Promise<void>;
+  onRetryCompletion(item: ProjectInflowItem): Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
   const messages = item.messages ?? [
@@ -341,6 +363,7 @@ export function InflowItemRow({
   const messageCount = item.messageCount ?? messages.length;
   const firstReceivedAt = item.firstReceivedAt ?? item.receivedAt;
   const [title, setTitle] = useState(() => suggestedTitle);
+  const [notes, setNotes] = useState(() => item.suggestedTaskNotes);
   const assigneeOptions = item.assigneeOptions ?? [];
   const [assigneeName, setAssigneeName] = useState(() =>
     item.senderName && assigneeOptions.includes(item.senderName)
@@ -368,6 +391,7 @@ export function InflowItemRow({
     setDueProblem(false);
     await onPromote(item, {
       title: title.trim(),
+      notes: notes.trim(),
       assigneeName: assigneeName || undefined,
       priority: Number(priority),
       dueAt: parsedDueAt,
@@ -435,6 +459,17 @@ export function InflowItemRow({
                   <span>{copy.projects.inflowReplyDone}</span>
                 )}
               </div>
+              {item.completionStatus !== "sent" && (
+                <button
+                  className="secondary-button focus-visible-control"
+                  type="button"
+                  disabled={saving}
+                  onClick={() => void onRetryCompletion(item)}
+                >
+                  <RefreshCw aria-hidden="true" />
+                  {copy.projects.inflowCompletionRetry}
+                </button>
+              )}
             </>
           )}
         </div>
@@ -455,6 +490,20 @@ export function InflowItemRow({
               />
               <small id={`inflow-task-title-help-${item.id}`}>
                 {copy.projects.inflowTaskTitleHint}
+              </small>
+            </label>
+            <label className="project-inflow-item__notes-field">
+              <span>{copy.projects.inflowTaskNotesLabel}</span>
+              <textarea
+                value={notes}
+                maxLength={10_000}
+                rows={8}
+                disabled={saving}
+                aria-describedby={`inflow-task-notes-help-${item.id}`}
+                onChange={(event) => setNotes(event.target.value)}
+              />
+              <small id={`inflow-task-notes-help-${item.id}`}>
+                {copy.projects.inflowTaskNotesHint}
               </small>
             </label>
             <label>

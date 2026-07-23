@@ -146,6 +146,7 @@ type ProjectsWorkspaceProps = {
     spaceName: string;
     displayName: string;
     acknowledgeWithReaction: boolean;
+    importHistory: boolean;
   }): Promise<void>;
   onDeleteGoogleChatSource(source: ProjectGoogleChatSource): Promise<void>;
   onSyncGoogleChatSource(source: ProjectGoogleChatSource): Promise<void>;
@@ -154,6 +155,7 @@ type ProjectsWorkspaceProps = {
     input: PromoteInflowInput,
   ): Promise<void>;
   onDismissInflow(item: ProjectInflowItem): Promise<void>;
+  onRetryInflowCompletion(item: ProjectInflowItem): Promise<void>;
 };
 
 export function ProjectsWorkspace({
@@ -202,6 +204,7 @@ export function ProjectsWorkspace({
   onSyncGoogleChatSource,
   onPromoteInflow,
   onDismissInflow,
+  onRetryInflowCompletion,
 }: ProjectsWorkspaceProps) {
   const [formOpen, setFormOpen] = useState(false);
   const [title, setTitle] = useState("");
@@ -875,6 +878,7 @@ export function ProjectsWorkspace({
                 onSyncSource={onSyncGoogleChatSource}
                 onPromote={onPromoteInflow}
                 onDismiss={onDismissInflow}
+                onRetryCompletion={onRetryInflowCompletion}
               />
               <ProjectWebhookPanel
                 projectId={selectedProject.id}

@@ -61,6 +61,7 @@ export interface ProjectInflowItem {
   sentByOwner: boolean;
   contentText: string;
   suggestedTaskTitle: string;
+  suggestedTaskNotes: string;
   messageCount: number;
   firstReceivedAt: string;
   receivedAt: string;
@@ -152,6 +153,7 @@ export async function createProjectGoogleChatSource(
     spaceName: string;
     displayName: string;
     acknowledgeWithReaction: boolean;
+    importHistory: boolean;
   },
 ): Promise<ProjectGoogleChatSource> {
   return request<ProjectGoogleChatSource>(
@@ -207,6 +209,9 @@ export function normalizeProjectInflowItem(
     ...item,
     projectName: item.projectName || item.sourceName,
     sentByOwner: item.sentByOwner ?? false,
+    suggestedTaskNotes:
+      item.suggestedTaskNotes ||
+      `업무 목적\n${item.suggestedTaskTitle || "대화 내용 확인"}\n\n완료 기준\n요청 범위를 확인하고 처리 결과를 관계자에게 공유합니다.`,
     completionStatus: item.completionStatus ?? "not_requested",
     completionReactionCompleted: item.completionReactionCompleted ?? false,
     completionReplyCompleted: item.completionReplyCompleted ?? false,
@@ -232,9 +237,11 @@ export async function decideProjectInflow(
   item: ProjectInflowItem,
   input:
     | { decision: "dismiss" }
+    | { decision: "retry_completion" }
     | {
         decision: "promote";
         title: string;
+        notes: string;
         assigneeName?: string;
         priority: number;
         dueAt?: string;

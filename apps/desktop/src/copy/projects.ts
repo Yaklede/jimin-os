@@ -103,6 +103,7 @@ export const projectCopy = {
   inflowChooseSpace: "Chat 공간을 선택해 주세요",
   inflowAddSource: "공간 연결하기",
   inflowAckLabel: "가져온 메시지에 👀 표시 남기기",
+  inflowImportHistoryLabel: "최근 7일 대화도 함께 가져오기",
   inflowRefresh: "새 메시지 확인",
   inflowRemoveSource: "공간 연결 해제",
   inflowEmpty: "지금 검토할 업무 대화가 없어요.",
@@ -118,6 +119,9 @@ export const projectCopy = {
   inflowDismiss: "업무 아님",
   inflowTaskTitleLabel: "정리된 할 일",
   inflowTaskTitleHint: "대화에서 해야 할 행동이나 완료 결과를 확인해 주세요.",
+  inflowTaskNotesLabel: "정리된 업무 내용",
+  inflowTaskNotesHint:
+    "보낸 사람 정보와 계정 정보는 빼고, 처리할 내용과 완료 기준만 정리했어요.",
   inflowAssigneeLabel: "담당자",
   inflowNoAssignee: "담당자 없이 등록",
   inflowDueAtLabel: "마감일",
@@ -134,6 +138,7 @@ export const projectCopy = {
   inflowCompletionPending: "Chat에 처리 결과를 남기고 있어요.",
   inflowCompletionRetrying:
     "할 일은 등록했어요. Chat 반영은 자동으로 다시 시도해요. 잠시 후 새로고침해 주세요.",
+  inflowCompletionRetry: "Chat에 다시 반영하기",
   inflowReactionDone: "✅ 표시 완료",
   inflowReplyDone: "마감일 답글 완료",
   inflowSourceProblem:
