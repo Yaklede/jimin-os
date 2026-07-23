@@ -106,6 +106,12 @@ export const projectCopy = {
   inflowRefresh: "새 메시지 확인",
   inflowRemoveSource: "공간 연결 해제",
   inflowEmpty: "지금 검토할 업무 대화가 없어요.",
+  inflowPendingTitle: "검토할 대화",
+  inflowRecentTitle: "최근 정리한 대화",
+  inflowRecentHomeEyebrow: "최근 처리 결과",
+  inflowRecentHomeTitle: "Chat에도 처리 결과를 남기고 있어요",
+  inflowRecentHomeDescription:
+    "할 일 등록과 원문 표시, 마감일 답글 상태를 함께 확인할 수 있어요.",
   inflowNoSource: "아직 확인할 Chat 공간을 연결하지 않았어요.",
   inflowPromote: "할 일로 정리하기",
   inflowPromoteAndNotify: "할 일로 정리하고 알리기",
@@ -115,12 +121,21 @@ export const projectCopy = {
   inflowAssigneeLabel: "담당자",
   inflowNoAssignee: "담당자 없이 등록",
   inflowDueAtLabel: "마감일",
+  inflowDueAtProblem: "마감일을 다시 선택해 주세요.",
   inflowPriorityLabel: "우선순위",
   inflowSenderPending: "보낸 사람 확인 중",
   inflowAssigneeWillBeNotified: (name: string) =>
     `등록하면 ${name}님을 Google Chat에서 멘션해 알려드려요.`,
   inflowAssigneeNotificationOff:
     "담당자는 저장하지만 Chat에는 알리지 않아요. 프로젝트 설정에서 할 일 알림 연결을 켜 주세요.",
+  inflowPromoted: "할 일로 정리했어요",
+  inflowDismissed: "업무 아님으로 정리했어요",
+  inflowCompletionSent: "✅ 원문 표시와 마감일 답글을 남겼어요.",
+  inflowCompletionPending: "Chat에 처리 결과를 남기고 있어요.",
+  inflowCompletionRetrying:
+    "할 일은 등록했어요. Chat 반영은 자동으로 다시 시도해요. 잠시 후 새로고침해 주세요.",
+  inflowReactionDone: "✅ 표시 완료",
+  inflowReplyDone: "마감일 답글 완료",
   inflowSourceProblem:
     "Chat 공간을 연결하지 못했어요. 회사 계정과 공간을 다시 확인해 주세요.",
   inflowLoadProblem:

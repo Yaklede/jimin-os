@@ -874,7 +874,7 @@ export default function App() {
         const [sources, items] = await withAuthenticatedSession((accessToken) =>
           Promise.all([
             fetchProjectGoogleChatSources(apiBaseUrl, accessToken, projectId),
-            fetchProjectInflow(apiBaseUrl, accessToken, projectId, "pending"),
+            fetchProjectInflow(apiBaseUrl, accessToken, projectId, "all"),
           ]),
         );
         setProjectGoogleChatSources(sources);
@@ -2803,6 +2803,9 @@ export default function App() {
         current.filter((currentItem) => currentItem.id !== item.id),
       );
       await loadHomeSnapshot();
+      if (selectedProjectId === item.projectId) {
+        await loadProjectInflow(item.projectId);
+      }
     } catch (error) {
       setInflowError(copy.projects.inflowDecisionProblem);
       throw error;

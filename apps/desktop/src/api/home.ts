@@ -55,6 +55,7 @@ export interface HomeSnapshot {
   tasks: Task[];
   dueTasks: Task[];
   inflow: ProjectInflowItem[];
+  recentInflow: ProjectInflowItem[];
   recommendations: Recommendation[];
 }
 
@@ -84,6 +85,9 @@ export async function fetchHomeSnapshot(
     dueTasks: Array.isArray(body.dueTasks) ? body.dueTasks : [],
     inflow: Array.isArray(body.inflow)
       ? body.inflow.map(normalizeProjectInflowItem)
+      : [],
+    recentInflow: Array.isArray(body.recentInflow)
+      ? body.recentInflow.map(normalizeProjectInflowItem)
       : [],
     recommendations: Array.isArray(body.recommendations)
       ? body.recommendations

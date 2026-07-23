@@ -4197,12 +4197,29 @@ svg {
 }
 
 .project-inflow__sources,
-.project-inflow__items > ul {
+.project-inflow__items ul {
   display: grid;
   gap: 0;
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.project-inflow__group {
+  display: grid;
+  gap: 0;
+}
+
+.project-inflow__group + .project-inflow__group {
+  margin-top: 14px;
+}
+
+.project-inflow__group > h4 {
+  margin: 0;
+  padding: 10px 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .project-inflow__sources {
@@ -4384,6 +4401,38 @@ svg {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.project-inflow-item__completion {
+  display: grid;
+  gap: 5px;
+  border-radius: 12px;
+  padding: 11px 13px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.project-inflow-item__completion strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.project-inflow-item__completion p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.project-inflow-item__completion > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  color: var(--accent);
+  font-weight: 650;
+}
+
+.project-inflow-item__completion--dismissed {
+  opacity: 0.78;
 }
 
 .project-inflow-item__notification-note {

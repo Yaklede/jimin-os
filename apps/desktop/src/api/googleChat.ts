@@ -41,6 +41,8 @@ export interface ProjectGoogleChatSource {
 }
 
 export type ProjectInflowStatus = "pending" | "promoted" | "dismissed";
+export type ProjectInflowCompletionStatus =
+  "not_requested" | "pending" | "sent" | "failed";
 
 export interface ProjectInflowMessage {
   senderName: string | null;
@@ -66,6 +68,11 @@ export interface ProjectInflowItem {
   status: ProjectInflowStatus;
   promotedTaskId: string | null;
   acknowledged: boolean;
+  completionStatus: ProjectInflowCompletionStatus;
+  completionReactionCompleted: boolean;
+  completionReplyCompleted: boolean;
+  completionErrorCode: string | null;
+  completionAttemptCount: number;
   assigneeOptions: string[];
   notifiableAssigneeNames: string[];
   assigneeNotificationAvailable: boolean;
@@ -200,14 +207,18 @@ export function normalizeProjectInflowItem(
     ...item,
     projectName: item.projectName || item.sourceName,
     sentByOwner: item.sentByOwner ?? false,
+    completionStatus: item.completionStatus ?? "not_requested",
+    completionReactionCompleted: item.completionReactionCompleted ?? false,
+    completionReplyCompleted: item.completionReplyCompleted ?? false,
+    completionErrorCode: item.completionErrorCode ?? null,
+    completionAttemptCount: item.completionAttemptCount ?? 0,
     assigneeOptions: Array.isArray(item.assigneeOptions)
       ? item.assigneeOptions
       : [],
     notifiableAssigneeNames: Array.isArray(item.notifiableAssigneeNames)
       ? item.notifiableAssigneeNames
       : [],
-    assigneeNotificationAvailable:
-      item.assigneeNotificationAvailable ?? false,
+    assigneeNotificationAvailable: item.assigneeNotificationAvailable ?? false,
     messages: (item.messages ?? []).map((message) => ({
       ...message,
       sentByOwner: message.sentByOwner ?? false,

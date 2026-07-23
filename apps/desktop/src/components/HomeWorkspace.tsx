@@ -347,6 +347,34 @@ export function HomeWorkspace({
             </section>
           )}
 
+          {!showingSkeleton && Boolean(snapshot?.recentInflow.length) && (
+            <section
+              className="home-inflow home-inflow--recent"
+              aria-labelledby="home-recent-inflow-title"
+            >
+              <header className="home-inflow__heading">
+                <div>
+                  <span>{copy.projects.inflowRecentHomeEyebrow}</span>
+                  <h2 id="home-recent-inflow-title">
+                    {copy.projects.inflowRecentHomeTitle}
+                  </h2>
+                  <p>{copy.projects.inflowRecentHomeDescription}</p>
+                </div>
+              </header>
+              <ul className="home-inflow__list">
+                {(snapshot?.recentInflow ?? []).slice(0, 3).map((item) => (
+                  <InflowItemRow
+                    key={item.id}
+                    item={item}
+                    saving={inflowSaving}
+                    onPromote={onPromoteInflow}
+                    onDismiss={onDismissInflow}
+                  />
+                ))}
+              </ul>
+            </section>
+          )}
+
           {!showingSkeleton && dueTasks.length > 0 && (
             <DeadlineBrief
               tasks={dueTasks}

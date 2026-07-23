@@ -72,6 +72,10 @@ export function ProjectInflowPanel({
   const [accountId, setAccountId] = useState("");
   const [spaceName, setSpaceName] = useState("");
   const [acknowledge, setAcknowledge] = useState(true);
+  const pendingItems = items.filter((item) => item.status === "pending");
+  const handledItems = items
+    .filter((item) => item.status !== "pending")
+    .slice(0, 12);
 
   useEffect(() => {
     const next = activeAccounts.some((account) => account.id === accountId)
@@ -255,20 +259,60 @@ export function ProjectInflowPanel({
           ) : items.length === 0 ? (
             <p className="project-inflow__empty">{copy.projects.inflowEmpty}</p>
           ) : (
-            <ul>
-              {items.map((item) => (
-                <InflowItemRow
-                  key={item.id}
-                  item={item}
-                  saving={saving}
-                  onPromote={onPromote}
-                  onDismiss={onDismiss}
-                />
-              ))}
-            </ul>
+            <>
+              <InflowItemList
+                title={copy.projects.inflowPendingTitle}
+                items={pendingItems}
+                saving={saving}
+                onPromote={onPromote}
+                onDismiss={onDismiss}
+              />
+              <InflowItemList
+                title={copy.projects.inflowRecentTitle}
+                items={handledItems}
+                saving={saving}
+                onPromote={onPromote}
+                onDismiss={onDismiss}
+              />
+            </>
           )}
         </div>
       )}
+    </section>
+  );
+}
+
+function InflowItemList({
+  title,
+  items,
+  saving,
+  onPromote,
+  onDismiss,
+}: {
+  title: string;
+  items: ProjectInflowItem[];
+  saving: boolean;
+  onPromote(item: ProjectInflowItem, input: PromoteInflowInput): Promise<void>;
+  onDismiss(item: ProjectInflowItem): Promise<void>;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <section
+      className="project-inflow__group"
+      aria-labelledby={`inflow-${title}`}
+    >
+      <h4 id={`inflow-${title}`}>{title}</h4>
+      <ul>
+        {items.map((item) => (
+          <InflowItemRow
+            key={item.id}
+            item={item}
+            saving={saving}
+            onPromote={onPromote}
+            onDismiss={onDismiss}
+          />
+        ))}
+      </ul>
     </section>
   );
 }
@@ -304,10 +348,32 @@ export function InflowItemRow({
       : "",
   );
   const [dueAt, setDueAt] = useState("");
+  const [dueProblem, setDueProblem] = useState(false);
   const [priority, setPriority] = useState("1");
   const canNotifyAssignee = Boolean(
     assigneeName && item.notifiableAssigneeNames?.includes(assigneeName),
   );
+
+  async function submitPromotion(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!title.trim()) return;
+    const rawDueAt = String(
+      new FormData(event.currentTarget).get("dueAt") ?? "",
+    );
+    const parsedDueAt = localInputToIso(rawDueAt);
+    if (rawDueAt && !parsedDueAt) {
+      setDueProblem(true);
+      return;
+    }
+    setDueProblem(false);
+    await onPromote(item, {
+      title: title.trim(),
+      assigneeName: assigneeName || undefined,
+      priority: Number(priority),
+      dueAt: parsedDueAt,
+    });
+    setEditing(false);
+  }
 
   return (
     <li className="project-inflow-item">
@@ -342,19 +408,40 @@ export function InflowItemRow({
           </ol>
         </details>
       )}
-      {editing ? (
+      {item.status !== "pending" ? (
+        <div
+          className={`project-inflow-item__completion project-inflow-item__completion--${item.status}`}
+          role="status"
+        >
+          <strong>
+            {item.status === "promoted"
+              ? copy.projects.inflowPromoted
+              : copy.projects.inflowDismissed}
+          </strong>
+          {item.status === "promoted" && (
+            <>
+              <p>
+                {item.completionStatus === "sent"
+                  ? copy.projects.inflowCompletionSent
+                  : item.completionStatus === "failed"
+                    ? copy.projects.inflowCompletionRetrying
+                    : copy.projects.inflowCompletionPending}
+              </p>
+              <div>
+                {item.completionReactionCompleted && (
+                  <span>{copy.projects.inflowReactionDone}</span>
+                )}
+                {item.completionReplyCompleted && (
+                  <span>{copy.projects.inflowReplyDone}</span>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      ) : editing ? (
         <form
           className="project-inflow-item__promote"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (!title.trim()) return;
-            void onPromote(item, {
-              title: title.trim(),
-              assigneeName: assigneeName || undefined,
-              priority: Number(priority),
-              dueAt: localInputToIso(dueAt),
-            });
-          }}
+          onSubmit={(event) => void submitPromotion(event)}
         >
           <div className="project-inflow-item__fields">
             <label className="project-inflow-item__title-field">
@@ -389,10 +476,23 @@ export function InflowItemRow({
               <span>{copy.projects.inflowDueAtLabel}</span>
               <input
                 type="datetime-local"
+                name="dueAt"
                 value={dueAt}
                 disabled={saving}
-                onChange={(event) => setDueAt(event.target.value)}
+                aria-invalid={dueProblem}
+                aria-describedby={
+                  dueProblem ? `inflow-due-problem-${item.id}` : undefined
+                }
+                onChange={(event) => {
+                  setDueAt(event.target.value);
+                  setDueProblem(false);
+                }}
               />
+              {dueProblem && (
+                <small id={`inflow-due-problem-${item.id}`} role="alert">
+                  {copy.projects.inflowDueAtProblem}
+                </small>
+              )}
             </label>
             <label>
               <span>{copy.projects.inflowPriorityLabel}</span>
@@ -459,7 +559,7 @@ export function InflowItemRow({
   );
 }
 
-function localInputToIso(value: string): string | undefined {
+export function localInputToIso(value: string): string | undefined {
   if (!value) return undefined;
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
