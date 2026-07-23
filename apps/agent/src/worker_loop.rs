@@ -35,6 +35,7 @@ const CONTEXT_TASK_LIMIT: usize = 128;
 const CONTEXT_PROJECT_LIMIT: usize = 32;
 const CONTEXT_GOAL_LIMIT: usize = 16;
 const CONTEXT_INBOX_LIMIT: usize = 16;
+const CONTEXT_MENTION_NAME_LIMIT: usize = 64;
 const CONTEXT_MAX_BYTES: usize = 160 * 1024;
 const MAX_STREAMED_STRUCTURED_BYTES: usize = 512 * 1024;
 const MAX_PRESENTATION_ITEMS: usize = 512;
@@ -1043,9 +1044,11 @@ fn render_contextualized_turn(
          local task or project actions in the same atomic batch when the user requests them together. Include the referenced \
          task number or title and the user's requested wording when the message concerns a task. Never send when the destination \
          or intended message is ambiguous. \
-         For Google Chat, project_webhooks exposes matching registered mention_names without user IDs. When the user explicitly \
-         asks to mention a listed person, include exactly @{Name} in the message. Do not add a mention merely because a \
-         person's name appears, and leave names that are not listed as plain text. \
+         For Google Chat, project_webhooks exposes registered mention_names without user IDs. When the user explicitly \
+         asks to mention a listed person, include exactly @{Name} in the message. When the user explicitly asks to mention \
+         the selected task's 담당자, match that task's exact assignee to the same project webhook's mention_names and include \
+         exactly @{Name}. Do not add a mention merely because a person's name appears, and leave names that are not listed \
+         as plain text. \
          Use exact existing entity, workspace, and project IDs; the server creates IDs for new records. \
          If the current request is a short affirmative confirmation such as 네, 넵, 응, 진행해, or 해줘, execute the exact \
          bounded action plan proposed by the immediately preceding assistant message and requested by the user just before it. \
@@ -1231,7 +1234,7 @@ fn render_contextualized_turn(
                     .mention_directory
                     .users
                     .keys()
-                    .filter(|name| input.contains(name.as_str()))
+                    .take(CONTEXT_MENTION_NAME_LIMIT)
                     .collect::<Vec<_>>(),
             )
             .unwrap_or_else(|_| "[]".to_owned());
@@ -3761,7 +3764,7 @@ mod tests {
     }
 
     #[test]
-    fn context_prompt_exposes_google_chat_mention_names_without_user_ids() {
+    fn context_prompt_exposes_registered_google_chat_names_without_user_ids() {
         let now = OffsetDateTime::now_utc();
         let webhook = ProjectWebhook {
             id: Uuid::now_v7(),
@@ -3788,7 +3791,7 @@ mod tests {
         };
 
         let prompt = render_contextualized_turn(
-            "홍길동을 멘션해서 확인 메시지 보내 줘",
+            "이 일의 담당자를 멘션해서 확인 메시지 보내 줘",
             &[],
             &[],
             &[],
@@ -3802,8 +3805,7 @@ mod tests {
             korea_day_end(now).expect("Korea day boundary"),
         );
 
-        assert!(prompt.contains(r#"mention_names ["홍길동"]"#));
-        assert!(!prompt.contains("김개발"));
+        assert!(prompt.contains(r#"mention_names ["김개발","홍길동"]"#));
         assert!(prompt.contains("include exactly @{Name}"));
         assert!(!prompt.contains("users/123456789012345678901"));
         assert!(!prompt.contains("users/987654321098765432109"));
