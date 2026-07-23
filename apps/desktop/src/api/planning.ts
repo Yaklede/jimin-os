@@ -27,6 +27,7 @@ export interface Task {
   projectId: string | null;
   title: string;
   notes: string | null;
+  assigneeName?: string | null;
   status: "open" | "completed" | "cancelled";
   priority: number;
   dueAt: string | null;

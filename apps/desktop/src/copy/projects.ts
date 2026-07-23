@@ -81,6 +81,10 @@ export const projectCopy = {
   inflowTitle: "확인할 대화",
   inflowDescription:
     "Chat 대화를 맥락별로 묶어 보여드려요. 해야 할 행동이 있는 대화만 할 일로 정리해요.",
+  inflowHomeEyebrow: "새 업무 대화",
+  inflowHomeTitle: "지금 판단할 대화가 있어요",
+  inflowHomeDescription:
+    "요청이 있는 대화만 모았어요. 담당자와 마감일을 정하면 바로 할 일로 등록해요.",
   inflowConnectAccount: "회사 Google 계정 연결",
   inflowConnectAnotherAccount: "다른 회사 계정 연결",
   inflowConnectDescription:
@@ -95,10 +99,20 @@ export const projectCopy = {
   inflowRemoveSource: "공간 연결 해제",
   inflowEmpty: "지금 검토할 업무 대화가 없어요.",
   inflowNoSource: "아직 확인할 Chat 공간을 연결하지 않았어요.",
-  inflowPromote: "할 일로 정리",
+  inflowPromote: "할 일로 정리하기",
+  inflowPromoteAndNotify: "할 일로 정리하고 알리기",
   inflowDismiss: "업무 아님",
   inflowTaskTitleLabel: "정리된 할 일",
   inflowTaskTitleHint: "대화에서 해야 할 행동이나 완료 결과를 확인해 주세요.",
+  inflowAssigneeLabel: "담당자",
+  inflowNoAssignee: "담당자 없이 등록",
+  inflowDueAtLabel: "마감일",
+  inflowPriorityLabel: "우선순위",
+  inflowSenderPending: "보낸 사람 확인 중",
+  inflowAssigneeWillBeNotified: (name: string) =>
+    `등록하면 ${name}님을 Google Chat에서 멘션해 알려드려요.`,
+  inflowAssigneeNotificationOff:
+    "담당자는 저장하지만 Chat에는 알리지 않아요. 프로젝트 설정에서 할 일 알림 연결을 켜 주세요.",
   inflowSourceProblem:
     "Chat 공간을 연결하지 못했어요. 회사 계정과 공간을 다시 확인해 주세요.",
   inflowLoadProblem:

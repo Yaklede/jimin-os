@@ -37,8 +37,15 @@ type ProjectInflowPanelProps = {
   }): Promise<void>;
   onDeleteSource(source: ProjectGoogleChatSource): Promise<void>;
   onSyncSource(source: ProjectGoogleChatSource): Promise<void>;
-  onPromote(item: ProjectInflowItem, title: string): Promise<void>;
+  onPromote(item: ProjectInflowItem, input: PromoteInflowInput): Promise<void>;
   onDismiss(item: ProjectInflowItem): Promise<void>;
+};
+
+export type PromoteInflowInput = {
+  title: string;
+  assigneeName?: string;
+  priority: number;
+  dueAt?: string;
 };
 
 export function ProjectInflowPanel({
@@ -266,7 +273,7 @@ export function ProjectInflowPanel({
   );
 }
 
-function InflowItemRow({
+export function InflowItemRow({
   item,
   saving,
   onPromote,
@@ -274,7 +281,7 @@ function InflowItemRow({
 }: {
   item: ProjectInflowItem;
   saving: boolean;
-  onPromote(item: ProjectInflowItem, title: string): Promise<void>;
+  onPromote(item: ProjectInflowItem, input: PromoteInflowInput): Promise<void>;
   onDismiss(item: ProjectInflowItem): Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
@@ -290,10 +297,22 @@ function InflowItemRow({
   const messageCount = item.messageCount ?? messages.length;
   const firstReceivedAt = item.firstReceivedAt ?? item.receivedAt;
   const [title, setTitle] = useState(() => suggestedTitle);
+  const assigneeOptions = item.assigneeOptions ?? [];
+  const [assigneeName, setAssigneeName] = useState(() =>
+    item.senderName && assigneeOptions.includes(item.senderName)
+      ? item.senderName
+      : "",
+  );
+  const [dueAt, setDueAt] = useState("");
+  const [priority, setPriority] = useState("1");
+  const canNotifyAssignee = Boolean(
+    assigneeName && item.notifiableAssigneeNames?.includes(assigneeName),
+  );
 
   return (
     <li className="project-inflow-item">
       <div className="project-inflow-item__meta">
+        <span>{item.projectName}</span>
         <span>{item.sourceName}</span>
         <span>대화 {messageCount}개</span>
         <span>{formatConversationRange(firstReceivedAt, item.receivedAt)}</span>
@@ -310,7 +329,9 @@ function InflowItemRow({
             {messages.map((message, index) => (
               <li key={`${message.receivedAt}-${index}`}>
                 <div>
-                  <strong>{message.senderName ?? "보낸 사람 정보 없음"}</strong>
+                  <strong>
+                    {message.senderName ?? copy.projects.inflowSenderPending}
+                  </strong>
                   <time dateTime={message.receivedAt}>
                     {formatReceivedAt(message.receivedAt)}
                   </time>
@@ -326,29 +347,83 @@ function InflowItemRow({
           className="project-inflow-item__promote"
           onSubmit={(event) => {
             event.preventDefault();
-            if (title.trim()) void onPromote(item, title.trim());
+            if (!title.trim()) return;
+            void onPromote(item, {
+              title: title.trim(),
+              assigneeName: assigneeName || undefined,
+              priority: Number(priority),
+              dueAt: localInputToIso(dueAt),
+            });
           }}
         >
-          <label>
-            <span>{copy.projects.inflowTaskTitleLabel}</span>
-            <input
-              value={title}
-              maxLength={300}
-              disabled={saving}
-              aria-describedby={`inflow-task-title-help-${item.id}`}
-              onChange={(event) => setTitle(event.target.value)}
-            />
-            <small id={`inflow-task-title-help-${item.id}`}>
-              {copy.projects.inflowTaskTitleHint}
-            </small>
-          </label>
+          <div className="project-inflow-item__fields">
+            <label className="project-inflow-item__title-field">
+              <span>{copy.projects.inflowTaskTitleLabel}</span>
+              <input
+                value={title}
+                maxLength={300}
+                disabled={saving}
+                aria-describedby={`inflow-task-title-help-${item.id}`}
+                onChange={(event) => setTitle(event.target.value)}
+              />
+              <small id={`inflow-task-title-help-${item.id}`}>
+                {copy.projects.inflowTaskTitleHint}
+              </small>
+            </label>
+            <label>
+              <span>{copy.projects.inflowAssigneeLabel}</span>
+              <select
+                value={assigneeName}
+                disabled={saving}
+                onChange={(event) => setAssigneeName(event.target.value)}
+              >
+                <option value="">{copy.projects.inflowNoAssignee}</option>
+                {assigneeOptions.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>{copy.projects.inflowDueAtLabel}</span>
+              <input
+                type="datetime-local"
+                value={dueAt}
+                disabled={saving}
+                onChange={(event) => setDueAt(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>{copy.projects.inflowPriorityLabel}</span>
+              <select
+                value={priority}
+                disabled={saving}
+                onChange={(event) => setPriority(event.target.value)}
+              >
+                <option value="1">{copy.forms.priorityNormal}</option>
+                <option value="2">{copy.forms.priorityImportant}</option>
+                <option value="3">{copy.forms.priorityHighest}</option>
+              </select>
+            </label>
+          </div>
+          {assigneeName && (
+            <p className="project-inflow-item__notification-note">
+              {canNotifyAssignee
+                ? copy.projects.inflowAssigneeWillBeNotified(assigneeName)
+                : copy.projects.inflowAssigneeNotificationOff}
+            </p>
+          )}
           <div>
             <button
               className="primary-button focus-visible-control"
               type="submit"
               disabled={!title.trim() || saving}
             >
-              <Check aria-hidden="true" /> {copy.projects.inflowPromote}
+              <Check aria-hidden="true" />
+              {canNotifyAssignee
+                ? copy.projects.inflowPromoteAndNotify
+                : copy.projects.inflowPromote}
             </button>
             <button
               className="secondary-button focus-visible-control"
@@ -382,6 +457,12 @@ function InflowItemRow({
       )}
     </li>
   );
+}
+
+function localInputToIso(value: string): string | undefined {
+  if (!value) return undefined;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
 }
 
 function legacySuggestedTaskTitle(content: string): string {

@@ -3860,6 +3860,60 @@ svg {
   gap: 18px;
 }
 
+.home-inflow {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  padding: 20px;
+  background: var(--surface);
+  box-shadow: var(--shadow-panel);
+}
+
+.home-inflow__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 8px;
+}
+
+.home-inflow__heading span {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.home-inflow__heading h2 {
+  margin: 4px 0 0;
+  color: var(--text-strong);
+  font-size: 20px;
+}
+
+.home-inflow__heading p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.home-inflow__heading > strong {
+  display: grid;
+  min-width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.home-inflow__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
 .project-inflow__heading,
 .project-inflow__connect,
 .project-inflow__sources li,
@@ -3935,7 +3989,8 @@ svg {
 }
 
 .project-inflow__source-form select,
-.project-inflow-item__promote input {
+.project-inflow-item__promote input,
+.project-inflow-item__promote select {
   width: 100%;
   min-height: 44px;
   border: 1px solid var(--border-strong);
@@ -4141,7 +4196,40 @@ svg {
   gap: 10px;
 }
 
+.project-inflow-item__fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.45fr) minmax(210px, 0.55fr) minmax(140px, 0.35fr);
+  gap: 10px;
+}
+
+.project-inflow-item__title-field {
+  grid-column: 1 / -1;
+}
+
+.project-inflow-item__promote small,
+.project-inflow-item__notification-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.project-inflow-item__notification-note {
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
 @media (max-width: 760px) {
+  .project-inflow-item__fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .project-inflow-item__title-field {
+    grid-column: auto;
+  }
+
   .project-inflow__source-form {
     grid-template-columns: minmax(0, 1fr);
   }

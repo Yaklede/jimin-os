@@ -44,6 +44,7 @@ export type ProjectInflowStatus = "pending" | "promoted" | "dismissed";
 
 export interface ProjectInflowMessage {
   senderName: string | null;
+  sentByOwner: boolean;
   contentText: string;
   receivedAt: string;
 }
@@ -51,9 +52,11 @@ export interface ProjectInflowMessage {
 export interface ProjectInflowItem {
   id: string;
   projectId: string;
+  projectName: string;
   sourceId: string;
   sourceName: string;
   senderName: string | null;
+  sentByOwner: boolean;
   contentText: string;
   suggestedTaskTitle: string;
   messageCount: number;
@@ -63,6 +66,9 @@ export interface ProjectInflowItem {
   status: ProjectInflowStatus;
   promotedTaskId: string | null;
   acknowledged: boolean;
+  assigneeOptions: string[];
+  notifiableAssigneeNames: string[];
+  assigneeNotificationAvailable: boolean;
   version: number;
 }
 
@@ -184,7 +190,29 @@ export async function fetchProjectInflow(
     access,
     path,
   );
-  return response.items;
+  return response.items.map(normalizeProjectInflowItem);
+}
+
+export function normalizeProjectInflowItem(
+  item: ProjectInflowItem,
+): ProjectInflowItem {
+  return {
+    ...item,
+    projectName: item.projectName || item.sourceName,
+    sentByOwner: item.sentByOwner ?? false,
+    assigneeOptions: Array.isArray(item.assigneeOptions)
+      ? item.assigneeOptions
+      : [],
+    notifiableAssigneeNames: Array.isArray(item.notifiableAssigneeNames)
+      ? item.notifiableAssigneeNames
+      : [],
+    assigneeNotificationAvailable:
+      item.assigneeNotificationAvailable ?? false,
+    messages: (item.messages ?? []).map((message) => ({
+      ...message,
+      sentByOwner: message.sentByOwner ?? false,
+    })),
+  };
 }
 
 export async function decideProjectInflow(
@@ -193,7 +221,13 @@ export async function decideProjectInflow(
   item: ProjectInflowItem,
   input:
     | { decision: "dismiss" }
-    | { decision: "promote"; title: string; priority: number; dueAt?: string },
+    | {
+        decision: "promote";
+        title: string;
+        assigneeName?: string;
+        priority: number;
+        dueAt?: string;
+      },
 ): Promise<ProjectInflowItem> {
   return request<ProjectInflowItem>(
     baseUrl,

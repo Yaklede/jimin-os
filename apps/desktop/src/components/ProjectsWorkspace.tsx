@@ -40,7 +40,10 @@ import {
 import { EmptySurface } from "./HomeWorkspace";
 import { GoalsPanel } from "./GoalsPanel";
 import { ProjectWebhookPanel } from "./ProjectWebhookPanel";
-import { ProjectInflowPanel } from "./ProjectInflowPanel";
+import {
+  ProjectInflowPanel,
+  type PromoteInflowInput,
+} from "./ProjectInflowPanel";
 
 type ProjectsWorkspaceProps = {
   workspaces: Workspace[];
@@ -145,7 +148,10 @@ type ProjectsWorkspaceProps = {
   }): Promise<void>;
   onDeleteGoogleChatSource(source: ProjectGoogleChatSource): Promise<void>;
   onSyncGoogleChatSource(source: ProjectGoogleChatSource): Promise<void>;
-  onPromoteInflow(item: ProjectInflowItem, title: string): Promise<void>;
+  onPromoteInflow(
+    item: ProjectInflowItem,
+    input: PromoteInflowInput,
+  ): Promise<void>;
   onDismissInflow(item: ProjectInflowItem): Promise<void>;
 };
 
@@ -1393,10 +1399,11 @@ function taskMeta(task: Task): string {
   const priority =
     copy.projects.taskPriorities[task.priority] ??
     copy.projects.taskPriorities[0];
-  if (!task.dueAt) return priority;
+  const assignment = task.assigneeName ? ` · ${task.assigneeName}` : "";
+  if (!task.dueAt) return `${priority}${assignment}`;
   const date = new Date(task.dueAt);
-  if (Number.isNaN(date.getTime())) return priority;
-  return `${priority} · ${new Intl.DateTimeFormat("ko-KR", {
+  if (Number.isNaN(date.getTime())) return `${priority}${assignment}`;
+  return `${priority}${assignment} · ${new Intl.DateTimeFormat("ko-KR", {
     month: "short",
     day: "numeric",
   }).format(date)}까지`;

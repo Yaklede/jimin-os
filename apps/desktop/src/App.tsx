@@ -120,6 +120,7 @@ import { MemoryWorkspace } from "./components/MemoryWorkspace";
 import { MeetingsWorkspace } from "./components/MeetingsWorkspace";
 import { OsShell, type OsDestination } from "./components/OsShell";
 import { PlanningWorkspace } from "./components/PlanningWorkspace";
+import { type PromoteInflowInput } from "./components/ProjectInflowPanel";
 import {
   PlanningItemEditor,
   type PlanningEditTarget,
@@ -991,6 +992,7 @@ export default function App() {
           "recommendation",
           "recommendation_decision",
           "recommendation_action_result",
+          "project_inflow_item",
         ].some((entityType) => entityTypes.has(entityType));
       const affectsDecisions =
         forceFull ||
@@ -2714,7 +2716,7 @@ export default function App() {
 
   async function promoteWorkspaceInflow(
     item: ProjectInflowItem,
-    title: string,
+    input: PromoteInflowInput,
   ): Promise<void> {
     setInflowSaving(true);
     setInflowError(undefined);
@@ -2722,17 +2724,22 @@ export default function App() {
       await withAuthenticatedSession((accessToken) =>
         decideProjectInflow(apiBaseUrl, accessToken, item, {
           decision: "promote",
-          title,
-          priority: 1,
+          ...input,
         }),
       );
       setProjectInflowItems((current) =>
         current.filter((currentItem) => currentItem.id !== item.id),
       );
-      await Promise.all([
-        loadProjectTasks(item.projectId),
-        loadProjectsForWorkspace(selectedWorkspaceId ?? "", item.projectId),
-      ]);
+      await loadHomeSnapshot();
+      if (selectedProjectId === item.projectId) {
+        await Promise.all([
+          loadProjectTasks(item.projectId),
+          loadProjectInflow(item.projectId),
+          selectedWorkspaceId
+            ? loadProjectsForWorkspace(selectedWorkspaceId, item.projectId)
+            : Promise.resolve(false),
+        ]);
+      }
     } catch (error) {
       setInflowError(copy.projects.inflowDecisionProblem);
       throw error;
@@ -2755,6 +2762,7 @@ export default function App() {
       setProjectInflowItems((current) =>
         current.filter((currentItem) => currentItem.id !== item.id),
       );
+      await loadHomeSnapshot();
     } catch (error) {
       setInflowError(copy.projects.inflowDecisionProblem);
       throw error;
@@ -3082,6 +3090,9 @@ export default function App() {
               onOpenMeetings={() => navigate("meetings")}
               onOpenSettings={() => navigate("settings")}
               onDecideRecommendation={decideHomeRecommendation}
+              inflowSaving={inflowSaving}
+              onPromoteInflow={promoteWorkspaceInflow}
+              onDismissInflow={dismissWorkspaceInflow}
             />
           )}
           {destination === "calendar" && (

@@ -21,6 +21,7 @@ import { type AgentJob, type ConversationMessage } from "../api/agent";
 import { type HomeSnapshot, type Recommendation } from "../api/home";
 import { type ScheduleEntry, type Task } from "../api/planning";
 import { type Project } from "../api/projects";
+import { type ProjectInflowItem } from "../api/googleChat";
 import { presentationForMessage } from "../assistantPresentation";
 import { copy } from "../copy";
 import { upcomingHomeSchedules } from "../homeSchedule";
@@ -36,6 +37,10 @@ import {
   useDelayedSkeleton,
 } from "./ContentSkeleton";
 import { AssistantInteractiveCanvas } from "./AssistantInteractiveCanvas";
+import {
+  InflowItemRow,
+  type PromoteInflowInput,
+} from "./ProjectInflowPanel";
 
 type HomeWorkspaceProps = {
   snapshot: HomeSnapshot | undefined;
@@ -67,6 +72,12 @@ type HomeWorkspaceProps = {
     recommendation: Recommendation,
     decision: "approve" | "defer",
   ): Promise<boolean>;
+  inflowSaving: boolean;
+  onPromoteInflow(
+    item: ProjectInflowItem,
+    input: PromoteInflowInput,
+  ): Promise<void>;
+  onDismissInflow(item: ProjectInflowItem): Promise<void>;
 };
 
 export function HomeWorkspace({
@@ -92,6 +103,9 @@ export function HomeWorkspace({
   onOpenMeetings,
   onOpenSettings,
   onDecideRecommendation,
+  inflowSaving,
+  onPromoteInflow,
+  onDismissInflow,
 }: HomeWorkspaceProps) {
   const [completingTaskId, setCompletingTaskId] = useState<string>();
   const [assistantFocused, setAssistantFocused] = useState(false);
@@ -307,6 +321,35 @@ export function HomeWorkspace({
 
       {!assistantFocused && (
         <>
+          {!showingSkeleton && Boolean(snapshot?.inflow.length) && (
+            <section
+              className="home-inflow"
+              aria-labelledby="home-inflow-title"
+            >
+              <header className="home-inflow__heading">
+                <div>
+                  <span>{copy.projects.inflowHomeEyebrow}</span>
+                  <h2 id="home-inflow-title">
+                    {copy.projects.inflowHomeTitle}
+                  </h2>
+                  <p>{copy.projects.inflowHomeDescription}</p>
+                </div>
+                <strong>{snapshot?.inflow.length ?? 0}</strong>
+              </header>
+              <ul className="home-inflow__list">
+                {(snapshot?.inflow ?? []).slice(0, 3).map((item) => (
+                  <InflowItemRow
+                    key={item.id}
+                    item={item}
+                    saving={inflowSaving}
+                    onPromote={onPromoteInflow}
+                    onDismiss={onDismissInflow}
+                  />
+                ))}
+              </ul>
+            </section>
+          )}
+
           {!showingSkeleton && dueTasks.length > 0 && (
             <DeadlineBrief
               tasks={dueTasks}

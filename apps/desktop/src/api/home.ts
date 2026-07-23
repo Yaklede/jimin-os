@@ -3,6 +3,10 @@ import {
   type ScheduleEntry,
   type Task,
 } from "./planning";
+import {
+  normalizeProjectInflowItem,
+  type ProjectInflowItem,
+} from "./googleChat";
 
 export interface Recommendation {
   id: string;
@@ -50,6 +54,7 @@ export interface HomeSnapshot {
   schedule: ScheduleEntry[];
   tasks: Task[];
   dueTasks: Task[];
+  inflow: ProjectInflowItem[];
   recommendations: Recommendation[];
 }
 
@@ -77,6 +82,9 @@ export async function fetchHomeSnapshot(
     schedule: body.schedule,
     tasks: body.tasks,
     dueTasks: Array.isArray(body.dueTasks) ? body.dueTasks : [],
+    inflow: Array.isArray(body.inflow)
+      ? body.inflow.map(normalizeProjectInflowItem)
+      : [],
     recommendations: Array.isArray(body.recommendations)
       ? body.recommendations
       : [],
