@@ -349,7 +349,7 @@ export function HomeWorkspace({
                 <strong>{snapshot?.inflow.length ?? 0}</strong>
               </header>
               <ul className="home-inflow__list">
-                {(snapshot?.inflow ?? []).slice(0, 3).map((item) => (
+                {(snapshot?.inflow ?? []).slice(0, 5).map((item) => (
                   <InflowItemRow
                     key={item.id}
                     item={item}
