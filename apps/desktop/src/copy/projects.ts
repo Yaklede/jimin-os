@@ -106,10 +106,14 @@ export const projectCopy = {
   inflowTitle: "확인할 대화",
   inflowDescription:
     "Chat 대화를 맥락별로 묶어 보여드려요. 해야 할 행동이 있는 대화만 할 일로 정리해요.",
-  inflowHomeEyebrow: "새 업무 대화",
-  inflowHomeTitle: "지금 판단할 대화가 있어요",
+  inflowHomeEyebrow: "새로 들어온 업무",
+  inflowHomeTitle: "새로운 업무 요청을 정리했어요",
   inflowHomeDescription:
-    "요청이 있는 대화만 모았어요. 담당자와 마감일을 정하면 바로 할 일로 등록해요.",
+    "Chat에서 해야 할 대화만 모았어요. 내용을 확인하고 담당자와 마감일을 정해 주세요.",
+  inflowHomeQueueTitle: "확인할 요청",
+  inflowHomeSelectedLabel: "선택한 업무",
+  inflowHomeSelectedRequest: (senderName: string) =>
+    senderName ? `${senderName}님의 요청` : "보낸 사람을 확인하고 있어요",
   inflowConnectAccount: "회사 Google 계정 연결",
   inflowConnectAnotherAccount: "다른 회사 계정 연결",
   inflowConnectDescription:

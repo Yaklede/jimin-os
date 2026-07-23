@@ -37,7 +37,8 @@ import {
   useDelayedSkeleton,
 } from "./ContentSkeleton";
 import { AssistantInteractiveCanvas } from "./AssistantInteractiveCanvas";
-import { InflowItemRow, type PromoteInflowInput } from "./ProjectInflowPanel";
+import { HomeInflowReview } from "./HomeInflowReview";
+import { type PromoteInflowInput } from "./ProjectInflowPanel";
 
 type HomeWorkspaceProps = {
   snapshot: HomeSnapshot | undefined;
@@ -334,33 +335,13 @@ export function HomeWorkspace({
       {!assistantFocused && (
         <>
           {!showingSkeleton && Boolean(snapshot?.inflow.length) && (
-            <section
-              className="home-inflow"
-              aria-labelledby="home-inflow-title"
-            >
-              <header className="home-inflow__heading">
-                <div>
-                  <span>{copy.projects.inflowHomeEyebrow}</span>
-                  <h2 id="home-inflow-title">
-                    {copy.projects.inflowHomeTitle}
-                  </h2>
-                  <p>{copy.projects.inflowHomeDescription}</p>
-                </div>
-                <strong>{snapshot?.inflow.length ?? 0}</strong>
-              </header>
-              <ul className="home-inflow__list">
-                {(snapshot?.inflow ?? []).slice(0, 5).map((item) => (
-                  <InflowItemRow
-                    key={item.id}
-                    item={item}
-                    saving={inflowSaving}
-                    onPromote={onPromoteInflow}
-                    onDismiss={onDismissInflow}
-                    onRetryCompletion={onRetryInflowCompletion}
-                  />
-                ))}
-              </ul>
-            </section>
+            <HomeInflowReview
+              items={snapshot?.inflow ?? []}
+              saving={inflowSaving}
+              onPromote={onPromoteInflow}
+              onDismiss={onDismissInflow}
+              onRetryCompletion={onRetryInflowCompletion}
+            />
           )}
 
           {!showingSkeleton && dueTasks.length > 0 && (
