@@ -246,6 +246,9 @@ where
             database
                 .fail_expired_running_meeting_analyses("meeting.recovery_required")
                 .await?;
+            database
+                .fail_expired_running_inflow_analyses("inflow.recovery_required")
+                .await?;
             next_recovery_at = Instant::now() + recovery_interval;
         }
 
@@ -258,6 +261,11 @@ where
         };
         if let Some(job) = claimed {
             execute_job(client, database, runner_id, lease, workspace, job).await?;
+            continue;
+        }
+        if crate::inflow_analysis::process_next(client, database, runner_id, lease, workspace)
+            .await?
+        {
             continue;
         }
         if crate::meeting_analysis::process_next(client, database, runner_id, lease, workspace)

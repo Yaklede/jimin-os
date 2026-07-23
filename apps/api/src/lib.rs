@@ -53,6 +53,10 @@ use jimin_storage::{
         GoogleChatCompletionDelivery, GoogleChatSourceSyncConnection, NewProjectGoogleChatSource,
         ProjectGoogleChatSource, ProjectInflowItem, ProjectInflowStatus, PromoteProjectInflowItem,
     },
+    inflow_analysis::{
+        InflowAnalysisState, InflowClassification, ProjectInflowAnalysis,
+        classification_value as inflow_classification_value,
+    },
     intelligence::{
         DecideRecommendation, DecideRecommendationOutcome, Recommendation, RecommendationDecision,
         RecommendationStatus, SuggestedActionKind,
@@ -683,6 +687,14 @@ pub struct ProjectInflowItemResponse {
     content_text: String,
     suggested_task_title: String,
     suggested_task_notes: String,
+    suggested_assignee_name: Option<String>,
+    suggested_due_at: Option<String>,
+    suggested_priority: Option<i16>,
+    analysis_status: String,
+    analysis_classification: Option<String>,
+    analysis_confidence: Option<i16>,
+    analysis_summary: Option<String>,
+    analysis_error_code: Option<String>,
     message_count: usize,
     first_received_at: String,
     received_at: String,
@@ -2345,17 +2357,19 @@ async fn get_home_snapshot(
         return invalid_request_response(request_id);
     };
     let user_id = principal.identity().user_id();
-    let (schedule, tasks, due_tasks, recommendations, inflow_items, webhooks) = match tokio::try_join!(
-        planning.schedule_entries_in_range(user_id, from, to),
-        planning.home_tasks_for_user(user_id, to),
-        planning.deadline_tasks_for_user(user_id, deadline_boundary),
-        planning.active_recommendations_for_user(user_id, OffsetDateTime::now_utc(), 5),
-        planning.pending_project_inflow_for_user(user_id),
-        planning.user_project_webhooks(user_id),
-    ) {
-        Ok(values) => values,
-        Err(error) => return storage_error_response(&error, request_id),
-    };
+    let (schedule, tasks, due_tasks, recommendations, inflow_items, inflow_analyses, webhooks) =
+        match tokio::try_join!(
+            planning.schedule_entries_in_range(user_id, from, to),
+            planning.home_tasks_for_user(user_id, to),
+            planning.deadline_tasks_for_user(user_id, deadline_boundary),
+            planning.active_recommendations_for_user(user_id, OffsetDateTime::now_utc(), 5),
+            planning.pending_project_inflow_for_user(user_id),
+            planning.project_inflow_analyses_for_user(user_id),
+            planning.user_project_webhooks(user_id),
+        ) {
+            Ok(values) => values,
+            Err(error) => return storage_error_response(&error, request_id),
+        };
     let Ok(schedule) = schedule
         .into_iter()
         .map(schedule_entry_response)
@@ -2385,7 +2399,7 @@ async fn get_home_snapshot(
         return unavailable_response(request_id);
     };
     let contexts = inflow_assignment_contexts(webhooks);
-    let Ok(mut inflow) = group_project_inflow_candidates(inflow_items)
+    let Ok(mut inflow) = group_project_inflow_candidates(inflow_items, inflow_analyses)
         .into_iter()
         .map(project_inflow_item_response)
         .collect::<Result<Vec<_>, _>>()
@@ -5775,11 +5789,12 @@ async fn list_project_inflow_items(
     let user_id = principal.identity().user_id();
     match tokio::try_join!(
         planning.project_inflow_items(user_id, project_id, status),
+        planning.project_inflow_analyses(user_id, project_id),
         planning.project_webhooks(user_id, project_id),
     ) {
-        Ok((items, webhooks)) => {
+        Ok((items, analyses, webhooks)) => {
             let contexts = inflow_assignment_contexts(webhooks);
-            let items = group_project_inflow_candidates(items)
+            let items = group_project_inflow_candidates(items, analyses)
                 .into_iter()
                 .map(project_inflow_item_response)
                 .collect::<Result<Vec<_>, _>>()
@@ -5857,16 +5872,19 @@ async fn decide_project_inflow_item(
             }
         }
         Ok(_) => {
-            let (code, message) = if request.decision == "retry_completion" {
-                (
+            let (code, message) = match request.decision.as_str() {
+                "retry_completion" => (
                     "project.inflow_completion_changed",
                     "반영 상태가 바뀌었어요. 들어오는 업무를 다시 불러온 뒤 재시도해 주세요.",
-                )
-            } else {
-                (
+                ),
+                "retry_analysis" => (
+                    "project.inflow_analysis_changed",
+                    "분석 상태가 바뀌었어요. 새로고침한 뒤 다시 정리해 주세요.",
+                ),
+                _ => (
                     "project.inflow_changed",
                     "이 항목은 이미 처리되었어요. 들어오는 업무를 다시 불러와 주세요.",
-                )
+                ),
             };
             error_response(StatusCode::CONFLICT, code, message, request_id, false)
         }
@@ -5932,6 +5950,23 @@ async fn apply_project_inflow_decision(
                     request.expected_version,
                 )
                 .await
+        }
+        "retry_analysis" => {
+            let retried = planning
+                .retry_project_inflow_analysis(
+                    user_id,
+                    project_id,
+                    item_id,
+                    request.expected_version,
+                )
+                .await?;
+            if !retried {
+                return Ok(None);
+            }
+            planning
+                .project_inflow_items(user_id, project_id, Some(ProjectInflowStatus::Pending))
+                .await
+                .map(|items| items.into_iter().find(|item| item.id == item_id))
         }
         _ => Err(StorageError::InvalidConfiguration),
     }
@@ -6376,6 +6411,7 @@ struct ProjectInflowCandidate {
     representative: ProjectInflowItem,
     focus: ProjectInflowItem,
     messages: Vec<ProjectInflowItem>,
+    analysis: Option<ProjectInflowAnalysis>,
 }
 
 #[derive(Default)]
@@ -6423,10 +6459,23 @@ fn single_project_inflow_candidate(item: ProjectInflowItem) -> ProjectInflowCand
         representative: item.clone(),
         focus: item.clone(),
         messages: vec![item],
+        analysis: None,
     }
 }
 
-fn group_project_inflow_candidates(items: Vec<ProjectInflowItem>) -> Vec<ProjectInflowCandidate> {
+fn group_project_inflow_candidates(
+    items: Vec<ProjectInflowItem>,
+    analysis_rows: Vec<ProjectInflowAnalysis>,
+) -> Vec<ProjectInflowCandidate> {
+    let mut analyses_by_conversation = BTreeMap::new();
+    let mut analyses_by_representative = BTreeMap::new();
+    for analysis in analysis_rows {
+        analyses_by_representative.insert(analysis.representative_item_id, analysis.clone());
+        analyses_by_conversation.insert(
+            (analysis.source_id, analysis.conversation_key.clone()),
+            analysis,
+        );
+    }
     let mut groups =
         BTreeMap::<(uuid::Uuid, String, &'static str, Option<uuid::Uuid>), Vec<_>>::new();
     for item in items {
@@ -6442,22 +6491,24 @@ fn group_project_inflow_candidates(items: Vec<ProjectInflowItem>) -> Vec<Project
     }
 
     let mut candidates = groups
-        .into_values()
-        .filter_map(|mut messages| {
+        .into_iter()
+        .filter_map(|((source_id, conversation_key, _, _), mut messages)| {
             messages.sort_by_key(|item| (item.received_at, item.id));
             let focus = messages
                 .iter()
-                .filter(|item| !item.sent_by_owner)
-                .max_by_key(|item| {
-                    (
-                        inflow_actionability_score(&item.content_text),
-                        item.content_text.chars().count(),
-                    )
-                })?
-                .clone();
+                .rfind(|item| !item.sent_by_owner)
+                .cloned()
+                .or_else(|| messages.last().cloned())?;
             let representative = messages.last()?.clone();
+            let analysis = analyses_by_conversation
+                .get(&(source_id, conversation_key))
+                .cloned()
+                .or_else(|| analyses_by_representative.get(&representative.id).cloned());
             if representative.status == ProjectInflowStatus::Pending
-                && inflow_actionability_score(&focus.content_text) < 2
+                && analysis.as_ref().is_some_and(|analysis| {
+                    analysis.state == InflowAnalysisState::Ready
+                        && analysis.classification != Some(InflowClassification::NewTask)
+                })
             {
                 return None;
             }
@@ -6465,6 +6516,7 @@ fn group_project_inflow_candidates(items: Vec<ProjectInflowItem>) -> Vec<Project
                 representative,
                 focus,
                 messages,
+                analysis,
             })
         })
         .collect::<Vec<_>>();
@@ -6480,271 +6532,10 @@ fn project_inflow_status_name(status: ProjectInflowStatus) -> &'static str {
     }
 }
 
-fn inflow_actionability_score(content: &str) -> u8 {
-    let normalized = content.trim().to_lowercase();
-    let meaningful_chars = normalized
-        .chars()
-        .filter(|character| character.is_alphanumeric())
-        .count();
-    if meaningful_chars < 4 {
-        return 0;
-    }
-    let compact_follow_up = meaningful_chars < 18
-        && !normalized.contains('?')
-        && !normalized.contains('？')
-        && ["확인일자", "리마인드", "리체크", "먼저", "금일", "메모"]
-            .iter()
-            .any(|term| normalized.contains(term));
-    if compact_follow_up {
-        return 0;
-    }
-    let request_terms = [
-        "요청",
-        "확인",
-        "검토",
-        "개발",
-        "수정",
-        "오류",
-        "안되",
-        "안돼",
-        "해야",
-        "필요",
-        "가능",
-        "전달",
-        "등록",
-        "처리",
-        "일정",
-        "문의",
-        "부탁",
-        "언제",
-        "얼마나",
-        "request",
-        "check",
-        "review",
-        "fix",
-        "issue",
-        "error",
-        "need",
-        "please",
-    ];
-    let mut score = 0;
-    if request_terms.iter().any(|term| normalized.contains(term)) {
-        score += 3;
-    }
-    if normalized.contains('?') || normalized.contains('？') {
-        score += 2;
-    }
-    if meaningful_chars >= 24 {
-        score += 1;
-    }
-    score
-}
-
-fn suggested_inflow_task_title(content: &str) -> String {
-    let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
-    let normalized = normalized
-        .trim_start_matches("혹시 ")
-        .trim_start_matches("혹시")
-        .trim();
-    let lowered = normalized.to_lowercase();
-    let task_like_title = if lowered.contains("개발")
-        && (lowered.contains("얼마나 걸")
-            || lowered.contains("소요 시간")
-            || lowered.contains("예상 일정"))
-    {
-        Some("개발 범위와 예상 일정 확인")
-    } else if (lowered.contains("안되") || lowered.contains("안돼") || lowered.contains("오류"))
-        && (lowered.contains("확인") || lowered.contains("처리") || lowered.contains("대응"))
-    {
-        Some("문제 원인 확인 및 대응")
-    } else if lowered.contains("안내") && (lowered.contains("해야") || lowered.contains("필요"))
-    {
-        Some("안내할 내용 확인 및 전달")
-    } else if lowered.contains("전달") && (lowered.contains("확실") || lowered.contains("정확"))
-    {
-        Some("전달할 내용과 기준 확인")
-    } else {
-        None
-    };
-    if let Some(title) = task_like_title {
-        return title.to_owned();
-    }
-    let title = normalized
-        .trim_end_matches(['.', '?', '!', '。', '？'])
-        .chars()
-        .take(100)
-        .collect::<String>();
-    if title.chars().count() >= 4 {
-        title
-    } else {
-        "대화 내용 확인".to_owned()
-    }
-}
-
-fn suggested_inflow_task_notes(title: &str, messages: &[ProjectInflowItem]) -> String {
-    let normalized_messages = messages
-        .iter()
-        .map(|item| item.content_text.to_lowercase())
-        .collect::<Vec<_>>();
-    let combined = normalized_messages.join("\n");
-    let mut points = Vec::new();
-    let mut seen = BTreeSet::new();
-
-    if combined.contains("qr")
-        && combined.contains("결제")
-        && (combined.contains("배송") || combined.contains("통지") || combined.contains("통보"))
-    {
-        add_unique_inflow_summary_point(
-            &mut points,
-            &mut seen,
-            "QR 결제 거래·배송 정보 통지 연동 범위를 확인합니다.",
-        );
-    }
-    if combined.contains("가이드") {
-        add_unique_inflow_summary_point(
-            &mut points,
-            &mut seen,
-            "제공된 연동 가이드와 테스트 조건을 확인합니다.",
-        );
-    }
-    if combined.contains("url") && combined.contains("회신") {
-        add_unique_inflow_summary_point(
-            &mut points,
-            &mut seen,
-            "거래 통지 수신 URL을 개발하고 연동처에 회신합니다.",
-        );
-    }
-    if combined.contains("거래내역")
-        && (combined.contains("목적")
-            || combined.contains("쌓")
-            || combined.contains("저장")
-            || combined.contains("보는"))
-    {
-        add_unique_inflow_summary_point(
-            &mut points,
-            &mut seen,
-            "거래내역 조회·저장 목적과 처리 범위를 정합니다.",
-        );
-    }
-    if combined.contains("테스트 페이지") || combined.contains("테스트 환경") {
-        add_unique_inflow_summary_point(
-            &mut points,
-            &mut seen,
-            "제공된 테스트 환경에서 확인 가능한 기능과 검증 방법을 점검합니다.",
-        );
-    }
-
-    if points.is_empty() {
-        for message in messages {
-            for line in message
-                .content_text
-                .split(['\n', '\r'])
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-            {
-                if sensitive_inflow_summary_line(line) {
-                    add_unique_inflow_summary_point(
-                        &mut points,
-                        &mut seen,
-                        "제공된 테스트 환경과 계정으로 연동 동작을 확인합니다.",
-                    );
-                    continue;
-                }
-                let Some(line) = concise_inflow_summary_line(line) else {
-                    continue;
-                };
-                add_unique_inflow_summary_point(&mut points, &mut seen, &line);
-            }
-        }
-    }
-    if points.is_empty() {
-        add_unique_inflow_summary_point(
-            &mut points,
-            &mut seen,
-            "요청 범위와 필요한 결과를 확인합니다.",
-        );
-    }
-
-    format!(
-        "업무 목적\n{}\n\n확인할 내용\n{}\n\n완료 기준\n요청 범위를 확정하고 처리 결과를 관계자에게 공유합니다.",
-        title.trim(),
-        points
-            .into_iter()
-            .map(|point| format!("- {point}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    )
-}
-
-fn add_unique_inflow_summary_point(
-    points: &mut Vec<String>,
-    seen: &mut BTreeSet<String>,
-    value: &str,
-) {
-    if points.len() >= 5 {
-        return;
-    }
-    let value = value.trim();
-    if !value.is_empty() && seen.insert(value.to_owned()) {
-        points.push(value.to_owned());
-    }
-}
-
-fn sensitive_inflow_summary_line(line: &str) -> bool {
-    let normalized = line.to_lowercase();
-    [
-        "비밀번호",
-        "password",
-        "passwd",
-        "테스트 계정",
-        "계정 정보",
-        "access token",
-        "api key",
-        "secret",
-    ]
-    .iter()
-    .any(|term| normalized.contains(term))
-}
-
-fn concise_inflow_summary_line(line: &str) -> Option<String> {
-    let mut value = line
-        .trim()
-        .trim_start_matches("보낸 사람 정보 없음:")
-        .trim_start_matches("안녕하세요.")
-        .trim_start_matches("안녕하세요,")
-        .trim()
-        .trim_start_matches(['-', '*', '•'])
-        .trim()
-        .to_owned();
-    for suffix in [
-        "확인 부탁드립니다.",
-        "확인 부탁드립니다",
-        "부탁드립니다.",
-        "부탁드립니다",
-    ] {
-        if value.ends_with(suffix) {
-            value.truncate(value.len() - suffix.len());
-            value = value.trim_end().to_owned();
-        }
-    }
-    if value.starts_with("URL:")
-        || value.starts_with("http://")
-        || value.starts_with("https://")
-        || value
-            .chars()
-            .filter(|character| character.is_alphanumeric())
-            .count()
-            < 8
-    {
-        return None;
-    }
-    let mut value = value.chars().take(140).collect::<String>();
-    if !value.ends_with(['.', '!', '?', '요', '다']) {
-        value.push('.');
-    }
-    Some(value)
-}
-
+#[allow(
+    clippy::too_many_lines,
+    reason = "The response assembler keeps one audited mapping from stored evidence and AI analysis to the public contract."
+)]
 fn project_inflow_item_response(
     candidate: ProjectInflowCandidate,
 ) -> Result<ProjectInflowItemResponse, ()> {
@@ -6752,6 +6543,7 @@ fn project_inflow_item_response(
         representative,
         focus,
         messages,
+        analysis,
     } = candidate;
     let first_received_at = messages.first().ok_or(())?.received_at;
     let acknowledged = messages.iter().all(|item| item.acknowledged_at.is_some());
@@ -6776,9 +6568,43 @@ fn project_inflow_item_response(
         "pending"
     };
     let message_count = messages.len();
-    let suggested_task_title = suggested_inflow_task_title(&focus.content_text);
-    let suggested_task_notes =
-        suggested_inflow_task_notes(&suggested_task_title, messages.as_slice());
+    let analysis_status = analysis.as_ref().map_or("queued", |analysis| {
+        inflow_analysis_state_name(analysis.state)
+    });
+    let analysis_classification = analysis
+        .as_ref()
+        .and_then(|analysis| analysis.classification)
+        .map(inflow_classification_value)
+        .map(str::to_owned);
+    let analysis_confidence = analysis.as_ref().and_then(|analysis| analysis.confidence);
+    let analysis_summary = analysis
+        .as_ref()
+        .and_then(|analysis| analysis.summary.clone());
+    let analysis_error_code = analysis
+        .as_ref()
+        .and_then(|analysis| analysis.error_code.clone());
+    let suggested_task_title = analysis
+        .as_ref()
+        .and_then(|analysis| analysis.suggested_task_title.clone())
+        .unwrap_or_else(|| match analysis.as_ref().map(|value| value.state) {
+            Some(InflowAnalysisState::Failed) => "업무 내용을 정리하지 못했어요".to_owned(),
+            _ => "대화를 업무로 정리하고 있어요".to_owned(),
+        });
+    let suggested_task_notes = analysis
+        .as_ref()
+        .map_or_else(String::new, inflow_task_notes);
+    let suggested_assignee_name = analysis
+        .as_ref()
+        .and_then(|analysis| analysis.suggested_assignee_name.clone());
+    let suggested_due_at = analysis
+        .as_ref()
+        .and_then(|analysis| analysis.suggested_due_at)
+        .map(|value| value.format(&Rfc3339))
+        .transpose()
+        .map_err(|_| ())?;
+    let suggested_priority = analysis
+        .as_ref()
+        .and_then(|analysis| analysis.suggested_priority);
     let messages = messages
         .into_iter()
         .map(|item| {
@@ -6806,6 +6632,14 @@ fn project_inflow_item_response(
         sent_by_owner: focus.sent_by_owner,
         suggested_task_title,
         suggested_task_notes,
+        suggested_assignee_name,
+        suggested_due_at,
+        suggested_priority,
+        analysis_status: analysis_status.to_owned(),
+        analysis_classification,
+        analysis_confidence,
+        analysis_summary,
+        analysis_error_code,
         content_text: focus.content_text,
         message_count,
         first_received_at: first_received_at.format(&Rfc3339).map_err(|_| ())?,
@@ -6827,6 +6661,41 @@ fn project_inflow_item_response(
         assignee_notification_available: false,
         version: focus.version,
     })
+}
+
+fn inflow_analysis_state_name(state: InflowAnalysisState) -> &'static str {
+    match state {
+        InflowAnalysisState::Queued => "queued",
+        InflowAnalysisState::Claimed => "claimed",
+        InflowAnalysisState::Running => "running",
+        InflowAnalysisState::Ready => "ready",
+        InflowAnalysisState::Failed => "failed",
+    }
+}
+
+fn inflow_task_notes(analysis: &ProjectInflowAnalysis) -> String {
+    let Some(summary) = analysis.summary.as_deref() else {
+        return String::new();
+    };
+    if analysis.classification != Some(InflowClassification::NewTask) {
+        return summary.to_owned();
+    }
+    let actions = analysis
+        .suggested_action_items
+        .iter()
+        .map(|item| format!("- {}", item.trim()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let completion = analysis
+        .suggested_completion_criteria
+        .as_deref()
+        .unwrap_or("완료 결과를 확인합니다.");
+    format!(
+        "업무 목적\n{}\n\n처리할 내용\n{}\n\n완료 기준\n{}",
+        summary.trim(),
+        actions,
+        completion.trim()
+    )
 }
 
 #[utoipa::path(
@@ -8596,7 +8465,11 @@ mod tests {
     }
 
     #[test]
-    fn inflow_candidates_group_threads_and_hide_reaction_only_messages() {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The regression test keeps task and non-task examples together to verify grouping and filtering."
+    )]
+    fn inflow_candidates_use_persisted_ai_analysis_and_hide_non_tasks() {
         let project_id = Uuid::now_v7();
         let source_id = Uuid::now_v7();
         let thread_name = Some("spaces/company/threads/request-1".to_owned());
@@ -8637,6 +8510,13 @@ mod tests {
             thread_name,
         );
         owner_follow_up.sent_by_owner = true;
+        let noise = make_item(
+            "ㅇㅇ",
+            OffsetDateTime::UNIX_EPOCH + TimeDuration::seconds(3),
+            None,
+        );
+        let noise_id = noise.id;
+        let representative_id = owner_follow_up.id;
         let items = vec![
             make_item(
                 "ㅠ",
@@ -8645,14 +8525,55 @@ mod tests {
             ),
             actionable_request,
             owner_follow_up,
-            make_item(
-                "ㅇㅇ",
-                OffsetDateTime::UNIX_EPOCH + TimeDuration::seconds(3),
-                None,
-            ),
+            noise,
+        ];
+        let analyses = vec![
+            ProjectInflowAnalysis {
+                id: Uuid::now_v7(),
+                project_id,
+                source_id,
+                conversation_key: "thread:spaces/company/threads/request-1".to_owned(),
+                representative_item_id: representative_id,
+                state: InflowAnalysisState::Ready,
+                classification: Some(InflowClassification::NewTask),
+                confidence: Some(94),
+                summary: Some("개발 범위와 예상 일정을 확인해야 한다.".to_owned()),
+                suggested_task_title: Some("개발 범위와 예상 일정 확인".to_owned()),
+                suggested_action_items: vec![
+                    "요청 기능의 개발 범위를 확인한다.".to_owned(),
+                    "예상 소요 일정을 관계자에게 공유한다.".to_owned(),
+                ],
+                suggested_completion_criteria: Some("개발 범위와 예상 일정이 공유된다.".to_owned()),
+                suggested_assignee_name: None,
+                suggested_due_at: None,
+                suggested_priority: Some(1),
+                linked_task_id: None,
+                error_code: None,
+                version: 1,
+            },
+            ProjectInflowAnalysis {
+                id: Uuid::now_v7(),
+                project_id,
+                source_id,
+                conversation_key: "message:noise".to_owned(),
+                representative_item_id: noise_id,
+                state: InflowAnalysisState::Ready,
+                classification: Some(InflowClassification::Noise),
+                confidence: Some(99),
+                summary: Some("업무 요청이 아닌 짧은 반응이다.".to_owned()),
+                suggested_task_title: None,
+                suggested_action_items: Vec::new(),
+                suggested_completion_criteria: None,
+                suggested_assignee_name: None,
+                suggested_due_at: None,
+                suggested_priority: None,
+                linked_task_id: None,
+                error_code: None,
+                version: 1,
+            },
         ];
 
-        let candidates = group_project_inflow_candidates(items);
+        let candidates = group_project_inflow_candidates(items, analyses);
 
         assert_eq!(candidates.len(), 1);
         let response = project_inflow_item_response(
@@ -8676,59 +8597,41 @@ mod tests {
                 .suggested_task_notes
                 .contains("보낸 사람 정보 없음")
         );
-
-        let mut owner_comment = make_item(
-            "권한이슈 확인일자: 금일",
-            OffsetDateTime::UNIX_EPOCH + TimeDuration::seconds(3),
-            None,
-        );
-        owner_comment.sent_by_owner = true;
-        assert!(group_project_inflow_candidates(vec![owner_comment]).is_empty());
-        assert_eq!(inflow_actionability_score("ip전달 먼저"), 0);
-        assert_eq!(inflow_actionability_score("리체크용 해야함"), 0);
     }
 
     #[test]
-    fn inflow_work_description_summarizes_qr_request_without_sender_or_credentials() {
+    fn inflow_work_description_is_built_only_from_structured_analysis() {
         let project_id = Uuid::now_v7();
         let source_id = Uuid::now_v7();
-        let message = |content: &str| ProjectInflowItem {
+        let analysis = ProjectInflowAnalysis {
             id: Uuid::now_v7(),
             project_id,
-            project_name: "비스킷링크".to_owned(),
             source_id,
-            source_name: "PAYMENTS CS".to_owned(),
-            provider_thread_name: Some("spaces/company/threads/qr".to_owned()),
-            sender_provider_name: None,
-            sender_name: None,
-            sent_by_owner: false,
-            content_text: content.to_owned(),
-            received_at: OffsetDateTime::UNIX_EPOCH,
-            status: ProjectInflowStatus::Pending,
-            promoted_task_id: None,
-            acknowledged_at: None,
-            completion_requested_at: None,
-            completion_reaction_at: None,
-            completion_reply_at: None,
-            completion_delivery_error_code: None,
-            completion_delivery_attempt_count: 0,
+            conversation_key: "thread:spaces/company/threads/qr".to_owned(),
+            representative_item_id: Uuid::now_v7(),
+            state: InflowAnalysisState::Ready,
+            classification: Some(InflowClassification::NewTask),
+            confidence: Some(96),
+            summary: Some("QR 결제 거래·배송 정보 통지 연동 범위를 확정한다.".to_owned()),
+            suggested_task_title: Some("페이시스 QR 결제 통보 연동 개발".to_owned()),
+            suggested_action_items: vec![
+                "제공된 연동 가이드와 테스트 조건을 확인한다.".to_owned(),
+                "거래 통지 수신 URL을 개발하고 연동처에 공유한다.".to_owned(),
+            ],
+            suggested_completion_criteria: Some(
+                "테스트 거래와 배송 정보가 정상 수신된다.".to_owned(),
+            ),
+            suggested_assignee_name: None,
+            suggested_due_at: None,
+            suggested_priority: Some(1),
+            linked_task_id: None,
+            error_code: None,
             version: 1,
         };
-        let messages = vec![
-            message(
-                "상위 QR 결제 거래·배송 정보 통지 연동을 요청드립니다.\n연동 가이드와 테스트 계정 정보: dalqtest / 1234",
-            ),
-            message("수신 URL을 개발한 후 당사로 회신해 주세요."),
-            message("거래내역을 쌓는 것이 주 목적인지 판단이 필요합니다."),
-            message("테스트 페이지에서 확인 가능한 기능도 점검해 주세요."),
-        ];
-
-        let notes = suggested_inflow_task_notes("페이시스 QR 결제 통보 연동 개발", &messages);
+        let notes = inflow_task_notes(&analysis);
 
         assert!(notes.contains("QR 결제 거래·배송 정보 통지 연동 범위"));
         assert!(notes.contains("거래 통지 수신 URL"));
-        assert!(notes.contains("거래내역 조회·저장 목적"));
-        assert!(notes.contains("테스트 환경"));
         assert!(!notes.contains("보낸 사람 정보 없음"));
         assert!(!notes.contains("dalqtest"));
         assert!(!notes.contains("1234"));

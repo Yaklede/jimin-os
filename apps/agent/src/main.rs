@@ -15,6 +15,7 @@ use tokio::io::AsyncReadExt;
 
 mod config;
 mod health;
+mod inflow_analysis;
 mod meeting_analysis;
 mod worker_loop;
 

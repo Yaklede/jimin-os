@@ -28,6 +28,7 @@ use jimin_storage::{
         NewProjectGoogleChatSource, ProjectInflowStatus, PromoteProjectInflowItem,
         ProviderGoogleChatMessage,
     },
+    inflow_analysis::{InflowAnalysisResult, InflowAnalysisState, InflowClassification},
     intelligence::{
         DecideRecommendation, DecideRecommendationOutcome, NewRecommendation,
         NewScheduleRequestConflict, RecommendationDecision, RecommendationStatus,
@@ -693,6 +694,62 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         .await
         .expect("project inflow should load");
     assert_eq!(pending.len(), 2);
+    let analysis_runner = "inflow-analysis-test";
+    let initial_analysis = database
+        .claim_next_inflow_analysis(analysis_runner, Duration::from_secs(30))
+        .await
+        .expect("queued analysis should be claimable")
+        .expect("the Chat thread should queue one analysis");
+    assert_eq!(initial_analysis.messages.len(), 2);
+    assert_eq!(initial_analysis.source_revision, 2);
+    assert!(initial_analysis.linked_task_id.is_none());
+    assert!(
+        database
+            .start_inflow_analysis(
+                initial_analysis.id,
+                analysis_runner,
+                Duration::from_secs(30),
+            )
+            .await
+            .expect("claimed analysis should start")
+    );
+    assert!(
+        database
+            .complete_inflow_analysis(
+                &initial_analysis,
+                analysis_runner,
+                &InflowAnalysisResult {
+                    classification: InflowClassification::NewTask,
+                    confidence: 96,
+                    summary: "회사 요청의 개발 범위와 예상 일정을 확인해야 한다.".to_owned(),
+                    suggested_task_title: Some("회사 요청 개발 범위 확인".to_owned()),
+                    suggested_action_items: vec![
+                        "요청 범위를 확인한다.".to_owned(),
+                        "예상 일정을 관계자에게 공유한다.".to_owned(),
+                    ],
+                    suggested_completion_criteria: Some(
+                        "개발 범위와 예상 일정이 관계자에게 공유된다.".to_owned(),
+                    ),
+                    suggested_assignee_name: None,
+                    suggested_due_at: None,
+                    suggested_priority: Some(1),
+                },
+            )
+            .await
+            .expect("structured analysis should persist")
+    );
+    let stored_initial_analysis = database
+        .project_inflow_analyses(owner.profile.id, first_project.id)
+        .await
+        .expect("stored analysis should load")
+        .into_iter()
+        .next()
+        .expect("stored analysis should exist");
+    assert_eq!(stored_initial_analysis.state, InflowAnalysisState::Ready);
+    assert_eq!(
+        stored_initial_analysis.classification,
+        Some(InflowClassification::NewTask)
+    );
     assert!(
         database
             .dismiss_project_inflow_item(
@@ -795,6 +852,78 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         .expect("retargeted completion delivery should load");
     assert_eq!(retry_deliveries.len(), 1);
     assert_eq!(retry_deliveries[0].inflow_id, retried.id);
+    let follow_up_message = ProviderGoogleChatMessage {
+        provider_message_name: "spaces/company-room/messages/message-3.message-3".to_owned(),
+        provider_thread_name: Some("spaces/company-room/threads/thread-1".to_owned()),
+        sender_provider_name: Some("users/123456789012345678901".to_owned()),
+        sender_name: Some("업무 담당자".to_owned()),
+        content_text: "이 건은 언제까지 확인할 수 있을까요?".to_owned(),
+        received_at: received_at + TimeDuration::seconds(2),
+    };
+    assert_eq!(
+        database
+            .apply_google_chat_messages(&connection, &[follow_up_message])
+            .await
+            .expect("follow-up message should ingest")
+            .len(),
+        1
+    );
+    let follow_up_analysis = database
+        .claim_next_inflow_analysis(analysis_runner, Duration::from_secs(30))
+        .await
+        .expect("follow-up analysis should be claimable")
+        .expect("the updated Chat thread should requeue analysis");
+    assert_eq!(follow_up_analysis.messages.len(), 3);
+    assert_eq!(
+        follow_up_analysis.linked_task_id, promoted.promoted_task_id,
+        "the analyzer should receive the existing task as follow-up context"
+    );
+    assert!(
+        database
+            .start_inflow_analysis(
+                follow_up_analysis.id,
+                analysis_runner,
+                Duration::from_secs(30),
+            )
+            .await
+            .expect("follow-up analysis should start")
+    );
+    assert!(
+        database
+            .complete_inflow_analysis(
+                &follow_up_analysis,
+                analysis_runner,
+                &InflowAnalysisResult {
+                    classification: InflowClassification::FollowUp,
+                    confidence: 99,
+                    summary: "기존 할 일의 처리 일정을 다시 묻는 후속 질문이다.".to_owned(),
+                    suggested_task_title: None,
+                    suggested_action_items: Vec::new(),
+                    suggested_completion_criteria: None,
+                    suggested_assignee_name: None,
+                    suggested_due_at: None,
+                    suggested_priority: None,
+                },
+            )
+            .await
+            .expect("follow-up classification should persist")
+    );
+    let stored_follow_up_analysis = database
+        .project_inflow_analyses(owner.profile.id, first_project.id)
+        .await
+        .expect("updated analysis should load")
+        .into_iter()
+        .next()
+        .expect("updated analysis should exist");
+    assert_eq!(
+        stored_follow_up_analysis.classification,
+        Some(InflowClassification::FollowUp)
+    );
+    assert!(stored_follow_up_analysis.suggested_task_title.is_none());
+    assert_eq!(
+        stored_follow_up_analysis.linked_task_id,
+        promoted.promoted_task_id
+    );
     assert!(
         database
             .recent_project_inflow_decisions_for_user(owner.profile.id)

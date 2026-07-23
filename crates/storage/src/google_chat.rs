@@ -12,6 +12,7 @@ use crate::{
     Database, StorageError,
     auth::{append_change, append_delete_change},
     calendar::EncryptedCalendarSecret,
+    inflow_analysis::queue_inflow_analysis_in_transaction,
     planning::queue_task_webhook_in_transaction,
 };
 
@@ -916,6 +917,15 @@ impl Database {
                     1,
                 )
                 .await?;
+                queue_inflow_analysis_in_transaction(
+                    &mut transaction,
+                    connection.user_id,
+                    connection.project_id,
+                    connection.source_id,
+                    &inflow_conversation_key(message),
+                    inflow_id,
+                )
+                .await?;
                 acknowledgements.push(NewInflowAcknowledgement {
                     inflow_id,
                     provider_message_name: message.provider_message_name.clone(),
@@ -944,6 +954,15 @@ impl Database {
                         "project_inflow_item",
                         inflow_id,
                         version,
+                    )
+                    .await?;
+                    queue_inflow_analysis_in_transaction(
+                        &mut transaction,
+                        connection.user_id,
+                        connection.project_id,
+                        connection.source_id,
+                        &inflow_conversation_key(message),
+                        inflow_id,
                     )
                     .await?;
                 }
@@ -2032,6 +2051,13 @@ fn valid_provider_message(message: &ProviderGoogleChatMessage) -> bool {
             .as_deref()
             .is_none_or(|value| valid_text(value, MAX_DISPLAY_NAME_CHARS, false))
         && valid_text(&message.content_text, MAX_MESSAGE_TEXT_CHARS, true)
+}
+
+fn inflow_conversation_key(message: &ProviderGoogleChatMessage) -> String {
+    message.provider_thread_name.as_ref().map_or_else(
+        || format!("message:{}", message.provider_message_name),
+        |thread| format!("thread:{thread}"),
+    )
 }
 
 fn valid_google_chat_user_name(value: &str) -> bool {
