@@ -8,6 +8,7 @@ import {
   Clock3,
   FolderKanban,
   ListTodo,
+  Pencil,
   UserRound,
 } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
@@ -30,6 +31,10 @@ type AssistantInteractiveCanvasProps = {
   presentation: AssistantPresentation;
   onContinue(): void;
   onCompleteTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
+  onEditTask(task: Pick<Task, "id" | "projectId">): void | Promise<void>;
+  onEditSchedule(
+    entry: Pick<ScheduleEntry, "id" | "startsAt">,
+  ): void | Promise<void>;
   onOpenTask(task: Pick<Task, "id" | "projectId">): void | Promise<void>;
   onOpenProject(
     project: Pick<Project, "id" | "workspaceId">,
@@ -43,6 +48,8 @@ export function AssistantInteractiveCanvas({
   presentation,
   onContinue,
   onCompleteTask,
+  onEditTask,
+  onEditSchedule,
   onOpenTask,
   onOpenProject,
   onOpenSchedule,
@@ -138,6 +145,23 @@ export function AssistantInteractiveCanvas({
       }
     } catch {
       if (mountedRef.current) setOpenError(copy.home.resultOpenFailed);
+    } finally {
+      if (mountedRef.current) setOpening(false);
+    }
+  }
+
+  async function editSelectedItem() {
+    if (!selectedItem || selectedItem.type === "project" || opening) return;
+    setOpening(true);
+    setOpenError(undefined);
+    try {
+      if (selectedItem.type === "task") {
+        await onEditTask(selectedItem);
+      } else {
+        await onEditSchedule(selectedItem);
+      }
+    } catch {
+      if (mountedRef.current) setOpenError(copy.home.resultEditFailed);
     } finally {
       if (mountedRef.current) setOpening(false);
     }
@@ -383,6 +407,7 @@ export function AssistantInteractiveCanvas({
                           ? void completePresentationTask(selectedItem)
                           : undefined
                       }
+                      onEdit={() => void editSelectedItem()}
                       onOpen={() => void openSelectedItem()}
                     />
                   </article>
@@ -502,6 +527,7 @@ function ItemDetail({
   error,
   canOpen,
   onComplete,
+  onEdit,
   onOpen,
 }: {
   item: AssistantPresentationSection["items"][number];
@@ -510,6 +536,7 @@ function ItemDetail({
   error: string | undefined;
   canOpen: boolean;
   onComplete(): void;
+  onEdit(): void;
   onOpen(): void;
 }) {
   if (item.type === "task") {
@@ -551,6 +578,16 @@ function ItemDetail({
               )}
             </button>
           )}
+          <button
+            className="secondary-button focus-visible-control"
+            type="button"
+            disabled={opening || completing}
+            aria-busy={opening}
+            onClick={onEdit}
+          >
+            <Pencil aria-hidden="true" />
+            {copy.home.editTaskAction}
+          </button>
           {canOpen && (
             <button
               className="secondary-button focus-visible-control"
@@ -581,20 +618,32 @@ function ItemDetail({
           <h4>{item.title}</h4>
           <span>{`${formatTime(item.startsAt)}–${formatTime(item.endsAt)}`}</span>
         </div>
-        {canOpen && (
+        <div className="assistant-canvas__detail-actions">
           <button
-            className="primary-button focus-visible-control"
+            className="secondary-button focus-visible-control"
             type="button"
             disabled={opening}
             aria-busy={opening}
-            onClick={onOpen}
+            onClick={onEdit}
           >
-            <DestinationActionContent
-              opening={opening}
-              label={copy.home.openScheduleAction}
-            />
+            <Pencil aria-hidden="true" />
+            {copy.home.editScheduleAction}
           </button>
-        )}
+          {canOpen && (
+            <button
+              className="primary-button focus-visible-control"
+              type="button"
+              disabled={opening}
+              aria-busy={opening}
+              onClick={onOpen}
+            >
+              <DestinationActionContent
+                opening={opening}
+                label={copy.home.openScheduleAction}
+              />
+            </button>
+          )}
+        </div>
         {error && <ResultOpenError message={error} />}
       </>
     );

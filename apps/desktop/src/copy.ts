@@ -132,6 +132,8 @@ export const copy = {
     resultCount: (count: number) => `${count}개`,
     resultOpening: "화면을 여는 중이에요",
     resultOpenFailed: "화면을 열지 못했어요. 아래 버튼을 다시 눌러 주세요.",
+    resultEditFailed:
+      "수정 화면을 열지 못했어요. 최신 내용을 확인한 뒤 다시 시도해 주세요.",
     resultTaskComplete: "완료하기",
     resultTaskCompleting: "완료하는 중",
     resultTaskCompleteFailed:
@@ -171,6 +173,8 @@ export const copy = {
     projectTaskCount: (count: number) => `열린 일감 ${count}개`,
     projectNextActionLabel: "다음 행동",
     openTaskAction: "일감 보기",
+    editTaskAction: "바로 수정",
+    editScheduleAction: "일정 수정",
     openProjectAction: "프로젝트에서 보기",
     openScheduleAction: "일정에서 보기",
     unassignedTask: "프로젝트에 연결되지 않은 일감",

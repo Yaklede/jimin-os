@@ -1871,6 +1871,36 @@ export default function App() {
     }
   }
 
+  async function editTaskFromAssistant(
+    task: Pick<Task, "id" | "projectId">,
+  ): Promise<void> {
+    setHomeError(undefined);
+    try {
+      const currentTask = await withAuthenticatedSession((accessToken) =>
+        fetchTask(apiBaseUrl, accessToken, task.id),
+      );
+      setPlanningEditTarget({ kind: "task", item: currentTask });
+    } catch (error) {
+      setHomeError(copy.messages.taskSaveNotice);
+      throw error;
+    }
+  }
+
+  async function editScheduleFromAssistant(
+    entry: Pick<ScheduleEntry, "id" | "startsAt">,
+  ): Promise<void> {
+    setHomeError(undefined);
+    const snapshot = await loadPlanningSnapshot(entry.startsAt);
+    const currentEntry = snapshot?.schedule.find(
+      (item) => item.id === entry.id,
+    );
+    if (!currentEntry) {
+      setHomeError(copy.home.scheduleDestinationNotice);
+      throw new Error("schedule unavailable");
+    }
+    setPlanningEditTarget({ kind: "schedule", item: currentEntry });
+  }
+
   async function restorePlanningTask(task: Task): Promise<void> {
     if (!tokens) return;
     setPlanningError(undefined);
@@ -3174,6 +3204,8 @@ export default function App() {
               }
               onCompleteTask={completeHomeTask}
               onCompleteAssistantTask={completeTaskFromAssistant}
+              onEditAssistantTask={editTaskFromAssistant}
+              onEditAssistantSchedule={editScheduleFromAssistant}
               onEditTask={(task) =>
                 setPlanningEditTarget({ kind: "task", item: task })
               }

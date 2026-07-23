@@ -53,6 +53,12 @@ type HomeWorkspaceProps = {
   onSendAssistant(text: string, clientMessageId: string): Promise<boolean>;
   onCompleteTask(task: Task): Promise<void>;
   onCompleteAssistantTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
+  onEditAssistantTask(
+    task: Pick<Task, "id" | "projectId">,
+  ): void | Promise<void>;
+  onEditAssistantSchedule(
+    entry: Pick<ScheduleEntry, "id" | "startsAt">,
+  ): void | Promise<void>;
   onEditTask(task: Task): void;
   onEditSchedule(entry: ScheduleEntry): void;
   onOpenPlanningTask(task: Task): void | Promise<void>;
@@ -93,6 +99,8 @@ export function HomeWorkspace({
   onSendAssistant,
   onCompleteTask,
   onCompleteAssistantTask,
+  onEditAssistantTask,
+  onEditAssistantSchedule,
   onEditTask,
   onEditSchedule,
   onOpenPlanningTask,
@@ -307,6 +315,8 @@ export function HomeWorkspace({
         onStartNew={onStartNewAssistant}
         onSend={onSendAssistant}
         onCompleteTask={onCompleteAssistantTask}
+        onEditTask={onEditAssistantTask}
+        onEditSchedule={onEditAssistantSchedule}
         onOpenTask={async (task) => {
           if (task.projectId) {
             await onOpenTask(task);
@@ -694,6 +704,8 @@ function HomeAssistantCommand({
   onStartNew,
   onSend,
   onCompleteTask,
+  onEditTask,
+  onEditSchedule,
   onOpenTask,
   onOpenProject,
   onOpenSchedule,
@@ -709,6 +721,10 @@ function HomeAssistantCommand({
   onStartNew(): void;
   onSend(text: string, clientMessageId: string): Promise<boolean>;
   onCompleteTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
+  onEditTask(task: Pick<Task, "id" | "projectId">): void | Promise<void>;
+  onEditSchedule(
+    entry: Pick<ScheduleEntry, "id" | "startsAt">,
+  ): void | Promise<void>;
   onOpenTask(task: Pick<Task, "id" | "projectId">): void | Promise<void>;
   onOpenProject(
     project: Pick<Project, "id" | "workspaceId">,
@@ -883,6 +899,8 @@ function HomeAssistantCommand({
           presentation={presentation}
           onContinue={() => inputRef.current?.focus()}
           onCompleteTask={onCompleteTask}
+          onEditTask={onEditTask}
+          onEditSchedule={onEditSchedule}
           onOpenTask={onOpenTask}
           onOpenProject={onOpenProject}
           onOpenSchedule={onOpenSchedule}
