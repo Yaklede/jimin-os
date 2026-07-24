@@ -582,12 +582,16 @@ function ScheduleTimelineSkeleton({
     >
       {Array.from({ length: rows }, (_, index) => (
         <span className="planning-timeline-skeleton__row" key={index}>
-          <SkeletonBlock className="skeleton--timeline-time" />
+          <span className="skeleton-time-stack">
+            <SkeletonBlock className="skeleton--timeline-day" />
+            <SkeletonBlock className="skeleton--timeline-time" />
+          </span>
           <SkeletonBlock className="skeleton--timeline-dot" />
           <span className="skeleton-copy-stack">
             <SkeletonBlock className="skeleton--title" />
             <SkeletonBlock className="skeleton--caption" />
           </span>
+          <SkeletonBlock className="skeleton--row-action" />
         </span>
       ))}
     </SkeletonGroup>
@@ -615,6 +619,7 @@ function PlanningTaskSkeleton({
             <SkeletonBlock className="skeleton--caption" />
           </span>
           <SkeletonBlock className="skeleton--task-date" />
+          <SkeletonBlock className="skeleton--row-action" />
         </span>
       ))}
     </SkeletonGroup>
