@@ -3,6 +3,7 @@ import { FormEvent, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { type ScheduleEntry, type Task } from "../api/planning";
 import { copy } from "../copy";
+import { registerMobileBackHandler } from "../mobileBack";
 
 export type PlanningEditTarget =
   { kind: "task"; item: Task } | { kind: "schedule"; item: ScheduleEntry };
@@ -106,6 +107,15 @@ export function PlanningItemEditor({
     });
     return () => window.cancelAnimationFrame(frame);
   }, [confirmingDelete]);
+
+  useEffect(() => {
+    if (!target) return;
+    return registerMobileBackHandler(() => {
+      if (saving) return true;
+      dialogRef.current?.close();
+      return true;
+    }, 100);
+  }, [saving, target]);
 
   if (!target) return null;
   const activeTarget = target;

@@ -17,6 +17,7 @@ import {
   type VoiceCommandOutcome,
   VoiceCommandSheet,
 } from "./VoiceCommandSheet";
+import { registerMobileBackHandler } from "../mobileBack";
 
 export type OsDestination =
   | "home"
@@ -60,6 +61,14 @@ export function OsShell({
   useEffect(() => {
     previousDestinationRef.current = destination;
   }, [destination]);
+
+  useEffect(() => {
+    if (!voiceSheetOpen) return;
+    return registerMobileBackHandler(() => {
+      setVoiceSheetOpen(false);
+      return true;
+    }, 100);
+  }, [voiceSheetOpen]);
 
   function openTextInput(value?: string) {
     setVoiceSheetOpen(false);

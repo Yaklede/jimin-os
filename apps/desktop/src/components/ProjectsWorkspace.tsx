@@ -53,6 +53,7 @@ import {
   ProjectInflowPanel,
   type PromoteInflowInput,
 } from "./ProjectInflowPanel";
+import { registerMobileBackHandler } from "../mobileBack";
 
 type ProjectDetailTab =
   "tasks" | "weekly" | "inflow" | "integrations" | "activity";
@@ -304,6 +305,25 @@ export function ProjectsWorkspace({
     });
     element.focus({ preventScroll: true });
   }, [highlightedTaskId, tasks]);
+
+  useEffect(() => {
+    if (!formOpen && !editingTaskId && !selectedTaskId) return;
+    return registerMobileBackHandler(() => {
+      if (editingTaskId) {
+        setEditingTaskId(undefined);
+        return true;
+      }
+      if (selectedTaskId) {
+        setSelectedTaskId(undefined);
+        return true;
+      }
+      if (formOpen) {
+        setFormOpen(false);
+        return true;
+      }
+      return false;
+    }, 80);
+  }, [editingTaskId, formOpen, selectedTaskId]);
 
   async function submitProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

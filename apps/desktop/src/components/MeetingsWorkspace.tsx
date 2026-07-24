@@ -31,6 +31,7 @@ import {
 } from "../api/meetings";
 import { type Project, type Workspace } from "../api/projects";
 import { copy } from "../copy";
+import { registerMobileBackHandler } from "../mobileBack";
 import {
   SkeletonBlock,
   SkeletonGroup,
@@ -89,6 +90,15 @@ export function MeetingsWorkspace({
   const [retrying, setRetrying] = useState(false);
   const meetingListRef = useRef<HTMLDivElement>(null);
   const skeletonVisible = useDelayedSkeleton(loading || detailLoading);
+
+  useEffect(() => {
+    if (!showComposer) return;
+    return registerMobileBackHandler(() => {
+      if (creating) return true;
+      setShowComposer(false);
+      return true;
+    }, 100);
+  }, [creating, showComposer]);
 
   const loadList = useCallback(async () => {
     try {

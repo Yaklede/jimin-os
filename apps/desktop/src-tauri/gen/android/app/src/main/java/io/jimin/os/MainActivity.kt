@@ -4,20 +4,32 @@ import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
 import android.webkit.WebView
+import androidx.activity.OnBackPressedCallback
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import io.crates.keyring.Keyring
 
 class MainActivity : TauriActivity() {
+  private var appWebView: WebView? = null
+
   override fun onCreate(savedInstanceState: Bundle?) {
     Keyring.initializeNdkContext(applicationContext)
     super.onCreate(savedInstanceState)
+    onBackPressedDispatcher.addCallback(
+      this,
+      object : OnBackPressedCallback(true) {
+        override fun handleOnBackPressed() {
+          handleAppBack()
+        }
+      },
+    )
     WindowCompat.setDecorFitsSystemWindows(window, true)
     updateSystemBarAppearance()
   }
 
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
+    appWebView = webView
     webView.settings.setSupportZoom(false)
     webView.settings.builtInZoomControls = false
     webView.settings.displayZoomControls = false
@@ -42,6 +54,26 @@ class MainActivity : TauriActivity() {
       isAppearanceLightStatusBars = !darkMode
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
         isAppearanceLightNavigationBars = !darkMode
+      }
+    }
+  }
+
+  private fun handleAppBack() {
+    val webView = appWebView
+    if (webView == null) {
+      moveTaskToBack(true)
+      return
+    }
+    webView.evaluateJavascript(
+      """
+      (() => {
+        const handler = window.__JIMIN_OS_ANDROID_BACK__;
+        return typeof handler === "function" ? handler() === true : false;
+      })()
+      """.trimIndent(),
+    ) { handled ->
+      if (handled != "true") {
+        moveTaskToBack(true)
       }
     }
   }

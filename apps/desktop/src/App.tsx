@@ -160,6 +160,10 @@ import {
   samePlanningViewRange,
   type PlanningViewRange,
 } from "./planningRange";
+import {
+  installAndroidBackBridge,
+  registerMobileBackHandler,
+} from "./mobileBack";
 import { localDayKey, millisecondsUntilNextLocalDay } from "./homeSchedule";
 import {
   acknowledgePendingReminderNavigation,
@@ -190,6 +194,7 @@ export default function App() {
   const [mode, setMode] = useState<AppMode>("loading");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [destination, setDestination] = useState<OsDestination>("home");
+  const navigationHistoryRef = useRef<OsDestination[]>([]);
   const [homeSnapshot, setHomeSnapshot] = useState<HomeSnapshot | undefined>();
   const [homeLoading, setHomeLoading] = useState(false);
   const [homeError, setHomeError] = useState<string | undefined>();
@@ -1403,7 +1408,7 @@ export default function App() {
             ),
           );
           if (!active || !snapshot) return;
-          setDestination(reminderFallbackDestination(navigation));
+          navigate(reminderFallbackDestination(navigation));
           if (navigation.itemType === "schedule") {
             setHighlightedPlanningTaskId(undefined);
             setHighlightedScheduleId(navigation.itemId);
@@ -1735,7 +1740,7 @@ export default function App() {
   ]);
 
   function selectConversation(conversationId: string) {
-    setDestination("chat");
+    navigate("chat");
     setAssistantDraft(undefined);
     setSelectedConversationId(conversationId);
     setConversationMessages([]);
@@ -1778,7 +1783,7 @@ export default function App() {
       return;
     }
     setAssistantDraft(undefined);
-    setDestination("chat");
+    navigate("chat");
     if (selectedConversationId !== homeConversationId) {
       setSelectedConversationId(homeConversationId);
       setConversationMessages([]);
@@ -2252,7 +2257,7 @@ export default function App() {
     setHighlightedProjectTaskId(undefined);
     setSelectedWorkspaceId(project.workspaceId);
     setSelectedProjectId(project.id);
-    setDestination("projects");
+    navigate("projects");
   }
 
   async function openTaskFromAssistant(
@@ -2280,7 +2285,7 @@ export default function App() {
       }
       setHighlightedProjectTaskId(task.id);
       setSelectedProjectId(currentProject.id);
-      setDestination("projects");
+      navigate("projects");
       return;
     }
 
@@ -2299,7 +2304,7 @@ export default function App() {
         setSelectedWorkspaceId(workspace.id);
         setSelectedProjectId(project.id);
         setHighlightedProjectTaskId(task.id);
-        setDestination("projects");
+        navigate("projects");
         return;
       } catch {
         // Keep searching the remaining personal workspaces.
@@ -2321,7 +2326,7 @@ export default function App() {
     }
     setHighlightedPlanningTaskId(undefined);
     setHighlightedScheduleId(entry.id);
-    setDestination("calendar");
+    navigate("calendar");
   }
 
   async function openPlanningTask(task: Task): Promise<void> {
@@ -2333,7 +2338,7 @@ export default function App() {
     }
     setHighlightedScheduleId(undefined);
     setHighlightedPlanningTaskId(task.id);
-    setDestination("calendar");
+    navigate("calendar");
   }
 
   async function createWorkspaceProject(input: {
@@ -3017,13 +3022,13 @@ export default function App() {
   function openNewAssistantRequest() {
     startConversation();
     setAssistantDraft(undefined);
-    setDestination("chat");
+    navigate("chat");
   }
 
   function handleVoiceTranscript(value: string) {
     startConversation();
     setAssistantDraft({ id: createUuidV7(), text: value, autoSend: true });
-    setDestination("chat");
+    navigate("chat");
   }
 
   async function handleVoiceCommand(
@@ -3212,6 +3217,12 @@ export default function App() {
     .find((message) => message.role === "user")?.content;
 
   function navigate(nextDestination: OsDestination): void {
+    if (nextDestination !== destination) {
+      navigationHistoryRef.current = [
+        ...navigationHistoryRef.current.slice(-31),
+        destination,
+      ];
+    }
     setDestination(nextDestination);
     if (
       nextDestination === "home" &&
@@ -3254,6 +3265,40 @@ export default function App() {
       void loadDecisionInbox();
     }
   }
+
+  useEffect(() => installAndroidBackBridge(), []);
+
+  useEffect(
+    () =>
+      registerMobileBackHandler(() => {
+        if (planningEditTarget) {
+          setPlanningEditTarget(undefined);
+          return true;
+        }
+        if (destination === "projects" && selectedProjectId) {
+          setHighlightedProjectTaskId(undefined);
+          setSelectedProjectId(undefined);
+          setProjectTasks([]);
+          setProjectWebhooks([]);
+          setWebhookDeliveries([]);
+          setProjectGoogleChatSources([]);
+          setProjectInflowItems([]);
+          setGoogleChatSpaces([]);
+          return true;
+        }
+        const previousDestination = navigationHistoryRef.current.pop();
+        if (previousDestination) {
+          setDestination(previousDestination);
+          return true;
+        }
+        if (destination !== "home") {
+          setDestination("home");
+          return true;
+        }
+        return false;
+      }, 10),
+    [destination, planningEditTarget, selectedProjectId],
+  );
 
   return (
     <div

@@ -8,6 +8,7 @@ import {
 } from "react";
 
 import { copy } from "../copy";
+import { registerMobileBackHandler } from "../mobileBack";
 
 export type PlanningCreateKind = "task" | "schedule";
 
@@ -78,6 +79,15 @@ export function PlanningCreateDialog({
       if (focusFrame !== undefined) window.cancelAnimationFrame(focusFrame);
     };
   }, [kind]);
+
+  useEffect(() => {
+    if (!kind) return;
+    return registerMobileBackHandler(() => {
+      if (saving) return true;
+      dialogRef.current?.close();
+      return true;
+    }, 100);
+  }, [kind, saving]);
 
   if (!kind) return null;
 
