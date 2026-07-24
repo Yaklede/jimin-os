@@ -9,7 +9,7 @@ use hmac::{Hmac, Mac, digest::KeyInit as HmacKeyInit};
 use jimin_domain::{ClientPlatform, PkceVerifier};
 use jimin_google::{
     GoogleAuthError, GoogleAuthorizationCode, GoogleChatAdapter, GoogleChatMessageEntry,
-    GoogleChatSpaceEntry, GoogleIdentityAdapter, GoogleOAuthProfile,
+    GoogleChatSpaceEntry, GoogleChatWriteError, GoogleIdentityAdapter, GoogleOAuthProfile,
 };
 use jimin_storage::{
     calendar::EncryptedCalendarSecret,
@@ -58,6 +58,8 @@ pub struct NewGoogleChatOAuthAuthorization {
 pub struct GoogleChatCompletionOutcome {
     pub reaction_completed: bool,
     pub reply_completed: bool,
+    pub reaction_failure_code: Option<&'static str>,
+    pub reply_failure_code: Option<&'static str>,
     pub failure_code: Option<&'static str>,
 }
 
@@ -303,6 +305,8 @@ impl GoogleChatOAuthRuntime {
                 return GoogleChatCompletionOutcome {
                     reaction_completed: false,
                     reply_completed: false,
+                    reaction_failure_code: Some(error.failure_code()),
+                    reply_failure_code: Some(error.failure_code()),
                     failure_code: Some(error.failure_code()),
                 };
             }
@@ -314,16 +318,24 @@ impl GoogleChatOAuthRuntime {
                 return GoogleChatCompletionOutcome {
                     reaction_completed: false,
                     reply_completed: false,
+                    reaction_failure_code: Some(error.failure_code()),
+                    reply_failure_code: Some(error.failure_code()),
                     failure_code: Some(error.failure_code()),
                 };
             }
         };
-        let reaction_completed = delivery.reaction_completed
-            || self
+        let (reaction_completed, reaction_failure) = if delivery.reaction_completed {
+            (true, None)
+        } else {
+            match self
                 .chat
                 .complete_message(&access_token, &delivery.provider_message_name)
                 .await
-                .is_ok();
+            {
+                Ok(()) => (true, None),
+                Err(error) => (false, Some(completion_reaction_failure_code(error))),
+            }
+        };
         let (reply_completed, reply_failure) = if delivery.reply_completed {
             (true, None)
         } else if !Self::completion_scope_granted(&connection.granted_scopes) {
@@ -341,7 +353,7 @@ impl GoogleChatOAuthRuntime {
                 .await
             {
                 Ok(()) => (true, None),
-                Err(_) => (false, Some("google_chat.completion_reply_failed")),
+                Err(error) => (false, Some(completion_reply_failure_code(error))),
             }
         } else {
             (false, Some("google_chat.thread_unavailable"))
@@ -349,11 +361,13 @@ impl GoogleChatOAuthRuntime {
         let failure_code = if reaction_completed && reply_completed {
             None
         } else {
-            reply_failure.or(Some("google_chat.completion_reaction_failed"))
+            reply_failure.or(reaction_failure)
         };
         GoogleChatCompletionOutcome {
             reaction_completed,
             reply_completed,
+            reaction_failure_code: reaction_failure,
+            reply_failure_code: reply_failure,
             failure_code,
         }
     }
@@ -373,6 +387,38 @@ impl GoogleChatOAuthRuntime {
             &connection.refresh_token,
             &refresh_token_aad(connection.user_id, &connection.provider_subject),
         )
+    }
+}
+
+const fn completion_reaction_failure_code(error: GoogleChatWriteError) -> &'static str {
+    match error {
+        GoogleChatWriteError::InvalidRequest => "google_chat.completion_reaction_invalid_request",
+        GoogleChatWriteError::Unauthenticated => "google_chat.completion_reaction_unauthenticated",
+        GoogleChatWriteError::PermissionDenied => {
+            "google_chat.completion_reaction_permission_denied"
+        }
+        GoogleChatWriteError::NotFound => "google_chat.completion_reaction_not_found",
+        GoogleChatWriteError::RateLimited => "google_chat.completion_reaction_rate_limited",
+        GoogleChatWriteError::ProviderRejected => {
+            "google_chat.completion_reaction_provider_rejected"
+        }
+        GoogleChatWriteError::ProviderUnavailable => {
+            "google_chat.completion_reaction_provider_unavailable"
+        }
+    }
+}
+
+const fn completion_reply_failure_code(error: GoogleChatWriteError) -> &'static str {
+    match error {
+        GoogleChatWriteError::InvalidRequest => "google_chat.completion_reply_invalid_request",
+        GoogleChatWriteError::Unauthenticated => "google_chat.completion_reply_unauthenticated",
+        GoogleChatWriteError::PermissionDenied => "google_chat.completion_reply_permission_denied",
+        GoogleChatWriteError::NotFound => "google_chat.completion_reply_not_found",
+        GoogleChatWriteError::RateLimited => "google_chat.completion_reply_rate_limited",
+        GoogleChatWriteError::ProviderRejected => "google_chat.completion_reply_provider_rejected",
+        GoogleChatWriteError::ProviderUnavailable => {
+            "google_chat.completion_reply_provider_unavailable"
+        }
     }
 }
 
@@ -600,6 +646,22 @@ mod tests {
         assert!(GoogleChatOAuthRuntime::completion_scope_granted(&[
             CHAT_MESSAGES_CREATE_SCOPE.to_owned(),
         ]));
+    }
+
+    #[test]
+    fn completion_failure_codes_keep_operation_and_provider_class() {
+        assert_eq!(
+            completion_reaction_failure_code(GoogleChatWriteError::PermissionDenied),
+            "google_chat.completion_reaction_permission_denied"
+        );
+        assert_eq!(
+            completion_reply_failure_code(GoogleChatWriteError::NotFound),
+            "google_chat.completion_reply_not_found"
+        );
+        assert_eq!(
+            completion_reply_failure_code(GoogleChatWriteError::RateLimited),
+            "google_chat.completion_reply_rate_limited"
+        );
     }
 
     #[test]

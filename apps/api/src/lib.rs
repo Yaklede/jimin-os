@@ -6111,6 +6111,8 @@ async fn deliver_google_chat_completions(
                 source_id = %connection.source_id,
                 attempt = delivery.attempt_count + 1,
                 error_code,
+                reaction_error_code = outcome.reaction_failure_code.unwrap_or("none"),
+                reply_error_code = outcome.reply_failure_code.unwrap_or("none"),
                 "Google Chat completion delivery is incomplete"
             );
         }

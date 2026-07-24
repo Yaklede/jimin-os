@@ -72,6 +72,29 @@ pub enum GoogleAuthError {
     CalendarEventRejected,
 }
 
+/// Sanitized failure returned by Google Chat write endpoints.
+///
+/// The response body is deliberately discarded because it can contain provider
+/// resource names or user-authored content. The status class is retained so
+/// callers can distinguish consent, target, throttling, and provider failures.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum GoogleChatWriteError {
+    #[error("Google Chat write request is invalid")]
+    InvalidRequest,
+    #[error("Google Chat write credential is not authenticated")]
+    Unauthenticated,
+    #[error("Google Chat write request is not permitted")]
+    PermissionDenied,
+    #[error("Google Chat write target was not found")]
+    NotFound,
+    #[error("Google Chat write request was rate limited")]
+    RateLimited,
+    #[error("Google Chat rejected the write request")]
+    ProviderRejected,
+    #[error("Google Chat write endpoint is temporarily unavailable")]
+    ProviderUnavailable,
+}
+
 /// One server-owned client profile. Callers cannot supply a client ID, token
 /// endpoint, or arbitrary redirect URI per request.
 #[derive(Debug, Clone)]
@@ -1260,7 +1283,7 @@ impl GoogleChatAdapter {
         &self,
         access_token: &SecretString,
         message_name: &str,
-    ) -> Result<(), GoogleAuthError> {
+    ) -> Result<(), GoogleChatWriteError> {
         self.add_message_reaction(access_token, message_name, "👀")
             .await
     }
@@ -1275,7 +1298,7 @@ impl GoogleChatAdapter {
         &self,
         access_token: &SecretString,
         message_name: &str,
-    ) -> Result<(), GoogleAuthError> {
+    ) -> Result<(), GoogleChatWriteError> {
         self.add_message_reaction(access_token, message_name, "✅")
             .await
     }
@@ -1285,17 +1308,19 @@ impl GoogleChatAdapter {
         access_token: &SecretString,
         message_name: &str,
         unicode: &str,
-    ) -> Result<(), GoogleAuthError> {
+    ) -> Result<(), GoogleChatWriteError> {
         if !matches!(unicode, "👀" | "✅") {
-            return Err(GoogleAuthError::InvalidRequest);
+            return Err(GoogleChatWriteError::InvalidRequest);
         }
-        let token = validate_access_token(access_token)?;
-        let segments = validated_chat_message_segments(message_name)?;
+        let token = validate_access_token(access_token)
+            .map_err(|_| GoogleChatWriteError::InvalidRequest)?;
+        let segments = validated_chat_message_segments(message_name)
+            .map_err(|_| GoogleChatWriteError::InvalidRequest)?;
         let mut url = reqwest::Url::parse("https://chat.googleapis.com/v1")
-            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+            .map_err(|_| GoogleChatWriteError::ProviderUnavailable)?;
         let mut path = url
             .path_segments_mut()
-            .map_err(|()| GoogleAuthError::ProviderUnavailable)?;
+            .map_err(|()| GoogleChatWriteError::ProviderUnavailable)?;
         for segment in segments {
             path.push(segment);
         }
@@ -1310,11 +1335,11 @@ impl GoogleChatAdapter {
             })
             .send()
             .await
-            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+            .map_err(|_| GoogleChatWriteError::ProviderUnavailable)?;
         if response.status().is_success() || response.status().as_u16() == 409 {
             Ok(())
         } else {
-            Err(classify_provider_status(response.status().as_u16()))
+            Err(classify_chat_write_status(response.status().as_u16()))
         }
     }
 
@@ -1331,25 +1356,29 @@ impl GoogleChatAdapter {
         thread_name: &str,
         text: &str,
         request_id: &str,
-    ) -> Result<(), GoogleAuthError> {
-        let token = validate_access_token(access_token)?;
-        let space_id = validated_chat_space_id(space_name)?;
-        let _ = validated_chat_thread_segments(thread_name, space_id)?;
-        let text = validate_provider_free_text(text.to_owned(), 32_000)?;
+    ) -> Result<(), GoogleChatWriteError> {
+        let token = validate_access_token(access_token)
+            .map_err(|_| GoogleChatWriteError::InvalidRequest)?;
+        let space_id = validated_chat_space_id(space_name)
+            .map_err(|_| GoogleChatWriteError::InvalidRequest)?;
+        let _ = validated_chat_thread_segments(thread_name, space_id)
+            .map_err(|_| GoogleChatWriteError::InvalidRequest)?;
+        let text = validate_provider_free_text(text.to_owned(), 32_000)
+            .map_err(|_| GoogleChatWriteError::InvalidRequest)?;
         if request_id.is_empty()
             || request_id.len() > 64
             || !request_id
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         {
-            return Err(GoogleAuthError::InvalidRequest);
+            return Err(GoogleChatWriteError::InvalidRequest);
         }
         let mut url = reqwest::Url::parse("https://chat.googleapis.com/v1")
-            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+            .map_err(|_| GoogleChatWriteError::ProviderUnavailable)?;
         {
             let mut path = url
                 .path_segments_mut()
-                .map_err(|()| GoogleAuthError::ProviderUnavailable)?;
+                .map_err(|()| GoogleChatWriteError::ProviderUnavailable)?;
             path.push("spaces");
             path.push(space_id);
             path.push("messages");
@@ -1367,11 +1396,11 @@ impl GoogleChatAdapter {
             })
             .send()
             .await
-            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+            .map_err(|_| GoogleChatWriteError::ProviderUnavailable)?;
         if response.status().is_success() || response.status().as_u16() == 409 {
             Ok(())
         } else {
-            Err(classify_provider_status(response.status().as_u16()))
+            Err(classify_chat_write_status(response.status().as_u16()))
         }
     }
 }
@@ -2567,6 +2596,18 @@ fn classify_provider_status(status: u16) -> GoogleAuthError {
     }
 }
 
+const fn classify_chat_write_status(status: u16) -> GoogleChatWriteError {
+    match status {
+        400 => GoogleChatWriteError::InvalidRequest,
+        401 => GoogleChatWriteError::Unauthenticated,
+        403 => GoogleChatWriteError::PermissionDenied,
+        404 => GoogleChatWriteError::NotFound,
+        429 => GoogleChatWriteError::RateLimited,
+        500..=599 => GoogleChatWriteError::ProviderUnavailable,
+        _ => GoogleChatWriteError::ProviderRejected,
+    }
+}
+
 fn classify_calendar_event_status(status: u16, incremental: bool) -> Option<GoogleAuthError> {
     if (200..300).contains(&status) {
         None
@@ -2732,6 +2773,38 @@ mod tests {
         );
         assert!(
             validated_chat_thread_segments("spaces/AAAAAAAAAAA/threads/..", "AAAAAAAAAAA").is_err()
+        );
+    }
+
+    #[test]
+    fn chat_write_status_preserves_safe_failure_classes() {
+        assert_eq!(
+            classify_chat_write_status(400),
+            GoogleChatWriteError::InvalidRequest
+        );
+        assert_eq!(
+            classify_chat_write_status(401),
+            GoogleChatWriteError::Unauthenticated
+        );
+        assert_eq!(
+            classify_chat_write_status(403),
+            GoogleChatWriteError::PermissionDenied
+        );
+        assert_eq!(
+            classify_chat_write_status(404),
+            GoogleChatWriteError::NotFound
+        );
+        assert_eq!(
+            classify_chat_write_status(429),
+            GoogleChatWriteError::RateLimited
+        );
+        assert_eq!(
+            classify_chat_write_status(503),
+            GoogleChatWriteError::ProviderUnavailable
+        );
+        assert_eq!(
+            classify_chat_write_status(422),
+            GoogleChatWriteError::ProviderRejected
         );
     }
 
