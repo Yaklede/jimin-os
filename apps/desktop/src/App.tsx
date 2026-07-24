@@ -1967,7 +1967,18 @@ export default function App() {
       );
       setHighlightedScheduleId(undefined);
       setHighlightedPlanningTaskId(created.id);
-      await Promise.all([loadHomeSnapshot(), loadPlanningSnapshot()]);
+      setPlanningSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              tasks: [
+                created,
+                ...current.tasks.filter((item) => item.id !== created.id),
+              ],
+            }
+          : current,
+      );
+      void Promise.all([loadHomeSnapshot(), loadPlanningSnapshot()]);
     } catch (error) {
       setPlanningError(copy.messages.taskCreateNotice);
       throw error;
@@ -1991,7 +2002,22 @@ export default function App() {
       );
       setHighlightedPlanningTaskId(undefined);
       setHighlightedScheduleId(created.id);
-      await Promise.all([
+      setPlanningSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              schedule: [
+                ...current.schedule.filter((item) => item.id !== created.id),
+                created,
+              ].sort(
+                (left, right) =>
+                  new Date(left.startsAt).getTime() -
+                  new Date(right.startsAt).getTime(),
+              ),
+            }
+          : current,
+      );
+      void Promise.all([
         loadHomeSnapshot(),
         loadPlanningSnapshot(created.startsAt),
       ]);
@@ -2051,7 +2077,7 @@ export default function App() {
     setProjectTasks((current) =>
       current.map((item) => (item.id === updated.id ? updated : item)),
     );
-    await Promise.all([
+    void Promise.all([
       loadHomeSnapshot(),
       loadPlanningSnapshot(),
       loadGoals(),
@@ -2102,7 +2128,7 @@ export default function App() {
           ),
         );
       }
-      await Promise.all([
+      void Promise.all([
         loadHomeSnapshot(),
         loadPlanningSnapshot(),
         loadGoals(),
@@ -2140,7 +2166,7 @@ export default function App() {
           }
         : current,
     );
-    await Promise.all([
+    void Promise.all([
       loadHomeSnapshot(),
       loadPlanningSnapshot(updated.startsAt),
     ]);
@@ -2161,7 +2187,7 @@ export default function App() {
           }
         : current,
     );
-    await Promise.all([loadHomeSnapshot(), loadPlanningSnapshot()]);
+    void Promise.all([loadHomeSnapshot(), loadPlanningSnapshot()]);
   }
 
   function selectWorkspace(workspaceId: string) {
@@ -3216,6 +3242,10 @@ export default function App() {
           }
           refreshing={
             mode === "loading" ||
+            (destination === "home" && homeLoading) ||
+            (destination === "calendar" && planningLoading) ||
+            (destination === "projects" &&
+              (projectsLoading || goalsLoading || inflowLoading)) ||
             (destination === "decisions" && decisionsLoading)
           }
         >
@@ -3315,6 +3345,7 @@ export default function App() {
               selectedWorkspaceId={selectedWorkspaceId}
               selectedProjectId={selectedProjectId}
               highlightedTaskId={highlightedProjectTaskId}
+              loaded={workspacesReady}
               loading={projectsLoading || goalsLoading || mode === "loading"}
               webhookLoading={webhooksLoading}
               inflowLoading={inflowLoading}

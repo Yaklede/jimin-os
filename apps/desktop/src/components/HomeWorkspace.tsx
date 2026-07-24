@@ -138,8 +138,9 @@ export function HomeWorkspace({
   const scheduleSectionRef = useRef<HTMLElement | null>(null);
   const taskSectionRef = useRef<HTMLElement | null>(null);
   const greeting = useMemo(() => greetingForHour(new Date().getHours()), []);
-  const skeletonVisible = useDelayedSkeleton(loading);
-  const showingSkeleton = loading || skeletonVisible;
+  const initialLoading = loading && snapshot === undefined;
+  const skeletonVisible = useDelayedSkeleton(initialLoading);
+  const showingSkeleton = initialLoading || skeletonVisible;
   const upcomingSchedule = useMemo(
     () => upcomingHomeSchedules(snapshot?.schedule ?? [], scheduleNow),
     [scheduleNow, snapshot?.schedule],
@@ -209,7 +210,7 @@ export function HomeWorkspace({
       className="home-page"
       data-assistant-state={assistantState}
       data-overview-panels={overviewPanelCount}
-      aria-busy={showingSkeleton}
+      aria-busy={loading}
     >
       <header className="home-greeting">
         <div>

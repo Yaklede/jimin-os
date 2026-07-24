@@ -71,6 +71,7 @@ type ProjectsWorkspaceProps = {
   selectedWorkspaceId: string | undefined;
   selectedProjectId: string | undefined;
   highlightedTaskId: string | undefined;
+  loaded: boolean;
   loading: boolean;
   webhookLoading: boolean;
   inflowLoading: boolean;
@@ -186,6 +187,7 @@ export function ProjectsWorkspace({
   selectedWorkspaceId,
   selectedProjectId,
   highlightedTaskId,
+  loaded,
   loading,
   webhookLoading,
   inflowLoading,
@@ -238,8 +240,9 @@ export function ProjectsWorkspace({
   const [restoreListFocus, setRestoreListFocus] = useState(false);
   const projectListHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const highlightedTaskRef = useRef<HTMLLIElement | null>(null);
-  const skeletonVisible = useDelayedSkeleton(loading);
-  const showingSkeleton = loading || skeletonVisible;
+  const initialLoading = loading && !loaded;
+  const skeletonVisible = useDelayedSkeleton(initialLoading);
+  const showingSkeleton = initialLoading || skeletonVisible;
 
   const selectedProject = projects.find(
     (project) => project.id === selectedProjectId,
@@ -319,7 +322,11 @@ export function ProjectsWorkspace({
   }
 
   return (
-    <section className="projects-page" aria-busy={showingSkeleton || saving}>
+    <section
+      className="projects-page"
+      aria-busy={loading || saving}
+      data-refreshing={loading && loaded}
+    >
       <header className="projects-heading">
         <div>
           <p>{copy.projects.eyebrow}</p>

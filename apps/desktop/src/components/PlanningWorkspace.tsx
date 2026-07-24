@@ -87,8 +87,9 @@ export function PlanningWorkspace({
   const [completedOpen, setCompletedOpen] = useState(false);
   const highlightedScheduleRef = useRef<HTMLLIElement | null>(null);
   const highlightedTaskRef = useRef<HTMLLIElement | null>(null);
-  const skeletonVisible = useDelayedSkeleton(loading);
-  const showingSkeleton = loading || skeletonVisible;
+  const initialLoading = loading && snapshot === undefined;
+  const skeletonVisible = useDelayedSkeleton(initialLoading);
+  const showingSkeleton = initialLoading || skeletonVisible;
   const now = Date.now();
   const upcomingSchedule =
     snapshot?.schedule.filter(
@@ -163,7 +164,11 @@ export function PlanningWorkspace({
   }
 
   return (
-    <section className="planning-page" aria-busy={showingSkeleton}>
+    <section
+      className="planning-page"
+      aria-busy={loading}
+      data-refreshing={loading && snapshot !== undefined}
+    >
       <header className="page-heading planning-page__heading">
         <p>{todayLabel()}</p>
         <h1>{copy.schedule.title}</h1>
@@ -309,6 +314,7 @@ export function PlanningWorkspace({
                       : undefined
                   }
                   data-highlighted={task.id === highlightedTaskId}
+                  data-pending={pendingTask?.id === task.id}
                   tabIndex={task.id === highlightedTaskId ? -1 : undefined}
                 >
                   <button
@@ -506,6 +512,7 @@ export function PlanningWorkspace({
                         : undefined
                     }
                     data-highlighted={task.id === highlightedTaskId}
+                    data-pending={pendingTask?.id === task.id}
                     tabIndex={task.id === highlightedTaskId ? -1 : undefined}
                   >
                     <button

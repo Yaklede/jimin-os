@@ -10,7 +10,7 @@ import {
   Settings2,
   Sparkles,
 } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { copy } from "../copy";
 import {
@@ -48,6 +48,7 @@ export function OsShell({
   refreshing,
 }: OsShellProps) {
   const [voiceSheetOpen, setVoiceSheetOpen] = useState(false);
+  const deferredRefreshing = useDeferredBusy(refreshing);
   const openChat = () => onNavigate("chat");
   const openVoiceSheet = () => setVoiceSheetOpen(true);
 
@@ -165,11 +166,11 @@ export function OsShell({
         </header>
         <div
           className="os-page-load"
-          data-active={refreshing}
-          aria-hidden={!refreshing}
+          data-active={deferredRefreshing}
+          aria-hidden={!deferredRefreshing}
         >
           <span className="os-page-load__bar" aria-hidden="true" />
-          {refreshing && (
+          {deferredRefreshing && (
             <span className="sr-only" role="status" aria-live="polite">
               {copy.home.loadingDescription}
             </span>
@@ -226,6 +227,41 @@ export function OsShell({
       />
     </div>
   );
+}
+
+function useDeferredBusy(
+  busy: boolean,
+  delayMs = 180,
+  minimumMs = 260,
+): boolean {
+  const [visible, setVisible] = useState(false);
+  const visibleSince = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    if (busy && !visible) {
+      timer = setTimeout(() => {
+        visibleSince.current = Date.now();
+        setVisible(true);
+      }, delayMs);
+    } else if (!busy && visible) {
+      const elapsed = Date.now() - (visibleSince.current ?? Date.now());
+      timer = setTimeout(
+        () => {
+          visibleSince.current = undefined;
+          setVisible(false);
+        },
+        Math.max(0, minimumMs - elapsed),
+      );
+    }
+
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, [busy, delayMs, minimumMs, visible]);
+
+  return visible;
 }
 
 function todayLabel(): string {
