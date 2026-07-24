@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { deleteProject, type Project, updateProject } from "./projects";
+import {
+  deleteProject,
+  fetchWeeklyReport,
+  type Project,
+  type WeeklyReport,
+  updateProject,
+} from "./projects";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -8,6 +14,48 @@ afterEach(() => {
 });
 
 describe("project client", () => {
+  it("loads the workspace weekly report with an optional project scope", async () => {
+    const report: WeeklyReport = {
+      workspaceId: "019f68cb-9400-7000-8000-000000000002",
+      periodStart: "2026-07-20T00:00:00+09:00",
+      periodEnd: "2026-07-24T15:00:00+09:00",
+      createdTaskCount: 5,
+      completedTaskCount: 4,
+      backlogStartCount: 3,
+      backlogEndCount: 4,
+      backlogDelta: 1,
+      overdueTaskCount: 0,
+      staleTaskCount: 1,
+      unassignedTaskCount: 0,
+      projects: [],
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(report), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchWeeklyReport(
+        "https://jimin-os.example/",
+        "access",
+        report.workspaceId,
+        "019f68cb-9400-7000-8000-000000000001",
+      ),
+    ).resolves.toEqual(report);
+
+    const requestedUrl = new URL(String(fetchMock.mock.calls[0]?.[0]));
+    expect(requestedUrl.pathname).toBe("/v1/reports/weekly");
+    expect(requestedUrl.searchParams.get("workspaceId")).toBe(
+      report.workspaceId,
+    );
+    expect(requestedUrl.searchParams.get("projectId")).toBe(
+      "019f68cb-9400-7000-8000-000000000001",
+    );
+  });
+
   it("replaces mutable project fields with optimistic version matching", async () => {
     const updated: Project = {
       id: "019f68cb-9400-7000-8000-000000000001",

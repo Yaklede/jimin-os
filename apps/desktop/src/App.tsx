@@ -39,9 +39,11 @@ import {
   deleteProject,
   fetchProjects,
   fetchProjectTasks,
+  fetchWeeklyReport,
   fetchWorkspaces,
   updateProject,
   type Project,
+  type WeeklyReport,
   type Workspace,
 } from "./api/projects";
 import { createGoal, fetchGoals, updateGoal, type Goal } from "./api/goals";
@@ -206,6 +208,7 @@ export default function App() {
   );
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [weeklyReport, setWeeklyReport] = useState<WeeklyReport>();
   const [goals, setGoals] = useState<Goal[]>([]);
   const [projectTasks, setProjectTasks] = useState<Task[]>([]);
   const [projectWebhooks, setProjectWebhooks] = useState<ProjectWebhook[]>([]);
@@ -250,6 +253,7 @@ export default function App() {
   const [goalsSaving, setGoalsSaving] = useState(false);
   const [goalsError, setGoalsError] = useState<string>();
   const [projectsError, setProjectsError] = useState<string>();
+  const [weeklyReportError, setWeeklyReportError] = useState<string>();
   const [workspacesReady, setWorkspacesReady] = useState(false);
   const [selectedConversationId, setSelectedConversationId] = useState<
     string | undefined
@@ -788,25 +792,56 @@ export default function App() {
     }
   }, [apiBaseUrl, tokens, withAuthenticatedSession]);
 
+  const loadWeeklyReport = useCallback(
+    async (workspaceId: string) => {
+      if (!tokens) return undefined;
+      setWeeklyReportError(undefined);
+      try {
+        const report = await withAuthenticatedSession((accessToken) =>
+          fetchWeeklyReport(apiBaseUrl, accessToken, workspaceId),
+        );
+        setWeeklyReport(report);
+        return report;
+      } catch {
+        setWeeklyReport(undefined);
+        setWeeklyReportError(copy.projects.weeklyReportLoadProblem);
+        return undefined;
+      }
+    },
+    [apiBaseUrl, tokens, withAuthenticatedSession],
+  );
+
   const loadProjectsForWorkspace = useCallback(
     async (workspaceId: string, preferredProjectId?: string) => {
       if (!tokens) return false;
       setProjectsLoading(true);
       setProjectsError(undefined);
+      setWeeklyReportError(undefined);
       try {
-        const items = await withAuthenticatedSession((accessToken) =>
-          fetchProjects(apiBaseUrl, accessToken, workspaceId),
-        );
-        setProjects(items);
+        const result = await withAuthenticatedSession(async (accessToken) => {
+          const [items, report] = await Promise.all([
+            fetchProjects(apiBaseUrl, accessToken, workspaceId),
+            fetchWeeklyReport(apiBaseUrl, accessToken, workspaceId).catch(
+              () => undefined,
+            ),
+          ]);
+          return { items, report };
+        });
+        setProjects(result.items);
+        setWeeklyReport(result.report);
+        if (!result.report) {
+          setWeeklyReportError(copy.projects.weeklyReportLoadProblem);
+        }
         setSelectedProjectId((current) => {
           const next = preferredProjectId ?? current;
-          return items.some((project) => project.id === next)
+          return result.items.some((project) => project.id === next)
             ? next
             : undefined;
         });
         return true;
       } catch {
         setProjects([]);
+        setWeeklyReport(undefined);
         setSelectedProjectId(undefined);
         setProjectTasks([]);
         setProjectsError(copy.messages.projectsLoadNotice);
@@ -1187,6 +1222,7 @@ export default function App() {
       setWorkspaces([]);
       setWorkspacesReady(false);
       setProjects([]);
+      setWeeklyReport(undefined);
       setGoals([]);
       setProjectTasks([]);
       setSelectedWorkspaceId(undefined);
@@ -1196,6 +1232,7 @@ export default function App() {
       setHighlightedPlanningTaskId(undefined);
       setPlanningEditTarget(undefined);
       setProjectsError(undefined);
+      setWeeklyReportError(undefined);
       setGoalsError(undefined);
       setConversationMessages([]);
       setSelectedConversationId(undefined);
@@ -2409,6 +2446,7 @@ export default function App() {
       setProjects((current) =>
         current.map((item) => (item.id === updated.id ? updated : item)),
       );
+      if (selectedWorkspaceId) void loadWeeklyReport(selectedWorkspaceId);
       void loadGoals();
     } catch (error) {
       setProjectsError(copy.projects.projectUpdateNotice);
@@ -3338,6 +3376,7 @@ export default function App() {
               workspaces={workspaces}
               goals={goals}
               projects={projects}
+              weeklyReport={weeklyReport}
               tasks={projectTasks}
               webhooks={projectWebhooks}
               webhookDeliveries={webhookDeliveries}
@@ -3355,6 +3394,7 @@ export default function App() {
               inflowLoading={inflowLoading}
               saving={projectsSaving || goalsSaving || inflowSaving}
               error={goalsError ?? projectsError}
+              weeklyReportError={weeklyReportError}
               inflowError={inflowError}
               onSelectWorkspace={selectWorkspace}
               onSelectProject={selectProject}

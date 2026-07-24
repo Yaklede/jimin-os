@@ -380,6 +380,9 @@ impl Database {
     ///
     /// Returns [`StorageError::InvalidConfiguration`] for malformed input and
     /// a classified persistence error for database failures.
+    // The length is dominated by one atomic UPDATE ... RETURNING aggregate
+    // statement whose fields mirror `ProjectRow`.
+    #[allow(clippy::too_many_lines)]
     pub async fn update_project(
         &self,
         update: &ProjectUpdate,
@@ -471,7 +474,7 @@ impl Database {
                  WHERE task.project_id = projects.id
                    AND task.status = 'open'
                    AND task.updated_at < NOW()
-                       - make_interval(days => projects.stale_threshold_days)) AS stale_task_count,
+                       - make_interval(days => projects.stale_threshold_days::INTEGER)) AS stale_task_count,
                 COALESCE((
                     SELECT (
                         EXTRACT(EPOCH FROM AVG(task.completed_at - task.created_at)) / 3600
@@ -631,6 +634,9 @@ impl Database {
     /// # Errors
     ///
     /// Returns [`StorageError::InvalidConfiguration`] for malformed IDs.
+    // The metrics are intentionally selected in one ownership-scoped query so
+    // callers never observe counters from a different snapshot.
+    #[allow(clippy::too_many_lines)]
     pub async fn projects_for_workspace(
         &self,
         user_id: Uuid,
@@ -716,7 +722,7 @@ impl Database {
                  WHERE task.project_id = projects.id
                    AND task.status = 'open'
                    AND task.updated_at < NOW()
-                       - make_interval(days => projects.stale_threshold_days)) AS stale_task_count,
+                       - make_interval(days => projects.stale_threshold_days::INTEGER)) AS stale_task_count,
                 COALESCE((
                     SELECT (
                         EXTRACT(EPOCH FROM AVG(task.completed_at - task.created_at)) / 3600
@@ -757,6 +763,9 @@ impl Database {
     /// # Errors
     ///
     /// Returns a classified persistence error if storage is unavailable.
+    // The metrics are intentionally selected in one ownership-scoped query so
+    // assistant context and project screens use the same snapshot.
+    #[allow(clippy::too_many_lines)]
     pub async fn projects_for_user(&self, user_id: Uuid) -> Result<Vec<Project>, StorageError> {
         self.ensure_default_workspaces(user_id).await?;
         let rows = sqlx::query_as::<_, ProjectRow>(
@@ -835,7 +844,7 @@ impl Database {
                  WHERE task.project_id = projects.id
                    AND task.status = 'open'
                    AND task.updated_at < NOW()
-                       - make_interval(days => projects.stale_threshold_days)) AS stale_task_count,
+                       - make_interval(days => projects.stale_threshold_days::INTEGER)) AS stale_task_count,
                 COALESCE((
                     SELECT (
                         EXTRACT(EPOCH FROM AVG(task.completed_at - task.created_at)) / 3600

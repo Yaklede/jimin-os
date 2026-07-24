@@ -71,6 +71,7 @@ use jimin_storage::{
         RetryWebhookDeliveryOutcome, WebhookDelivery, WebhookDestinationUpdate,
         WebhookMentionDirectoryUpdate, WebhookProvider,
     },
+    weekly_report::{WeeklyProjectReport, WeeklyWorkspaceReport},
     work::{
         DeleteProjectOutcome, NewProject, Project, ProjectManagementMode, ProjectStatus,
         ProjectUpdate, Workspace, WorkspaceScope,
@@ -438,6 +439,44 @@ pub struct ProjectResponse {
 pub struct ProjectListResponse {
     items: Vec<ProjectResponse>,
     next_cursor: Option<String>,
+}
+
+/// A live Monday-to-now report for one reporting-enabled project.
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WeeklyProjectReportResponse {
+    project_id: uuid::Uuid,
+    title: String,
+    management_mode: String,
+    created_task_count: i64,
+    completed_task_count: i64,
+    backlog_start_count: i64,
+    backlog_end_count: i64,
+    backlog_delta: i64,
+    overdue_task_count: i64,
+    stale_task_count: i64,
+    unassigned_task_count: i64,
+    average_cycle_time_hours: i64,
+    on_time_completion_percent: Option<i16>,
+    health: String,
+}
+
+/// A live weekly operating report for one personal or company workspace.
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WeeklyReportResponse {
+    workspace_id: uuid::Uuid,
+    period_start: String,
+    period_end: String,
+    created_task_count: i64,
+    completed_task_count: i64,
+    backlog_start_count: i64,
+    backlog_end_count: i64,
+    backlog_delta: i64,
+    overdue_task_count: i64,
+    stale_task_count: i64,
+    unassigned_task_count: i64,
+    projects: Vec<WeeklyProjectReportResponse>,
 }
 
 /// A desired outcome that gives projects and daily work a clear direction.
@@ -1245,6 +1284,13 @@ struct ProjectListQuery {
 
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct WeeklyReportQuery {
+    workspace_id: uuid::Uuid,
+    project_id: Option<uuid::Uuid>,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct TaskListQuery {
     project_id: Option<uuid::Uuid>,
     status: Option<String>,
@@ -1379,6 +1425,7 @@ pub(crate) fn error_response(
         create_goal,
         update_goal,
         list_projects,
+        get_weekly_report,
         create_project,
         update_project,
         delete_project,
@@ -1461,6 +1508,8 @@ pub(crate) fn error_response(
         WorkspaceListResponse,
         ProjectResponse,
         ProjectListResponse,
+        WeeklyProjectReportResponse,
+        WeeklyReportResponse,
         ProjectWebhookResponse,
         ProjectWebhookListResponse,
         WebhookDeliveryResponse,
@@ -1508,6 +1557,7 @@ pub(crate) fn error_response(
         UpdateAgentModelRequest,
         AgentTurnInput,
         ProjectListQuery,
+        WeeklyReportQuery,
         TaskListQuery,
         CompleteTaskRequest,
         VoiceCommandRequest,
@@ -1569,6 +1619,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/workspaces", get(list_workspaces))
         .merge(goal_router())
         .route("/v1/projects", get(list_projects).post(create_project))
+        .route("/v1/reports/weekly", get(get_weekly_report))
         .route(
             "/v1/projects/{project_id}",
             axum::routing::put(update_project).delete(delete_project),
@@ -3140,6 +3191,47 @@ async fn list_projects(
             .into_response(),
             Err(()) => unavailable_response(request_id),
         },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/reports/weekly",
+    tag = "work",
+    params(
+        ("workspaceId" = String, Query),
+        ("projectId" = Option<String>, Query)
+    ),
+    responses(
+        (status = 200, body = WeeklyReportResponse),
+        (status = 400),
+        (status = 401),
+        (status = 503)
+    )
+)]
+async fn get_weekly_report(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    axum::extract::Query(query): axum::extract::Query<WeeklyReportQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .weekly_report_for_workspace(
+            principal.identity().user_id(),
+            query.workspace_id,
+            query.project_id,
+        )
+        .await
+    {
+        Ok(report) => Json(weekly_report_response(report)).into_response(),
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -7387,6 +7479,65 @@ fn project_response(project: Project) -> Result<ProjectResponse, ()> {
     })
 }
 
+fn weekly_report_response(report: WeeklyWorkspaceReport) -> WeeklyReportResponse {
+    let projects = report
+        .projects
+        .into_iter()
+        .map(weekly_project_report_response)
+        .collect::<Vec<_>>();
+    let sum =
+        |select: fn(&WeeklyProjectReportResponse) -> i64| projects.iter().map(select).sum::<i64>();
+    let backlog_start_count = sum(|project| project.backlog_start_count);
+    let backlog_end_count = sum(|project| project.backlog_end_count);
+    WeeklyReportResponse {
+        workspace_id: report.workspace_id,
+        period_start: report
+            .period_start
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| report.period_start.unix_timestamp().to_string()),
+        period_end: report
+            .period_end
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| report.period_end.unix_timestamp().to_string()),
+        created_task_count: sum(|project| project.created_task_count),
+        completed_task_count: sum(|project| project.completed_task_count),
+        backlog_start_count,
+        backlog_end_count,
+        backlog_delta: backlog_end_count - backlog_start_count,
+        overdue_task_count: sum(|project| project.overdue_task_count),
+        stale_task_count: sum(|project| project.stale_task_count),
+        unassigned_task_count: sum(|project| project.unassigned_task_count),
+        projects,
+    }
+}
+
+fn weekly_project_report_response(report: WeeklyProjectReport) -> WeeklyProjectReportResponse {
+    let backlog_delta = report.backlog_end_count - report.backlog_start_count;
+    let health = if report.overdue_task_count > 0 || backlog_delta >= 3 {
+        "at_risk"
+    } else if report.stale_task_count > 0 || report.unassigned_task_count > 0 {
+        "needs_attention"
+    } else {
+        "on_track"
+    };
+    WeeklyProjectReportResponse {
+        project_id: report.project_id,
+        title: report.title,
+        management_mode: report.management_mode,
+        created_task_count: report.created_task_count,
+        completed_task_count: report.completed_task_count,
+        backlog_start_count: report.backlog_start_count,
+        backlog_end_count: report.backlog_end_count,
+        backlog_delta,
+        overdue_task_count: report.overdue_task_count,
+        stale_task_count: report.stale_task_count,
+        unassigned_task_count: report.unassigned_task_count,
+        average_cycle_time_hours: report.average_cycle_time_hours,
+        on_time_completion_percent: report.on_time_completion_percent,
+        health: health.to_owned(),
+    }
+}
+
 fn project_health_name(project: &Project) -> &'static str {
     match project.status {
         ProjectStatus::Completed => "completed",
@@ -7932,6 +8083,35 @@ mod tests {
     }
 
     #[test]
+    fn weekly_report_totals_keep_backlog_and_attention_visible() {
+        let workspace_id = Uuid::now_v7();
+        let report = weekly_report_response(WeeklyWorkspaceReport {
+            workspace_id,
+            period_start: OffsetDateTime::from_unix_timestamp(1_769_958_000).expect("period start"),
+            period_end: OffsetDateTime::from_unix_timestamp(1_770_303_600).expect("period end"),
+            projects: vec![WeeklyProjectReport {
+                project_id: Uuid::now_v7(),
+                title: "상시 CS 운영".to_owned(),
+                management_mode: "operation".to_owned(),
+                created_task_count: 6,
+                completed_task_count: 4,
+                backlog_start_count: 3,
+                backlog_end_count: 5,
+                overdue_task_count: 1,
+                stale_task_count: 0,
+                unassigned_task_count: 1,
+                average_cycle_time_hours: 20,
+                on_time_completion_percent: Some(75),
+            }],
+        });
+        assert_eq!(report.workspace_id, workspace_id);
+        assert_eq!(report.created_task_count, 6);
+        assert_eq!(report.completed_task_count, 4);
+        assert_eq!(report.backlog_delta, 2);
+        assert_eq!(report.projects[0].health, "at_risk");
+    }
+
+    #[test]
     fn voice_command_response_serializes_structured_result_items() {
         let item_id =
             Uuid::parse_str("019f68cb-9400-7000-8000-000000000000").expect("item ID should parse");
@@ -8245,6 +8425,7 @@ mod tests {
                 "/v1/push/registration",
                 "/v1/recommendations",
                 "/v1/recommendations/{recommendation_id}/decisions",
+                "/v1/reports/weekly",
                 "/v1/schedule-entries",
                 "/v1/schedule-entries/{schedule_entry_id}",
                 "/v1/sync/changes",
@@ -8273,6 +8454,7 @@ mod tests {
                 .post
                 .is_some()
         );
+        assert!(document.paths.paths["/v1/reports/weekly"].get.is_some());
         for path in [
             "/v1/goals",
             "/v1/schedule-entries",
@@ -8508,6 +8690,22 @@ mod tests {
             .await
             .expect("handler should respond");
         assert_eq!(task_update_response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn weekly_report_endpoint_requires_a_live_signed_session() {
+        let (state, _, _) = signed_auth_state(true);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/reports/weekly?workspaceId=019f68cb-9400-7000-8000-000000000000")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

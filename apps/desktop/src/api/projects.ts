@@ -42,6 +42,38 @@ export interface Project {
   version: number;
 }
 
+export interface WeeklyProjectReport {
+  projectId: string;
+  title: string;
+  managementMode: Project["managementMode"];
+  createdTaskCount: number;
+  completedTaskCount: number;
+  backlogStartCount: number;
+  backlogEndCount: number;
+  backlogDelta: number;
+  overdueTaskCount: number;
+  staleTaskCount: number;
+  unassignedTaskCount: number;
+  averageCycleTimeHours: number;
+  onTimeCompletionPercent: number | null;
+  health: "on_track" | "at_risk" | "needs_attention";
+}
+
+export interface WeeklyReport {
+  workspaceId: string;
+  periodStart: string;
+  periodEnd: string;
+  createdTaskCount: number;
+  completedTaskCount: number;
+  backlogStartCount: number;
+  backlogEndCount: number;
+  backlogDelta: number;
+  overdueTaskCount: number;
+  staleTaskCount: number;
+  unassignedTaskCount: number;
+  projects: WeeklyProjectReport[];
+}
+
 type ListResponse<T> = { items: T[]; nextCursor: string | null };
 
 export async function fetchWorkspaces(
@@ -62,6 +94,26 @@ export async function fetchProjects(
   );
   url.searchParams.set("workspaceId", workspaceId);
   return requestListFromUrl<Project>(url, access);
+}
+
+export async function fetchWeeklyReport(
+  baseUrl: string,
+  access: string,
+  workspaceId: string,
+  projectId?: string,
+): Promise<WeeklyReport> {
+  const url = new URL(
+    `${normalizeBaseUrl(baseUrl)}/v1/reports/weekly`,
+    browserOrigin(),
+  );
+  url.searchParams.set("workspaceId", workspaceId);
+  if (projectId) url.searchParams.set("projectId", projectId);
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${access}` },
+  });
+  const body = await readJson(response);
+  if (!response.ok || !isRecord(body)) throw errorFromStatus(response.status);
+  return body as unknown as WeeklyReport;
 }
 
 export async function fetchProjectTasks(

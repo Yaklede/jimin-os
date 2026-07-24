@@ -78,6 +78,7 @@ export const projectCopy = {
     backlog: "밀린 일 변화",
     overdue: "기한 지난 일",
     stale: "정체된 일",
+    unassigned: "담당자 없는 일",
     cycleTime: "평균 처리 시간",
     onTime: "기한 내 완료",
   },
@@ -88,8 +89,8 @@ export const projectCopy = {
     if (hours < 24) return `${hours}시간`;
     return `${Math.round(hours / 24)}일`;
   },
-  onTimeCompletion: (value: number | null) =>
-    value === null ? "기록 없음" : `${value}%`,
+  onTimeCompletion: (value?: number) =>
+    typeof value !== "number" ? "기록 없음" : `${value}%`,
   noNextAction: "다음 행동을 정해 보세요.",
   emptyTitle: "아직 프로젝트가 없어요",
   emptyDescription: "반복해서 챙길 일을 프로젝트로 묶어 보세요.",
@@ -100,10 +101,42 @@ export const projectCopy = {
   detailTabsLabel: "프로젝트에서 볼 내용",
   detailTabs: {
     tasks: "일감",
+    weekly: "주간 리포트",
     inflow: "확인할 대화",
     integrations: "연결",
     activity: "완료 기록",
   },
+  weeklyReportTitle: "이번 주 운영 리포트",
+  weeklyReportEyebrow: "이번 주 흐름",
+  weeklyReportSummary: (
+    created: number,
+    completed: number,
+    backlogDelta: number,
+  ) =>
+    `새로 들어온 일 ${created}개 · 완료 ${completed}개 · 밀린 일 ${backlogDelta > 0 ? `+${backlogDelta}` : backlogDelta}`,
+  weeklyProjectSummary: (completed: number, backlogDelta: number) =>
+    `완료 ${completed}개 · 밀린 일 ${backlogDelta > 0 ? `+${backlogDelta}` : backlogDelta}`,
+  weeklyReportProjectTitle: (title: string) => `${title} 주간 리포트`,
+  weeklyReportDisabledTitle: "주간 리포트가 꺼져 있어요",
+  weeklyReportDisabledDescription:
+    "프로젝트 수정에서 주간 리포트를 켜면 처리 흐름을 정리해 드려요.",
+  weeklyReportEmptyTitle: "이번 주 기록을 준비하고 있어요",
+  weeklyReportEmptyDescription:
+    "일을 추가하거나 완료하면 이번 주 변화와 확인할 점을 보여드려요.",
+  weeklyReportLoadProblem: "주간 리포트를 불러오지 못했어요.",
+  weeklyReportLoadAction: "연결 상태를 확인한 뒤 프로젝트를 다시 열어 주세요.",
+  weeklyFocusTitle: "다음으로 확인할 점",
+  weeklyFocusDescription: "이번 주 흐름에서 먼저 정리하면 좋은 항목이에요.",
+  weeklyFocusOverdue: (count: number) =>
+    `기한이 지난 일 ${count}개를 먼저 정리해요.`,
+  weeklyFocusStale: (count: number) =>
+    `오랫동안 바뀌지 않은 일 ${count}개를 확인해요.`,
+  weeklyFocusUnassigned: (count: number) =>
+    `담당자 없는 일 ${count}개를 배정해요.`,
+  weeklyFocusBacklog: (count: number) =>
+    `이번 주 밀린 일이 ${count}개 늘었어요.`,
+  weeklyFocusClear: "기한·정체·담당자 누락 없이 안정적으로 운영 중이에요.",
+  weeklyOpenTasks: "열린 일 확인하기",
   editProject: "프로젝트 수정하기",
   editTitle: "프로젝트 수정",
   editDescription: "목표와 현재 상태, 다음 행동을 최신 내용으로 바꿔요.",

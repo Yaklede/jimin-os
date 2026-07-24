@@ -1,5 +1,6 @@
 import {
   ArrowLeft,
+  BarChart3,
   BriefcaseBusiness,
   CalendarDays,
   ChevronRight,
@@ -17,7 +18,12 @@ import {
 } from "lucide-react";
 import { FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 
-import { type Project, type Workspace } from "../api/projects";
+import {
+  type Project,
+  type WeeklyProjectReport,
+  type WeeklyReport,
+  type Workspace,
+} from "../api/projects";
 import {
   type GoogleChatAccount,
   type GoogleChatSpace,
@@ -48,9 +54,11 @@ import {
   type PromoteInflowInput,
 } from "./ProjectInflowPanel";
 
-type ProjectDetailTab = "tasks" | "inflow" | "integrations" | "activity";
+type ProjectDetailTab =
+  "tasks" | "weekly" | "inflow" | "integrations" | "activity";
 const PROJECT_DETAIL_TABS: ProjectDetailTab[] = [
   "tasks",
+  "weekly",
   "inflow",
   "integrations",
   "activity",
@@ -60,6 +68,7 @@ type ProjectsWorkspaceProps = {
   workspaces: Workspace[];
   goals: Goal[];
   projects: Project[];
+  weeklyReport: WeeklyReport | undefined;
   tasks: Task[];
   webhooks: ProjectWebhook[];
   webhookDeliveries: WebhookDelivery[];
@@ -77,6 +86,7 @@ type ProjectsWorkspaceProps = {
   inflowLoading: boolean;
   saving: boolean;
   error: string | undefined;
+  weeklyReportError: string | undefined;
   inflowError: string | undefined;
   onSelectWorkspace(workspaceId: string): void;
   onSelectProject(projectId: string): void;
@@ -182,6 +192,7 @@ export function ProjectsWorkspace({
   workspaces,
   goals,
   projects,
+  weeklyReport,
   tasks,
   webhooks,
   webhookDeliveries,
@@ -199,6 +210,7 @@ export function ProjectsWorkspace({
   inflowLoading,
   saving,
   error,
+  weeklyReportError,
   inflowError,
   onSelectWorkspace,
   onSelectProject,
@@ -256,6 +268,9 @@ export function ProjectsWorkspace({
 
   const selectedProject = projects.find(
     (project) => project.id === selectedProjectId,
+  );
+  const selectedWeeklyReport = weeklyReport?.projects.find(
+    (project) => project.projectId === selectedProjectId,
   );
   const openTasks = tasks.filter((task) => task.status === "open");
   const completedTasks = tasks.filter((task) => task.status === "completed");
@@ -507,6 +522,7 @@ export function ProjectsWorkspace({
               <label className="project-reporting-toggle">
                 <input
                   type="checkbox"
+                  aria-label={copy.projects.weeklyReportingLabel}
                   checked={reportingEnabled}
                   onChange={(event) =>
                     setReportingEnabled(event.target.checked)
@@ -522,6 +538,7 @@ export function ProjectsWorkspace({
             <label className="project-reporting-toggle">
               <input
                 type="checkbox"
+                aria-label={copy.projects.weeklyReportingLabel}
                 checked={reportingEnabled}
                 onChange={(event) => setReportingEnabled(event.target.checked)}
                 disabled={saving}
@@ -574,6 +591,14 @@ export function ProjectsWorkspace({
             </button>
           </div>
         </form>
+      )}
+
+      {(weeklyReport || weeklyReportError) && projects.length > 0 && (
+        <WeeklyWorkspaceOverview
+          report={weeklyReport}
+          error={weeklyReportError}
+          onSelectProject={onSelectProject}
+        />
       )}
 
       <div
@@ -703,6 +728,14 @@ export function ProjectsWorkspace({
                   label={copy.projects.detailTabs.tasks}
                   count={openTasks.length}
                   icon={<ListTodo aria-hidden="true" />}
+                  onSelect={setActiveProjectTab}
+                />
+                <ProjectDetailTabButton
+                  id="weekly"
+                  active={activeProjectTab === "weekly"}
+                  label={copy.projects.detailTabs.weekly}
+                  count={selectedWeeklyReport ? 1 : 0}
+                  icon={<BarChart3 aria-hidden="true" />}
                   onSelect={setActiveProjectTab}
                 />
                 <ProjectDetailTabButton
@@ -997,6 +1030,20 @@ export function ProjectsWorkspace({
                   )}
                 </div>
               )}
+              {activeProjectTab === "weekly" && (
+                <div
+                  className="project-detail__tasks"
+                  role="tabpanel"
+                  aria-label={copy.projects.detailTabs.weekly}
+                >
+                  <ProjectWeeklyReportPanel
+                    project={selectedProject}
+                    report={selectedWeeklyReport}
+                    error={weeklyReportError}
+                    onOpenTasks={() => setActiveProjectTab("tasks")}
+                  />
+                </div>
+              )}
               {activeProjectTab === "activity" && (
                 <div
                   className="project-detail__tasks"
@@ -1245,6 +1292,236 @@ export function taskHierarchyRows(
   });
 }
 
+function WeeklyWorkspaceOverview({
+  report,
+  error,
+  onSelectProject,
+}: {
+  report: WeeklyReport | undefined;
+  error: string | undefined;
+  onSelectProject(projectId: string): void;
+}) {
+  if (!report) {
+    return error ? (
+      <p className="inline-alert" role="status">
+        {error}
+      </p>
+    ) : null;
+  }
+  return (
+    <details className="project-weekly-overview">
+      <summary className="focus-visible-control">
+        <span className="project-weekly-overview__icon" aria-hidden="true">
+          <BarChart3 />
+        </span>
+        <span>
+          <strong>{copy.projects.weeklyReportTitle}</strong>
+          <small>
+            {copy.projects.weeklyReportSummary(
+              report.createdTaskCount,
+              report.completedTaskCount,
+              report.backlogDelta,
+            )}
+          </small>
+        </span>
+        <span className="project-weekly-overview__period">
+          {formatWeeklyPeriod(report.periodStart, report.periodEnd)}
+        </span>
+        <ChevronRight aria-hidden="true" />
+      </summary>
+      <div className="project-weekly-overview__body">
+        <dl className="project-weekly-metrics">
+          <WeeklyMetric
+            label={copy.projects.operationMetrics.inflow}
+            value={`${report.createdTaskCount}`}
+          />
+          <WeeklyMetric
+            label={copy.projects.operationMetrics.completed}
+            value={`${report.completedTaskCount}`}
+          />
+          <WeeklyMetric
+            label={copy.projects.operationMetrics.backlog}
+            value={copy.projects.backlogDelta(report.backlogDelta)}
+            attention={report.backlogDelta > 0}
+          />
+          <WeeklyMetric
+            label={copy.projects.operationMetrics.overdue}
+            value={`${report.overdueTaskCount}`}
+            attention={report.overdueTaskCount > 0}
+          />
+          <WeeklyMetric
+            label={copy.projects.operationMetrics.stale}
+            value={`${report.staleTaskCount}`}
+            attention={report.staleTaskCount > 0}
+          />
+          <WeeklyMetric
+            label={copy.projects.operationMetrics.unassigned}
+            value={`${report.unassignedTaskCount}`}
+            attention={report.unassignedTaskCount > 0}
+          />
+        </dl>
+        <div className="project-weekly-overview__projects">
+          {report.projects.map((project) => (
+            <button
+              className="focus-visible-control"
+              type="button"
+              key={project.projectId}
+              data-health={project.health}
+              onClick={() => onSelectProject(project.projectId)}
+            >
+              <span>
+                <strong>{project.title}</strong>
+                <small>
+                  {copy.projects.weeklyProjectSummary(
+                    project.completedTaskCount,
+                    project.backlogDelta,
+                  )}
+                </small>
+              </span>
+              <span>{copy.projects.projectHealth[project.health]}</span>
+              <ChevronRight aria-hidden="true" />
+            </button>
+          ))}
+        </div>
+      </div>
+    </details>
+  );
+}
+
+function ProjectWeeklyReportPanel({
+  project,
+  report,
+  error,
+  onOpenTasks,
+}: {
+  project: Project;
+  report: WeeklyProjectReport | undefined;
+  error: string | undefined;
+  onOpenTasks(): void;
+}) {
+  if (!project.reportingEnabled) {
+    return (
+      <EmptySurface
+        title={copy.projects.weeklyReportDisabledTitle}
+        description={copy.projects.weeklyReportDisabledDescription}
+      />
+    );
+  }
+  if (!report) {
+    return (
+      <EmptySurface
+        title={
+          error
+            ? copy.projects.weeklyReportLoadProblem
+            : copy.projects.weeklyReportEmptyTitle
+        }
+        description={
+          error
+            ? copy.projects.weeklyReportLoadAction
+            : copy.projects.weeklyReportEmptyDescription
+        }
+      />
+    );
+  }
+  const focusItems = weeklyFocusItems(report);
+  return (
+    <section className="project-weekly-report">
+      <header>
+        <div>
+          <p>{copy.projects.weeklyReportEyebrow}</p>
+          <h3>{copy.projects.weeklyReportProjectTitle(project.title)}</h3>
+          <span>
+            {copy.projects.weeklyProjectSummary(
+              report.completedTaskCount,
+              report.backlogDelta,
+            )}
+          </span>
+        </div>
+        <strong data-health={report.health}>
+          {copy.projects.projectHealth[report.health]}
+        </strong>
+      </header>
+      <dl className="project-weekly-metrics">
+        <WeeklyMetric
+          label={copy.projects.operationMetrics.inflow}
+          value={`${report.createdTaskCount}`}
+        />
+        <WeeklyMetric
+          label={copy.projects.operationMetrics.completed}
+          value={`${report.completedTaskCount}`}
+        />
+        <WeeklyMetric
+          label={copy.projects.operationMetrics.backlog}
+          value={copy.projects.backlogDelta(report.backlogDelta)}
+          attention={report.backlogDelta > 0}
+        />
+        <WeeklyMetric
+          label={copy.projects.operationMetrics.overdue}
+          value={`${report.overdueTaskCount}`}
+          attention={report.overdueTaskCount > 0}
+        />
+        <WeeklyMetric
+          label={copy.projects.operationMetrics.stale}
+          value={`${report.staleTaskCount}`}
+          attention={report.staleTaskCount > 0}
+        />
+        <WeeklyMetric
+          label={copy.projects.operationMetrics.unassigned}
+          value={`${report.unassignedTaskCount}`}
+          attention={report.unassignedTaskCount > 0}
+        />
+        <WeeklyMetric
+          label={copy.projects.operationMetrics.cycleTime}
+          value={copy.projects.cycleTime(report.averageCycleTimeHours)}
+        />
+        <WeeklyMetric
+          label={copy.projects.operationMetrics.onTime}
+          value={copy.projects.onTimeCompletion(
+            report.onTimeCompletionPercent ?? undefined,
+          )}
+          attention={(report.onTimeCompletionPercent ?? 100) < 80}
+        />
+      </dl>
+      <div className="project-weekly-report__focus">
+        <div>
+          <strong>{copy.projects.weeklyFocusTitle}</strong>
+          <span>{copy.projects.weeklyFocusDescription}</span>
+        </div>
+        <ul>
+          {focusItems.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+        <button
+          className="secondary-button focus-visible-control"
+          type="button"
+          onClick={onOpenTasks}
+        >
+          <ListTodo aria-hidden="true" />
+          {copy.projects.weeklyOpenTasks}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function WeeklyMetric({
+  label,
+  value,
+  attention = false,
+}: {
+  label: string;
+  value: string;
+  attention?: boolean;
+}) {
+  return (
+    <div data-attention={attention}>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
+    </div>
+  );
+}
+
 function CompletionProjectProgress({ project }: { project: Project }) {
   return (
     <section
@@ -1335,7 +1612,9 @@ function OperationProjectHealth({ project }: { project: Project }) {
     },
     {
       label: copy.projects.operationMetrics.onTime,
-      value: copy.projects.onTimeCompletion(project.onTimeCompletionPercent),
+      value: copy.projects.onTimeCompletion(
+        project.onTimeCompletionPercent ?? undefined,
+      ),
       attention: (project.onTimeCompletionPercent ?? 100) < 80,
     },
   ];
@@ -1549,6 +1828,7 @@ function ProjectEditForm({
         <label className="project-reporting-toggle">
           <input
             type="checkbox"
+            aria-label={copy.projects.weeklyReportingLabel}
             checked={reportingEnabled}
             disabled={busy}
             onChange={(event) => setReportingEnabled(event.target.checked)}
@@ -2086,4 +2366,35 @@ function formatDueDate(value: string | null): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return copy.projects.noDueDate;
   return new Intl.DateTimeFormat("ko-KR", { dateStyle: "medium" }).format(date);
+}
+
+function formatWeeklyPeriod(startValue: string, endValue: string): string {
+  const start = new Date(startValue);
+  const end = new Date(endValue);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return copy.projects.operationPeriod;
+  }
+  const formatter = new Intl.DateTimeFormat("ko-KR", {
+    month: "short",
+    day: "numeric",
+  });
+  return `${formatter.format(start)}–${formatter.format(end)}`;
+}
+
+function weeklyFocusItems(report: WeeklyProjectReport): string[] {
+  const items: string[] = [];
+  if (report.overdueTaskCount > 0) {
+    items.push(copy.projects.weeklyFocusOverdue(report.overdueTaskCount));
+  }
+  if (report.staleTaskCount > 0) {
+    items.push(copy.projects.weeklyFocusStale(report.staleTaskCount));
+  }
+  if (report.unassignedTaskCount > 0) {
+    items.push(copy.projects.weeklyFocusUnassigned(report.unassignedTaskCount));
+  }
+  if (report.backlogDelta > 0) {
+    items.push(copy.projects.weeklyFocusBacklog(report.backlogDelta));
+  }
+  if (items.length === 0) items.push(copy.projects.weeklyFocusClear);
+  return items;
 }

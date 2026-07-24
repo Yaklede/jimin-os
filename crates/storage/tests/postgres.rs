@@ -3418,6 +3418,14 @@ async fn project_update_is_scoped_versioned_and_emits_current_state() {
     assert_eq!(updated.risk_level, 2);
     assert_eq!(updated.due_at, Some(due_at));
     assert!(updated.version > created.version);
+    let weekly_report = database
+        .weekly_report_for_workspace(provisioned.profile.id, personal.id, None)
+        .await
+        .expect("weekly report query should succeed");
+    assert!(
+        weekly_report.projects.is_empty(),
+        "projects that disabled reporting stay out of the weekly report"
+    );
     assert!(
         database
             .update_project(&ProjectUpdate {

@@ -18,6 +18,7 @@ pub mod planning;
 pub mod push;
 pub mod sync;
 pub mod webhook;
+pub mod weekly_report;
 pub mod work;
 
 pub const EXPECTED_SCHEMA_VERSION: i64 = 35;
