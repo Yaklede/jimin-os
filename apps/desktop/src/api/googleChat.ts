@@ -71,6 +71,7 @@ export interface ProjectInflowItem {
   contentText: string;
   suggestedTaskTitle: string;
   suggestedTaskNotes: string;
+  referenceLinks: string[];
   suggestedAssigneeName: string | null;
   suggestedDueAt: string | null;
   suggestedPriority: number | null;
@@ -229,6 +230,9 @@ export function normalizeProjectInflowItem(
     suggestedTaskTitle:
       item.suggestedTaskTitle || "대화를 업무로 정리하고 있어요",
     suggestedTaskNotes: item.suggestedTaskNotes || "",
+    referenceLinks: Array.isArray(item.referenceLinks)
+      ? item.referenceLinks
+      : [],
     suggestedAssigneeName: item.suggestedAssigneeName ?? null,
     suggestedDueAt: item.suggestedDueAt ?? null,
     suggestedPriority: item.suggestedPriority ?? null,

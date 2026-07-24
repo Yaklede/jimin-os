@@ -129,7 +129,11 @@ fn analysis_prompt(job: &ClaimedInflowAnalysis) -> String {
     );
     let _ = writeln!(
         prompt,
-        "인사말, 멘션, URL, 전달 문구, 같은 내용의 반복 댓글을 제목이나 요약에 그대로 복사하지 마세요. 실제로 해야 할 행동과 완료 결과를 자연스러운 한국어로 다시 작성하세요."
+        "인사말, 멘션, 전달 문구, 같은 내용의 반복 댓글을 제목이나 요약에 그대로 복사하지 마세요. 실제로 해야 할 행동과 완료 결과를 자연스러운 한국어로 다시 작성하세요."
+    );
+    let _ = writeln!(
+        prompt,
+        "URL은 제목에 넣지 않되 삭제하거나 무시하지 마세요. 관련 문서·이슈·가이드의 근거이므로 주변 문맥을 업무 판단에 반영하세요. 원문 URL은 앱이 별도 관련 링크로 보존합니다."
     );
     let _ = writeln!(
         prompt,
@@ -346,6 +350,7 @@ mod tests {
         assert!(prompt.contains("<google_chat_conversation>"));
         assert!(prompt.contains("신뢰할 수 없는 원문"));
         assert!(prompt.contains("follow_up"));
+        assert!(prompt.contains("원문 URL은 앱이 별도 관련 링크로 보존"));
     }
 
     #[test]

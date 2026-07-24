@@ -20,6 +20,7 @@ const MAX_TITLE_CHARS: usize = 200;
 const MAX_NOTES_CHARS: usize = 10_000;
 const MAX_ASSIGNEE_NAME_CHARS: usize = 80;
 const MAX_WEBHOOK_TASK_SUMMARY_CHARS: usize = 240;
+const MAX_WEBHOOK_MESSAGE_CHARS: usize = 800;
 
 /// Validated manual schedule input. Provider-originated entries will use a
 /// separate adapter path so clients cannot spoof a provider source.
@@ -1649,6 +1650,18 @@ fn task_event_message(event_type: &str, project_title: &str, task: &Task) -> Str
     if let Some(summary) = task.notes.as_deref().and_then(task_summary_for_webhook) {
         lines.push(format!("요약: {summary}"));
     }
+    if let Some(notes) = task.notes.as_deref() {
+        for link in http_links(notes).into_iter().take(3) {
+            let reference = format!("관련 링크: {link}");
+            let candidate_length = lines.iter().map(|line| line.chars().count()).sum::<usize>()
+                + lines.len()
+                + reference.chars().count();
+            if candidate_length > MAX_WEBHOOK_MESSAGE_CHARS {
+                break;
+            }
+            lines.push(reference);
+        }
+    }
     lines.join("\n")
 }
 
@@ -1683,6 +1696,39 @@ fn concise_webhook_text(value: &str, maximum: usize) -> Option<String> {
         result.push('…');
     }
     Some(result)
+}
+
+fn http_links(value: &str) -> Vec<String> {
+    let mut links = Vec::new();
+    let mut remaining = value;
+    while let Some(index) = next_http_link_index(remaining) {
+        let candidate = remaining[index..]
+            .split(|character: char| {
+                character.is_whitespace() || matches!(character, '<' | '>' | '"' | '\'' | ']' | '}')
+            })
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(|character: char| {
+                matches!(character, '.' | ',' | ';' | ':' | '!' | '?' | ')')
+            });
+        if candidate.len() <= 2_048
+            && !links.iter().any(|link| link == candidate)
+            && (candidate.starts_with("https://") || candidate.starts_with("http://"))
+        {
+            links.push(candidate.to_owned());
+        }
+        let advance = index + candidate.len().max(1);
+        remaining = &remaining[advance.min(remaining.len())..];
+    }
+    links
+}
+
+fn next_http_link_index(value: &str) -> Option<usize> {
+    match (value.find("https://"), value.find("http://")) {
+        (Some(https), Some(http)) => Some(https.min(http)),
+        (Some(index), None) | (None, Some(index)) => Some(index),
+        (None, None) => None,
+    }
 }
 
 fn korean_deadline(value: OffsetDateTime) -> String {
@@ -1793,7 +1839,7 @@ mod tests {
     }
 
     #[test]
-    fn task_webhook_drops_transport_urls_and_mentions_from_summary() {
+    fn task_webhook_keeps_reference_links_outside_the_clean_summary() {
         let task = Task {
             id: Uuid::now_v7(),
             project_id: Some(Uuid::now_v7()),
@@ -1814,7 +1860,8 @@ mod tests {
         let message = task_event_message("task.created", "비스킷링크", &task);
 
         assert!(message.contains("요약: 거래내역에 정산방식을 표시한다."));
-        assert!(!message.contains("https://"));
+        assert!(message.contains("관련 링크: https://itsm.example/issues/3876"));
         assert!(!message.contains("@조지민"));
+        assert!(message.chars().count() <= MAX_WEBHOOK_MESSAGE_CHARS);
     }
 }

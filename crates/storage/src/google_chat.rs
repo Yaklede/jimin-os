@@ -1634,30 +1634,60 @@ impl Database {
             transaction.rollback().await.map_err(classify)?;
             return Ok(None);
         };
+        let completion_target_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT item.id
+             FROM project_inflow_items AS item
+             JOIN project_google_chat_sources AS source ON source.id = item.source_id
+             JOIN google_chat_accounts AS account ON account.id = source.account_id
+             WHERE item.user_id = $1 AND item.project_id = $2
+               AND item.status = 'promoted' AND item.promoted_task_id = $3
+               AND (($4::TEXT IS NULL AND item.id = $5)
+                 OR ($4::TEXT IS NOT NULL AND item.source_id = $6
+                   AND item.provider_thread_name = $4))
+             ORDER BY
+               CASE WHEN item.completion_requested_at IS NOT NULL THEN 0 ELSE 1 END,
+               CASE
+                 WHEN item.sender_provider_name = CONCAT('users/', account.provider_subject)
+                 THEN 1
+                 ELSE 0
+               END,
+               item.received_at ASC,
+               item.id ASC
+             LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(project_id)
+        .bind(promoted_task_id)
+        .bind(&thread_name)
+        .bind(item_id)
+        .bind(source_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(classify)?;
         let rows = sqlx::query_as::<_, ProjectInflowItemRow>(
             "UPDATE project_inflow_items AS item
              SET completion_requested_at = CASE
-                     WHEN item.id = $1 THEN NOW()
+                     WHEN item.id = $7 THEN NOW()
                      ELSE NULL
                  END,
                  completion_reaction_at = CASE
-                     WHEN item.id = $1 THEN NULL
+                     WHEN item.id = $7 THEN NULL
                      ELSE item.completion_reaction_at
                  END,
                  completion_reply_at = CASE
-                     WHEN item.id = $1 THEN NULL
+                     WHEN item.id = $7 THEN NULL
                      ELSE item.completion_reply_at
                  END,
                  completion_delivery_error_code = CASE
-                     WHEN item.id = $1 THEN NULL
+                     WHEN item.id = $7 THEN NULL
                      ELSE item.completion_delivery_error_code
                  END,
                  completion_delivery_attempt_count = CASE
-                     WHEN item.id = $1 THEN 0
+                     WHEN item.id = $7 THEN 0
                      ELSE item.completion_delivery_attempt_count
                  END,
                  completion_delivery_next_attempt_at = CASE
-                     WHEN item.id = $1 THEN NOW()
+                     WHEN item.id = $7 THEN NOW()
                      ELSE item.completion_delivery_next_attempt_at
                  END
              FROM project_google_chat_sources AS source
@@ -1703,6 +1733,7 @@ impl Database {
         .bind(promoted_task_id)
         .bind(&thread_name)
         .bind(source_id)
+        .bind(completion_target_id)
         .fetch_all(&mut *transaction)
         .await
         .map_err(classify)?;
@@ -1717,7 +1748,7 @@ impl Database {
                 item.version,
             )
             .await?;
-            if item.id == item_id {
+            if item.id == completion_target_id {
                 selected = Some(item);
             }
         }
@@ -1789,17 +1820,23 @@ async fn mark_inflow_group_promoted(
     source_id: Uuid,
     thread_name: Option<&str>,
 ) -> Result<Option<ProjectInflowItem>, StorageError> {
+    let completion_target_id =
+        pending_inflow_completion_target(transaction, command, source_id, thread_name).await?;
     let rows = sqlx::query_as::<_, ProjectInflowItemRow>(
         "UPDATE project_inflow_items AS item
          SET status = 'promoted', promoted_task_id = $2,
              completion_requested_at = CASE
-                 WHEN item.id = $1 THEN NOW()
-                 ELSE item.completion_requested_at
+                 WHEN item.id = $7 THEN NOW()
+                 ELSE NULL
              END,
              completion_delivery_next_attempt_at = CASE
-                 WHEN item.id = $1 THEN NOW()
-                 ELSE item.completion_delivery_next_attempt_at
-             END
+                 WHEN item.id = $7 THEN NOW()
+                 ELSE NULL
+             END,
+             completion_reaction_at = NULL,
+             completion_reply_at = NULL,
+             completion_delivery_error_code = NULL,
+             completion_delivery_attempt_count = 0
          FROM project_google_chat_sources AS source
          WHERE item.user_id = $3 AND item.project_id = $4
            AND item.status = 'pending' AND source.id = item.source_id
@@ -1841,6 +1878,7 @@ async fn mark_inflow_group_promoted(
     .bind(command.project_id)
     .bind(thread_name)
     .bind(source_id)
+    .bind(completion_target_id)
     .fetch_all(&mut **transaction)
     .await
     .map_err(classify)?;
@@ -1860,6 +1898,42 @@ async fn mark_inflow_group_promoted(
         }
     }
     Ok(selected)
+}
+
+async fn pending_inflow_completion_target(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    command: &PromoteProjectInflowItem,
+    source_id: Uuid,
+    thread_name: Option<&str>,
+) -> Result<Uuid, StorageError> {
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT item.id
+         FROM project_inflow_items AS item
+         JOIN project_google_chat_sources AS source ON source.id = item.source_id
+         JOIN google_chat_accounts AS account ON account.id = source.account_id
+         WHERE item.user_id = $1 AND item.project_id = $2
+           AND item.status = 'pending'
+           AND (($3::TEXT IS NULL AND item.id = $4)
+             OR ($3::TEXT IS NOT NULL AND item.source_id = $5
+               AND item.provider_thread_name = $3))
+         ORDER BY
+           CASE
+             WHEN item.sender_provider_name = CONCAT('users/', account.provider_subject)
+             THEN 1
+             ELSE 0
+           END,
+           item.received_at ASC,
+           item.id ASC
+         LIMIT 1",
+    )
+    .bind(command.user_id)
+    .bind(command.project_id)
+    .bind(thread_name)
+    .bind(command.item_id)
+    .bind(source_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(classify)
 }
 
 #[derive(sqlx::FromRow)]
@@ -2071,15 +2145,63 @@ fn valid_google_chat_user_name(value: &str) -> bool {
 
 fn default_google_chat_task_notes(
     title: &str,
-    _messages: &[(Uuid, Option<String>, String, OffsetDateTime)],
+    messages: &[(Uuid, Option<String>, String, OffsetDateTime)],
 ) -> String {
-    truncate_chars(
-        &format!(
-            "업무 목적\n{}\n\n완료 기준\n요청 범위를 확인하고 처리 결과를 관계자에게 공유합니다.",
-            title.trim()
-        ),
-        MAX_TASK_NOTES_CHARS,
-    )
+    let mut notes = format!(
+        "업무 목적\n{}\n\n완료 기준\n요청 범위를 확인하고 처리 결과를 관계자에게 공유합니다.",
+        title.trim()
+    );
+    let links = related_http_links(
+        messages.iter().map(|(_, _, content, _)| content.as_str()),
+        8,
+    );
+    if !links.is_empty() {
+        notes.push_str("\n\n관련 링크");
+        for link in links {
+            notes.push_str("\n- ");
+            notes.push_str(&link);
+        }
+    }
+    truncate_chars(&notes, MAX_TASK_NOTES_CHARS)
+}
+
+fn related_http_links<'a>(values: impl Iterator<Item = &'a str>, maximum: usize) -> Vec<String> {
+    let mut links = Vec::new();
+    for value in values {
+        let mut remaining = value;
+        while let Some(index) = next_http_link_index(remaining) {
+            let candidate = remaining[index..]
+                .split(|character: char| {
+                    character.is_whitespace()
+                        || matches!(character, '<' | '>' | '"' | '\'' | ']' | '}')
+                })
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches(|character: char| {
+                    matches!(character, '.' | ',' | ';' | ':' | '!' | '?' | ')')
+                });
+            if candidate.len() <= 2_048
+                && (candidate.starts_with("https://") || candidate.starts_with("http://"))
+                && !links.iter().any(|link| link == candidate)
+            {
+                links.push(candidate.to_owned());
+                if links.len() == maximum {
+                    return links;
+                }
+            }
+            let advance = index + candidate.len().max(1);
+            remaining = &remaining[advance.min(remaining.len())..];
+        }
+    }
+    links
+}
+
+fn next_http_link_index(value: &str) -> Option<usize> {
+    match (value.find("https://"), value.find("http://")) {
+        (Some(https), Some(http)) => Some(https.min(http)),
+        (Some(index), None) | (None, Some(index)) => Some(index),
+        (None, None) => None,
+    }
 }
 
 fn valid_secret(secret: &EncryptedCalendarSecret) -> bool {
@@ -2204,5 +2326,34 @@ mod tests {
         };
 
         assert!(!valid_provider_message(&message));
+    }
+
+    #[test]
+    fn fallback_task_notes_keep_unique_related_links() {
+        let messages = vec![
+            (
+                Uuid::now_v7(),
+                Some("요청자".to_owned()),
+                "이슈 https://itsm.example.test/issues/3876 확인".to_owned(),
+                OffsetDateTime::UNIX_EPOCH,
+            ),
+            (
+                Uuid::now_v7(),
+                Some("담당자".to_owned()),
+                "같은 이슈 https://itsm.example.test/issues/3876 와 가이드 https://docs.example.test/guide".to_owned(),
+                OffsetDateTime::UNIX_EPOCH,
+            ),
+        ];
+
+        let notes = default_google_chat_task_notes("정산방식 표시 확인", &messages);
+
+        assert!(notes.contains("관련 링크"));
+        assert_eq!(
+            notes
+                .matches("https://itsm.example.test/issues/3876")
+                .count(),
+            1
+        );
+        assert!(notes.contains("https://docs.example.test/guide"));
     }
 }

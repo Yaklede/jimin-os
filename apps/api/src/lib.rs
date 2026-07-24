@@ -693,6 +693,7 @@ pub struct ProjectInflowItemResponse {
     content_text: String,
     suggested_task_title: String,
     suggested_task_notes: String,
+    reference_links: Vec<String>,
     suggested_assignee_name: Option<String>,
     suggested_due_at: Option<String>,
     suggested_priority: Option<i16>,
@@ -5880,22 +5881,48 @@ async fn decide_project_inflow_item(
         apply_project_inflow_decision(planning, user_id, project_id, item_id, &request).await;
     match result {
         Ok(Some(mut item)) => {
-            if matches!(request.decision.as_str(), "promote" | "retry_completion")
-                && let Some(runtime) = state.google_chat_oauth()
-                && let Ok(Some(connection)) = planning
-                    .google_chat_source_sync_connection(item.source_id)
-                    .await
-            {
-                if let Err(error) =
-                    deliver_google_chat_completions(planning, runtime, &connection, Some(item.id))
-                        .await
-                {
-                    warn!(
-                        event = "google_chat.completion_delivery_deferred",
-                        source_id = %item.source_id,
-                        error_code = error.failure_code(),
-                        "Google Chat completion delivery will be retried"
-                    );
+            if matches!(request.decision.as_str(), "promote" | "retry_completion") {
+                match (
+                    state.google_chat_oauth(),
+                    planning
+                        .google_chat_source_sync_connection(item.source_id)
+                        .await,
+                ) {
+                    (Some(runtime), Ok(Some(connection))) => {
+                        if let Err(error) =
+                            deliver_google_chat_completions(planning, runtime, &connection, None)
+                                .await
+                        {
+                            warn!(
+                                event = "google_chat.completion_delivery_deferred",
+                                source_id = %item.source_id,
+                                error_code = error.failure_code(),
+                                "Google Chat completion delivery will be retried"
+                            );
+                        }
+                    }
+                    (None, _) => {
+                        warn!(
+                            event = "google_chat.completion_runtime_unavailable",
+                            source_id = %item.source_id,
+                            "Google Chat completion delivery will wait for the runtime"
+                        );
+                    }
+                    (_, Ok(None)) => {
+                        warn!(
+                            event = "google_chat.completion_connection_unavailable",
+                            source_id = %item.source_id,
+                            "Google Chat completion delivery will wait for reconnection"
+                        );
+                    }
+                    (_, Err(error)) => {
+                        warn!(
+                            event = "google_chat.completion_connection_read_failed",
+                            source_id = %item.source_id,
+                            error = ?error,
+                            "Google Chat completion delivery will be retried"
+                        );
+                    }
                 }
                 if let Ok(items) = planning
                     .project_inflow_items(user_id, project_id, Some(ProjectInflowStatus::Promoted))
@@ -6630,9 +6657,10 @@ fn project_inflow_item_response(
             Some(InflowAnalysisState::Failed) => "업무 내용을 정리하지 못했어요".to_owned(),
             _ => "대화를 업무로 정리하고 있어요".to_owned(),
         });
-    let suggested_task_notes = analysis
-        .as_ref()
-        .map_or_else(String::new, inflow_task_notes);
+    let reference_links = inflow_reference_links(&messages);
+    let suggested_task_notes = analysis.as_ref().map_or_else(String::new, |analysis| {
+        inflow_task_notes(analysis, &reference_links)
+    });
     let suggested_assignee_name = analysis
         .as_ref()
         .and_then(|analysis| analysis.suggested_assignee_name.clone());
@@ -6672,6 +6700,7 @@ fn project_inflow_item_response(
         sent_by_owner: focus.sent_by_owner,
         suggested_task_title,
         suggested_task_notes,
+        reference_links,
         suggested_assignee_name,
         suggested_due_at,
         suggested_priority,
@@ -6713,29 +6742,93 @@ fn inflow_analysis_state_name(state: InflowAnalysisState) -> &'static str {
     }
 }
 
-fn inflow_task_notes(analysis: &ProjectInflowAnalysis) -> String {
+fn inflow_task_notes(analysis: &ProjectInflowAnalysis, reference_links: &[String]) -> String {
     let Some(summary) = analysis.summary.as_deref() else {
         return String::new();
     };
-    if analysis.classification != Some(InflowClassification::NewTask) {
-        return summary.to_owned();
+    let mut notes = if analysis.classification == Some(InflowClassification::NewTask) {
+        let actions = analysis
+            .suggested_action_items
+            .iter()
+            .map(|item| format!("- {}", item.trim()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let completion = analysis
+            .suggested_completion_criteria
+            .as_deref()
+            .unwrap_or("완료 결과를 확인합니다.");
+        format!(
+            "업무 목적\n{}\n\n처리할 내용\n{}\n\n완료 기준\n{}",
+            summary.trim(),
+            actions,
+            completion.trim()
+        )
+    } else {
+        summary.trim().to_owned()
+    };
+    append_reference_links(&mut notes, reference_links);
+    notes
+}
+
+fn inflow_reference_links(messages: &[ProjectInflowItem]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut links = Vec::new();
+    for message in messages {
+        for link in http_links(&message.content_text) {
+            if seen.insert(link.clone()) {
+                links.push(link);
+                if links.len() == 8 {
+                    return links;
+                }
+            }
+        }
     }
-    let actions = analysis
-        .suggested_action_items
-        .iter()
-        .map(|item| format!("- {}", item.trim()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let completion = analysis
-        .suggested_completion_criteria
-        .as_deref()
-        .unwrap_or("완료 결과를 확인합니다.");
-    format!(
-        "업무 목적\n{}\n\n처리할 내용\n{}\n\n완료 기준\n{}",
-        summary.trim(),
-        actions,
-        completion.trim()
-    )
+    links
+}
+
+fn append_reference_links(notes: &mut String, reference_links: &[String]) {
+    if reference_links.is_empty() {
+        return;
+    }
+    notes.push_str("\n\n관련 링크");
+    for link in reference_links {
+        notes.push_str("\n- ");
+        notes.push_str(link);
+    }
+}
+
+fn http_links(value: &str) -> Vec<String> {
+    let mut links = Vec::new();
+    let mut remaining = value;
+    while let Some(index) = next_http_link_index(remaining) {
+        let candidate = remaining[index..]
+            .split(|character: char| {
+                character.is_whitespace() || matches!(character, '<' | '>' | '"' | '\'' | ']' | '}')
+            })
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(|character: char| {
+                matches!(character, '.' | ',' | ';' | ':' | '!' | '?' | ')')
+            });
+        if candidate.len() <= 2_048
+            && reqwest::Url::parse(candidate).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+            })
+        {
+            links.push(candidate.to_owned());
+        }
+        let advance = index + candidate.len().max(1);
+        remaining = &remaining[advance.min(remaining.len())..];
+    }
+    links
+}
+
+fn next_http_link_index(value: &str) -> Option<usize> {
+    match (value.find("https://"), value.find("http://")) {
+        (Some(https), Some(http)) => Some(https.min(http)),
+        (Some(index), None) | (None, Some(index)) => Some(index),
+        (None, None) => None,
+    }
 }
 
 #[utoipa::path(
@@ -8609,7 +8702,7 @@ mod tests {
         let representative_id = owner_follow_up.id;
         let items = vec![
             make_item(
-                "ㅠ",
+                "관련 문서 https://docs.example.test/specs/settlement 를 확인해 주세요.",
                 OffsetDateTime::UNIX_EPOCH,
                 owner_follow_up.provider_thread_name.clone(),
             ),
@@ -8683,6 +8776,15 @@ mod tests {
         assert_eq!(response.suggested_task_title, "개발 범위와 예상 일정 확인");
         assert!(response.suggested_task_notes.contains("업무 목적"));
         assert!(
+            response
+                .suggested_task_notes
+                .contains("https://docs.example.test/specs/settlement")
+        );
+        assert_eq!(
+            response.reference_links,
+            vec!["https://docs.example.test/specs/settlement"]
+        );
+        assert!(
             !response
                 .suggested_task_notes
                 .contains("보낸 사람 정보 없음")
@@ -8718,13 +8820,34 @@ mod tests {
             error_code: None,
             version: 1,
         };
-        let notes = inflow_task_notes(&analysis);
+        let notes = inflow_task_notes(
+            &analysis,
+            &["https://docs.example.test/qr-integration".to_owned()],
+        );
 
         assert!(notes.contains("QR 결제 거래·배송 정보 통지 연동 범위"));
         assert!(notes.contains("거래 통지 수신 URL"));
         assert!(!notes.contains("보낸 사람 정보 없음"));
         assert!(!notes.contains("dalqtest"));
         assert!(!notes.contains("1234"));
+        assert!(notes.contains("관련 링크"));
+        assert!(notes.contains("https://docs.example.test/qr-integration"));
+    }
+
+    #[test]
+    fn inflow_link_scanner_strips_chat_punctuation() {
+        let links = http_links(
+            "가이드: https://docs.example.test/guide, 이슈 [https://itsm.example.test/issues/1](https://itsm.example.test/issues/1)",
+        );
+
+        assert_eq!(
+            links,
+            vec![
+                "https://docs.example.test/guide",
+                "https://itsm.example.test/issues/1",
+                "https://itsm.example.test/issues/1",
+            ]
+        );
     }
 
     #[test]

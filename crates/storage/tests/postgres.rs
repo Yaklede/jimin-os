@@ -826,10 +826,15 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             && item.provider_thread_name == promoted.provider_thread_name
     }));
     let completion_deliveries = database
-        .pending_google_chat_completion_deliveries(source.id, Some(promoted.id), 20)
+        .pending_google_chat_completion_deliveries(source.id, None, 20)
         .await
         .expect("completion delivery should load");
     assert_eq!(completion_deliveries.len(), 1);
+    assert_eq!(
+        completion_deliveries[0].provider_message_name,
+        "spaces/company-room/messages/message-1.message-1",
+        "the reaction must be attached to the first external request, not the latest comment"
+    );
     assert_eq!(completion_deliveries[0].due_at, Some(due_at));
     assert_eq!(
         completion_deliveries[0].assignee_name.as_deref(),
@@ -849,8 +854,8 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         .expect("completed Chat thread should load");
     let selected_completion = completed_group
         .iter()
-        .find(|item| item.id == promoted.id)
-        .expect("selected promoted message should remain available");
+        .find(|item| item.completion_requested_at.is_some())
+        .expect("the original request should own the completion state");
     assert!(selected_completion.completion_reaction_at.is_some());
     assert!(selected_completion.completion_reply_at.is_some());
     assert!(selected_completion.completion_delivery_error_code.is_none());
@@ -869,7 +874,10 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         .await
         .expect("completion delivery retry should persist")
         .expect("promoted message should accept a retry");
-    assert_eq!(retried.id, retry_target.id);
+    assert_eq!(
+        retried.id, selected_completion.id,
+        "retrying from any message in the thread must preserve the original request target"
+    );
     assert!(retried.completion_requested_at.is_some());
     assert!(retried.completion_reaction_at.is_none());
     assert!(retried.completion_reply_at.is_none());

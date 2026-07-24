@@ -4869,6 +4869,50 @@ svg {
   font-weight: 700;
 }
 
+.project-inflow-item__references {
+  display: grid;
+  gap: 7px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  padding-left: 12px;
+}
+
+.project-inflow-item__references > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.project-inflow-item__references svg {
+  width: 14px;
+  height: 14px;
+}
+
+.project-inflow-item__references ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-inflow-item__references a {
+  display: block;
+  overflow: hidden;
+  color: var(--accent);
+  font-size: 12px;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-inflow-item__references a:hover,
+.project-inflow-item__references a:focus-visible {
+  text-decoration: underline;
+}
+
 .project-inflow-item__context {
   border-radius: 12px;
   background: var(--surface-subtle);

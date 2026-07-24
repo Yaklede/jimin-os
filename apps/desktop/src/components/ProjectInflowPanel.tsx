@@ -369,6 +369,7 @@ export function InflowItemRow({
   ];
   const suggestedTitle =
     item.suggestedTaskTitle || "대화를 업무로 정리하고 있어요";
+  const referenceLinks = item.referenceLinks ?? [];
   const messageCount = item.messageCount ?? messages.length;
   const firstReceivedAt = item.firstReceivedAt ?? item.receivedAt;
   const [title, setTitle] = useState(() => suggestedTitle);
@@ -465,6 +466,23 @@ export function InflowItemRow({
           </span>
         )}
       </div>
+      {referenceLinks.length > 0 && (
+        <div className="project-inflow-item__references">
+          <span>
+            <Link2 aria-hidden="true" />
+            관련 링크
+          </span>
+          <ul>
+            {referenceLinks.map((link) => (
+              <li key={link}>
+                <a href={link} target="_blank" rel="noreferrer">
+                  {link}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {messages.length > 0 && (
         <details className="project-inflow-item__context">
           <summary>원문 대화 {messages.length}개 보기</summary>
