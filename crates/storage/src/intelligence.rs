@@ -17,7 +17,7 @@ use crate::{
     gmail::GmailMessage,
     goals::{GoalHealth, GoalOverview, GoalStatus},
     planning::{ScheduleEntry, Task},
-    work::{Project, ProjectStatus},
+    work::{Project, ProjectManagementMode, ProjectStatus},
 };
 
 const MAX_TITLE_CHARS: usize = 200;
@@ -1120,81 +1120,152 @@ fn project_attention_observation(
     project: &Project,
     now: OffsetDateTime,
 ) -> Option<WorkObservation> {
-    let (title, summary, severity, risk_level, risk_summary) = if project.overdue_task_count > 0 {
-        (
-            format!("{}의 늦어진 일을 먼저 정리하세요", project.title),
-            format!(
-                "진행률은 {}%이고 기한이 지난 실행 항목이 {}개 있어요.",
-                project.progress_percent, project.overdue_task_count
-            ),
-            3,
-            2,
-            Some("늦어진 하위 일이 전체 프로젝트 일정에 영향을 줄 수 있어요.".to_owned()),
-        )
-    } else if project.risk_level >= 2 {
-        (
-            format!("{}의 위험 요소를 먼저 확인하세요", project.title),
-            "프로젝트 위험도가 높게 설정되어 있어 진행 상태를 다시 확인할 필요가 있어요."
-                .to_owned(),
-            project.risk_level,
-            project.risk_level,
-            Some("확인하지 않으면 일정이나 범위 조정이 늦어질 수 있어요.".to_owned()),
-        )
-    } else if project.unassigned_task_count > 0 {
-        (
-            format!("{}의 담당자를 정하세요", project.title),
-            format!(
-                "담당자가 정해지지 않은 실행 항목이 {}개 있어요.",
-                project.unassigned_task_count
-            ),
-            2,
-            1,
-            Some("담당자가 없으면 시작 여부와 진행 상태를 확인하기 어려워요.".to_owned()),
-        )
-    } else if project.progress_percent == 100 && project.total_task_count > 0 {
-        (
-            format!("{}의 완료 여부를 확인하세요", project.title),
-            "실행 항목을 모두 마쳤어요. 프로젝트의 목적까지 달성했는지 확인할 차례예요.".to_owned(),
-            1,
-            0,
-            None,
-        )
-    } else if project.open_task_count > 0 && project.next_action.is_none() {
-        (
-            format!("{}의 다음 행동을 정하세요", project.title),
-            format!(
-                "열린 할 일 {}개가 있지만 다음 행동이 정해지지 않았어요.",
-                project.open_task_count
-            ),
-            1,
-            0,
-            None,
-        )
-    } else {
-        return None;
-    };
+    let attention = project_attention_content(project)?;
     Some(WorkObservation {
         fingerprint: format!("work:project-attention:{}", project.id),
         workspace_id: Some(project.workspace_id),
         project_id: Some(project.id),
         goal_id: None,
-        severity,
+        severity: attention.severity,
         kind: "project_risk",
         source_type: "project",
         source_entity_id: Some(project.id),
         suggested_action_kind: SuggestedActionKind::Review,
         suggested_entity_id: Some(project.id),
-        title,
-        summary,
+        title: attention.title,
+        summary: attention.summary,
         expected_effect: "다음 행동을 분명히 해 프로젝트가 멈춰 있는 시간을 줄일 수 있어요."
             .to_owned(),
-        risk_summary,
+        risk_summary: attention.risk_summary,
         confidence: 94,
-        urgency: severity,
+        urgency: attention.severity,
         impact: project.risk_level.max(1),
-        risk_level,
+        risk_level: attention.risk_level,
         effort_minutes: Some(10),
         valid_until: now + time::Duration::days(7),
+    })
+}
+
+struct ProjectAttentionContent {
+    title: String,
+    summary: String,
+    severity: i16,
+    risk_level: i16,
+    risk_summary: Option<String>,
+}
+
+fn project_attention_content(project: &Project) -> Option<ProjectAttentionContent> {
+    if project.overdue_task_count > 0 {
+        let summary = match project.management_mode {
+            ProjectManagementMode::Completion => format!(
+                "진행률은 {}%이고 기한이 지난 실행 항목이 {}개 있어요.",
+                project.progress_percent, project.overdue_task_count
+            ),
+            ProjectManagementMode::Operation => format!(
+                "이번 주 새 일 {}개 중 {}개를 마쳤고, 기한이 지난 일이 {}개 있어요.",
+                project.weekly_created_task_count,
+                project.weekly_completed_task_count,
+                project.overdue_task_count
+            ),
+        };
+        return Some(ProjectAttentionContent {
+            title: format!("{}의 늦어진 일을 먼저 정리하세요", project.title),
+            summary,
+            severity: 3,
+            risk_level: 2,
+            risk_summary: Some(
+                "늦어진 일이 계속 쌓이면 새 업무의 처리도 함께 밀릴 수 있어요.".to_owned(),
+            ),
+        });
+    }
+    if project.risk_level >= 2 {
+        return Some(ProjectAttentionContent {
+            title: format!("{}의 위험 요소를 먼저 확인하세요", project.title),
+            summary: "프로젝트 위험도가 높게 설정되어 있어 진행 상태를 다시 확인할 필요가 있어요."
+                .to_owned(),
+            severity: project.risk_level,
+            risk_level: project.risk_level,
+            risk_summary: Some("확인하지 않으면 일정이나 범위 조정이 늦어질 수 있어요.".to_owned()),
+        });
+    }
+    operation_project_attention_content(project)
+        .or_else(|| common_project_attention_content(project))
+}
+
+fn operation_project_attention_content(project: &Project) -> Option<ProjectAttentionContent> {
+    if project.management_mode != ProjectManagementMode::Operation {
+        return None;
+    }
+    if project.backlog_delta > 0 {
+        let severity = if project.backlog_delta >= 3 { 2 } else { 1 };
+        return Some(ProjectAttentionContent {
+            title: format!("{}에 밀린 일이 늘었어요", project.title),
+            summary: format!(
+                "이번 주 새 일 {}개 중 {}개를 마쳐 밀린 일이 {}개 늘었어요.",
+                project.weekly_created_task_count,
+                project.weekly_completed_task_count,
+                project.backlog_delta
+            ),
+            severity,
+            risk_level: severity,
+            risk_summary: Some(
+                "들어오는 일보다 처리한 일이 적으면 다음 주 업무까지 밀릴 수 있어요.".to_owned(),
+            ),
+        });
+    }
+    (project.stale_task_count > 0).then(|| ProjectAttentionContent {
+        title: format!("{}의 정체된 일을 확인하세요", project.title),
+        summary: format!(
+            "프로젝트에서 정한 기간 동안 바뀌지 않은 일이 {}개 있어요.",
+            project.stale_task_count
+        ),
+        severity: 2,
+        risk_level: 1,
+        risk_summary: Some(
+            "진행 여부를 확인하지 않으면 누락된 일과 대기 중인 일을 구분하기 어려워요.".to_owned(),
+        ),
+    })
+}
+
+fn common_project_attention_content(project: &Project) -> Option<ProjectAttentionContent> {
+    if project.unassigned_task_count > 0 {
+        return Some(ProjectAttentionContent {
+            title: format!("{}의 담당자를 정하세요", project.title),
+            summary: format!(
+                "담당자가 정해지지 않은 실행 항목이 {}개 있어요.",
+                project.unassigned_task_count
+            ),
+            severity: 2,
+            risk_level: 1,
+            risk_summary: Some(
+                "담당자가 없으면 시작 여부와 진행 상태를 확인하기 어려워요.".to_owned(),
+            ),
+        });
+    }
+    if project.management_mode == ProjectManagementMode::Completion
+        && project.progress_percent == 100
+        && project.total_task_count > 0
+    {
+        return Some(ProjectAttentionContent {
+            title: format!("{}의 완료 여부를 확인하세요", project.title),
+            summary: "실행 항목을 모두 마쳤어요. 프로젝트의 목적까지 달성했는지 확인할 차례예요."
+                .to_owned(),
+            severity: 1,
+            risk_level: 0,
+            risk_summary: None,
+        });
+    }
+    (project.open_task_count > 0 && project.next_action.is_none()).then(|| {
+        ProjectAttentionContent {
+            title: format!("{}의 다음 행동을 정하세요", project.title),
+            summary: format!(
+                "열린 할 일 {}개가 있지만 다음 행동이 정해지지 않았어요.",
+                project.open_task_count
+            ),
+            severity: 1,
+            risk_level: 0,
+            risk_summary: None,
+        }
     })
 }
 
@@ -1825,5 +1896,80 @@ mod tests {
         assert!(observation.title.contains("늦어진 일"));
         assert!(observation.summary.contains("50%"));
         assert_eq!(observation.urgency, 3);
+    }
+
+    #[test]
+    fn operation_project_attention_uses_flow_instead_of_completion_progress() {
+        let project = Project {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            title: "고객 요청 운영".to_owned(),
+            objective: Some("고객 요청을 빠짐없이 처리".to_owned()),
+            status: ProjectStatus::Active,
+            management_mode: ProjectManagementMode::Operation,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
+            risk_level: 1,
+            next_action: Some("새 요청 분류".to_owned()),
+            due_at: None,
+            open_task_count: 8,
+            total_task_count: 40,
+            completed_task_count: 32,
+            overdue_task_count: 0,
+            unassigned_task_count: 0,
+            progress_percent: 80,
+            weekly_created_task_count: 7,
+            weekly_completed_task_count: 4,
+            backlog_delta: 3,
+            stale_task_count: 1,
+            average_cycle_time_hours: 16,
+            on_time_completion_percent: Some(75),
+            version: 1,
+        };
+
+        let observation = project_attention_observation(&project, OffsetDateTime::now_utc())
+            .expect("growing operation backlog should need attention");
+
+        assert_eq!(observation.title, "고객 요청 운영에 밀린 일이 늘었어요");
+        assert!(observation.summary.contains("새 일 7개"));
+        assert!(observation.summary.contains("4개를 마쳐"));
+        assert!(observation.summary.contains("3개 늘었어요"));
+        assert!(!observation.summary.contains("80%"));
+        assert_eq!(observation.urgency, 2);
+    }
+
+    #[test]
+    fn operation_project_never_uses_ready_to_complete_recommendation() {
+        let project = Project {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            title: "상시 모니터링".to_owned(),
+            objective: None,
+            status: ProjectStatus::Active,
+            management_mode: ProjectManagementMode::Operation,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
+            risk_level: 0,
+            next_action: Some("새 신호 확인".to_owned()),
+            due_at: None,
+            open_task_count: 0,
+            total_task_count: 5,
+            completed_task_count: 5,
+            overdue_task_count: 0,
+            unassigned_task_count: 0,
+            progress_percent: 100,
+            weekly_created_task_count: 0,
+            weekly_completed_task_count: 5,
+            backlog_delta: -5,
+            stale_task_count: 0,
+            average_cycle_time_hours: 3,
+            on_time_completion_percent: Some(100),
+            version: 1,
+        };
+
+        assert!(
+            project_attention_observation(&project, OffsetDateTime::now_utc()).is_none(),
+            "an operation project is not complete just because its current queue is empty"
+        );
     }
 }

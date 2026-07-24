@@ -111,6 +111,7 @@ export const copy = {
     followUpPlaceholder: "예: 그중 내일 할 것만 다시 정리해 줘",
     followUpSend: "후속 요청 보내기",
     startNewRequest: "새 요청 시작하기",
+    collapseResult: "결과 접기",
     commandNeedsConnection: "ChatGPT를 연결하면 바로 요청할 수 있어요",
     commandSend: "요청 보내기",
     commandProcessing: "요청을 처리하고 있어요",
@@ -245,6 +246,28 @@ export const copy = {
     openMeetings: "회의 기록",
     recommendationDecisionNotice:
       "제안을 정리하지 못했어요. 잠시 후 다시 시도해 주세요.",
+    weeklyOperationsEyebrow: "월요일부터 지금까지",
+    weeklyOperationsTitle: "이번 주 운영 흐름",
+    weeklyOperationsSummary: (
+      created: number,
+      completed: number,
+      backlog: number,
+    ) =>
+      `새 일 ${created}개 중 ${completed}개를 마쳤고, ${backlog > 0 ? `밀린 일이 ${backlog}개 늘었어요.` : backlog < 0 ? `밀린 일을 ${Math.abs(backlog)}개 줄였어요.` : "밀린 일은 늘지 않았어요."}`,
+    weeklyNewWork: "새로 들어온 일",
+    weeklyCompletedWork: "완료한 일",
+    weeklyOverdueWork: "기한이 지난 일",
+    weeklyStaleWork: "정체된 일",
+    weeklyMetricCount: (count: number) => `${count}개`,
+    weeklyOperationsClear:
+      "기한이 지난 일이나 정체된 일이 없어요. 현재 흐름을 유지해 보세요.",
+    weeklyProjectOverdue: (count: number) =>
+      `기한이 지난 일 ${count}개를 먼저 확인해 주세요.`,
+    weeklyProjectBacklog: (count: number) => `밀린 일이 ${count}개 늘었어요.`,
+    weeklyProjectStale: (count: number) =>
+      `정체된 일 ${count}개를 확인해 주세요.`,
+    weeklyProjectUnassigned: (count: number) =>
+      `담당자를 정하지 않은 일 ${count}개가 있어요.`,
     overdue: "기한 지남",
     dueToday: "오늘 마감",
     dueTomorrow: "내일 마감",

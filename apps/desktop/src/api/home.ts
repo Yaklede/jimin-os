@@ -7,6 +7,11 @@ import {
   normalizeProjectInflowItem,
   type ProjectInflowItem,
 } from "./googleChat";
+import {
+  fetchWeeklyReport,
+  fetchWorkspaces,
+  type WeeklyReport,
+} from "./projects";
 
 export interface Recommendation {
   id: string;
@@ -57,6 +62,7 @@ export interface HomeSnapshot {
   inflow: ProjectInflowItem[];
   recentInflow: ProjectInflowItem[];
   recommendations: Recommendation[];
+  weeklyReports: WeeklyReport[];
 }
 
 export async function fetchHomeSnapshot(
@@ -79,6 +85,9 @@ export async function fetchHomeSnapshot(
   if (!response.ok || !isHomeSnapshot(body)) {
     throw errorFromStatus(response.status);
   }
+  const weeklyReports = Array.isArray(body.weeklyReports)
+    ? body.weeklyReports
+    : await fetchWeeklyReportsFromCompatibleServer(baseUrl, access);
   return {
     schedule: body.schedule,
     tasks: body.tasks,
@@ -92,7 +101,27 @@ export async function fetchHomeSnapshot(
     recommendations: Array.isArray(body.recommendations)
       ? body.recommendations
       : [],
+    weeklyReports,
   };
+}
+
+async function fetchWeeklyReportsFromCompatibleServer(
+  baseUrl: string,
+  access: string,
+): Promise<WeeklyReport[]> {
+  try {
+    const workspaces = await fetchWorkspaces(baseUrl, access);
+    const reports = await Promise.all(
+      workspaces.map((workspace) =>
+        fetchWeeklyReport(baseUrl, access, workspace.id).catch(() => undefined),
+      ),
+    );
+    return reports.filter(
+      (report): report is WeeklyReport => report !== undefined,
+    );
+  } catch {
+    return [];
+  }
 }
 
 function normalizeBaseUrl(value: string): string {

@@ -575,6 +575,7 @@ pub struct HomeSnapshotResponse {
     inflow: Vec<ProjectInflowItemResponse>,
     recent_inflow: Vec<ProjectInflowItemResponse>,
     recommendations: Vec<RecommendationResponse>,
+    weekly_reports: Vec<WeeklyReportResponse>,
 }
 
 /// One prioritized action proposal generated from the owner's current context.
@@ -2464,19 +2465,38 @@ async fn get_home_snapshot(
         return invalid_request_response(request_id);
     };
     let user_id = principal.identity().user_id();
-    let (schedule, tasks, due_tasks, recommendations, inflow_items, inflow_analyses, webhooks) =
-        match tokio::try_join!(
-            planning.schedule_entries_in_range(user_id, from, to),
-            planning.home_tasks_for_user(user_id, to),
-            planning.deadline_tasks_for_user(user_id, deadline_boundary),
-            planning.active_recommendations_for_user(user_id, OffsetDateTime::now_utc(), 5),
-            planning.pending_project_inflow_for_user(user_id),
-            planning.project_inflow_analyses_for_user(user_id),
-            planning.user_project_webhooks(user_id),
-        ) {
-            Ok(values) => values,
+    let (
+        schedule,
+        tasks,
+        due_tasks,
+        recommendations,
+        inflow_items,
+        inflow_analyses,
+        webhooks,
+        workspaces,
+    ) = match tokio::try_join!(
+        planning.schedule_entries_in_range(user_id, from, to),
+        planning.home_tasks_for_user(user_id, to),
+        planning.deadline_tasks_for_user(user_id, deadline_boundary),
+        planning.active_recommendations_for_user(user_id, OffsetDateTime::now_utc(), 5),
+        planning.pending_project_inflow_for_user(user_id),
+        planning.project_inflow_analyses_for_user(user_id),
+        planning.user_project_webhooks(user_id),
+        planning.workspaces_for_user(user_id),
+    ) {
+        Ok(values) => values,
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    let mut weekly_reports = Vec::with_capacity(workspaces.len());
+    for workspace in workspaces {
+        match planning
+            .weekly_report_for_workspace(user_id, workspace.id, None)
+            .await
+        {
+            Ok(report) => weekly_reports.push(weekly_report_response(report)),
             Err(error) => return storage_error_response(&error, request_id),
-        };
+        }
+    }
     let Ok(schedule) = schedule
         .into_iter()
         .map(schedule_entry_response)
@@ -2526,6 +2546,7 @@ async fn get_home_snapshot(
         // source messages back on the attention-focused home screen.
         recent_inflow: Vec::new(),
         recommendations,
+        weekly_reports,
     })
     .into_response()
 }

@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   AudioLines,
   CalendarDays,
+  CheckCircle2,
   ChevronRight,
   Circle,
   Cloud,
@@ -20,7 +21,11 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { type AgentJob, type ConversationMessage } from "../api/agent";
 import { type HomeSnapshot, type Recommendation } from "../api/home";
 import { type ScheduleEntry, type Task } from "../api/planning";
-import { type Project } from "../api/projects";
+import {
+  type Project,
+  type WeeklyProjectReport,
+  type WeeklyReport,
+} from "../api/projects";
 import { type ProjectInflowItem } from "../api/googleChat";
 import { presentationForMessage } from "../assistantPresentation";
 import { copy } from "../copy";
@@ -352,6 +357,13 @@ export function HomeWorkspace({
               onDismiss={onDismissInflow}
               onRetryAnalysis={onRetryInflowAnalysis}
               onRetryCompletion={onRetryInflowCompletion}
+            />
+          )}
+
+          {!showingSkeleton && Boolean(snapshot?.weeklyReports.length) && (
+            <WeeklyOperationsBrief
+              reports={snapshot?.weeklyReports ?? []}
+              onOpenProject={onOpenProject}
             />
           )}
 
@@ -870,9 +882,20 @@ function HomeAssistantCommand({
               : copy.home.commandDescription}
           </p>
         </div>
-        <span aria-hidden="true">
-          <Sparkles />
-        </span>
+        <div className="home-command__heading-actions">
+          {focused && continuing && !active && (
+            <button
+              className="text-button focus-visible-control"
+              type="button"
+              onClick={() => onFocusChange(false)}
+            >
+              {copy.home.collapseResult}
+            </button>
+          )}
+          <span aria-hidden="true">
+            <Sparkles />
+          </span>
+        </div>
       </div>
       {!continuing && composer}
       {focused && submittedRequest && (
@@ -956,6 +979,164 @@ function HomeAssistantCommand({
       )}
     </section>
   );
+}
+
+type WeeklyOperationProject = WeeklyProjectReport & {
+  workspaceId: string;
+};
+
+function WeeklyOperationsBrief({
+  reports,
+  onOpenProject,
+}: {
+  reports: WeeklyReport[];
+  onOpenProject(
+    project: Pick<Project, "id" | "workspaceId">,
+  ): void | Promise<void>;
+}) {
+  const activeReports = reports.filter((report) => report.projects.length > 0);
+  if (activeReports.length === 0) return null;
+
+  const totals = activeReports.reduce(
+    (current, report) => ({
+      created: current.created + report.createdTaskCount,
+      completed: current.completed + report.completedTaskCount,
+      backlog: current.backlog + report.backlogDelta,
+      overdue: current.overdue + report.overdueTaskCount,
+      stale: current.stale + report.staleTaskCount,
+    }),
+    { created: 0, completed: 0, backlog: 0, overdue: 0, stale: 0 },
+  );
+  const attentionProjects = activeReports
+    .flatMap((report) =>
+      report.projects.map((project) => ({
+        ...project,
+        workspaceId: report.workspaceId,
+      })),
+    )
+    .filter((project) => project.health !== "on_track")
+    .sort(
+      (left, right) =>
+        weeklyProjectAttentionRank(right) - weeklyProjectAttentionRank(left) ||
+        left.title.localeCompare(right.title, "ko"),
+    )
+    .slice(0, 4);
+
+  return (
+    <section
+      className="home-weekly-operations"
+      aria-labelledby="home-weekly-operations-title"
+    >
+      <header>
+        <span className="home-weekly-operations__icon" aria-hidden="true">
+          <ListTodo />
+        </span>
+        <div>
+          <span>{copy.home.weeklyOperationsEyebrow}</span>
+          <h2 id="home-weekly-operations-title">
+            {copy.home.weeklyOperationsTitle}
+          </h2>
+          <p>
+            {copy.home.weeklyOperationsSummary(
+              totals.created,
+              totals.completed,
+              totals.backlog,
+            )}
+          </p>
+        </div>
+      </header>
+
+      <dl className="home-weekly-operations__metrics">
+        <WeeklyOperationMetric
+          label={copy.home.weeklyNewWork}
+          value={totals.created}
+        />
+        <WeeklyOperationMetric
+          label={copy.home.weeklyCompletedWork}
+          value={totals.completed}
+        />
+        <WeeklyOperationMetric
+          label={copy.home.weeklyOverdueWork}
+          value={totals.overdue}
+          attention={totals.overdue > 0}
+        />
+        <WeeklyOperationMetric
+          label={copy.home.weeklyStaleWork}
+          value={totals.stale}
+          attention={totals.stale > 0}
+        />
+      </dl>
+
+      {attentionProjects.length > 0 ? (
+        <ul className="home-weekly-operations__projects">
+          {attentionProjects.map((project) => (
+            <li key={project.projectId}>
+              <button
+                className="focus-visible-control"
+                type="button"
+                onClick={() =>
+                  void onOpenProject({
+                    id: project.projectId,
+                    workspaceId: project.workspaceId,
+                  })
+                }
+              >
+                <span>
+                  <strong>{project.title}</strong>
+                  <small>{weeklyProjectSummary(project)}</small>
+                </span>
+                <ChevronRight aria-hidden="true" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="home-weekly-operations__clear">
+          <CheckCircle2 aria-hidden="true" />
+          <span>{copy.home.weeklyOperationsClear}</span>
+        </p>
+      )}
+    </section>
+  );
+}
+
+function WeeklyOperationMetric({
+  label,
+  value,
+  attention = false,
+}: {
+  label: string;
+  value: number;
+  attention?: boolean;
+}) {
+  return (
+    <div data-attention={attention}>
+      <dt>{label}</dt>
+      <dd>{copy.home.weeklyMetricCount(value)}</dd>
+    </div>
+  );
+}
+
+function weeklyProjectAttentionRank(project: WeeklyOperationProject): number {
+  return (
+    project.overdueTaskCount * 100 +
+    Math.max(0, project.backlogDelta) * 10 +
+    project.staleTaskCount * 5 +
+    project.unassignedTaskCount
+  );
+}
+
+function weeklyProjectSummary(project: WeeklyOperationProject): string {
+  if (project.overdueTaskCount > 0) {
+    return copy.home.weeklyProjectOverdue(project.overdueTaskCount);
+  }
+  if (project.backlogDelta > 0) {
+    return copy.home.weeklyProjectBacklog(project.backlogDelta);
+  }
+  if (project.staleTaskCount > 0) {
+    return copy.home.weeklyProjectStale(project.staleTaskCount);
+  }
+  return copy.home.weeklyProjectUnassigned(project.unassignedTaskCount);
 }
 
 export function EmptySurface({

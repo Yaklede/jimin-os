@@ -3622,7 +3622,7 @@ mod tests {
         goals::{Goal, GoalHealth, GoalOverview, GoalStatus},
         planning::{ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus},
         webhook::{GoogleChatMentionDirectory, ProjectWebhook, WebhookProvider},
-        work::{Project, ProjectStatus, Workspace, WorkspaceScope},
+        work::{Project, ProjectManagementMode, ProjectStatus, Workspace, WorkspaceScope},
     };
     use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
     use uuid::Uuid;
@@ -3721,6 +3721,9 @@ mod tests {
             title: "개인 운영체제".to_owned(),
             objective: Some("AI 비서 구현".to_owned()),
             status: ProjectStatus::Active,
+            management_mode: ProjectManagementMode::Completion,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
             risk_level: 1,
             next_action: Some("구조화 응답 연결".to_owned()),
             due_at: None,
@@ -3730,6 +3733,12 @@ mod tests {
             overdue_task_count: 0,
             unassigned_task_count: 1,
             progress_percent: 0,
+            weekly_created_task_count: 0,
+            weekly_completed_task_count: 0,
+            backlog_delta: 0,
+            stale_task_count: 0,
+            average_cycle_time_hours: 0,
+            on_time_completion_percent: None,
             version: 1,
         };
         let workspace = Workspace {
@@ -4843,6 +4852,9 @@ mod tests {
             title: "비스킷링크".to_owned(),
             objective: Some("개인 프로젝트".to_owned()),
             status: ProjectStatus::Active,
+            management_mode: ProjectManagementMode::Completion,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
             risk_level: 1,
             next_action: Some("다음 작업 확인".to_owned()),
             due_at: None,
@@ -4852,6 +4864,12 @@ mod tests {
             overdue_task_count: 0,
             unassigned_task_count: 0,
             progress_percent: 0,
+            weekly_created_task_count: 0,
+            weekly_completed_task_count: 0,
+            backlog_delta: 0,
+            stale_task_count: 0,
+            average_cycle_time_hours: 0,
+            on_time_completion_percent: None,
             version: 7,
         };
         let context = TurnContext {
@@ -5385,6 +5403,9 @@ mod tests {
             title: "비스킷링크".to_owned(),
             objective: None,
             status: ProjectStatus::Active,
+            management_mode: ProjectManagementMode::Completion,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
             risk_level: 1,
             next_action: None,
             due_at: None,
@@ -5394,6 +5415,12 @@ mod tests {
             overdue_task_count: 0,
             unassigned_task_count: 0,
             progress_percent: 100,
+            weekly_created_task_count: 0,
+            weekly_completed_task_count: 1,
+            backlog_delta: -1,
+            stale_task_count: 0,
+            average_cycle_time_hours: 0,
+            on_time_completion_percent: None,
             version: 4,
         };
         let task = Task {

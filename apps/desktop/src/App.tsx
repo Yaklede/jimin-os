@@ -2257,7 +2257,7 @@ export default function App() {
     setHighlightedProjectTaskId(undefined);
     setSelectedWorkspaceId(project.workspaceId);
     setSelectedProjectId(project.id);
-    navigate("projects");
+    navigate("projects", { projectDataReady: true });
   }
 
   async function openTaskFromAssistant(
@@ -2285,7 +2285,7 @@ export default function App() {
       }
       setHighlightedProjectTaskId(task.id);
       setSelectedProjectId(currentProject.id);
-      navigate("projects");
+      navigate("projects", { projectDataReady: true });
       return;
     }
 
@@ -2304,7 +2304,7 @@ export default function App() {
         setSelectedWorkspaceId(workspace.id);
         setSelectedProjectId(project.id);
         setHighlightedProjectTaskId(task.id);
-        navigate("projects");
+        navigate("projects", { projectDataReady: true });
         return;
       } catch {
         // Keep searching the remaining personal workspaces.
@@ -3216,7 +3216,10 @@ export default function App() {
     .reverse()
     .find((message) => message.role === "user")?.content;
 
-  function navigate(nextDestination: OsDestination): void {
+  function navigate(
+    nextDestination: OsDestination,
+    options: { projectDataReady?: boolean } = {},
+  ): void {
     if (nextDestination !== destination) {
       navigationHistoryRef.current = [
         ...navigationHistoryRef.current.slice(-31),
@@ -3246,6 +3249,7 @@ export default function App() {
     }
     if (nextDestination === "projects") {
       void loadGoals();
+      if (options.projectDataReady) return;
       const latestProject = [
         ...(latestAssistantMessage?.presentation?.items ?? []),
       ]
