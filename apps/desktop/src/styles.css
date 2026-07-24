@@ -425,7 +425,7 @@ svg {
 .os-content__view {
   width: 100%;
   min-height: 100%;
-  animation: workspace-route-enter 180ms ease-out both;
+  animation: workspace-route-enter 140ms ease-out both;
 }
 
 .os-page-load {
@@ -3166,6 +3166,10 @@ svg {
   column-gap: 8px;
   min-height: 72px;
   padding: 8px 14px;
+  transition:
+    background-color 160ms ease,
+    opacity 160ms ease,
+    transform 160ms ease;
 }
 
 .planning-task-list li + li {
@@ -3174,6 +3178,17 @@ svg {
 
 .planning-task-list li > div {
   min-width: 0;
+  transition: opacity 160ms ease;
+}
+
+.planning-task-list li[data-pending="true"] {
+  background: color-mix(in srgb, var(--accent-tint) 52%, var(--surface));
+}
+
+.planning-task-list li[data-pending="true"] > div,
+.planning-task-list li[data-pending="true"] > time,
+.planning-task-list li[data-pending="true"] > .planning-row-edit {
+  opacity: 0.56;
 }
 
 .planning-task-list strong {
@@ -3223,7 +3238,7 @@ svg {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-panel);
   padding: 0;
-  overflow: hidden auto;
+  overflow: hidden;
   background: var(--surface);
   box-shadow: var(--shadow-float);
   color: var(--text);
@@ -3241,14 +3256,25 @@ svg {
 .planning-editor > form {
   display: grid;
   gap: 18px;
+  max-height: inherit;
   padding: 22px;
+  overflow: auto;
+  scrollbar-gutter: stable;
 }
 
 .planning-editor__heading {
+  position: sticky;
+  z-index: 2;
+  top: -22px;
   display: grid;
   grid-template-columns: 40px minmax(0, 1fr) 44px;
   align-items: start;
   gap: 12px;
+  margin: -22px -22px 0;
+  border-bottom: 1px solid transparent;
+  padding: 22px 22px 12px;
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  backdrop-filter: blur(14px);
 }
 
 .planning-editor__heading > span {
@@ -3305,14 +3331,27 @@ svg {
 
 .planning-editor__field-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns:
+    minmax(160px, 0.75fr)
+    minmax(240px, 1.25fr);
+  align-items: start;
   gap: 12px;
 }
 
 .planning-editor__field {
   display: grid;
+  grid-template-rows: auto minmax(48px, auto) minmax(16px, auto);
+  align-content: start;
   min-width: 0;
   gap: 6px;
+}
+
+.planning-editor fieldset > .planning-editor__field {
+  grid-template-rows: auto minmax(48px, auto);
+}
+
+.planning-editor__field-grid .planning-editor__field > p {
+  min-height: 16px;
 }
 
 .planning-editor__field label {
@@ -3368,11 +3407,18 @@ svg {
 }
 
 .planning-editor__actions {
+  position: sticky;
+  z-index: 2;
+  bottom: -22px;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  padding-top: 2px;
+  margin: 0 -22px -22px;
+  border-top: 1px solid var(--border);
+  padding: 14px 22px 22px;
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  backdrop-filter: blur(14px);
 }
 
 .planning-editor__action-spacer {
@@ -7125,8 +7171,8 @@ svg {
 
 @keyframes workspace-route-enter {
   from {
-    opacity: 0;
-    transform: translateY(6px);
+    opacity: 0.94;
+    transform: translateY(3px);
   }
 
   to {
@@ -8858,13 +8904,22 @@ svg {
     padding: 20px 16px calc(20px + var(--safe-area-bottom));
   }
 
+  .planning-editor__heading {
+    top: -20px;
+    margin: -20px -16px 0;
+    padding: 20px 16px 12px;
+  }
+
   .planning-editor__field-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
   .planning-editor__actions {
+    bottom: calc(-20px - var(--safe-area-bottom));
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin: 0 -16px calc(-20px - var(--safe-area-bottom));
+    padding: 14px 16px calc(20px + var(--safe-area-bottom));
   }
 
   .planning-editor__action-spacer {
