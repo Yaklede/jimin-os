@@ -49,8 +49,17 @@ export function OsShell({
 }: OsShellProps) {
   const [voiceSheetOpen, setVoiceSheetOpen] = useState(false);
   const deferredRefreshing = useDeferredBusy(refreshing);
+  const previousDestinationRef = useRef(destination);
+  const routeDirection = destinationDirection(
+    previousDestinationRef.current,
+    destination,
+  );
   const openChat = () => onNavigate("chat");
   const openVoiceSheet = () => setVoiceSheetOpen(true);
+
+  useEffect(() => {
+    previousDestinationRef.current = destination;
+  }, [destination]);
 
   function openTextInput(value?: string) {
     setVoiceSheetOpen(false);
@@ -177,7 +186,11 @@ export function OsShell({
           )}
         </div>
         <main className="os-content">
-          <div className="os-content__view" key={destination}>
+          <div
+            className="os-content__view"
+            data-route-direction={routeDirection}
+            key={destination}
+          >
             {children}
           </div>
         </main>
@@ -270,6 +283,23 @@ function todayLabel(): string {
     day: "numeric",
     weekday: "short",
   }).format(new Date());
+}
+
+function destinationDirection(
+  previous: OsDestination,
+  next: OsDestination,
+): "backward" | "forward" | "neutral" {
+  const order: Partial<Record<OsDestination, number>> = {
+    home: 0,
+    projects: 1,
+    calendar: 2,
+    meetings: 3,
+  };
+  const previousIndex = order[previous];
+  const nextIndex = order[next];
+  if (previousIndex === undefined || nextIndex === undefined) return "neutral";
+  if (previousIndex === nextIndex) return "neutral";
+  return nextIndex > previousIndex ? "forward" : "backward";
 }
 
 function NavigationButton({

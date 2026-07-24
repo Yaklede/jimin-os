@@ -7201,10 +7201,67 @@ svg {
 
 @keyframes voice-sheet-up {
   from {
-    opacity: 0;
+    opacity: 0.94;
+    transform: translateY(28px);
   }
   to {
     opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes mobile-route-forward {
+  from {
+    opacity: 0.9;
+    transform: translateX(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes mobile-route-backward {
+  from {
+    opacity: 0.9;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes mobile-route-neutral {
+  from {
+    opacity: 0.92;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes mobile-sheet-in {
+  from {
+    opacity: 0.96;
+    transform: translateY(32px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes mobile-disclosure-in {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 
@@ -8202,6 +8259,18 @@ svg {
     scroll-padding-bottom: calc(104px + var(--safe-area-bottom) + 16px);
   }
 
+  .os-content__view[data-route-direction="forward"] {
+    animation: mobile-route-forward 190ms cubic-bezier(0.22, 0.8, 0.3, 1) both;
+  }
+
+  .os-content__view[data-route-direction="backward"] {
+    animation: mobile-route-backward 190ms cubic-bezier(0.22, 0.8, 0.3, 1) both;
+  }
+
+  .os-content__view[data-route-direction="neutral"] {
+    animation: mobile-route-neutral 170ms ease-out both;
+  }
+
   .planning-task-list li[data-highlighted="true"],
   .planning-timeline li[data-highlighted="true"] {
     scroll-margin-top: calc(var(--mobile-top-clearance) + 16px);
@@ -8739,6 +8808,18 @@ svg {
     grid-template-columns: 40px minmax(0, 1fr) auto 20px;
     gap: 10px;
     padding: 12px;
+    transition:
+      background-color 160ms ease,
+      transform 120ms ease;
+  }
+
+  .planning-archive__summary:active {
+    background: var(--surface-subtle);
+    transform: scale(0.985);
+  }
+
+  .planning-archive[open] > .planning-surface {
+    animation: mobile-disclosure-in 180ms ease-out both;
   }
 
   .planning-surface[data-empty="true"] .empty-surface p {
@@ -8897,7 +8978,7 @@ svg {
   }
 
   .planning-editor[open] {
-    animation-duration: 240ms;
+    animation: mobile-sheet-in 240ms cubic-bezier(0.2, 0.8, 0.25, 1) both;
   }
 
   .planning-editor > form {
@@ -8959,6 +9040,8 @@ svg {
   }
 
   .os-mobile-nav .os-nav__button {
+    position: relative;
+    isolation: isolate;
     display: grid;
     justify-items: center;
     gap: 3px;
@@ -8968,6 +9051,32 @@ svg {
     color: var(--faint);
     font-size: 11px;
     text-align: center;
+    transition:
+      color 160ms ease,
+      transform 120ms ease;
+  }
+
+  .os-mobile-nav .os-nav__button::before {
+    position: absolute;
+    z-index: 0;
+    top: 3px;
+    left: 50%;
+    width: 44px;
+    height: 32px;
+    border-radius: 18px;
+    background: var(--accent-tint);
+    content: "";
+    opacity: 0;
+    transform: translateX(-50%) scale(0.72);
+    transition:
+      opacity 160ms ease,
+      transform 180ms cubic-bezier(0.2, 0.8, 0.25, 1);
+  }
+
+  .os-mobile-nav .os-nav__button > svg,
+  .os-mobile-nav .os-nav__button > span {
+    position: relative;
+    z-index: 1;
   }
 
   .os-mobile-nav .os-nav__button:hover,
@@ -8976,9 +9085,23 @@ svg {
     color: var(--accent);
   }
 
+  .os-mobile-nav .os-nav__button[data-active="true"]::before {
+    opacity: 1;
+    transform: translateX(-50%) scale(1);
+  }
+
+  .os-mobile-nav .os-nav__button:active {
+    transform: scale(0.94);
+  }
+
   .os-mobile-nav .os-nav__button svg {
     width: 21px;
     height: 21px;
+    transition: transform 180ms cubic-bezier(0.2, 0.8, 0.25, 1);
+  }
+
+  .os-mobile-nav .os-nav__button[data-active="true"] svg {
+    transform: translateY(-1px) scale(1.05);
   }
 
   .os-mobile-nav > .os-nav__button:nth-child(1) {
@@ -9024,6 +9147,23 @@ svg {
   .os-mobile-nav__assistant svg {
     width: 27px;
     height: 27px;
+  }
+
+  .home-task-list__open,
+  .project-list__item,
+  .meeting-list-item,
+  .planning-row-edit {
+    transition:
+      background-color 160ms ease,
+      border-color 160ms ease,
+      transform 120ms ease;
+  }
+
+  .home-task-list__open:active,
+  .project-list__item:active,
+  .meeting-list-item:active,
+  .planning-row-edit:active {
+    transform: scale(0.985);
   }
 
   .page-heading {
