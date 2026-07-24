@@ -72,8 +72,8 @@ use jimin_storage::{
         WebhookMentionDirectoryUpdate, WebhookProvider,
     },
     work::{
-        DeleteProjectOutcome, NewProject, Project, ProjectStatus, ProjectUpdate, Workspace,
-        WorkspaceScope,
+        DeleteProjectOutcome, NewProject, Project, ProjectManagementMode, ProjectStatus,
+        ProjectUpdate, Workspace, WorkspaceScope,
     },
 };
 use secrecy::{ExposeSecret, SecretString};
@@ -411,6 +411,9 @@ pub struct ProjectResponse {
     title: String,
     objective: Option<String>,
     status: String,
+    management_mode: String,
+    reporting_enabled: bool,
+    stale_threshold_days: i16,
     risk_level: i16,
     next_action: Option<String>,
     due_at: Option<String>,
@@ -420,6 +423,12 @@ pub struct ProjectResponse {
     overdue_task_count: i64,
     unassigned_task_count: i64,
     progress_percent: i16,
+    weekly_created_task_count: i64,
+    weekly_completed_task_count: i64,
+    backlog_delta: i64,
+    stale_task_count: i64,
+    average_cycle_time_hours: i64,
+    on_time_completion_percent: Option<i16>,
     health: String,
     version: i64,
 }
@@ -1138,6 +1147,9 @@ struct CreateProjectRequest {
     workspace_id: uuid::Uuid,
     title: String,
     objective: Option<String>,
+    management_mode: Option<String>,
+    reporting_enabled: Option<bool>,
+    stale_threshold_days: Option<i16>,
     risk_level: i16,
     next_action: Option<String>,
     due_at: Option<String>,
@@ -1149,6 +1161,9 @@ struct UpdateProjectRequest {
     title: String,
     objective: Option<String>,
     status: String,
+    management_mode: Option<String>,
+    reporting_enabled: Option<bool>,
+    stale_threshold_days: Option<i16>,
     risk_level: i16,
     next_action: Option<String>,
     due_at: Option<String>,
@@ -3153,6 +3168,13 @@ async fn create_project(
         },
         None => None,
     };
+    let management_mode = match body.management_mode.as_deref() {
+        Some(value) => match project_management_mode(value) {
+            Some(value) => value,
+            None => return invalid_request_response(request_id),
+        },
+        None => ProjectManagementMode::Completion,
+    };
     let Some(planning) = state.planning() else {
         return unavailable_response(request_id);
     };
@@ -3164,6 +3186,9 @@ async fn create_project(
             workspace_id: body.workspace_id,
             title: body.title,
             objective: body.objective,
+            management_mode,
+            reporting_enabled: body.reporting_enabled.unwrap_or(true),
+            stale_threshold_days: body.stale_threshold_days.unwrap_or(7),
             risk_level: body.risk_level,
             next_action: body.next_action,
             due_at,
@@ -3210,6 +3235,13 @@ async fn update_project(
         "completed" => ProjectStatus::Completed,
         _ => return invalid_request_response(request_id),
     };
+    let management_mode = match body.management_mode.as_deref() {
+        Some(value) => match project_management_mode(value) {
+            Some(value) => Some(value),
+            None => return invalid_request_response(request_id),
+        },
+        None => None,
+    };
     let Some(planning) = state.planning() else {
         return unavailable_response(request_id);
     };
@@ -3221,6 +3253,9 @@ async fn update_project(
             title: body.title,
             objective: body.objective,
             status,
+            management_mode,
+            reporting_enabled: body.reporting_enabled,
+            stale_threshold_days: body.stale_threshold_days,
             risk_level: body.risk_level,
             next_action: body.next_action,
             due_at,
@@ -7323,6 +7358,12 @@ fn project_response(project: Project) -> Result<ProjectResponse, ()> {
             ProjectStatus::Paused => "paused".to_owned(),
             ProjectStatus::Completed => "completed".to_owned(),
         },
+        management_mode: match project.management_mode {
+            ProjectManagementMode::Completion => "completion".to_owned(),
+            ProjectManagementMode::Operation => "operation".to_owned(),
+        },
+        reporting_enabled: project.reporting_enabled,
+        stale_threshold_days: project.stale_threshold_days,
         risk_level: project.risk_level,
         next_action: project.next_action,
         due_at: project
@@ -7335,6 +7376,12 @@ fn project_response(project: Project) -> Result<ProjectResponse, ()> {
         overdue_task_count: project.overdue_task_count,
         unassigned_task_count: project.unassigned_task_count,
         progress_percent: project.progress_percent,
+        weekly_created_task_count: project.weekly_created_task_count,
+        weekly_completed_task_count: project.weekly_completed_task_count,
+        backlog_delta: project.backlog_delta,
+        stale_task_count: project.stale_task_count,
+        average_cycle_time_hours: project.average_cycle_time_hours,
+        on_time_completion_percent: project.on_time_completion_percent,
         health,
         version: project.version,
     })
@@ -7344,6 +7391,30 @@ fn project_health_name(project: &Project) -> &'static str {
     match project.status {
         ProjectStatus::Completed => "completed",
         ProjectStatus::Paused => "paused",
+        ProjectStatus::Active
+            if project.management_mode == ProjectManagementMode::Operation
+                && (project.risk_level >= 2
+                    || project.overdue_task_count > 0
+                    || project.backlog_delta >= 3) =>
+        {
+            "at_risk"
+        }
+        ProjectStatus::Active
+            if project.management_mode == ProjectManagementMode::Operation
+                && (project.stale_task_count > 0 || project.unassigned_task_count > 0) =>
+        {
+            "needs_attention"
+        }
+        ProjectStatus::Active
+            if project.management_mode == ProjectManagementMode::Operation
+                && project.open_task_count == 0
+                && project.weekly_created_task_count == 0 =>
+        {
+            "needs_plan"
+        }
+        ProjectStatus::Active if project.management_mode == ProjectManagementMode::Operation => {
+            "on_track"
+        }
         ProjectStatus::Active
             if project.risk_level >= 2
                 || project.overdue_task_count > 0
@@ -7358,6 +7429,14 @@ fn project_health_name(project: &Project) -> &'static str {
             "needs_plan"
         }
         ProjectStatus::Active => "on_track",
+    }
+}
+
+fn project_management_mode(value: &str) -> Option<ProjectManagementMode> {
+    match value {
+        "completion" => Some(ProjectManagementMode::Completion),
+        "operation" => Some(ProjectManagementMode::Operation),
+        _ => None,
     }
 }
 
@@ -7798,6 +7877,9 @@ mod tests {
             title: "개인 운영체제".to_owned(),
             objective: Some("업무 운영 흐름 완성".to_owned()),
             status: ProjectStatus::Active,
+            management_mode: ProjectManagementMode::Completion,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
             risk_level: 0,
             next_action: None,
             due_at: None,
@@ -7807,9 +7889,46 @@ mod tests {
             overdue_task_count: 0,
             unassigned_task_count: 0,
             progress_percent: 100,
+            weekly_created_task_count: 0,
+            weekly_completed_task_count: 0,
+            backlog_delta: 0,
+            stale_task_count: 0,
+            average_cycle_time_hours: 0,
+            on_time_completion_percent: None,
             version: 1,
         };
         assert_eq!(project_health_name(&project), "ready_to_complete");
+    }
+
+    #[test]
+    fn operation_project_uses_flow_health_instead_of_completion_percent() {
+        let project = Project {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            title: "상시 CS 운영".to_owned(),
+            objective: Some("들어오는 요청을 안정적으로 처리한다.".to_owned()),
+            status: ProjectStatus::Active,
+            management_mode: ProjectManagementMode::Operation,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
+            risk_level: 0,
+            next_action: None,
+            due_at: None,
+            open_task_count: 4,
+            total_task_count: 30,
+            completed_task_count: 26,
+            overdue_task_count: 0,
+            unassigned_task_count: 0,
+            progress_percent: 86,
+            weekly_created_task_count: 5,
+            weekly_completed_task_count: 5,
+            backlog_delta: 0,
+            stale_task_count: 0,
+            average_cycle_time_hours: 16,
+            on_time_completion_percent: Some(100),
+            version: 1,
+        };
+        assert_eq!(project_health_name(&project), "on_track");
     }
 
     #[test]

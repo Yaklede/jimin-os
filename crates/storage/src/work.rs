@@ -37,6 +37,15 @@ pub enum ProjectStatus {
     Completed,
 }
 
+/// How a project should be evaluated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectManagementMode {
+    /// A project with a defined finish line and completion progress.
+    Completion,
+    /// A continuously operated project evaluated by flow and backlog health.
+    Operation,
+}
+
 /// A project and its current work summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
@@ -45,6 +54,9 @@ pub struct Project {
     pub title: String,
     pub objective: Option<String>,
     pub status: ProjectStatus,
+    pub management_mode: ProjectManagementMode,
+    pub reporting_enabled: bool,
+    pub stale_threshold_days: i16,
     pub risk_level: i16,
     pub next_action: Option<String>,
     pub due_at: Option<OffsetDateTime>,
@@ -54,6 +66,12 @@ pub struct Project {
     pub overdue_task_count: i64,
     pub unassigned_task_count: i64,
     pub progress_percent: i16,
+    pub weekly_created_task_count: i64,
+    pub weekly_completed_task_count: i64,
+    pub backlog_delta: i64,
+    pub stale_task_count: i64,
+    pub average_cycle_time_hours: i64,
+    pub on_time_completion_percent: Option<i16>,
     pub version: i64,
 }
 
@@ -64,6 +82,9 @@ pub struct NewProject {
     pub workspace_id: Uuid,
     pub title: String,
     pub objective: Option<String>,
+    pub management_mode: ProjectManagementMode,
+    pub reporting_enabled: bool,
+    pub stale_threshold_days: i16,
     pub risk_level: i16,
     pub next_action: Option<String>,
     pub due_at: Option<OffsetDateTime>,
@@ -78,6 +99,9 @@ pub struct ProjectUpdate {
     pub title: String,
     pub objective: Option<String>,
     pub status: ProjectStatus,
+    pub management_mode: Option<ProjectManagementMode>,
+    pub reporting_enabled: Option<bool>,
+    pub stale_threshold_days: Option<i16>,
     pub risk_level: i16,
     pub next_action: Option<String>,
     pub due_at: Option<OffsetDateTime>,
@@ -112,6 +136,7 @@ impl NewProject {
                 .next_action
                 .as_deref()
                 .is_none_or(|value| valid_text(value, MAX_NEXT_ACTION_CHARS, true))
+            || !(1..=90).contains(&self.stale_threshold_days)
             || !(0..=3).contains(&self.risk_level)
         {
             return Err(StorageError::InvalidConfiguration);
@@ -139,6 +164,9 @@ impl ProjectUpdate {
                 .next_action
                 .as_deref()
                 .is_none_or(|value| valid_text(value, MAX_NEXT_ACTION_CHARS, true))
+            || self
+                .stale_threshold_days
+                .is_some_and(|value| !(1..=90).contains(&value))
             || !(0..=3).contains(&self.risk_level)
             || self.expected_version <= 0
         {
@@ -163,6 +191,9 @@ struct ProjectRow {
     title: String,
     objective: Option<String>,
     status: String,
+    management_mode: String,
+    reporting_enabled: bool,
+    stale_threshold_days: i16,
     risk_level: i16,
     next_action: Option<String>,
     due_at: Option<OffsetDateTime>,
@@ -172,6 +203,12 @@ struct ProjectRow {
     overdue_task_count: i64,
     unassigned_task_count: i64,
     progress_percent: i16,
+    weekly_created_task_count: i64,
+    weekly_completed_task_count: i64,
+    backlog_delta: i64,
+    stale_task_count: i64,
+    average_cycle_time_hours: i64,
+    on_time_completion_percent: Option<i16>,
     version: i64,
 }
 
@@ -203,12 +240,20 @@ impl TryFrom<ProjectRow> for Project {
             "completed" => ProjectStatus::Completed,
             _ => return Err(StorageError::PersistenceUnavailable),
         };
+        let management_mode = match row.management_mode.as_str() {
+            "completion" => ProjectManagementMode::Completion,
+            "operation" => ProjectManagementMode::Operation,
+            _ => return Err(StorageError::PersistenceUnavailable),
+        };
         Ok(Self {
             id: row.id,
             workspace_id: row.workspace_id,
             title: row.title,
             objective: row.objective,
             status,
+            management_mode,
+            reporting_enabled: row.reporting_enabled,
+            stale_threshold_days: row.stale_threshold_days,
             risk_level: row.risk_level,
             next_action: row.next_action,
             due_at: row.due_at,
@@ -218,6 +263,12 @@ impl TryFrom<ProjectRow> for Project {
             overdue_task_count: row.overdue_task_count,
             unassigned_task_count: row.unassigned_task_count,
             progress_percent: row.progress_percent,
+            weekly_created_task_count: row.weekly_created_task_count,
+            weekly_completed_task_count: row.weekly_completed_task_count,
+            backlog_delta: row.backlog_delta,
+            stale_task_count: row.stale_task_count,
+            average_cycle_time_hours: row.average_cycle_time_hours,
+            on_time_completion_percent: row.on_time_completion_percent,
             version: row.version,
         })
     }
@@ -256,24 +307,38 @@ impl Database {
         let row = sqlx::query_as::<_, ProjectRow>(
             "\
             INSERT INTO projects (
-                id, user_id, workspace_id, title, objective, status, risk_level, next_action, due_at
+                id, user_id, workspace_id, title, objective, status,
+                management_mode, reporting_enabled, stale_threshold_days,
+                risk_level, next_action, due_at
             )
-            SELECT $1, $2, workspaces.id, $3, $4, 'active', $5, $6, $7
+            SELECT $1, $2, workspaces.id, $3, $4, 'active',
+                $5, $6, $7, $8, $9, $10
             FROM workspaces
-            WHERE workspaces.id = $8 AND workspaces.user_id = $2
-            RETURNING id, workspace_id, title, objective, status, risk_level, next_action, due_at,
+            WHERE workspaces.id = $11 AND workspaces.user_id = $2
+            RETURNING id, workspace_id, title, objective, status,
+                management_mode, reporting_enabled, stale_threshold_days,
+                risk_level, next_action, due_at,
                 0::BIGINT AS open_task_count,
                 0::BIGINT AS total_task_count,
                 0::BIGINT AS completed_task_count,
                 0::BIGINT AS overdue_task_count,
                 0::BIGINT AS unassigned_task_count,
                 0::SMALLINT AS progress_percent,
+                0::BIGINT AS weekly_created_task_count,
+                0::BIGINT AS weekly_completed_task_count,
+                0::BIGINT AS backlog_delta,
+                0::BIGINT AS stale_task_count,
+                0::BIGINT AS average_cycle_time_hours,
+                NULL::SMALLINT AS on_time_completion_percent,
                 version",
         )
         .bind(project.id)
         .bind(project.user_id)
         .bind(project.title.trim())
         .bind(trim_optional(project.objective.as_ref()))
+        .bind(project_management_mode_name(project.management_mode))
+        .bind(project.reporting_enabled)
+        .bind(project.stale_threshold_days)
         .bind(project.risk_level)
         .bind(trim_optional(project.next_action.as_ref()))
         .bind(project.due_at)
@@ -327,11 +392,16 @@ impl Database {
             SET title = $1,
                 objective = $2,
                 status = $3,
-                risk_level = $4,
-                next_action = $5,
-                due_at = $6
-            WHERE id = $7 AND user_id = $8 AND version = $9
-            RETURNING id, workspace_id, title, objective, status, risk_level, next_action, due_at,
+                management_mode = COALESCE($4, management_mode),
+                reporting_enabled = COALESCE($5, reporting_enabled),
+                stale_threshold_days = COALESCE($6, stale_threshold_days),
+                risk_level = $7,
+                next_action = $8,
+                due_at = $9
+            WHERE id = $10 AND user_id = $11 AND version = $12
+            RETURNING id, workspace_id, title, objective, status,
+                management_mode, reporting_enabled, stale_threshold_days,
+                risk_level, next_action, due_at,
                 (SELECT COUNT(*)::BIGINT FROM tasks
                  WHERE tasks.project_id = projects.id AND tasks.status = 'open') AS open_task_count,
                 (SELECT COUNT(*)::BIGINT
@@ -379,11 +449,53 @@ impl Database {
                           WHERE child.parent_task_id = task.id AND child.status <> 'cancelled'
                       )
                 ), 0::SMALLINT) AS progress_percent,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.created_at >= NOW() - INTERVAL '7 days') AS weekly_created_task_count,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.completed_at >= NOW() - INTERVAL '7 days') AS weekly_completed_task_count,
+                ((SELECT COUNT(*)::BIGINT
+                  FROM tasks AS task
+                  WHERE task.project_id = projects.id
+                    AND task.created_at >= NOW() - INTERVAL '7 days')
+                 -
+                 (SELECT COUNT(*)::BIGINT
+                  FROM tasks AS task
+                  WHERE task.project_id = projects.id
+                    AND task.completed_at >= NOW() - INTERVAL '7 days')) AS backlog_delta,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.status = 'open'
+                   AND task.updated_at < NOW()
+                       - make_interval(days => projects.stale_threshold_days)) AS stale_task_count,
+                COALESCE((
+                    SELECT (
+                        EXTRACT(EPOCH FROM AVG(task.completed_at - task.created_at)) / 3600
+                    )::BIGINT
+                    FROM tasks AS task
+                    WHERE task.project_id = projects.id
+                      AND task.completed_at >= NOW() - INTERVAL '7 days'
+                ), 0::BIGINT) AS average_cycle_time_hours,
+                (SELECT (
+                    COUNT(*) FILTER (WHERE task.completed_at <= task.due_at) * 100
+                    / NULLIF(COUNT(*), 0)
+                )::SMALLINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.completed_at >= NOW() - INTERVAL '7 days'
+                   AND task.due_at IS NOT NULL) AS on_time_completion_percent,
                 version",
         )
         .bind(update.title.trim())
         .bind(trim_optional(update.objective.as_ref()))
         .bind(project_status_name(update.status))
+        .bind(update.management_mode.map(project_management_mode_name))
+        .bind(update.reporting_enabled)
+        .bind(update.stale_threshold_days)
         .bind(update.risk_level)
         .bind(trim_optional(update.next_action.as_ref()))
         .bind(update.due_at)
@@ -532,8 +644,9 @@ impl Database {
             "\
             SELECT
                 projects.id, projects.workspace_id, projects.title, projects.objective,
-                projects.status, projects.risk_level, projects.next_action, projects.due_at,
-                projects.version,
+                projects.status, projects.management_mode, projects.reporting_enabled,
+                projects.stale_threshold_days, projects.risk_level, projects.next_action,
+                projects.due_at, projects.version,
                 (SELECT COUNT(*)::BIGINT FROM tasks AS task
                  WHERE task.project_id = projects.id AND task.status = 'open') AS open_task_count,
                 (SELECT COUNT(*)::BIGINT
@@ -580,7 +693,46 @@ impl Database {
                           SELECT 1 FROM tasks AS child
                           WHERE child.parent_task_id = task.id AND child.status <> 'cancelled'
                       )
-                ), 0::SMALLINT) AS progress_percent
+                ), 0::SMALLINT) AS progress_percent,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.created_at >= NOW() - INTERVAL '7 days') AS weekly_created_task_count,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.completed_at >= NOW() - INTERVAL '7 days') AS weekly_completed_task_count,
+                ((SELECT COUNT(*)::BIGINT
+                  FROM tasks AS task
+                  WHERE task.project_id = projects.id
+                    AND task.created_at >= NOW() - INTERVAL '7 days')
+                 -
+                 (SELECT COUNT(*)::BIGINT
+                  FROM tasks AS task
+                  WHERE task.project_id = projects.id
+                    AND task.completed_at >= NOW() - INTERVAL '7 days')) AS backlog_delta,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.status = 'open'
+                   AND task.updated_at < NOW()
+                       - make_interval(days => projects.stale_threshold_days)) AS stale_task_count,
+                COALESCE((
+                    SELECT (
+                        EXTRACT(EPOCH FROM AVG(task.completed_at - task.created_at)) / 3600
+                    )::BIGINT
+                    FROM tasks AS task
+                    WHERE task.project_id = projects.id
+                      AND task.completed_at >= NOW() - INTERVAL '7 days'
+                ), 0::BIGINT) AS average_cycle_time_hours,
+                (SELECT (
+                    COUNT(*) FILTER (WHERE task.completed_at <= task.due_at) * 100
+                    / NULLIF(COUNT(*), 0)
+                )::SMALLINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.completed_at >= NOW() - INTERVAL '7 days'
+                   AND task.due_at IS NOT NULL) AS on_time_completion_percent
             FROM projects
             WHERE projects.user_id = $1 AND projects.workspace_id = $2
             ORDER BY
@@ -611,8 +763,9 @@ impl Database {
             "\
             SELECT
                 projects.id, projects.workspace_id, projects.title, projects.objective,
-                projects.status, projects.risk_level, projects.next_action, projects.due_at,
-                projects.version,
+                projects.status, projects.management_mode, projects.reporting_enabled,
+                projects.stale_threshold_days, projects.risk_level, projects.next_action,
+                projects.due_at, projects.version,
                 (SELECT COUNT(*)::BIGINT FROM tasks AS task
                  WHERE task.project_id = projects.id AND task.status = 'open') AS open_task_count,
                 (SELECT COUNT(*)::BIGINT
@@ -659,7 +812,46 @@ impl Database {
                           SELECT 1 FROM tasks AS child
                           WHERE child.parent_task_id = task.id AND child.status <> 'cancelled'
                       )
-                ), 0::SMALLINT) AS progress_percent
+                ), 0::SMALLINT) AS progress_percent,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.created_at >= NOW() - INTERVAL '7 days') AS weekly_created_task_count,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.completed_at >= NOW() - INTERVAL '7 days') AS weekly_completed_task_count,
+                ((SELECT COUNT(*)::BIGINT
+                  FROM tasks AS task
+                  WHERE task.project_id = projects.id
+                    AND task.created_at >= NOW() - INTERVAL '7 days')
+                 -
+                 (SELECT COUNT(*)::BIGINT
+                  FROM tasks AS task
+                  WHERE task.project_id = projects.id
+                    AND task.completed_at >= NOW() - INTERVAL '7 days')) AS backlog_delta,
+                (SELECT COUNT(*)::BIGINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.status = 'open'
+                   AND task.updated_at < NOW()
+                       - make_interval(days => projects.stale_threshold_days)) AS stale_task_count,
+                COALESCE((
+                    SELECT (
+                        EXTRACT(EPOCH FROM AVG(task.completed_at - task.created_at)) / 3600
+                    )::BIGINT
+                    FROM tasks AS task
+                    WHERE task.project_id = projects.id
+                      AND task.completed_at >= NOW() - INTERVAL '7 days'
+                ), 0::BIGINT) AS average_cycle_time_hours,
+                (SELECT (
+                    COUNT(*) FILTER (WHERE task.completed_at <= task.due_at) * 100
+                    / NULLIF(COUNT(*), 0)
+                )::SMALLINT
+                 FROM tasks AS task
+                 WHERE task.project_id = projects.id
+                   AND task.completed_at >= NOW() - INTERVAL '7 days'
+                   AND task.due_at IS NOT NULL) AS on_time_completion_percent
             FROM projects
             WHERE projects.user_id = $1
             ORDER BY
@@ -728,6 +920,13 @@ const fn project_status_name(status: ProjectStatus) -> &'static str {
         ProjectStatus::Active => "active",
         ProjectStatus::Paused => "paused",
         ProjectStatus::Completed => "completed",
+    }
+}
+
+const fn project_management_mode_name(mode: ProjectManagementMode) -> &'static str {
+    match mode {
+        ProjectManagementMode::Completion => "completion",
+        ProjectManagementMode::Operation => "operation",
     }
 }
 

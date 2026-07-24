@@ -123,4 +123,13 @@ before a brief delivery is written may restore the previous item-type
 constraint; after that point use the verified pre-migration backup so the
 delivery audit is not discarded.
 
+Migration `0035_project_operating_modes.sql` separates projects with a defined
+finish line from continuously operated projects. Existing projects default to
+completion mode so their current progress remains unchanged until the owner
+chooses operation mode. Apply it to an empty database and a restored version-34
+backup, then verify the new constraints and
+`jimin_schema_metadata.schema_version = 35`. Rollback after a project mode is
+changed requires the verified pre-migration backup so the owner's management
+choice is not lost.
+
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.

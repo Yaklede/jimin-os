@@ -3627,6 +3627,15 @@ svg {
   font-weight: 500;
 }
 
+.project-create-form label > small,
+.project-edit-form label > small,
+.project-reporting-toggle small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
 .project-create-form input,
 .project-create-form textarea,
 .project-create-form select,
@@ -3684,6 +3693,26 @@ svg {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.project-reporting-toggle {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: 12px;
+  background: var(--surface-subtle);
+}
+
+.project-reporting-toggle input {
+  width: 18px;
+  min-height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.project-reporting-toggle small {
+  grid-column: 2;
 }
 
 .goals-panel {
@@ -5275,6 +5304,78 @@ svg {
 .project-progress__facts {
   justify-content: flex-start;
   flex-wrap: wrap;
+}
+
+.project-operation-health {
+  display: grid;
+  gap: 12px;
+}
+
+.project-operation-health > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.project-operation-health > header > div {
+  display: grid;
+  gap: 3px;
+}
+
+.project-operation-health > header span,
+.project-operation-health > header small,
+.project-operation-health dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.project-operation-health > header strong {
+  color: var(--text-strong);
+  font-size: 14px;
+}
+
+.project-operation-health[data-health="at_risk"] > header strong,
+.project-operation-health[data-health="needs_attention"] > header strong {
+  color: var(--warning);
+}
+
+.project-operation-health dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  overflow: hidden;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-subtle);
+}
+
+.project-operation-health dl > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 12px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.project-operation-health dl > div:nth-child(4n) {
+  border-right: 0;
+}
+
+.project-operation-health dl > div:nth-last-child(-n + 4) {
+  border-bottom: 0;
+}
+
+.project-operation-health dd {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.project-operation-health [data-attention="true"] dd {
+  color: var(--warning);
 }
 
 .project-edit-form {
@@ -8525,6 +8626,26 @@ svg {
   .project-create-form__split,
   .project-edit-form__fields {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .project-operation-health dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .project-operation-health dl > div:nth-child(4n) {
+    border-right: 1px solid var(--border);
+  }
+
+  .project-operation-health dl > div:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .project-operation-health dl > div:nth-last-child(-n + 4) {
+    border-bottom: 1px solid var(--border);
+  }
+
+  .project-operation-health dl > div:nth-last-child(-n + 2) {
+    border-bottom: 0;
   }
 
   .projects-list {

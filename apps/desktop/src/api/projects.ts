@@ -13,6 +13,9 @@ export interface Project {
   title: string;
   objective: string | null;
   status: "active" | "paused" | "completed";
+  managementMode: "completion" | "operation";
+  reportingEnabled: boolean;
+  staleThresholdDays: number;
   riskLevel: number;
   nextAction: string | null;
   dueAt: string | null;
@@ -22,9 +25,16 @@ export interface Project {
   overdueTaskCount: number;
   unassignedTaskCount: number;
   progressPercent: number;
+  weeklyCreatedTaskCount: number;
+  weeklyCompletedTaskCount: number;
+  backlogDelta: number;
+  staleTaskCount: number;
+  averageCycleTimeHours: number;
+  onTimeCompletionPercent: number | null;
   health:
     | "on_track"
     | "at_risk"
+    | "needs_attention"
     | "needs_plan"
     | "ready_to_complete"
     | "paused"
@@ -72,6 +82,9 @@ export async function createProject(
     workspaceId: string;
     title: string;
     objective?: string;
+    managementMode: Project["managementMode"];
+    reportingEnabled: boolean;
+    staleThresholdDays: number;
     riskLevel: number;
     nextAction?: string;
     dueAt?: string;
@@ -85,6 +98,9 @@ export async function createProject(
       workspaceId: input.workspaceId,
       title: input.title,
       objective: input.objective || null,
+      managementMode: input.managementMode,
+      reportingEnabled: input.reportingEnabled,
+      staleThresholdDays: input.staleThresholdDays,
       riskLevel: input.riskLevel,
       nextAction: input.nextAction || null,
       dueAt: input.dueAt || null,
@@ -101,6 +117,9 @@ export async function updateProject(
     title: string;
     objective?: string;
     status: Project["status"];
+    managementMode: Project["managementMode"];
+    reportingEnabled: boolean;
+    staleThresholdDays: number;
     riskLevel: number;
     nextAction?: string;
     dueAt?: string;
@@ -114,6 +133,9 @@ export async function updateProject(
       title: input.title,
       objective: input.objective || null,
       status: input.status,
+      managementMode: input.managementMode,
+      reportingEnabled: input.reportingEnabled,
+      staleThresholdDays: input.staleThresholdDays,
       riskLevel: input.riskLevel,
       nextAction: input.nextAction || null,
       dueAt: input.dueAt || null,

@@ -20,7 +20,7 @@ pub mod sync;
 pub mod webhook;
 pub mod work;
 
-pub const EXPECTED_SCHEMA_VERSION: i64 = 34;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 35;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 

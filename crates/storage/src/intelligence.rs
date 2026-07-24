@@ -1667,7 +1667,7 @@ mod tests {
     };
     use crate::{
         planning::{ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus},
-        work::{Project, ProjectStatus},
+        work::{Project, ProjectManagementMode, ProjectStatus},
     };
     use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
     use uuid::Uuid;
@@ -1800,6 +1800,9 @@ mod tests {
             title: "개인 운영체제".to_owned(),
             objective: Some("실행 흐름 완성".to_owned()),
             status: ProjectStatus::Active,
+            management_mode: ProjectManagementMode::Completion,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
             risk_level: 1,
             next_action: Some("늦어진 하위 일 처리".to_owned()),
             due_at: None,
@@ -1809,6 +1812,12 @@ mod tests {
             overdue_task_count: 1,
             unassigned_task_count: 0,
             progress_percent: 50,
+            weekly_created_task_count: 0,
+            weekly_completed_task_count: 0,
+            backlog_delta: 0,
+            stale_task_count: 0,
+            average_cycle_time_hours: 0,
+            on_time_completion_percent: None,
             version: 1,
         };
         let observation = project_attention_observation(&project, OffsetDateTime::now_utc())

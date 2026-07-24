@@ -85,6 +85,9 @@ type ProjectsWorkspaceProps = {
   onCreateProject(input: {
     title: string;
     objective?: string;
+    managementMode: Project["managementMode"];
+    reportingEnabled: boolean;
+    staleThresholdDays: number;
     riskLevel: number;
     nextAction?: string;
     dueAt?: string;
@@ -111,6 +114,9 @@ type ProjectsWorkspaceProps = {
       title: string;
       objective?: string;
       status: Project["status"];
+      managementMode: Project["managementMode"];
+      reportingEnabled: boolean;
+      staleThresholdDays: number;
       riskLevel: number;
       nextAction?: string;
       dueAt?: string;
@@ -226,6 +232,10 @@ export function ProjectsWorkspace({
   const [title, setTitle] = useState("");
   const [objective, setObjective] = useState("");
   const [nextAction, setNextAction] = useState("");
+  const [managementMode, setManagementMode] =
+    useState<Project["managementMode"]>("completion");
+  const [reportingEnabled, setReportingEnabled] = useState(true);
+  const [staleThresholdDays, setStaleThresholdDays] = useState("7");
   const [riskLevel, setRiskLevel] = useState("0");
   const [dueDate, setDueDate] = useState("");
   const [taskTitle, setTaskTitle] = useState("");
@@ -291,6 +301,9 @@ export function ProjectsWorkspace({
       await onCreateProject({
         title: title.trim(),
         objective: objective.trim() || undefined,
+        managementMode,
+        reportingEnabled,
+        staleThresholdDays: Number(staleThresholdDays),
         riskLevel: Number(riskLevel),
         nextAction: nextAction.trim() || undefined,
         dueAt: dateInputToIso(dueDate),
@@ -298,6 +311,9 @@ export function ProjectsWorkspace({
       setTitle("");
       setObjective("");
       setNextAction("");
+      setManagementMode("completion");
+      setReportingEnabled(true);
+      setStaleThresholdDays("7");
       setRiskLevel("0");
       setDueDate("");
       setFormOpen(false);
@@ -445,6 +461,76 @@ export function ProjectsWorkspace({
             />
           </label>
           <div className="project-create-form__split">
+            <label htmlFor="project-management-mode">
+              <span>{copy.projects.managementModeLabel}</span>
+              <select
+                id="project-management-mode"
+                value={managementMode}
+                onChange={(event) =>
+                  setManagementMode(
+                    event.target.value as Project["managementMode"],
+                  )
+                }
+                disabled={saving}
+              >
+                <option value="completion">
+                  {copy.projects.managementModes.completion}
+                </option>
+                <option value="operation">
+                  {copy.projects.managementModes.operation}
+                </option>
+              </select>
+              <small>
+                {copy.projects.managementModeDescription[managementMode]}
+              </small>
+            </label>
+            {managementMode === "operation" ? (
+              <label htmlFor="project-stale-threshold">
+                <span>{copy.projects.staleThresholdLabel}</span>
+                <select
+                  id="project-stale-threshold"
+                  value={staleThresholdDays}
+                  onChange={(event) =>
+                    setStaleThresholdDays(event.target.value)
+                  }
+                  disabled={saving}
+                >
+                  {[3, 5, 7, 14, 30].map((days) => (
+                    <option value={days} key={days}>
+                      {copy.projects.staleThresholdOption(days)}
+                    </option>
+                  ))}
+                </select>
+                <small>{copy.projects.staleThresholdDescription}</small>
+              </label>
+            ) : (
+              <label className="project-reporting-toggle">
+                <input
+                  type="checkbox"
+                  checked={reportingEnabled}
+                  onChange={(event) =>
+                    setReportingEnabled(event.target.checked)
+                  }
+                  disabled={saving}
+                />
+                <span>{copy.projects.weeklyReportingLabel}</span>
+                <small>{copy.projects.weeklyReportingDescription}</small>
+              </label>
+            )}
+          </div>
+          {managementMode === "operation" && (
+            <label className="project-reporting-toggle">
+              <input
+                type="checkbox"
+                checked={reportingEnabled}
+                onChange={(event) => setReportingEnabled(event.target.checked)}
+                disabled={saving}
+              />
+              <span>{copy.projects.weeklyReportingLabel}</span>
+              <small>{copy.projects.weeklyReportingDescription}</small>
+            </label>
+          )}
+          <div className="project-create-form__split">
             <label htmlFor="project-risk-level">
               <span>{copy.projects.riskLabel}</span>
               <select
@@ -558,9 +644,14 @@ export function ProjectsWorkspace({
                       </span>
                       <span className="project-list__meta">
                         <span>
-                          {copy.projects.projectProgress(
-                            project.progressPercent,
-                          )}
+                          {project.managementMode === "completion"
+                            ? copy.projects.projectProgress(
+                                project.progressPercent,
+                              )
+                            : copy.projects.operationSummary(
+                                project.openTaskCount,
+                                project.backlogDelta,
+                              )}
                         </span>
                         <small>
                           {copy.projects.openTaskCount(project.openTaskCount)}
@@ -683,70 +774,24 @@ export function ProjectsWorkspace({
                     {statusLabel(selectedProject.status)}
                   </span>
                   <span>
+                    <strong>{copy.projects.managementModeLabel}</strong>
+                    {
+                      copy.projects.managementModes[
+                        selectedProject.managementMode
+                      ]
+                    }
+                  </span>
+                  <span>
                     <CalendarDays aria-hidden="true" />
                     <strong>{copy.projects.dueDateLabel}</strong>
                     {formatDueDate(selectedProject.dueAt)}
                   </span>
                 </div>
-                <section
-                  className="project-progress"
-                  aria-labelledby="project-progress-title"
-                  data-health={selectedProject.health}
-                >
-                  <div className="project-progress__heading">
-                    <div>
-                      <span id="project-progress-title">
-                        {copy.projects.progressTitle}
-                      </span>
-                      <strong>
-                        {copy.projects.projectHealth[selectedProject.health]}
-                      </strong>
-                    </div>
-                    <strong>
-                      {copy.projects.progressPercent(
-                        selectedProject.progressPercent,
-                      )}
-                    </strong>
-                  </div>
-                  <div
-                    className="project-progress__track"
-                    role="progressbar"
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-valuenow={selectedProject.progressPercent}
-                  >
-                    <span
-                      style={{
-                        width: `${Math.max(
-                          0,
-                          Math.min(100, selectedProject.progressPercent),
-                        )}%`,
-                      }}
-                    />
-                  </div>
-                  <div className="project-progress__facts">
-                    <span>
-                      {copy.projects.progressSummary(
-                        selectedProject.completedTaskCount,
-                        selectedProject.totalTaskCount,
-                      )}
-                    </span>
-                    {selectedProject.overdueTaskCount > 0 && (
-                      <span data-attention="true">
-                        {copy.projects.overdueTaskCount(
-                          selectedProject.overdueTaskCount,
-                        )}
-                      </span>
-                    )}
-                    {selectedProject.unassignedTaskCount > 0 && (
-                      <span>
-                        {copy.projects.unassignedTaskCount(
-                          selectedProject.unassignedTaskCount,
-                        )}
-                      </span>
-                    )}
-                  </div>
-                </section>
+                {selectedProject.managementMode === "completion" ? (
+                  <CompletionProjectProgress project={selectedProject} />
+                ) : (
+                  <OperationProjectHealth project={selectedProject} />
+                )}
                 {editingProjectId === selectedProject.id ? (
                   <ProjectEditForm
                     key={`${selectedProject.id}:${selectedProject.version}`}
@@ -1200,6 +1245,127 @@ export function taskHierarchyRows(
   });
 }
 
+function CompletionProjectProgress({ project }: { project: Project }) {
+  return (
+    <section
+      className="project-progress"
+      aria-labelledby="project-progress-title"
+      data-health={project.health}
+    >
+      <div className="project-progress__heading">
+        <div>
+          <span id="project-progress-title">{copy.projects.progressTitle}</span>
+          <strong>{copy.projects.projectHealth[project.health]}</strong>
+        </div>
+        <strong>
+          {copy.projects.progressPercent(project.progressPercent)}
+        </strong>
+      </div>
+      <div
+        className="project-progress__track"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={project.progressPercent}
+      >
+        <span
+          style={{
+            width: `${Math.max(0, Math.min(100, project.progressPercent))}%`,
+          }}
+        />
+      </div>
+      <div className="project-progress__facts">
+        <span>
+          {copy.projects.progressSummary(
+            project.completedTaskCount,
+            project.totalTaskCount,
+          )}
+        </span>
+        {project.overdueTaskCount > 0 && (
+          <span data-attention="true">
+            {copy.projects.overdueTaskCount(project.overdueTaskCount)}
+          </span>
+        )}
+        {project.unassignedTaskCount > 0 && (
+          <span>
+            {copy.projects.unassignedTaskCount(project.unassignedTaskCount)}
+          </span>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function OperationProjectHealth({ project }: { project: Project }) {
+  const metrics = [
+    {
+      label: copy.projects.operationMetrics.open,
+      value: `${project.openTaskCount}`,
+      attention: false,
+    },
+    {
+      label: copy.projects.operationMetrics.inflow,
+      value: `${project.weeklyCreatedTaskCount}`,
+      attention: false,
+    },
+    {
+      label: copy.projects.operationMetrics.completed,
+      value: `${project.weeklyCompletedTaskCount}`,
+      attention: false,
+    },
+    {
+      label: copy.projects.operationMetrics.backlog,
+      value: copy.projects.backlogDelta(project.backlogDelta),
+      attention: project.backlogDelta > 0,
+    },
+    {
+      label: copy.projects.operationMetrics.overdue,
+      value: `${project.overdueTaskCount}`,
+      attention: project.overdueTaskCount > 0,
+    },
+    {
+      label: copy.projects.operationMetrics.stale,
+      value: `${project.staleTaskCount}`,
+      attention: project.staleTaskCount > 0,
+    },
+    {
+      label: copy.projects.operationMetrics.cycleTime,
+      value: copy.projects.cycleTime(project.averageCycleTimeHours),
+      attention: false,
+    },
+    {
+      label: copy.projects.operationMetrics.onTime,
+      value: copy.projects.onTimeCompletion(project.onTimeCompletionPercent),
+      attention: (project.onTimeCompletionPercent ?? 100) < 80,
+    },
+  ];
+  return (
+    <section
+      className="project-operation-health"
+      aria-labelledby="project-operation-health-title"
+      data-health={project.health}
+    >
+      <header>
+        <div>
+          <span id="project-operation-health-title">
+            {copy.projects.operationHealthTitle}
+          </span>
+          <strong>{copy.projects.projectHealth[project.health]}</strong>
+        </div>
+        <small>{copy.projects.operationPeriod}</small>
+      </header>
+      <dl>
+        {metrics.map((metric) => (
+          <div key={metric.label} data-attention={metric.attention}>
+            <dt>{metric.label}</dt>
+            <dd>{metric.value}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  );
+}
+
 function ProjectEditForm({
   project,
   saving,
@@ -1214,6 +1380,9 @@ function ProjectEditForm({
     title: string;
     objective?: string;
     status: Project["status"];
+    managementMode: Project["managementMode"];
+    reportingEnabled: boolean;
+    staleThresholdDays: number;
     riskLevel: number;
     nextAction?: string;
     dueAt?: string;
@@ -1223,6 +1392,15 @@ function ProjectEditForm({
   const [title, setTitle] = useState(project.title);
   const [objective, setObjective] = useState(project.objective ?? "");
   const [status, setStatus] = useState<Project["status"]>(project.status);
+  const [managementMode, setManagementMode] = useState<
+    Project["managementMode"]
+  >(project.managementMode);
+  const [reportingEnabled, setReportingEnabled] = useState(
+    project.reportingEnabled,
+  );
+  const [staleThresholdDays, setStaleThresholdDays] = useState(
+    String(project.staleThresholdDays),
+  );
   const [riskLevel, setRiskLevel] = useState(String(project.riskLevel));
   const [nextAction, setNextAction] = useState(project.nextAction ?? "");
   const [dueDate, setDueDate] = useState(isoToDateInput(project.dueAt));
@@ -1260,6 +1438,9 @@ function ProjectEditForm({
       title: title.trim(),
       objective: objective.trim() || undefined,
       status,
+      managementMode,
+      reportingEnabled,
+      staleThresholdDays: Number(staleThresholdDays),
       riskLevel: Number(riskLevel),
       nextAction: nextAction.trim() || undefined,
       dueAt: dateInputToIso(dueDate),
@@ -1329,6 +1510,53 @@ function ProjectEditForm({
           onChange={(event) => setNextAction(event.target.value)}
         />
       </label>
+      <div className="project-edit-form__fields">
+        <label htmlFor="project-edit-management-mode">
+          <span>{copy.projects.managementModeLabel}</span>
+          <select
+            id="project-edit-management-mode"
+            value={managementMode}
+            disabled={busy}
+            onChange={(event) =>
+              setManagementMode(event.target.value as Project["managementMode"])
+            }
+          >
+            <option value="completion">
+              {copy.projects.managementModes.completion}
+            </option>
+            <option value="operation">
+              {copy.projects.managementModes.operation}
+            </option>
+          </select>
+        </label>
+        {managementMode === "operation" && (
+          <label htmlFor="project-edit-stale-threshold">
+            <span>{copy.projects.staleThresholdLabel}</span>
+            <select
+              id="project-edit-stale-threshold"
+              value={staleThresholdDays}
+              disabled={busy}
+              onChange={(event) => setStaleThresholdDays(event.target.value)}
+            >
+              {[3, 5, 7, 14, 30].map((days) => (
+                <option value={days} key={days}>
+                  {copy.projects.staleThresholdOption(days)}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        <label className="project-reporting-toggle">
+          <input
+            type="checkbox"
+            checked={reportingEnabled}
+            disabled={busy}
+            onChange={(event) => setReportingEnabled(event.target.checked)}
+          />
+          <span>{copy.projects.weeklyReportingLabel}</span>
+          <small>{copy.projects.weeklyReportingDescription}</small>
+        </label>
+      </div>
       <div className="project-edit-form__fields">
         <label htmlFor="project-edit-status">
           <span>{copy.projects.statusLabel}</span>

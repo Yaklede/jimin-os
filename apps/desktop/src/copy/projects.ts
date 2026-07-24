@@ -24,6 +24,22 @@ export const projectCopy = {
   noDueDate: "정하지 않음",
   statusLabel: "프로젝트 상태",
   currentStateLabel: "프로젝트 현재 상태",
+  managementModeLabel: "관리 방식",
+  managementModes: {
+    completion: "완료형",
+    operation: "운영형",
+  },
+  managementModeDescription: {
+    completion: "끝나는 조건이 있는 프로젝트로 진행률을 확인해요.",
+    operation: "계속 들어오는 일을 처리량과 밀린 일로 확인해요.",
+  },
+  weeklyReportingLabel: "주간 리포트 받기",
+  weeklyReportingDescription:
+    "매주 처리 흐름과 다음 주 우선순위를 함께 정리해요.",
+  staleThresholdLabel: "정체된 일 기준",
+  staleThresholdDescription:
+    "이 기간 동안 바뀌지 않은 열린 일을 따로 알려드려요.",
+  staleThresholdOption: (days: number) => `${days}일 동안 변화 없음`,
   statuses: {
     active: "진행 중",
     paused: "잠시 멈춤",
@@ -45,11 +61,35 @@ export const projectCopy = {
   projectHealth: {
     on_track: "순조롭게 진행 중",
     at_risk: "지금 확인이 필요해요",
+    needs_attention: "정리가 필요한 일이 있어요",
     needs_plan: "다음 계획이 필요해요",
     ready_to_complete: "완료 여부를 확인해 주세요",
     paused: "잠시 멈춘 상태",
     completed: "완료한 프로젝트",
   },
+  operationHealthTitle: "운영 상태",
+  operationPeriod: "최근 7일",
+  operationSummary: (open: number, backlogDelta: number) =>
+    `열린 일 ${open}개 · 밀린 일 ${backlogDelta > 0 ? `+${backlogDelta}` : backlogDelta}`,
+  operationMetrics: {
+    open: "열린 일",
+    inflow: "새로 들어온 일",
+    completed: "완료한 일",
+    backlog: "밀린 일 변화",
+    overdue: "기한 지난 일",
+    stale: "정체된 일",
+    cycleTime: "평균 처리 시간",
+    onTime: "기한 내 완료",
+  },
+  backlogDelta: (value: number) =>
+    value > 0 ? `+${value}` : value === 0 ? "변화 없음" : `${value}`,
+  cycleTime: (hours: number) => {
+    if (hours <= 0) return "기록 없음";
+    if (hours < 24) return `${hours}시간`;
+    return `${Math.round(hours / 24)}일`;
+  },
+  onTimeCompletion: (value: number | null) =>
+    value === null ? "기록 없음" : `${value}%`,
   noNextAction: "다음 행동을 정해 보세요.",
   emptyTitle: "아직 프로젝트가 없어요",
   emptyDescription: "반복해서 챙길 일을 프로젝트로 묶어 보세요.",

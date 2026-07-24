@@ -2302,6 +2302,9 @@ export default function App() {
   async function createWorkspaceProject(input: {
     title: string;
     objective?: string;
+    managementMode: Project["managementMode"];
+    reportingEnabled: boolean;
+    staleThresholdDays: number;
     riskLevel: number;
     nextAction?: string;
     dueAt?: string;
@@ -2389,6 +2392,9 @@ export default function App() {
       title: string;
       objective?: string;
       status: Project["status"];
+      managementMode: Project["managementMode"];
+      reportingEnabled: boolean;
+      staleThresholdDays: number;
       riskLevel: number;
       nextAction?: string;
       dueAt?: string;
