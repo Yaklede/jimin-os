@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   deleteProject,
   fetchWeeklyReport,
+  fetchWeeklyReportHistory,
   type Project,
   type WeeklyReport,
   updateProject,
@@ -54,6 +55,51 @@ describe("project client", () => {
     expect(requestedUrl.searchParams.get("projectId")).toBe(
       "019f68cb-9400-7000-8000-000000000001",
     );
+  });
+
+  it("loads bounded weekly report history for comparison", async () => {
+    const response = {
+      items: [
+        {
+          id: "019f68cb-9400-7000-8000-000000000003",
+          generatedAt: "2026-07-24T09:00:00Z",
+          report: {
+            workspaceId: "019f68cb-9400-7000-8000-000000000002",
+            periodStart: "2026-07-19T15:00:00Z",
+            periodEnd: "2026-07-24T09:00:00Z",
+            createdTaskCount: 5,
+            completedTaskCount: 4,
+            backlogStartCount: 3,
+            backlogEndCount: 4,
+            backlogDelta: 1,
+            overdueTaskCount: 1,
+            staleTaskCount: 0,
+            unassignedTaskCount: 0,
+            projects: [],
+          },
+        },
+      ],
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchWeeklyReportHistory(
+        "https://jimin-os.example/",
+        "access",
+        response.items[0]!.report.workspaceId,
+        6,
+      ),
+    ).resolves.toEqual(response.items);
+
+    const requestedUrl = new URL(String(fetchMock.mock.calls[0]?.[0]));
+    expect(requestedUrl.pathname).toBe("/v1/reports/weekly/history");
+    expect(requestedUrl.searchParams.get("limit")).toBe("6");
   });
 
   it("replaces mutable project fields with optimistic version matching", async () => {

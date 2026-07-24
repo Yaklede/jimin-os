@@ -71,7 +71,7 @@ use jimin_storage::{
         RetryWebhookDeliveryOutcome, WebhookDelivery, WebhookDestinationUpdate,
         WebhookMentionDirectoryUpdate, WebhookProvider,
     },
-    weekly_report::{WeeklyProjectReport, WeeklyWorkspaceReport},
+    weekly_report::{WeeklyProjectReport, WeeklyReportSnapshot, WeeklyWorkspaceReport},
     work::{
         DeleteProjectOutcome, NewProject, Project, ProjectManagementMode, ProjectStatus,
         ProjectUpdate, Workspace, WorkspaceScope,
@@ -477,6 +477,21 @@ pub struct WeeklyReportResponse {
     stale_task_count: i64,
     unassigned_task_count: i64,
     projects: Vec<WeeklyProjectReportResponse>,
+}
+
+/// One stored weekly report revision for week-over-week review.
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WeeklyReportSnapshotResponse {
+    id: uuid::Uuid,
+    generated_at: String,
+    report: WeeklyReportResponse,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WeeklyReportHistoryResponse {
+    items: Vec<WeeklyReportSnapshotResponse>,
 }
 
 /// A desired outcome that gives projects and daily work a clear direction.
@@ -1292,6 +1307,13 @@ struct WeeklyReportQuery {
 
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct WeeklyReportHistoryQuery {
+    workspace_id: uuid::Uuid,
+    limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct TaskListQuery {
     project_id: Option<uuid::Uuid>,
     status: Option<String>,
@@ -1427,6 +1449,7 @@ pub(crate) fn error_response(
         update_goal,
         list_projects,
         get_weekly_report,
+        get_weekly_report_history,
         create_project,
         update_project,
         delete_project,
@@ -1511,6 +1534,8 @@ pub(crate) fn error_response(
         ProjectListResponse,
         WeeklyProjectReportResponse,
         WeeklyReportResponse,
+        WeeklyReportSnapshotResponse,
+        WeeklyReportHistoryResponse,
         ProjectWebhookResponse,
         ProjectWebhookListResponse,
         WebhookDeliveryResponse,
@@ -1559,6 +1584,7 @@ pub(crate) fn error_response(
         AgentTurnInput,
         ProjectListQuery,
         WeeklyReportQuery,
+        WeeklyReportHistoryQuery,
         TaskListQuery,
         CompleteTaskRequest,
         VoiceCommandRequest,
@@ -1621,6 +1647,7 @@ pub fn router(state: ApiState) -> Router {
         .merge(goal_router())
         .route("/v1/projects", get(list_projects).post(create_project))
         .route("/v1/reports/weekly", get(get_weekly_report))
+        .route("/v1/reports/weekly/history", get(get_weekly_report_history))
         .route(
             "/v1/projects/{project_id}",
             axum::routing::put(update_project).delete(delete_project),
@@ -1864,13 +1891,20 @@ pub fn spawn_work_brief_worker(state: &ApiState) -> Option<tokio::task::JoinHand
         loop {
             if let Ok(user_ids) = planning.active_work_brief_user_ids().await {
                 for user_id in user_ids {
+                    let now = OffsetDateTime::now_utc();
+                    if planning.refresh_work_brief(user_id, now).await.is_err() {
+                        warn!(
+                            event = "work_brief.periodic_refresh_failed",
+                            error_code = "storage.persistence_unavailable"
+                        );
+                    }
                     if planning
-                        .refresh_work_brief(user_id, OffsetDateTime::now_utc())
+                        .refresh_weekly_report_snapshots_for_user(user_id, now)
                         .await
                         .is_err()
                     {
                         warn!(
-                            event = "work_brief.periodic_refresh_failed",
+                            event = "weekly_report.periodic_refresh_failed",
                             error_code = "storage.persistence_unavailable"
                         );
                     }
@@ -3253,6 +3287,53 @@ async fn get_weekly_report(
         .await
     {
         Ok(report) => Json(weekly_report_response(report)).into_response(),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/reports/weekly/history",
+    tag = "work",
+    params(
+        ("workspaceId" = String, Query),
+        ("limit" = Option<i64>, Query)
+    ),
+    responses(
+        (status = 200, body = WeeklyReportHistoryResponse),
+        (status = 400),
+        (status = 401),
+        (status = 503)
+    )
+)]
+async fn get_weekly_report_history(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    axum::extract::Query(query): axum::extract::Query<WeeklyReportHistoryQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .weekly_report_history_for_workspace(
+            principal.identity().user_id(),
+            query.workspace_id,
+            query.limit.unwrap_or(8),
+        )
+        .await
+    {
+        Ok(snapshots) => Json(WeeklyReportHistoryResponse {
+            items: snapshots
+                .into_iter()
+                .map(weekly_report_snapshot_response)
+                .collect(),
+        })
+        .into_response(),
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -7532,6 +7613,17 @@ fn weekly_report_response(report: WeeklyWorkspaceReport) -> WeeklyReportResponse
     }
 }
 
+fn weekly_report_snapshot_response(snapshot: WeeklyReportSnapshot) -> WeeklyReportSnapshotResponse {
+    WeeklyReportSnapshotResponse {
+        id: snapshot.id,
+        generated_at: snapshot
+            .generated_at
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| snapshot.generated_at.unix_timestamp().to_string()),
+        report: weekly_report_response(snapshot.report),
+    }
+}
+
 fn weekly_project_report_response(report: WeeklyProjectReport) -> WeeklyProjectReportResponse {
     let backlog_delta = report.backlog_end_count - report.backlog_start_count;
     let health = if report.overdue_task_count > 0 || backlog_delta >= 3 {
@@ -8447,6 +8539,7 @@ mod tests {
                 "/v1/recommendations",
                 "/v1/recommendations/{recommendation_id}/decisions",
                 "/v1/reports/weekly",
+                "/v1/reports/weekly/history",
                 "/v1/schedule-entries",
                 "/v1/schedule-entries/{schedule_entry_id}",
                 "/v1/sync/changes",
@@ -8476,6 +8569,11 @@ mod tests {
                 .is_some()
         );
         assert!(document.paths.paths["/v1/reports/weekly"].get.is_some());
+        assert!(
+            document.paths.paths["/v1/reports/weekly/history"]
+                .get
+                .is_some()
+        );
         for path in [
             "/v1/goals",
             "/v1/schedule-entries",
@@ -8716,7 +8814,7 @@ mod tests {
     #[tokio::test]
     async fn weekly_report_endpoint_requires_a_live_signed_session() {
         let (state, _, _) = signed_auth_state(true);
-        let response = router(state)
+        let response = router(state.clone())
             .oneshot(
                 Request::builder()
                     .uri("/v1/reports/weekly?workspaceId=019f68cb-9400-7000-8000-000000000000")
@@ -8727,6 +8825,20 @@ mod tests {
             .expect("handler should respond");
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let history_response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/v1/reports/weekly/history?workspaceId=019f68cb-9400-7000-8000-000000000000",
+                    )
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+
+        assert_eq!(history_response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

@@ -137,6 +137,16 @@ export const projectCopy = {
     `이번 주 밀린 일이 ${count}개 늘었어요.`,
   weeklyFocusClear: "기한·정체·담당자 누락 없이 안정적으로 운영 중이에요.",
   weeklyOpenTasks: "열린 일 확인하기",
+  weeklyHistoryTitle: "지난 주간 리포트",
+  weeklyHistoryDescription: "지난 흐름과 비교해 달라진 점을 확인해요.",
+  weeklyHistoryEmpty:
+    "아직 비교할 지난 리포트가 없어요. 다음 주부터 변화가 쌓여요.",
+  weeklyHistoryAttention: (
+    overdue: number,
+    stale: number,
+    unassigned: number,
+  ) =>
+    `기한 지난 일 ${overdue}개 · 정체된 일 ${stale}개 · 담당자 없는 일 ${unassigned}개`,
   editProject: "프로젝트 수정하기",
   editTitle: "프로젝트 수정",
   editDescription: "목표와 현재 상태, 다음 행동을 최신 내용으로 바꿔요.",

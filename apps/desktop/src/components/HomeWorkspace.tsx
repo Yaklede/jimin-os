@@ -363,6 +363,11 @@ export function HomeWorkspace({
           {!showingSkeleton && Boolean(snapshot?.weeklyReports.length) && (
             <WeeklyOperationsBrief
               reports={snapshot?.weeklyReports ?? []}
+              tasks={dueTasks}
+              completingTaskId={completingTaskId}
+              onCompleteTask={complete}
+              onEditTask={onEditTask}
+              onOpenTask={onOpenPlanningTask}
               onOpenProject={onOpenProject}
             />
           )}
@@ -987,9 +992,19 @@ type WeeklyOperationProject = WeeklyProjectReport & {
 
 function WeeklyOperationsBrief({
   reports,
+  tasks,
+  completingTaskId,
+  onCompleteTask,
+  onEditTask,
+  onOpenTask,
   onOpenProject,
 }: {
   reports: WeeklyReport[];
+  tasks: Task[];
+  completingTaskId: string | undefined;
+  onCompleteTask(task: Task): Promise<void>;
+  onEditTask(task: Task): void;
+  onOpenTask(task: Task): void | Promise<void>;
   onOpenProject(
     project: Pick<Project, "id" | "workspaceId">,
   ): void | Promise<void>;
@@ -1021,6 +1036,17 @@ function WeeklyOperationsBrief({
         left.title.localeCompare(right.title, "ko"),
     )
     .slice(0, 4);
+  const attentionProjectIds = new Set(
+    attentionProjects.map((project) => project.projectId),
+  );
+  const priorityTasks = tasks
+    .filter(
+      (task) =>
+        task.status === "open" &&
+        Boolean(task.projectId) &&
+        attentionProjectIds.has(task.projectId ?? ""),
+    )
+    .slice(0, 3);
 
   return (
     <section
@@ -1066,6 +1092,72 @@ function WeeklyOperationsBrief({
           attention={totals.stale > 0}
         />
       </dl>
+
+      <section
+        className="home-weekly-operations__priority"
+        aria-labelledby="home-weekly-priority-title"
+      >
+        <header>
+          <div>
+            <h3 id="home-weekly-priority-title">
+              {copy.home.weeklyPriorityTitle}
+            </h3>
+            <p>{copy.home.weeklyPriorityDescription}</p>
+          </div>
+        </header>
+        {priorityTasks.length > 0 ? (
+          <ul>
+            {priorityTasks.map((task) => (
+              <li key={task.id}>
+                <button
+                  className="home-weekly-operations__complete focus-visible-control"
+                  type="button"
+                  disabled={Boolean(completingTaskId)}
+                  onClick={() => void onCompleteTask(task)}
+                  aria-label={copy.home.completeTask(task.title)}
+                >
+                  {completingTaskId === task.id ? (
+                    <span className="button-spinner" aria-hidden="true" />
+                  ) : (
+                    <Circle aria-hidden="true" />
+                  )}
+                </button>
+                <button
+                  className="home-weekly-operations__task focus-visible-control"
+                  type="button"
+                  onClick={() => void onOpenTask(task)}
+                >
+                  <span>
+                    <strong>{task.title}</strong>
+                    <small>
+                      {copy.projects.taskAssignee(
+                        task.assigneeName ?? undefined,
+                      )}
+                    </small>
+                  </span>
+                  {task.dueAt && (
+                    <time dateTime={task.dueAt}>
+                      {formatDueTime(task.dueAt)}
+                    </time>
+                  )}
+                </button>
+                <button
+                  className="home-weekly-operations__edit focus-visible-control"
+                  type="button"
+                  onClick={() => onEditTask(task)}
+                  aria-label={copy.home.editTask(task.title)}
+                >
+                  <Pencil aria-hidden="true" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="home-weekly-operations__priority-empty">
+            {copy.home.weeklyPriorityEmpty}
+          </p>
+        )}
+      </section>
 
       {attentionProjects.length > 0 ? (
         <ul className="home-weekly-operations__projects">

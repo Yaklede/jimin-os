@@ -257,6 +257,47 @@ impl Database {
                    recommendation.valid_until IS NULL
                    OR recommendation.valid_until > $1
                )
+             UNION ALL
+             SELECT snapshot.user_id, 'weekly_report'::TEXT AS item_type,
+                    snapshot.id AS item_id, snapshot.version AS item_version,
+                    NULL::UUID AS project_id,
+                    workspace.name AS raw_title,
+                    CONCAT(
+                        '새 일 ', snapshot.created_task_count, '개 중 ',
+                        snapshot.completed_task_count, '개를 마쳤고, ',
+                        CASE
+                            WHEN snapshot.backlog_end_count > snapshot.backlog_start_count
+                                THEN CONCAT(
+                                    '밀린 일이 ',
+                                    snapshot.backlog_end_count - snapshot.backlog_start_count,
+                                    '개 늘었어요.'
+                                )
+                            WHEN snapshot.backlog_end_count < snapshot.backlog_start_count
+                                THEN CONCAT(
+                                    '밀린 일을 ',
+                                    snapshot.backlog_start_count - snapshot.backlog_end_count,
+                                    '개 줄였어요.'
+                                )
+                            ELSE '밀린 일은 늘지 않았어요.'
+                        END,
+                        CASE
+                            WHEN snapshot.overdue_task_count > 0
+                                THEN CONCAT(
+                                    ' 기한이 지난 일 ',
+                                    snapshot.overdue_task_count,
+                                    '개를 확인해 주세요.'
+                                )
+                            ELSE ''
+                        END
+                    ) AS raw_body,
+                    snapshot.period_start + INTERVAL '7 days' AS target_at,
+                    snapshot.period_start + INTERVAL '4 days 18 hours' AS notify_at
+             FROM weekly_report_snapshots AS snapshot
+             INNER JOIN workspaces AS workspace
+                 ON workspace.id = snapshot.workspace_id
+                AND workspace.user_id = snapshot.user_id
+             WHERE snapshot.period_start + INTERVAL '4 days 18 hours' <= $1
+               AND snapshot.period_start + INTERVAL '7 days' > $1
              ORDER BY notify_at, item_id
              LIMIT 500",
         )
@@ -515,6 +556,15 @@ impl Database {
                                  OR recommendation.valid_until > NOW()
                              )
                        ))
+                       OR
+                       (delivery.item_type = 'weekly_report' AND EXISTS (
+                           SELECT 1 FROM weekly_report_snapshots AS snapshot
+                           WHERE snapshot.id = delivery.item_id
+                             AND snapshot.user_id = delivery.user_id
+                             AND snapshot.version = delivery.item_version
+                             AND snapshot.period_start + INTERVAL '7 days' = delivery.target_at
+                             AND snapshot.period_start + INTERVAL '7 days' > NOW()
+                       ))
                    )
                )",
         )
@@ -573,6 +623,7 @@ fn reminder_copy(candidate: &ReminderCandidate) -> (&'static str, String, String
     let title = match candidate.item_type.as_str() {
         "task" => format!("곧 마감해요 · {raw_title}"),
         "schedule" => format!("곧 시작해요 · {raw_title}"),
+        "weekly_report" => format!("주간 운영 리포트 · {raw_title}"),
         _ => format!("확인이 필요해요 · {raw_title}"),
     };
     let title = title.chars().take(120).collect();
@@ -592,6 +643,17 @@ fn reminder_copy(candidate: &ReminderCandidate) -> (&'static str, String, String
             title,
             "일정 내용을 확인하고 준비해 주세요.".to_owned(),
         ),
+        ("weekly_report", _) => {
+            let body = candidate
+                .raw_body
+                .as_deref()
+                .unwrap_or("이번 주 운영 흐름과 먼저 확인할 일을 정리했어요.")
+                .trim()
+                .chars()
+                .take(240)
+                .collect();
+            ("home", title, body)
+        }
         _ => {
             let body = candidate
                 .raw_body
@@ -676,6 +738,25 @@ mod tests {
         assert_eq!(destination, "home");
         assert!(title.starts_with("확인이 필요해요"));
         assert_eq!(body, "내일 일정 2개와 마감할 일 3개가 있어요.");
+    }
+
+    #[test]
+    fn weekly_report_copy_opens_home_with_workspace_context() {
+        let candidate = ReminderCandidate {
+            user_id: Uuid::now_v7(),
+            item_type: "weekly_report".to_owned(),
+            item_id: Uuid::now_v7(),
+            item_version: 1,
+            project_id: None,
+            raw_title: "회사".to_owned(),
+            raw_body: Some("새 일 8개 중 6개를 마쳤고, 밀린 일이 2개 늘었어요.".to_owned()),
+            target_at: OffsetDateTime::now_utc() + Duration::days(2),
+            notify_at: OffsetDateTime::now_utc(),
+        };
+        let (destination, title, body) = reminder_copy(&candidate);
+        assert_eq!(destination, "home");
+        assert_eq!(title, "주간 운영 리포트 · 회사");
+        assert_eq!(body, "새 일 8개 중 6개를 마쳤고, 밀린 일이 2개 늘었어요.");
     }
 
     #[test]

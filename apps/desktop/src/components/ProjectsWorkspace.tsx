@@ -22,6 +22,7 @@ import {
   type Project,
   type WeeklyProjectReport,
   type WeeklyReport,
+  type WeeklyReportSnapshot,
   type Workspace,
 } from "../api/projects";
 import {
@@ -70,6 +71,7 @@ type ProjectsWorkspaceProps = {
   goals: Goal[];
   projects: Project[];
   weeklyReport: WeeklyReport | undefined;
+  weeklyReportHistory: WeeklyReportSnapshot[];
   tasks: Task[];
   webhooks: ProjectWebhook[];
   webhookDeliveries: WebhookDelivery[];
@@ -194,6 +196,7 @@ export function ProjectsWorkspace({
   goals,
   projects,
   weeklyReport,
+  weeklyReportHistory,
   tasks,
   webhooks,
   webhookDeliveries,
@@ -273,6 +276,24 @@ export function ProjectsWorkspace({
   const selectedWeeklyReport = weeklyReport?.projects.find(
     (project) => project.projectId === selectedProjectId,
   );
+  const selectedWeeklyHistory = weeklyReportHistory
+    .map((snapshot) => {
+      const project = snapshot.report.projects.find(
+        (item) => item.projectId === selectedProjectId,
+      );
+      return project ? { snapshot, project } : undefined;
+    })
+    .filter(
+      (
+        item,
+      ): item is {
+        snapshot: WeeklyReportSnapshot;
+        project: WeeklyProjectReport;
+      } => item !== undefined,
+    )
+    .filter(
+      (item) => item.snapshot.report.periodStart !== weeklyReport?.periodStart,
+    );
   const openTasks = tasks.filter((task) => task.status === "open");
   const completedTasks = tasks.filter((task) => task.status === "completed");
   const rootTasks = tasks.filter((task) => !task.parentTaskId);
@@ -1072,6 +1093,7 @@ export function ProjectsWorkspace({
                   <ProjectWeeklyReportPanel
                     project={selectedProject}
                     report={selectedWeeklyReport}
+                    history={selectedWeeklyHistory}
                     error={weeklyReportError}
                     onOpenTasks={() => setActiveProjectTab("tasks")}
                   />
@@ -1424,11 +1446,16 @@ function WeeklyWorkspaceOverview({
 function ProjectWeeklyReportPanel({
   project,
   report,
+  history,
   error,
   onOpenTasks,
 }: {
   project: Project;
   report: WeeklyProjectReport | undefined;
+  history: Array<{
+    snapshot: WeeklyReportSnapshot;
+    project: WeeklyProjectReport;
+  }>;
   error: string | undefined;
   onOpenTasks(): void;
 }) {
@@ -1534,6 +1561,49 @@ function ProjectWeeklyReportPanel({
           {copy.projects.weeklyOpenTasks}
         </button>
       </div>
+      <section
+        className="project-weekly-report__history"
+        aria-labelledby="project-weekly-history-title"
+      >
+        <header>
+          <div>
+            <strong id="project-weekly-history-title">
+              {copy.projects.weeklyHistoryTitle}
+            </strong>
+            <span>{copy.projects.weeklyHistoryDescription}</span>
+          </div>
+          <History aria-hidden="true" />
+        </header>
+        {history.length > 0 ? (
+          <ul>
+            {history.slice(0, 6).map(({ snapshot, project: item }) => (
+              <li key={snapshot.id}>
+                <time dateTime={snapshot.report.periodStart}>
+                  {formatWeeklyPeriod(
+                    snapshot.report.periodStart,
+                    snapshot.report.periodEnd,
+                  )}
+                </time>
+                <strong>
+                  {copy.projects.weeklyProjectSummary(
+                    item.completedTaskCount,
+                    item.backlogDelta,
+                  )}
+                </strong>
+                <span>
+                  {copy.projects.weeklyHistoryAttention(
+                    item.overdueTaskCount,
+                    item.staleTaskCount,
+                    item.unassignedTaskCount,
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p>{copy.projects.weeklyHistoryEmpty}</p>
+        )}
+      </section>
     </section>
   );
 }

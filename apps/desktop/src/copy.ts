@@ -268,6 +268,11 @@ export const copy = {
       `정체된 일 ${count}개를 확인해 주세요.`,
     weeklyProjectUnassigned: (count: number) =>
       `담당자를 정하지 않은 일 ${count}개가 있어요.`,
+    weeklyPriorityTitle: "이번 주 먼저 처리할 일",
+    weeklyPriorityDescription:
+      "기한과 프로젝트 상태를 기준으로 가장 먼저 확인할 일을 골랐어요.",
+    weeklyPriorityEmpty:
+      "바로 처리할 기한 문제는 없어요. 프로젝트 흐름을 확인해 보세요.",
     overdue: "기한 지남",
     dueToday: "오늘 마감",
     dueTomorrow: "내일 마감",

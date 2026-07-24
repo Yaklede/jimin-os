@@ -153,6 +153,139 @@ async fn sync_change_feed_pages_task_mutations_in_order() {
 }
 
 #[tokio::test]
+async fn weekly_report_snapshots_refresh_idempotently_and_stay_owner_scoped() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 2, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_android_login_command(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+        ))
+        .await
+        .expect("fixture owner should exist");
+    let token = EncryptedPushToken {
+        ciphertext: vec![31; 48],
+        nonce: vec![32; 24],
+        fingerprint: vec![33; 32],
+    };
+    database
+        .register_push_token(Uuid::now_v7(), owner.profile.id, owner.device.id, &token)
+        .await
+        .expect("owner push token should register");
+    let other_owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("other owner should exist");
+    let workspace = database
+        .workspaces_for_user(owner.profile.id)
+        .await
+        .expect("workspace query should succeed")
+        .into_iter()
+        .find(|item| item.scope == WorkspaceScope::Company)
+        .expect("company workspace should exist");
+    let project = database
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            workspace_id: workspace.id,
+            title: "결제 운영".to_owned(),
+            objective: Some("들어오는 요청을 놓치지 않고 처리한다.".to_owned()),
+            management_mode: ProjectManagementMode::Operation,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
+            risk_level: 0,
+            next_action: Some("기한이 지난 일을 정리한다.".to_owned()),
+            due_at: None,
+        })
+        .await
+        .expect("operation project should persist");
+    database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            project_id: Some(project.id),
+            parent_task_id: None,
+            title: "주간 리포트 확인".to_owned(),
+            notes: None,
+            assignee_name: Some("조지민".to_owned()),
+            priority: 2,
+            due_at: Some(OffsetDateTime::now_utc() + TimeDuration::days(1)),
+        })
+        .await
+        .expect("project task should persist");
+    let now = OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .expect("whole-second fixture time");
+
+    assert_eq!(
+        database
+            .refresh_weekly_report_snapshots_for_user(owner.profile.id, now)
+            .await
+            .expect("first snapshot refresh should succeed"),
+        1
+    );
+    assert_eq!(
+        database
+            .refresh_weekly_report_snapshots_for_user(owner.profile.id, now)
+            .await
+            .expect("second snapshot refresh should update the same week"),
+        1
+    );
+    let history = database
+        .weekly_report_history_for_workspace(owner.profile.id, workspace.id, 8)
+        .await
+        .expect("owner history should load");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].report.projects.len(), 1);
+    assert_eq!(history[0].report.projects[0].project_id, project.id);
+    let friday_evening =
+        history[0].report.period_start + TimeDuration::days(4) + TimeDuration::hours(18);
+    assert_weekly_report_push_is_idempotent(&database, history[0].id, friday_evening).await;
+    assert!(
+        database
+            .weekly_report_history_for_workspace(other_owner.profile.id, workspace.id, 8)
+            .await
+            .expect("other owner query should stay isolated")
+            .is_empty()
+    );
+    database.close().await;
+}
+
+async fn assert_weekly_report_push_is_idempotent(
+    database: &Database,
+    snapshot_id: Uuid,
+    friday_evening: OffsetDateTime,
+) {
+    assert_eq!(
+        database
+            .queue_due_push_reminders(friday_evening)
+            .await
+            .expect("Friday report notification should queue once"),
+        1
+    );
+    assert_eq!(
+        database
+            .queue_due_push_reminders(friday_evening)
+            .await
+            .expect("Friday report notification should stay idempotent"),
+        0
+    );
+    let deliveries = database
+        .claim_push_deliveries("weekly-report-test-worker", 10)
+        .await
+        .expect("weekly report delivery should be claimable");
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].item_type, "weekly_report");
+    assert_eq!(deliveries[0].item_id, snapshot_id);
+    assert_eq!(deliveries[0].destination, "home");
+}
+
+#[tokio::test]
 #[allow(
     clippy::too_many_lines,
     reason = "The integration test keeps registration transfer, queue reconciliation, and delivery acknowledgement in one lifecycle."

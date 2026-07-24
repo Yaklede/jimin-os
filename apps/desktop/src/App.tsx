@@ -40,10 +40,12 @@ import {
   fetchProjects,
   fetchProjectTasks,
   fetchWeeklyReport,
+  fetchWeeklyReportHistory,
   fetchWorkspaces,
   updateProject,
   type Project,
   type WeeklyReport,
+  type WeeklyReportSnapshot,
   type Workspace,
 } from "./api/projects";
 import { createGoal, fetchGoals, updateGoal, type Goal } from "./api/goals";
@@ -214,6 +216,9 @@ export default function App() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [weeklyReport, setWeeklyReport] = useState<WeeklyReport>();
+  const [weeklyReportHistory, setWeeklyReportHistory] = useState<
+    WeeklyReportSnapshot[]
+  >([]);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [projectTasks, setProjectTasks] = useState<Task[]>([]);
   const [projectWebhooks, setProjectWebhooks] = useState<ProjectWebhook[]>([]);
@@ -802,13 +807,25 @@ export default function App() {
       if (!tokens) return undefined;
       setWeeklyReportError(undefined);
       try {
-        const report = await withAuthenticatedSession((accessToken) =>
-          fetchWeeklyReport(apiBaseUrl, accessToken, workspaceId),
+        const { report, history } = await withAuthenticatedSession(
+          async (accessToken) => {
+            const [report, history] = await Promise.all([
+              fetchWeeklyReport(apiBaseUrl, accessToken, workspaceId),
+              fetchWeeklyReportHistory(
+                apiBaseUrl,
+                accessToken,
+                workspaceId,
+              ).catch(() => []),
+            ]);
+            return { report, history };
+          },
         );
         setWeeklyReport(report);
+        setWeeklyReportHistory(history);
         return report;
       } catch {
         setWeeklyReport(undefined);
+        setWeeklyReportHistory([]);
         setWeeklyReportError(copy.projects.weeklyReportLoadProblem);
         return undefined;
       }
@@ -824,16 +841,22 @@ export default function App() {
       setWeeklyReportError(undefined);
       try {
         const result = await withAuthenticatedSession(async (accessToken) => {
-          const [items, report] = await Promise.all([
+          const [items, report, history] = await Promise.all([
             fetchProjects(apiBaseUrl, accessToken, workspaceId),
             fetchWeeklyReport(apiBaseUrl, accessToken, workspaceId).catch(
               () => undefined,
             ),
+            fetchWeeklyReportHistory(
+              apiBaseUrl,
+              accessToken,
+              workspaceId,
+            ).catch(() => []),
           ]);
-          return { items, report };
+          return { items, report, history };
         });
         setProjects(result.items);
         setWeeklyReport(result.report);
+        setWeeklyReportHistory(result.history);
         if (!result.report) {
           setWeeklyReportError(copy.projects.weeklyReportLoadProblem);
         }
@@ -847,6 +870,7 @@ export default function App() {
       } catch {
         setProjects([]);
         setWeeklyReport(undefined);
+        setWeeklyReportHistory([]);
         setSelectedProjectId(undefined);
         setProjectTasks([]);
         setProjectsError(copy.messages.projectsLoadNotice);
@@ -1228,6 +1252,7 @@ export default function App() {
       setWorkspacesReady(false);
       setProjects([]);
       setWeeklyReport(undefined);
+      setWeeklyReportHistory([]);
       setGoals([]);
       setProjectTasks([]);
       setSelectedWorkspaceId(undefined);
@@ -3426,6 +3451,7 @@ export default function App() {
               goals={goals}
               projects={projects}
               weeklyReport={weeklyReport}
+              weeklyReportHistory={weeklyReportHistory}
               tasks={projectTasks}
               webhooks={projectWebhooks}
               webhookDeliveries={webhookDeliveries}

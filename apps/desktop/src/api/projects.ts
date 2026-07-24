@@ -74,6 +74,12 @@ export interface WeeklyReport {
   projects: WeeklyProjectReport[];
 }
 
+export interface WeeklyReportSnapshot {
+  id: string;
+  generatedAt: string;
+  report: WeeklyReport;
+}
+
 type ListResponse<T> = { items: T[]; nextCursor: string | null };
 
 export async function fetchWorkspaces(
@@ -114,6 +120,28 @@ export async function fetchWeeklyReport(
   const body = await readJson(response);
   if (!response.ok || !isRecord(body)) throw errorFromStatus(response.status);
   return body as unknown as WeeklyReport;
+}
+
+export async function fetchWeeklyReportHistory(
+  baseUrl: string,
+  access: string,
+  workspaceId: string,
+  limit = 8,
+): Promise<WeeklyReportSnapshot[]> {
+  const url = new URL(
+    `${normalizeBaseUrl(baseUrl)}/v1/reports/weekly/history`,
+    browserOrigin(),
+  );
+  url.searchParams.set("workspaceId", workspaceId);
+  url.searchParams.set("limit", `${limit}`);
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${access}` },
+  });
+  const body = await readJson(response);
+  if (!response.ok || !isRecord(body) || !Array.isArray(body.items)) {
+    throw errorFromStatus(response.status);
+  }
+  return body.items as WeeklyReportSnapshot[];
 }
 
 export async function fetchProjectTasks(
