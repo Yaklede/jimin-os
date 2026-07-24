@@ -203,6 +203,7 @@ export const copy = {
         ? `열린 할 일 ${count}개도 함께 정리해 드릴게요.`
         : "지금은 일정에 집중하면 돼요.",
     briefingOnlyTasks: (count: number) => `열린 할 일 ${count}개가 있어요.`,
+    openPlanning: "일정과 할 일 보기",
     briefingNoItems: "아직 등록한 일정이나 할 일이 없어요.",
     scheduleTitle: "오늘 일정",
     scheduleCount: (count: number) => `${count}개`,
@@ -390,13 +391,15 @@ export const copy = {
   },
   schedule: {
     title: "일정",
-    description: "지난 일정과 앞으로의 일정, 열린 할 일을 한곳에서 확인해요.",
+    description:
+      "남은 할 일과 앞으로의 일정을 먼저 확인하고, 지난 기록은 필요할 때 펼쳐 보세요.",
     upcomingTitle: "다가오는 일정",
     upcomingEmpty:
       "앞으로 90일 안에 일정이 없어요. 필요한 시간을 먼저 잡아 보세요.",
     historyTitle: "지난 일정",
     historyDescription: "최근 3개월 동안의 일정을 최신순으로 보여줘요.",
     historyEmpty: "최근 3개월 동안 지난 일정이 없어요.",
+    historyCollapsed: "최근 3개월 기록",
     todayLabel: "오늘",
     tomorrowLabel: "내일",
     editSchedule: (title: string) => `${title} 일정 수정하기`,
@@ -421,6 +424,7 @@ export const copy = {
     description: "완료하지 않은 일을 우선순위대로 보여줘요.",
     empty: "열린 할 일이 없어요. 다음에 할 일을 추가해 보세요.",
     completedTitle: "완료한 일",
+    completedCollapsed: "완료 기록",
     completedEmptyTitle: "아직 완료한 일이 없어요",
     completedEmptyDescription: "완료한 일은 이곳에서 다시 확인할 수 있어요.",
     restoreTask: (title: string) => `${title} 다시 진행하기`,

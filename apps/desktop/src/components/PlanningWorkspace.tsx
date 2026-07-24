@@ -3,6 +3,7 @@ import {
   CalendarDays,
   CalendarPlus,
   CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Circle,
@@ -82,6 +83,8 @@ export function PlanningWorkspace({
     action: "complete" | "restore";
   }>();
   const [createKind, setCreateKind] = useState<PlanningCreateKind>();
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [completedOpen, setCompletedOpen] = useState(false);
   const highlightedScheduleRef = useRef<HTMLLIElement | null>(null);
   const highlightedTaskRef = useRef<HTMLLIElement | null>(null);
   const skeletonVisible = useDelayedSkeleton(loading);
@@ -120,6 +123,24 @@ export function PlanningWorkspace({
     });
     element.focus({ preventScroll: true });
   }, [highlightedTaskId, snapshot?.tasks]);
+
+  useEffect(() => {
+    if (
+      highlightedScheduleId &&
+      pastSchedule.some((entry) => entry.id === highlightedScheduleId)
+    ) {
+      setHistoryOpen(true);
+    }
+  }, [highlightedScheduleId, snapshot?.schedule]);
+
+  useEffect(() => {
+    if (
+      highlightedTaskId &&
+      snapshot?.completedTasks.some((task) => task.id === highlightedTaskId)
+    ) {
+      setCompletedOpen(true);
+    }
+  }, [highlightedTaskId, snapshot?.completedTasks]);
 
   async function complete(task: Task) {
     if (pendingTask) return;
@@ -256,54 +277,6 @@ export function PlanningWorkspace({
         </div>
       </section>
 
-      <section
-        className="planning-schedule"
-        aria-labelledby="planning-schedule-title"
-      >
-        <div className="planning-section-heading">
-          <div>
-            <CalendarDays aria-hidden="true" />
-            <h2 id="planning-schedule-title">{copy.schedule.upcomingTitle}</h2>
-          </div>
-          <span>
-            {showingSkeleton ? (
-              <CountSkeleton visible={skeletonVisible} />
-            ) : (
-              copy.home.scheduleCount(upcomingSchedule.length)
-            )}
-          </span>
-        </div>
-        <div
-          className="planning-surface"
-          data-empty={!showingSkeleton && upcomingSchedule.length === 0}
-        >
-          {showingSkeleton ? (
-            <ScheduleTimelineSkeleton rows={3} visible={skeletonVisible} />
-          ) : upcomingSchedule.length ? (
-            <ol className="planning-timeline">
-              {upcomingSchedule.map((entry) => (
-                <ScheduleRow
-                  entry={entry}
-                  highlighted={entry.id === highlightedScheduleId}
-                  elementRef={
-                    entry.id === highlightedScheduleId
-                      ? highlightedScheduleRef
-                      : undefined
-                  }
-                  onEdit={onEditSchedule}
-                  key={entry.id}
-                />
-              ))}
-            </ol>
-          ) : (
-            <EmptySurface
-              title={copy.home.scheduleEmptyTitle}
-              description={copy.schedule.upcomingEmpty}
-            />
-          )}
-        </div>
-      </section>
-
       <section className="planning-tasks" aria-labelledby="planning-task-title">
         <div className="planning-section-heading">
           <div>
@@ -386,31 +359,31 @@ export function PlanningWorkspace({
       </section>
 
       <section
-        className="planning-history"
-        aria-labelledby="planning-history-title"
+        className="planning-schedule"
+        aria-labelledby="planning-schedule-title"
       >
         <div className="planning-section-heading">
           <div>
-            <CalendarClock aria-hidden="true" />
-            <h2 id="planning-history-title">{copy.schedule.historyTitle}</h2>
+            <CalendarDays aria-hidden="true" />
+            <h2 id="planning-schedule-title">{copy.schedule.upcomingTitle}</h2>
           </div>
           <span>
             {showingSkeleton ? (
               <CountSkeleton visible={skeletonVisible} />
             ) : (
-              copy.home.scheduleCount(pastSchedule.length)
+              copy.home.scheduleCount(upcomingSchedule.length)
             )}
           </span>
         </div>
         <div
           className="planning-surface"
-          data-empty={!showingSkeleton && pastSchedule.length === 0}
+          data-empty={!showingSkeleton && upcomingSchedule.length === 0}
         >
           {showingSkeleton ? (
-            <ScheduleTimelineSkeleton rows={2} visible={skeletonVisible} />
-          ) : pastSchedule.length ? (
-            <ol className="planning-timeline planning-timeline--history">
-              {pastSchedule.map((entry) => (
+            <ScheduleTimelineSkeleton rows={3} visible={skeletonVisible} />
+          ) : upcomingSchedule.length ? (
+            <ol className="planning-timeline">
+              {upcomingSchedule.map((entry) => (
                 <ScheduleRow
                   entry={entry}
                   highlighted={entry.id === highlightedScheduleId}
@@ -426,79 +399,152 @@ export function PlanningWorkspace({
             </ol>
           ) : (
             <EmptySurface
-              title={copy.schedule.historyTitle}
-              description={copy.schedule.historyEmpty}
+              title={copy.home.scheduleEmptyTitle}
+              description={copy.schedule.upcomingEmpty}
             />
           )}
         </div>
       </section>
 
-      <section
-        className="planning-completed"
-        aria-labelledby="planning-completed-title"
-      >
-        <div className="planning-section-heading">
-          <div>
-            <History aria-hidden="true" />
-            <h2 id="planning-completed-title">{copy.tasks.completedTitle}</h2>
-          </div>
-          <span>
-            {showingSkeleton ? (
-              <CountSkeleton visible={skeletonVisible} />
-            ) : (
-              copy.home.taskCount(snapshot?.completedTasks.length ?? 0)
-            )}
-          </span>
-        </div>
-        <div
-          className="planning-surface"
-          data-empty={!showingSkeleton && !snapshot?.completedTasks.length}
+      <div className="planning-archive-grid">
+        <details
+          className="planning-archive"
+          open={historyOpen}
+          onToggle={(event) => setHistoryOpen(event.currentTarget.open)}
         >
-          {showingSkeleton ? (
-            <PlanningTaskSkeleton rows={2} visible={skeletonVisible} />
-          ) : snapshot?.completedTasks.length ? (
-            <ul className="planning-task-list planning-task-list--completed">
-              {snapshot.completedTasks.map((task) => (
-                <li
-                  className="planning-entity-row planning-entity-row--completed"
-                  key={task.id}
-                >
-                  <button
-                    className="planning-task-list__restore focus-visible-control"
-                    type="button"
-                    onClick={() => void restore(task)}
-                    disabled={Boolean(pendingTask)}
-                    aria-label={copy.tasks.restoreTask(task.title)}
-                  >
-                    {pendingTask?.id === task.id &&
-                    pendingTask.action === "restore" ? (
-                      <span className="button-spinner" aria-hidden="true" />
-                    ) : (
-                      <RotateCcw aria-hidden="true" />
-                    )}
-                  </button>
-                  <div>
-                    <strong>{task.title}</strong>
-                    {task.notes && <p>{task.notes}</p>}
-                  </div>
-                  {task.completedAt && (
-                    <time dateTime={task.completedAt}>
-                      {copy.tasks.completedAt(
-                        completedAtLabel(task.completedAt),
-                      )}
-                    </time>
-                  )}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <EmptySurface
-              title={copy.tasks.completedEmptyTitle}
-              description={copy.tasks.completedEmptyDescription}
+          <summary className="planning-archive__summary focus-visible-control">
+            <span className="planning-archive__icon" aria-hidden="true">
+              <CalendarClock />
+            </span>
+            <span className="planning-archive__copy">
+              <strong>{copy.schedule.historyTitle}</strong>
+              <span>{copy.schedule.historyCollapsed}</span>
+            </span>
+            <span className="planning-archive__count">
+              {showingSkeleton ? (
+                <CountSkeleton visible={skeletonVisible} />
+              ) : (
+                copy.home.scheduleCount(pastSchedule.length)
+              )}
+            </span>
+            <ChevronDown
+              className="planning-archive__chevron"
+              aria-hidden="true"
             />
-          )}
-        </div>
-      </section>
+          </summary>
+          <div
+            className="planning-surface"
+            data-empty={!showingSkeleton && pastSchedule.length === 0}
+          >
+            {showingSkeleton ? (
+              <ScheduleTimelineSkeleton rows={2} visible={skeletonVisible} />
+            ) : pastSchedule.length ? (
+              <ol className="planning-timeline planning-timeline--history">
+                {pastSchedule.map((entry) => (
+                  <ScheduleRow
+                    entry={entry}
+                    highlighted={entry.id === highlightedScheduleId}
+                    elementRef={
+                      entry.id === highlightedScheduleId
+                        ? highlightedScheduleRef
+                        : undefined
+                    }
+                    onEdit={onEditSchedule}
+                    key={entry.id}
+                  />
+                ))}
+              </ol>
+            ) : (
+              <EmptySurface
+                title={copy.schedule.historyTitle}
+                description={copy.schedule.historyEmpty}
+              />
+            )}
+          </div>
+        </details>
+
+        <details
+          className="planning-archive"
+          open={completedOpen}
+          onToggle={(event) => setCompletedOpen(event.currentTarget.open)}
+        >
+          <summary className="planning-archive__summary focus-visible-control">
+            <span className="planning-archive__icon" aria-hidden="true">
+              <History />
+            </span>
+            <span className="planning-archive__copy">
+              <strong>{copy.tasks.completedTitle}</strong>
+              <span>{copy.tasks.completedCollapsed}</span>
+            </span>
+            <span className="planning-archive__count">
+              {showingSkeleton ? (
+                <CountSkeleton visible={skeletonVisible} />
+              ) : (
+                copy.home.taskCount(snapshot?.completedTasks.length ?? 0)
+              )}
+            </span>
+            <ChevronDown
+              className="planning-archive__chevron"
+              aria-hidden="true"
+            />
+          </summary>
+          <div
+            className="planning-surface"
+            data-empty={!showingSkeleton && !snapshot?.completedTasks.length}
+          >
+            {showingSkeleton ? (
+              <PlanningTaskSkeleton rows={2} visible={skeletonVisible} />
+            ) : snapshot?.completedTasks.length ? (
+              <ul className="planning-task-list planning-task-list--completed">
+                {snapshot.completedTasks.map((task) => (
+                  <li
+                    className="planning-entity-row planning-entity-row--completed"
+                    key={task.id}
+                    ref={
+                      task.id === highlightedTaskId
+                        ? highlightedTaskRef
+                        : undefined
+                    }
+                    data-highlighted={task.id === highlightedTaskId}
+                    tabIndex={task.id === highlightedTaskId ? -1 : undefined}
+                  >
+                    <button
+                      className="planning-task-list__restore focus-visible-control"
+                      type="button"
+                      onClick={() => void restore(task)}
+                      disabled={Boolean(pendingTask)}
+                      aria-label={copy.tasks.restoreTask(task.title)}
+                    >
+                      {pendingTask?.id === task.id &&
+                      pendingTask.action === "restore" ? (
+                        <span className="button-spinner" aria-hidden="true" />
+                      ) : (
+                        <RotateCcw aria-hidden="true" />
+                      )}
+                    </button>
+                    <div>
+                      <strong>{task.title}</strong>
+                      {task.notes && <p>{task.notes}</p>}
+                    </div>
+                    {task.completedAt && (
+                      <time dateTime={task.completedAt}>
+                        {copy.tasks.completedAt(
+                          completedAtLabel(task.completedAt),
+                        )}
+                      </time>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <EmptySurface
+                title={copy.tasks.completedEmptyTitle}
+                description={copy.tasks.completedEmptyDescription}
+              />
+            )}
+          </div>
+        </details>
+      </div>
       <PlanningCreateDialog
         kind={createKind}
         onClose={() => setCreateKind(undefined)}

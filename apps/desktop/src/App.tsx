@@ -3242,6 +3242,7 @@ export default function App() {
                   : undefined
               }
               onOpenAssistant={openHomeAssistant}
+              onOpenPlanning={() => navigate("calendar")}
               onStartNewAssistant={startHomeConversation}
               onSendAssistant={(text, clientMessageId) =>
                 sendConversationRequest(text, clientMessageId, {

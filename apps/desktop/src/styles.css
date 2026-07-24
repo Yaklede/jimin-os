@@ -2781,7 +2781,7 @@ svg {
 
 .planning-page {
   display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(300px, 0.85fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
 }
 
@@ -2931,9 +2931,100 @@ svg {
   height: 18px;
 }
 
-.planning-history,
-.planning-completed {
+.planning-schedule,
+.planning-tasks,
+.planning-archive-grid {
   min-width: 0;
+}
+
+.planning-archive-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 16px;
+}
+
+.planning-archive {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  box-shadow: var(--shadow-panel);
+}
+
+.planning-archive__summary {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto 24px;
+  align-items: center;
+  gap: 12px;
+  min-height: 72px;
+  padding: 12px 16px;
+  color: inherit;
+  cursor: pointer;
+  list-style: none;
+}
+
+.planning-archive__summary::-webkit-details-marker {
+  display: none;
+}
+
+.planning-archive__summary:hover {
+  background: var(--surface-subtle);
+}
+
+.planning-archive__icon {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: var(--radius-control);
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.planning-archive__icon svg,
+.planning-archive__chevron {
+  width: 18px;
+  height: 18px;
+}
+
+.planning-archive__copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.planning-archive__copy strong {
+  color: var(--text-strong);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.planning-archive__copy span,
+.planning-archive__count {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.planning-archive__count {
+  white-space: nowrap;
+}
+
+.planning-archive__chevron {
+  color: var(--muted);
+  transition: transform 160ms ease;
+}
+
+.planning-archive[open] .planning-archive__chevron {
+  transform: rotate(180deg);
+}
+
+.planning-archive > .planning-surface {
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .planning-section-heading {
@@ -8574,6 +8665,16 @@ svg {
 
   .planning-page {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .planning-archive-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .planning-archive__summary {
+    grid-template-columns: 40px minmax(0, 1fr) auto 20px;
+    gap: 10px;
+    padding: 12px;
   }
 
   .planning-surface[data-empty="true"] .empty-surface p {

@@ -54,6 +54,7 @@ type HomeWorkspaceProps = {
   assistantJob: AgentJob | undefined;
   assistantMessage: ConversationMessage | undefined;
   onOpenAssistant(): void;
+  onOpenPlanning(): void;
   onStartNewAssistant(): void;
   onSendAssistant(text: string, clientMessageId: string): Promise<boolean>;
   onCompleteTask(task: Task): Promise<void>;
@@ -101,6 +102,7 @@ export function HomeWorkspace({
   assistantJob,
   assistantMessage,
   onOpenAssistant,
+  onOpenPlanning,
   onStartNewAssistant,
   onSendAssistant,
   onCompleteTask,
@@ -376,8 +378,8 @@ export function HomeWorkspace({
           <button
             className="home-briefing focus-visible-control"
             type="button"
-            onClick={onOpenAssistant}
-            aria-label={copy.home.askAssistant}
+            onClick={onOpenPlanning}
+            aria-label={copy.home.openPlanning}
           >
             {showingSkeleton ? (
               <HomeBriefingSkeleton visible={skeletonVisible} />
