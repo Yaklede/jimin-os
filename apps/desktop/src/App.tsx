@@ -1323,9 +1323,7 @@ export default function App() {
       window.scrollTo({
         top: 0,
         left: 0,
-        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
-          ? "auto"
-          : "smooth",
+        behavior: "auto",
       });
     });
     return () => window.cancelAnimationFrame(frame);
