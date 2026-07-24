@@ -155,7 +155,7 @@ export async function createProject(
       staleThresholdDays: input.staleThresholdDays,
       riskLevel: input.riskLevel,
       nextAction: input.nextAction || null,
-      dueAt: input.dueAt || null,
+      dueAt: input.managementMode === "completion" ? input.dueAt || null : null,
     },
     "POST",
   );
@@ -190,7 +190,7 @@ export async function updateProject(
       staleThresholdDays: input.staleThresholdDays,
       riskLevel: input.riskLevel,
       nextAction: input.nextAction || null,
-      dueAt: input.dueAt || null,
+      dueAt: input.managementMode === "completion" ? input.dueAt || null : null,
       expectedVersion: project.version,
     },
     "PUT",

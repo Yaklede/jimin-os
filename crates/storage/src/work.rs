@@ -312,7 +312,8 @@ impl Database {
                 risk_level, next_action, due_at
             )
             SELECT $1, $2, workspaces.id, $3, $4, 'active',
-                $5, $6, $7, $8, $9, $10
+                $5, $6, $7, $8, $9,
+                CASE WHEN $5 = 'operation' THEN NULL ELSE $10 END
             FROM workspaces
             WHERE workspaces.id = $11 AND workspaces.user_id = $2
             RETURNING id, workspace_id, title, objective, status,
@@ -400,7 +401,10 @@ impl Database {
                 stale_threshold_days = COALESCE($6, stale_threshold_days),
                 risk_level = $7,
                 next_action = $8,
-                due_at = $9
+                due_at = CASE
+                    WHEN COALESCE($4, management_mode) = 'operation' THEN NULL
+                    ELSE $9
+                END
             WHERE id = $10 AND user_id = $11 AND version = $12
             RETURNING id, workspace_id, title, objective, status,
                 management_mode, reporting_enabled, stale_threshold_days,

@@ -68,7 +68,7 @@ describe("project client", () => {
       staleThresholdDays: 7,
       riskLevel: 2,
       nextAction: "Webhook 계약 확정",
-      dueAt: "2026-07-20T14:59:59.000Z",
+      dueAt: null,
       openTaskCount: 2,
       totalTaskCount: 4,
       completedTaskCount: 2,
@@ -103,7 +103,7 @@ describe("project client", () => {
         staleThresholdDays: updated.staleThresholdDays,
         riskLevel: updated.riskLevel,
         nextAction: updated.nextAction ?? undefined,
-        dueAt: updated.dueAt ?? undefined,
+        dueAt: "2026-07-20T14:59:59.000Z",
       }),
     ).resolves.toEqual(updated);
 
@@ -121,7 +121,7 @@ describe("project client", () => {
       staleThresholdDays: updated.staleThresholdDays,
       riskLevel: updated.riskLevel,
       nextAction: updated.nextAction,
-      dueAt: updated.dueAt,
+      dueAt: null,
       expectedVersion: 3,
     });
   });

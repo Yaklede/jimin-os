@@ -321,7 +321,8 @@ export function ProjectsWorkspace({
         staleThresholdDays: Number(staleThresholdDays),
         riskLevel: Number(riskLevel),
         nextAction: nextAction.trim() || undefined,
-        dueAt: dateInputToIso(dueDate),
+        dueAt:
+          managementMode === "completion" ? dateInputToIso(dueDate) : undefined,
       });
       setTitle("");
       setObjective("");
@@ -481,11 +482,12 @@ export function ProjectsWorkspace({
               <select
                 id="project-management-mode"
                 value={managementMode}
-                onChange={(event) =>
-                  setManagementMode(
-                    event.target.value as Project["managementMode"],
-                  )
-                }
+                onChange={(event) => {
+                  const nextMode = event.target
+                    .value as Project["managementMode"];
+                  setManagementMode(nextMode);
+                  if (nextMode === "operation") setDueDate("");
+                }}
                 disabled={saving}
               >
                 <option value="completion">
@@ -562,16 +564,18 @@ export function ProjectsWorkspace({
                 <option value="3">{copy.projects.riskLevels[3]}</option>
               </select>
             </label>
-            <label htmlFor="project-due-date">
-              <span>{copy.projects.dueDateLabel}</span>
-              <input
-                id="project-due-date"
-                type="date"
-                value={dueDate}
-                onInput={(event) => setDueDate(event.currentTarget.value)}
-                disabled={saving}
-              />
-            </label>
+            {managementMode === "completion" && (
+              <label htmlFor="project-due-date">
+                <span>{copy.projects.dueDateLabel}</span>
+                <input
+                  id="project-due-date"
+                  type="date"
+                  value={dueDate}
+                  onInput={(event) => setDueDate(event.currentTarget.value)}
+                  disabled={saving}
+                />
+              </label>
+            )}
           </div>
           <div className="project-create-form__actions">
             <button
@@ -814,11 +818,20 @@ export function ProjectsWorkspace({
                       ]
                     }
                   </span>
-                  <span>
-                    <CalendarDays aria-hidden="true" />
-                    <strong>{copy.projects.dueDateLabel}</strong>
-                    {formatDueDate(selectedProject.dueAt)}
-                  </span>
+                  {selectedProject.managementMode === "completion" ? (
+                    <span>
+                      <CalendarDays aria-hidden="true" />
+                      <strong>{copy.projects.dueDateLabel}</strong>
+                      {formatDueDate(selectedProject.dueAt)}
+                    </span>
+                  ) : (
+                    <span>
+                      <strong>{copy.projects.staleThresholdLabel}</strong>
+                      {copy.projects.staleThresholdOption(
+                        selectedProject.staleThresholdDays,
+                      )}
+                    </span>
+                  )}
                 </div>
                 {selectedProject.managementMode === "completion" ? (
                   <CompletionProjectProgress project={selectedProject} />
@@ -1722,7 +1735,8 @@ function ProjectEditForm({
       staleThresholdDays: Number(staleThresholdDays),
       riskLevel: Number(riskLevel),
       nextAction: nextAction.trim() || undefined,
-      dueAt: dateInputToIso(dueDate),
+      dueAt:
+        managementMode === "completion" ? dateInputToIso(dueDate) : undefined,
     });
   }
 
@@ -1796,9 +1810,11 @@ function ProjectEditForm({
             id="project-edit-management-mode"
             value={managementMode}
             disabled={busy}
-            onChange={(event) =>
-              setManagementMode(event.target.value as Project["managementMode"])
-            }
+            onChange={(event) => {
+              const nextMode = event.target.value as Project["managementMode"];
+              setManagementMode(nextMode);
+              if (nextMode === "operation") setDueDate("");
+            }}
           >
             <option value="completion">
               {copy.projects.managementModes.completion}
@@ -1870,16 +1886,18 @@ function ProjectEditForm({
             ))}
           </select>
         </label>
-        <label htmlFor="project-edit-due-date">
-          <span>{copy.projects.dueDateLabel}</span>
-          <input
-            id="project-edit-due-date"
-            type="date"
-            value={dueDate}
-            disabled={busy}
-            onInput={(event) => setDueDate(event.currentTarget.value)}
-          />
-        </label>
+        {managementMode === "completion" && (
+          <label htmlFor="project-edit-due-date">
+            <span>{copy.projects.dueDateLabel}</span>
+            <input
+              id="project-edit-due-date"
+              type="date"
+              value={dueDate}
+              disabled={busy}
+              onInput={(event) => setDueDate(event.currentTarget.value)}
+            />
+          </label>
+        )}
       </div>
       {confirmingDelete ? (
         <section

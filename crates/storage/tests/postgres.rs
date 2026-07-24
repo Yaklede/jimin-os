@@ -3416,7 +3416,10 @@ async fn project_update_is_scoped_versioned_and_emits_current_state() {
     assert_eq!(updated.weekly_completed_task_count, 0);
     assert_eq!(updated.backlog_delta, 0);
     assert_eq!(updated.risk_level, 2);
-    assert_eq!(updated.due_at, Some(due_at));
+    assert_eq!(
+        updated.due_at, None,
+        "operation projects do not keep a project-level due date"
+    );
     assert!(updated.version > created.version);
     let weekly_report = database
         .weekly_report_for_workspace(provisioned.profile.id, personal.id, None)
