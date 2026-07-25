@@ -97,6 +97,7 @@ import {
   streamSyncCursor,
   type SyncChange,
 } from "./api/sync";
+import { SyncPullCoordinator } from "./syncPullCoordinator";
 import {
   AgentRequestError,
   createConversation,
@@ -318,7 +319,7 @@ export default function App() {
     undefined,
   );
   const syncCursorRef = useRef("0");
-  const syncPullInFlightRef = useRef<Promise<void> | undefined>(undefined);
+  const syncPullCoordinatorRef = useRef(new SyncPullCoordinator());
   const reminderSyncInFlightRef = useRef<Promise<boolean> | undefined>(
     undefined,
   );
@@ -1200,9 +1201,7 @@ export default function App() {
 
   const pullSyncChanges = useCallback(async (): Promise<void> => {
     if (!tokens) return;
-    if (syncPullInFlightRef.current) return syncPullInFlightRef.current;
-
-    const operation = (async () => {
+    return syncPullCoordinatorRef.current.request(async () => {
       for (let pageNumber = 0; pageNumber < 20; pageNumber += 1) {
         const after = syncCursorRef.current;
         const page = await withAuthenticatedSession((accessToken) =>
@@ -1222,15 +1221,7 @@ export default function App() {
         writeSyncCursor(appliedCursor);
         if (!page.hasMore) return;
       }
-    })();
-    syncPullInFlightRef.current = operation;
-    try {
-      await operation;
-    } finally {
-      if (syncPullInFlightRef.current === operation) {
-        syncPullInFlightRef.current = undefined;
-      }
-    }
+    });
   }, [
     apiBaseUrl,
     refreshSynchronizedProjections,
