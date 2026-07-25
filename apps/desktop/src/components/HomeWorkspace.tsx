@@ -63,7 +63,9 @@ type HomeWorkspaceProps = {
   onStartNewAssistant(): void;
   onSendAssistant(text: string, clientMessageId: string): Promise<boolean>;
   onCompleteTask(task: Task): Promise<void>;
+  onLoadAssistantTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
   onCompleteAssistantTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
+  onRestoreAssistantTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
   onEditAssistantTask(
     task: Pick<Task, "id" | "projectId">,
   ): void | Promise<void>;
@@ -111,7 +113,9 @@ export function HomeWorkspace({
   onStartNewAssistant,
   onSendAssistant,
   onCompleteTask,
+  onLoadAssistantTask,
   onCompleteAssistantTask,
+  onRestoreAssistantTask,
   onEditAssistantTask,
   onEditAssistantSchedule,
   onEditTask,
@@ -338,7 +342,9 @@ export function HomeWorkspace({
         onOpenAssistant={onOpenAssistant}
         onStartNew={onStartNewAssistant}
         onSend={onSendAssistant}
+        onLoadTask={onLoadAssistantTask}
         onCompleteTask={onCompleteAssistantTask}
+        onRestoreTask={onRestoreAssistantTask}
         onEditTask={onEditAssistantTask}
         onEditSchedule={onEditAssistantSchedule}
         onOpenTask={async (task) => {
@@ -753,7 +759,9 @@ function HomeAssistantCommand({
   onOpenAssistant,
   onStartNew,
   onSend,
+  onLoadTask,
   onCompleteTask,
+  onRestoreTask,
   onEditTask,
   onEditSchedule,
   onOpenTask,
@@ -770,7 +778,9 @@ function HomeAssistantCommand({
   onOpenAssistant(): void;
   onStartNew(): void;
   onSend(text: string, clientMessageId: string): Promise<boolean>;
+  onLoadTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
   onCompleteTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
+  onRestoreTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
   onEditTask(task: Pick<Task, "id" | "projectId">): void | Promise<void>;
   onEditSchedule(
     entry: Pick<ScheduleEntry, "id" | "startsAt">,
@@ -959,7 +969,9 @@ function HomeAssistantCommand({
           key={message?.id}
           presentation={presentation}
           onContinue={() => inputRef.current?.focus()}
+          onLoadTask={onLoadTask}
           onCompleteTask={onCompleteTask}
+          onRestoreTask={onRestoreTask}
           onEditTask={onEditTask}
           onEditSchedule={onEditSchedule}
           onOpenTask={onOpenTask}

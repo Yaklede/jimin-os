@@ -1970,6 +1970,14 @@ export default function App() {
     }
   }
 
+  async function loadTaskFromAssistant(
+    task: Pick<Task, "id" | "projectId">,
+  ): Promise<Task> {
+    return withAuthenticatedSession((accessToken) =>
+      fetchTask(apiBaseUrl, accessToken, task.id),
+    );
+  }
+
   async function editTaskFromAssistant(
     task: Pick<Task, "id" | "projectId">,
   ): Promise<void> {
@@ -2000,47 +2008,85 @@ export default function App() {
     setPlanningEditTarget({ kind: "schedule", item: currentEntry });
   }
 
+  function applyRestoredTask(previous: Task, restored: Task) {
+    setPlanningSnapshot((current) =>
+      current
+        ? {
+            ...current,
+            tasks: [
+              restored,
+              ...current.tasks.filter((item) => item.id !== restored.id),
+            ],
+            completedTasks: current.completedTasks.filter(
+              (item) => item.id !== restored.id,
+            ),
+          }
+        : current,
+    );
+    setProjectTasks((current) => {
+      const updated = current.map((item) =>
+        item.id === restored.id ? restored : item,
+      );
+      return restored.projectId === selectedProjectId &&
+        !updated.some((item) => item.id === restored.id)
+        ? [restored, ...updated]
+        : updated;
+    });
+    if (previous.projectId) {
+      setProjects((current) =>
+        current.map((project) =>
+          project.id === previous.projectId
+            ? { ...project, openTaskCount: project.openTaskCount + 1 }
+            : project,
+        ),
+      );
+      if (selectedWorkspaceId) {
+        void loadProjectsForWorkspace(selectedWorkspaceId, previous.projectId);
+      }
+    }
+    void loadHomeSnapshot();
+    void loadGoals();
+  }
+
+  async function restoreTaskRecord(taskId: string): Promise<Task> {
+    const currentTask = await withAuthenticatedSession((accessToken) =>
+      fetchTask(apiBaseUrl, accessToken, taskId),
+    );
+    if (currentTask.status === "open") return currentTask;
+    const restored = await withAuthenticatedSession((accessToken) =>
+      updateTask(apiBaseUrl, accessToken, currentTask, {
+        title: currentTask.title,
+        notes: currentTask.notes ?? undefined,
+        assigneeName: currentTask.assigneeName ?? undefined,
+        status: "open",
+        priority: currentTask.priority,
+        dueAt: currentTask.dueAt ?? undefined,
+        parentTaskId: currentTask.parentTaskId,
+      }),
+    );
+    applyRestoredTask(currentTask, restored);
+    return restored;
+  }
+
+  async function restoreTaskFromAssistant(
+    task: Pick<Task, "id" | "projectId">,
+  ): Promise<Task> {
+    setHomeError(undefined);
+    try {
+      return await restoreTaskRecord(task.id);
+    } catch (error) {
+      setHomeError(copy.messages.taskRestoreNotice);
+      void loadHomeSnapshot();
+      void loadPlanningSnapshot();
+      throw error;
+    }
+  }
+
   async function restorePlanningTask(task: Task): Promise<void> {
     if (!tokens) return;
     setPlanningError(undefined);
     try {
-      const restored = await withAuthenticatedSession((accessToken) =>
-        updateTask(apiBaseUrl, accessToken, task, {
-          title: task.title,
-          notes: task.notes ?? undefined,
-          status: "open",
-          priority: task.priority,
-          dueAt: task.dueAt ?? undefined,
-        }),
-      );
-      setPlanningSnapshot((current) =>
-        current
-          ? {
-              ...current,
-              tasks: [
-                restored,
-                ...current.tasks.filter((item) => item.id !== restored.id),
-              ],
-              completedTasks: current.completedTasks.filter(
-                (item) => item.id !== restored.id,
-              ),
-            }
-          : current,
-      );
-      setProjectTasks((current) =>
-        current.map((item) => (item.id === restored.id ? restored : item)),
-      );
-      if (task.projectId) {
-        setProjects((current) =>
-          current.map((project) =>
-            project.id === task.projectId
-              ? { ...project, openTaskCount: project.openTaskCount + 1 }
-              : project,
-          ),
-        );
-      }
-      void loadHomeSnapshot();
-      void loadGoals();
+      await restoreTaskRecord(task.id);
     } catch {
       setPlanningError(copy.messages.taskRestoreNotice);
       void loadPlanningSnapshot();
@@ -3436,7 +3482,9 @@ export default function App() {
                 })
               }
               onCompleteTask={completeHomeTask}
+              onLoadAssistantTask={loadTaskFromAssistant}
               onCompleteAssistantTask={completeTaskFromAssistant}
+              onRestoreAssistantTask={restoreTaskFromAssistant}
               onEditAssistantTask={editTaskFromAssistant}
               onEditAssistantSchedule={editScheduleFromAssistant}
               onEditTask={(task) =>

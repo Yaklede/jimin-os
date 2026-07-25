@@ -1425,6 +1425,40 @@ svg {
   line-height: 1.55;
 }
 
+.assistant-canvas__detail-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.assistant-canvas__task-notes {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.assistant-canvas__task-notes strong {
+  color: var(--text-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.assistant-canvas__detail-copy .assistant-canvas__task-notes p {
+  max-height: 168px;
+  overflow: auto;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.assistant-canvas__detail-load-error {
+  color: var(--danger) !important;
+}
+
 .assistant-canvas__detail-actions {
   display: flex;
   grid-column: 2;

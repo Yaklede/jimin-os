@@ -137,6 +137,14 @@ export const copy = {
     resultTaskComplete: "완료하기",
     resultTaskCompleting: "완료하는 중",
     resultTaskCompleteFailed: "완료하지 못했어요. 확인하고 다시 눌러 주세요.",
+    resultTaskRestore: "다시 할 일로 열기",
+    resultTaskRestoring: "다시 여는 중",
+    resultTaskRestoreFailed:
+      "할 일을 다시 열지 못했어요. 최신 상태를 확인한 뒤 다시 눌러 주세요.",
+    resultTaskDetailsLoading: "상세 내용을 불러오는 중이에요",
+    resultTaskDetailsFailed:
+      "상세 내용을 불러오지 못했어요. 잠시 후 다시 선택해 주세요.",
+    resultTaskNotesLabel: "처리할 내용",
     resultTasksHandled: "이 결과의 할 일을 모두 처리했어요.",
     taskGroupViewLabel: "보기 기준",
     groupTasksByAssignee: "담당자별",

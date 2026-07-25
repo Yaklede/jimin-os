@@ -25,6 +25,31 @@ describe("assistant project result navigation", () => {
   });
 });
 
+describe("assistant completed task actions", () => {
+  const completedTask: Extract<AssistantPresentationItem, { type: "task" }> = {
+    type: "task",
+    id: "019bffff-ffff-7fff-8000-000000000031",
+    projectId: null,
+    projectTitle: null,
+    assigneeName: "김경주",
+    title: "계약 검토 결과 기록",
+    status: "completed",
+    priority: 2,
+    dueAt: "2026-07-24T14:59:59Z",
+  };
+
+  it("서버에서 다시 열린 상태를 확인하면 홈에서 곧바로 이동할 수 있다", () => {
+    expect(canOpenPresentationItem(completedTask)).toBe(false);
+    expect(
+      canOpenPresentationItem(
+        completedTask,
+        new Date("2026-07-24T09:00:00+09:00"),
+        "open",
+      ),
+    ).toBe(true);
+  });
+});
+
 describe("assistant task result grouping", () => {
   const tasks: Extract<AssistantPresentationItem, { type: "task" }>[] = [
     {

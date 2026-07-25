@@ -9,6 +9,7 @@ import {
   FolderKanban,
   ListTodo,
   Pencil,
+  RotateCcw,
   UserRound,
 } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
@@ -30,7 +31,9 @@ import { copy } from "../copy";
 type AssistantInteractiveCanvasProps = {
   presentation: AssistantPresentation;
   onContinue(): void;
+  onLoadTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
   onCompleteTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
+  onRestoreTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
   onEditTask(task: Pick<Task, "id" | "projectId">): void | Promise<void>;
   onEditSchedule(
     entry: Pick<ScheduleEntry, "id" | "startsAt">,
@@ -47,7 +50,9 @@ type AssistantInteractiveCanvasProps = {
 export function AssistantInteractiveCanvas({
   presentation,
   onContinue,
+  onLoadTask,
   onCompleteTask,
+  onRestoreTask,
   onEditTask,
   onEditSchedule,
   onOpenTask,
@@ -72,6 +77,10 @@ export function AssistantInteractiveCanvas({
   );
   const [opening, setOpening] = useState(false);
   const [completingTaskId, setCompletingTaskId] = useState<string>();
+  const [restoringTaskId, setRestoringTaskId] = useState<string>();
+  const [selectedTaskDetail, setSelectedTaskDetail] = useState<Task>();
+  const [taskDetailLoading, setTaskDetailLoading] = useState(false);
+  const [taskDetailError, setTaskDetailError] = useState<string>();
   const [completedTaskIds, setCompletedTaskIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -90,8 +99,14 @@ export function AssistantInteractiveCanvas({
       : (activeSection?.items ?? []);
   const selectedItem =
     activeItems.find((item) => item.id === selectedItemId) ?? activeItems[0];
+  const selectedTaskStatus =
+    selectedItem?.type === "task" && selectedTaskDetail?.id === selectedItem.id
+      ? selectedTaskDetail.status
+      : selectedItem?.type === "task"
+        ? selectedItem.status
+        : undefined;
   const selectedItemCanOpen = selectedItem
-    ? canOpenPresentationItem(selectedItem)
+    ? canOpenPresentationItem(selectedItem, new Date(), selectedTaskStatus)
     : false;
   const taskGroups =
     activeSection?.kind === "tasks"
@@ -105,6 +120,34 @@ export function AssistantInteractiveCanvas({
       mountedRef.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!selectedItem || selectedItem.type !== "task") {
+      setSelectedTaskDetail(undefined);
+      setTaskDetailLoading(false);
+      setTaskDetailError(undefined);
+      return;
+    }
+    let active = true;
+    setSelectedTaskDetail(undefined);
+    setTaskDetailLoading(true);
+    setTaskDetailError(undefined);
+    void onLoadTask(selectedItem)
+      .then((task) => {
+        if (active && mountedRef.current) setSelectedTaskDetail(task);
+      })
+      .catch(() => {
+        if (active && mountedRef.current) {
+          setTaskDetailError(copy.home.resultTaskDetailsFailed);
+        }
+      })
+      .finally(() => {
+        if (active && mountedRef.current) setTaskDetailLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedItem?.id, selectedItem?.type]);
 
   function selectSection(section: AssistantPresentationSection) {
     setActiveKind(section.kind);
@@ -183,6 +226,23 @@ export function AssistantInteractiveCanvas({
       }
     } finally {
       if (mountedRef.current) setCompletingTaskId(undefined);
+    }
+  }
+
+  async function restorePresentationTask(task: Pick<Task, "id" | "projectId">) {
+    if (restoringTaskId) return;
+    setRestoringTaskId(task.id);
+    setOpenError(undefined);
+    try {
+      const restored = await onRestoreTask(task);
+      if (!mountedRef.current) return;
+      setSelectedTaskDetail(restored);
+    } catch {
+      if (mountedRef.current) {
+        setOpenError(copy.home.resultTaskRestoreFailed);
+      }
+    } finally {
+      if (mountedRef.current) setRestoringTaskId(undefined);
     }
   }
 
@@ -347,6 +407,11 @@ export function AssistantInteractiveCanvas({
                                       item,
                                       taskGroupView,
                                     )}
+                                    status={
+                                      selectedTaskDetail?.id === item.id
+                                        ? selectedTaskDetail.status
+                                        : item.status
+                                    }
                                     completing={completingTaskId === item.id}
                                     onComplete={() =>
                                       void completePresentationTask(item)
@@ -398,13 +463,26 @@ export function AssistantInteractiveCanvas({
                   >
                     <ItemDetail
                       item={selectedItem}
+                      taskDetail={
+                        selectedTaskDetail?.id === selectedItem.id
+                          ? selectedTaskDetail
+                          : undefined
+                      }
+                      taskDetailLoading={taskDetailLoading}
+                      taskDetailError={taskDetailError}
                       opening={opening}
                       completing={completingTaskId === selectedItem.id}
+                      restoring={restoringTaskId === selectedItem.id}
                       error={openError}
                       canOpen={selectedItemCanOpen}
                       onComplete={() =>
                         selectedItem.type === "task"
                           ? void completePresentationTask(selectedItem)
+                          : undefined
+                      }
+                      onRestore={() =>
+                        selectedItem.type === "task"
+                          ? void restorePresentationTask(selectedItem)
                           : undefined
                       }
                       onEdit={() => void editSelectedItem()}
@@ -426,6 +504,7 @@ function PresentationItemButton({
   section,
   selected,
   summary,
+  status,
   completing,
   onComplete,
   onSelect,
@@ -434,13 +513,16 @@ function PresentationItemButton({
   section: AssistantPresentationSection;
   selected: boolean;
   summary?: string;
+  status?: Task["status"];
   completing: boolean;
   onComplete?: () => void;
   onSelect(): void;
 }) {
   return (
     <div className="assistant-canvas__item" data-selected={selected}>
-      {item.type === "task" && item.status === "open" && onComplete ? (
+      {item.type === "task" &&
+      (status ?? item.status) === "open" &&
+      onComplete ? (
         <button
           className="assistant-canvas__complete focus-visible-control"
           type="button"
@@ -455,7 +537,12 @@ function PresentationItemButton({
           )}
         </button>
       ) : (
-        <ItemMarker section={section} />
+        <ItemMarker
+          section={section}
+          taskStatus={
+            item.type === "task" ? (status ?? item.status) : undefined
+          }
+        />
       )}
       <button
         className="assistant-canvas__item-main focus-visible-control"
@@ -490,8 +577,19 @@ function SectionIcon({ kind }: { kind: AssistantPresentationSection["kind"] }) {
   return <FolderKanban aria-hidden="true" />;
 }
 
-function ItemMarker({ section }: { section: AssistantPresentationSection }) {
+function ItemMarker({
+  section,
+  taskStatus,
+}: {
+  section: AssistantPresentationSection;
+  taskStatus?: Task["status"];
+}) {
   if (section.kind === "tasks" && section.view === "checklist") {
+    if (taskStatus === "completed") {
+      return (
+        <CheckCircle2 className="assistant-canvas__marker" aria-hidden="true" />
+      );
+    }
     return <Circle className="assistant-canvas__marker" aria-hidden="true" />;
   }
   if (section.kind === "schedule" && section.view === "timeline") {
@@ -522,46 +620,81 @@ function itemSummary(
 
 function ItemDetail({
   item,
+  taskDetail,
+  taskDetailLoading,
+  taskDetailError,
   opening,
   completing,
+  restoring,
   error,
   canOpen,
   onComplete,
+  onRestore,
   onEdit,
   onOpen,
 }: {
   item: AssistantPresentationSection["items"][number];
+  taskDetail: Task | undefined;
+  taskDetailLoading: boolean;
+  taskDetailError: string | undefined;
   opening: boolean;
   completing: boolean;
+  restoring: boolean;
   error: string | undefined;
   canOpen: boolean;
   onComplete(): void;
+  onRestore(): void;
   onEdit(): void;
   onOpen(): void;
 }) {
   if (item.type === "task") {
+    const status = taskDetail?.status ?? item.status;
     return (
       <>
         <span className="assistant-canvas__detail-icon" aria-hidden="true">
           <CheckCircle2 />
         </span>
-        <div className="assistant-canvas__detail-copy">
-          <p>{`${copy.home.taskStatus(item.status)} · ${copy.home.taskPriority(item.priority)}`}</p>
-          <h4>{item.title}</h4>
+        <div
+          className="assistant-canvas__detail-copy"
+          aria-busy={taskDetailLoading}
+        >
+          <p>{`${copy.home.taskStatus(status)} · ${copy.home.taskPriority(taskDetail?.priority ?? item.priority)}`}</p>
+          <h4>{taskDetail?.title ?? item.title}</h4>
           <span>{item.projectTitle || copy.home.unassignedTask}</span>
           <span>
-            {copy.projects.taskAssignee(item.assigneeName ?? undefined)}
+            {copy.projects.taskAssignee(
+              taskDetail?.assigneeName ?? item.assigneeName ?? undefined,
+            )}
           </span>
-          {item.dueAt && (
-            <time dateTime={item.dueAt}>{formatDate(item.dueAt)}</time>
+          {(taskDetail?.dueAt ?? item.dueAt) && (
+            <time dateTime={(taskDetail?.dueAt ?? item.dueAt)!}>
+              {formatDate((taskDetail?.dueAt ?? item.dueAt)!)}
+            </time>
+          )}
+          {taskDetailLoading && (
+            <span className="assistant-canvas__detail-loading" role="status">
+              <span className="button-spinner" aria-hidden="true" />
+              {copy.home.resultTaskDetailsLoading}
+            </span>
+          )}
+          {taskDetail?.notes && (
+            <div className="assistant-canvas__task-notes">
+              <strong>{copy.home.resultTaskNotesLabel}</strong>
+              <p>{taskDetail.notes}</p>
+            </div>
+          )}
+          {taskDetailError && (
+            <span className="assistant-canvas__detail-load-error" role="alert">
+              {taskDetailError}
+            </span>
           )}
         </div>
         <div className="assistant-canvas__detail-actions">
-          {item.status === "open" && (
+          {status === "open" ? (
             <button
               className="primary-button focus-visible-control"
               type="button"
-              disabled={completing || opening}
+              disabled={completing || restoring || opening}
               aria-busy={completing}
               onClick={onComplete}
             >
@@ -577,11 +710,31 @@ function ItemDetail({
                 </>
               )}
             </button>
+          ) : (
+            <button
+              className="primary-button focus-visible-control"
+              type="button"
+              disabled={restoring || completing || opening}
+              aria-busy={restoring}
+              onClick={onRestore}
+            >
+              {restoring ? (
+                <>
+                  <span className="button-spinner" aria-hidden="true" />
+                  {copy.home.resultTaskRestoring}
+                </>
+              ) : (
+                <>
+                  <RotateCcw aria-hidden="true" />
+                  {copy.home.resultTaskRestore}
+                </>
+              )}
+            </button>
           )}
           <button
             className="secondary-button focus-visible-control"
             type="button"
-            disabled={opening || completing}
+            disabled={opening || completing || restoring}
             aria-busy={opening}
             onClick={onEdit}
           >
@@ -592,7 +745,7 @@ function ItemDetail({
             <button
               className="secondary-button focus-visible-control"
               type="button"
-              disabled={opening || completing}
+              disabled={opening || completing || restoring}
               aria-busy={opening}
               onClick={onOpen}
             >
@@ -714,10 +867,11 @@ function ResultOpenError({ message }: { message: string }) {
 export function canOpenPresentationItem(
   item: AssistantPresentationSection["items"][number],
   now = new Date(),
+  taskStatus = item.type === "task" ? item.status : undefined,
 ): boolean {
   if (item.type === "project") return item.status !== "removed";
   if (item.type === "schedule") return item.status !== "cancelled";
-  if (item.status !== "open") return false;
+  if (taskStatus !== "open") return false;
   if (item.projectId) return true;
   if (!item.dueAt) return true;
   const endOfToday = new Date(now);
