@@ -58,7 +58,7 @@ describe("agent API", () => {
       .fn<typeof fetch>()
       .mockResolvedValue(
         new Response(
-          '{"id":"conversation-1","title":"오늘 일정","status":"active","lastMessageAt":null,"version":1}',
+          '{"id":"conversation-1","title":"오늘 일정","surface":"home","status":"active","lastMessageAt":null,"version":1}',
           { status: 201, headers: { "Content-Type": "application/json" } },
         ),
       );
@@ -69,12 +69,14 @@ describe("agent API", () => {
       "session-access",
       "019f68cb-9400-7000-8000-000000000000",
       "오늘 일정",
+      "home",
     );
 
     const request = fetchMock.mock.calls[0]?.[1];
     expect(JSON.parse(String(request?.body))).toMatchObject({
       clientConversationId: "019f68cb-9400-7000-8000-000000000000",
       title: "오늘 일정",
+      surface: "home",
     });
   });
 

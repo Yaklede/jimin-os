@@ -46,6 +46,7 @@ pub struct NewConversation {
     pub id: Uuid,
     pub user_id: Uuid,
     pub title: Option<String>,
+    pub surface: ConversationSurface,
 }
 
 impl NewConversation {
@@ -524,9 +525,25 @@ impl NewAgentTurn {
 pub struct Conversation {
     pub id: Uuid,
     pub title: Option<String>,
+    pub surface: ConversationSurface,
     pub status: ConversationStatus,
     pub last_message_at: Option<OffsetDateTime>,
     pub version: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationSurface {
+    Home,
+    Chat,
+}
+
+impl ConversationSurface {
+    fn database_value(self) -> &'static str {
+        match self {
+            Self::Home => "home",
+            Self::Chat => "chat",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -875,6 +892,7 @@ pub struct RequestedAgentAuthentication {
 struct ConversationRow {
     id: Uuid,
     title: Option<String>,
+    surface: String,
     status: String,
     last_message_at: Option<OffsetDateTime>,
     version: i64,
@@ -889,9 +907,15 @@ impl TryFrom<ConversationRow> for Conversation {
             "archived" => ConversationStatus::Archived,
             _ => return Err(StorageError::PersistenceUnavailable),
         };
+        let surface = match row.surface.as_str() {
+            "home" => ConversationSurface::Home,
+            "chat" => ConversationSurface::Chat,
+            _ => return Err(StorageError::PersistenceUnavailable),
+        };
         Ok(Self {
             id: row.id,
             title: row.title,
+            surface,
             status,
             last_message_at: row.last_message_at,
             version: row.version,
@@ -1746,35 +1770,21 @@ impl Database {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty());
-        let inserted = sqlx::query_as::<_, ConversationRow>(
+        let existing = sqlx::query_as::<_, ConversationRow>(
             "\
-            INSERT INTO conversations (id, user_id, title)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (id) DO NOTHING
-            RETURNING id, title, status, last_message_at, version",
+            SELECT id, title, surface, status, last_message_at, version
+            FROM conversations
+            WHERE id = $1 AND user_id = $2",
         )
         .bind(conversation.id)
         .bind(conversation.user_id)
-        .bind(normalized_title)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|error| classify(&error))?;
-        let Some(row) = inserted else {
-            let existing = sqlx::query_as::<_, ConversationRow>(
-                "\
-                SELECT id, title, status, last_message_at, version
-                FROM conversations
-                WHERE id = $1 AND user_id = $2",
-            )
-            .bind(conversation.id)
-            .bind(conversation.user_id)
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(|error| classify(&error))?;
-            let Some(existing) = existing else {
-                return Err(StorageError::IdentityConflict);
-            };
-            if existing.title.as_deref() != normalized_title {
+        if let Some(existing) = existing {
+            if existing.title.as_deref() != normalized_title
+                || existing.surface != conversation.surface.database_value()
+            {
                 return Err(StorageError::IdentityConflict);
             }
             let conversation = Conversation::try_from(existing)?;
@@ -1783,6 +1793,48 @@ impl Database {
                 .await
                 .map_err(|error| classify(&error))?;
             return Ok(conversation);
+        }
+        if conversation.surface == ConversationSurface::Home {
+            let locked =
+                sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+                    .bind(user_id)
+                    .fetch_optional(&mut *transaction)
+                    .await
+                    .map_err(|error| classify(&error))?;
+            if locked.is_none() {
+                return Err(StorageError::IdentityConflict);
+            }
+            let archived = sqlx::query_as::<_, (Uuid, i64)>(
+                "\
+                UPDATE conversations
+                SET status = 'archived'
+                WHERE user_id = $1 AND status = 'active' AND surface = 'home'
+                RETURNING id, version",
+            )
+            .bind(user_id)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(|error| classify(&error))?;
+            for (id, version) in archived {
+                append_change(&mut transaction, user_id, "conversation", id, version).await?;
+            }
+        }
+        let inserted = sqlx::query_as::<_, ConversationRow>(
+            "\
+            INSERT INTO conversations (id, user_id, title, surface)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (id) DO NOTHING
+            RETURNING id, title, surface, status, last_message_at, version",
+        )
+        .bind(conversation.id)
+        .bind(conversation.user_id)
+        .bind(normalized_title)
+        .bind(conversation.surface.database_value())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        let Some(row) = inserted else {
+            return Err(StorageError::IdentityConflict);
         };
         let conversation = Conversation::try_from(row)?;
         append_change(
@@ -1811,7 +1863,7 @@ impl Database {
     ) -> Result<Vec<Conversation>, StorageError> {
         let rows = sqlx::query_as::<_, ConversationRow>(
             "\
-            SELECT id, title, status, last_message_at, version
+            SELECT id, title, surface, status, last_message_at, version
             FROM conversations
             WHERE user_id = $1 AND status = 'active'
             ORDER BY last_message_at DESC NULLS LAST, created_at DESC, id DESC",
@@ -3829,7 +3881,8 @@ mod tests {
     use super::{
         AgentActionCommand, AssistantPresentation, AssistantPresentationItem,
         AssistantPresentationKind, AssistantPresentationLayout, AssistantPresentationSection,
-        AssistantPresentationSectionKind, AssistantPresentationView, NewAgentTurn, NewConversation,
+        AssistantPresentationSectionKind, AssistantPresentationView, ConversationSurface,
+        NewAgentTurn, NewConversation,
     };
     use crate::{StorageError, planning::TaskStatus};
     use uuid::Uuid;
@@ -3840,6 +3893,7 @@ mod tests {
             id: Uuid::nil(),
             user_id: Uuid::now_v7(),
             title: Some(" ".to_owned()),
+            surface: ConversationSurface::Chat,
         };
         assert!(matches!(
             invalid.validate(),

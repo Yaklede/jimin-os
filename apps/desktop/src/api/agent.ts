@@ -1,6 +1,7 @@
 export interface Conversation {
   id: string;
   title: string | null;
+  surface: "home" | "chat";
   status: "active" | "archived";
   lastMessageAt: string | null;
   version: number;
@@ -236,10 +237,12 @@ export async function createConversation(
   access: string,
   clientConversationId: string,
   title: string | null,
+  surface: Conversation["surface"],
 ): Promise<Conversation> {
   return request<Conversation>(baseUrl, access, "/v1/conversations", {
     clientConversationId,
     title,
+    surface,
   });
 }
 

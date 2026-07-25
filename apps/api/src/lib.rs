@@ -39,7 +39,7 @@ use jimin_storage::{
         AssistantPresentationItem, AssistantPresentationKind, AssistantPresentationLayout,
         AssistantPresentationSection, AssistantPresentationSectionKind, AssistantPresentationView,
         Conversation, ConversationMessage, ConversationMessageRole, ConversationMessageStatus,
-        ConversationStatus, NewAgentTurn, NewConversation, PendingAgentAction,
+        ConversationStatus, ConversationSurface, NewAgentTurn, NewConversation, PendingAgentAction,
         PendingAgentActionDecision, QueuedAgentTurn,
     },
     auth::{Device, DeviceStatus, Profile},
@@ -839,6 +839,7 @@ struct ProjectInflowListQuery {
 pub struct ConversationResponse {
     id: uuid::Uuid,
     title: Option<String>,
+    surface: String,
     status: String,
     last_message_at: Option<String>,
     version: i64,
@@ -1333,6 +1334,12 @@ struct VoiceCommandRequest {
 struct CreateConversationRequest {
     client_conversation_id: uuid::Uuid,
     title: Option<String>,
+    #[serde(default = "default_conversation_surface")]
+    surface: String,
+}
+
+fn default_conversation_surface() -> String {
+    "chat".to_owned()
 }
 
 #[derive(serde::Deserialize, ToSchema)]
@@ -4652,6 +4659,11 @@ async fn create_conversation(
             id: body.client_conversation_id,
             user_id: principal.identity().user_id(),
             title: body.title,
+            surface: match body.surface.as_str() {
+                "home" => ConversationSurface::Home,
+                "chat" => ConversationSurface::Chat,
+                _ => return invalid_request_response(request_id),
+            },
         })
         .await
     {
@@ -7774,6 +7786,10 @@ fn conversation_response(conversation: Conversation) -> Result<ConversationRespo
     Ok(ConversationResponse {
         id: conversation.id,
         title: conversation.title,
+        surface: match conversation.surface {
+            ConversationSurface::Home => "home".to_owned(),
+            ConversationSurface::Chat => "chat".to_owned(),
+        },
         status: match conversation.status {
             ConversationStatus::Active => "active".to_owned(),
             ConversationStatus::Archived => "archived".to_owned(),
@@ -8631,7 +8647,7 @@ mod tests {
                     .uri("/v1/conversations")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"clientConversationId":"019f68cb-9400-7000-8000-000000000000","title":null}"#,
+                        r#"{"clientConversationId":"019f68cb-9400-7000-8000-000000000000","title":null,"surface":"chat"}"#,
                     ))
                     .expect("request should be valid"),
             )

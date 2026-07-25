@@ -132,4 +132,12 @@ backup, then verify the new constraints and
 changed requires the verified pre-migration backup so the owner's management
 choice is not lost.
 
+Migration `0039_conversation_surfaces.sql` marks one active conversation per
+owner as the cross-device home assistant context. Existing installations choose
+the most recently used active conversation during migration. Apply it to an
+empty database and a restored version-38 backup, then verify that creating a new
+home conversation archives the previous home context and
+`jimin_schema_metadata.schema_version = 39`. Rollback requires the verified
+pre-migration backup after clients begin relying on the durable home marker.
+
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.

@@ -311,6 +311,7 @@ export default function App() {
   const [remoteReminderStatus, setRemoteReminderStatus] =
     useState<RemoteReminderStatus>("idle");
   const pendingConversationId = useRef<string | undefined>(undefined);
+  const homeConversationDetachedRef = useRef(false);
   const openedAuthenticationUrl = useRef<string | undefined>(undefined);
   const activeSessionRef = useRef<SessionTokens | undefined>(undefined);
   const refreshInFlightRef = useRef<Promise<SessionTokens> | undefined>(
@@ -1280,6 +1281,7 @@ export default function App() {
       setReminderSyncError(undefined);
       setRemoteReminderStatus("idle");
       pendingConversationId.current = undefined;
+      homeConversationDetachedRef.current = false;
       await bootstrapTrustedNetworkDevice();
     }
   }
@@ -1328,6 +1330,32 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!tokens || homeConversationDetachedRef.current) return;
+    const durableHome = conversations.find(
+      (conversation) => conversation.surface === "home",
+    );
+    if (!durableHome) return;
+    if (durableHome.id !== homeConversationId) {
+      setHomeConversationId(durableHome.id);
+    }
+    if (destination !== "home") return;
+    if (selectedConversationId === durableHome.id) return;
+    setSelectedConversationId(durableHome.id);
+    setConversationMessages([]);
+    void Promise.all([
+      loadConversationMessages(durableHome.id),
+      restoreConversationJob(durableHome.id),
+    ]);
+  }, [
+    conversations,
+    destination,
+    homeConversationId,
+    loadConversationMessages,
+    selectedConversationId,
+    tokens,
+  ]);
 
   useEffect(() => {
     if (!tokens) return;
@@ -1798,6 +1826,7 @@ export default function App() {
   }
 
   function startHomeConversation() {
+    homeConversationDetachedRef.current = true;
     setHomeConversationId(undefined);
     startConversation();
   }
@@ -3145,11 +3174,19 @@ export default function App() {
             accessToken,
             clientConversationId,
             conversationTitle(text),
+            options.rememberForHome ? "home" : "chat",
           ),
         );
         pendingConversationId.current = undefined;
         conversationId = conversation.id;
-        setConversations((current) => [conversation, ...current]);
+        setConversations((current) => [
+          conversation,
+          ...current.filter(
+            (known) =>
+              known.id !== conversation.id &&
+              !(conversation.surface === "home" && known.surface === "home"),
+          ),
+        ]);
         setSelectedConversationId(conversation.id);
       }
       if (!conversationId) {
@@ -3162,6 +3199,7 @@ export default function App() {
         setConversationMessages([]);
       }
       if (options.rememberForHome) {
+        homeConversationDetachedRef.current = false;
         setHomeConversationId(targetConversationId);
       }
       const queued = await withAuthenticatedSession((accessToken) =>

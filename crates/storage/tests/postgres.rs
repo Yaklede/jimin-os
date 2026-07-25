@@ -7,8 +7,8 @@ use jimin_storage::{
     agent::{
         AgentActionCommand, AgentJobState, AgentModelCatalogEntry, AgentReasoningEffort,
         AssistantPresentation, AssistantPresentationKind, AssistantPresentationLayout,
-        ConversationMessageRole, NewAgentTurn, NewConversation, PendingAgentAction,
-        PendingAgentActionDecision,
+        ConversationMessageRole, ConversationSurface, NewAgentTurn, NewConversation,
+        PendingAgentAction, PendingAgentActionDecision,
     },
     auth::{
         ConsumeDevicePairing, CreateDevicePairing, PairingConsumption, ProvisionLogin,
@@ -2239,6 +2239,7 @@ async fn agent_task_reopen_and_webhook_message_commit_as_one_batch() {
             id: conversation_id,
             user_id: owner.profile.id,
             title: Some("Google Chat 전송".to_owned()),
+            surface: ConversationSurface::Chat,
         })
         .await
         .expect("conversation should persist");
@@ -4021,6 +4022,70 @@ async fn project_and_task_deletions_are_scoped_versioned_and_idempotent() {
 }
 
 #[tokio::test]
+async fn a_new_home_conversation_replaces_the_previous_home_across_devices() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database
+        .migrate()
+        .await
+        .expect("conversation surface migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let chat = database
+        .create_conversation(&NewConversation {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            title: Some("별도 대화".to_owned()),
+            surface: ConversationSurface::Chat,
+        })
+        .await
+        .expect("chat conversation should persist");
+    let first_home = database
+        .create_conversation(&NewConversation {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            title: Some("첫 홈 요청".to_owned()),
+            surface: ConversationSurface::Home,
+        })
+        .await
+        .expect("first home conversation should persist");
+    let latest_home = database
+        .create_conversation(&NewConversation {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            title: Some("새 홈 요청".to_owned()),
+            surface: ConversationSurface::Home,
+        })
+        .await
+        .expect("new home conversation should replace the prior home");
+
+    let active = database
+        .active_conversations_for_user(owner.profile.id)
+        .await
+        .expect("another device should load active conversations");
+    assert_eq!(active.len(), 2);
+    assert!(active.iter().any(|conversation| {
+        conversation.id == chat.id && conversation.surface == ConversationSurface::Chat
+    }));
+    assert!(active.iter().any(|conversation| {
+        conversation.id == latest_home.id && conversation.surface == ConversationSurface::Home
+    }));
+    assert!(
+        !active
+            .iter()
+            .any(|conversation| conversation.id == first_home.id)
+    );
+
+    database.close().await;
+}
+
+#[tokio::test]
 #[allow(
     clippy::too_many_lines,
     reason = "The integration test verifies one durable agent turn lifecycle and its replay path."
@@ -4047,6 +4112,7 @@ async fn queued_agent_turn_is_leased_and_completed_once() {
             id: conversation_id,
             user_id: provisioned.profile.id,
             title: Some("개인 운영체제".to_owned()),
+            surface: ConversationSurface::Chat,
         })
         .await
         .expect("conversation should persist");
@@ -4055,6 +4121,7 @@ async fn queued_agent_turn_is_leased_and_completed_once() {
             id: conversation_id,
             user_id: provisioned.profile.id,
             title: Some("개인 운영체제".to_owned()),
+            surface: ConversationSurface::Chat,
         })
         .await
         .expect("same client conversation should be replayed");
@@ -4209,6 +4276,7 @@ async fn failed_agent_turn_finalizes_its_streamed_assistant_message() {
             id: conversation_id,
             user_id: provisioned.profile.id,
             title: Some("추가 정보 질문".to_owned()),
+            surface: ConversationSurface::Chat,
         })
         .await
         .expect("conversation should persist");
@@ -4312,6 +4380,7 @@ async fn approved_conversation_action_creates_one_task_and_finalizes_the_job() {
             id: conversation_id,
             user_id: provisioned.profile.id,
             title: Some("할 일 추가".to_owned()),
+            surface: ConversationSurface::Chat,
         })
         .await
         .expect("conversation should persist");
@@ -4432,6 +4501,7 @@ async fn structured_agent_action_and_completion_message_commit_together() {
             id: conversation_id,
             user_id: provisioned.profile.id,
             title: Some("AI 실행".to_owned()),
+            surface: ConversationSurface::Chat,
         })
         .await
         .expect("conversation should persist");
@@ -4595,6 +4665,7 @@ async fn structured_agent_project_delete_commits_a_sync_tombstone() {
             id: conversation_id,
             user_id: provisioned.profile.id,
             title: Some("프로젝트 제거".to_owned()),
+            surface: ConversationSurface::Chat,
         })
         .await
         .expect("conversation should persist");
@@ -4754,6 +4825,7 @@ async fn structured_agent_batch_actions_commit_as_one_turn() {
             id: conversation_id,
             user_id: provisioned.profile.id,
             title: Some("여러 건 완료".to_owned()),
+            surface: ConversationSurface::Chat,
         })
         .await
         .expect("conversation should persist");
@@ -4884,6 +4956,7 @@ async fn expired_running_turn_is_failed_without_replaying_the_provider_call() {
             id: conversation_id,
             user_id: provisioned.profile.id,
             title: Some("중단 복구".to_owned()),
+            surface: ConversationSurface::Chat,
         })
         .await
         .expect("conversation should persist");
@@ -5322,6 +5395,7 @@ async fn connected_schedules_use_one_durable_google_mutation_stream() {
             id: conversation_id,
             user_id,
             title: Some("일정 비서".to_owned()),
+            surface: ConversationSurface::Chat,
         })
         .await
         .expect("conversation should persist");
@@ -5393,6 +5467,7 @@ async fn connected_schedules_use_one_durable_google_mutation_stream() {
             id: approval_conversation_id,
             user_id,
             title: Some("승인 일정".to_owned()),
+            surface: ConversationSurface::Chat,
         })
         .await
         .expect("approval conversation should persist");
@@ -5931,6 +6006,7 @@ async fn resolved_conversation_schedule_conflict_leaves_the_active_decision_inbo
             id: conversation_id,
             user_id: owner.profile.id,
             title: Some("일정 조정".to_owned()),
+            surface: ConversationSurface::Chat,
         })
         .await
         .expect("conversation should persist");
