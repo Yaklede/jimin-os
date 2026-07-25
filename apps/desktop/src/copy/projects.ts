@@ -106,6 +106,13 @@ export const projectCopy = {
     integrations: "연결",
     activity: "완료 기록",
   },
+  detailTabsMobile: {
+    tasks: "일감",
+    weekly: "리포트",
+    inflow: "대화",
+    integrations: "연결",
+    activity: "완료",
+  },
   weeklyReportTitle: "이번 주 운영 리포트",
   weeklyReportEyebrow: "이번 주 흐름",
   weeklyReportSummary: (

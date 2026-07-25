@@ -4857,6 +4857,10 @@ svg {
   color: currentColor;
 }
 
+.project-detail-tabs__mobile-label {
+  display: none;
+}
+
 .project-detail-tabs__button small {
   min-width: 20px;
   border-radius: 999px;
@@ -9408,6 +9412,13 @@ svg {
     flex-direction: column;
   }
 
+  .projects-page[data-project-selected="true"] > .projects-heading,
+  .projects-page[data-project-selected="true"] > .workspace-tabs,
+  .projects-page[data-project-selected="true"] > .project-goals-drawer,
+  .projects-page[data-project-selected="true"] > .project-weekly-overview {
+    display: none;
+  }
+
   .projects-heading .primary-button {
     width: 100%;
   }
@@ -9551,12 +9562,15 @@ svg {
   .project-detail-tabs {
     display: flex;
     margin: 0 -16px;
-    padding-right: 16px;
-    padding-left: 16px;
+    gap: 6px;
+    padding: 4px 16px;
     overflow-x: auto;
     border-right: 0;
     border-left: 0;
     border-radius: 0;
+    overscroll-behavior-inline: contain;
+    scroll-padding-inline: 16px;
+    scroll-snap-type: inline mandatory;
     scrollbar-width: none;
   }
 
@@ -9565,7 +9579,36 @@ svg {
   }
 
   .project-detail-tabs__button {
-    min-width: 132px;
+    flex: 0 0 104px;
+    grid-template-columns: 18px minmax(0, auto) auto;
+    justify-content: center;
+    gap: 6px;
+    min-width: 0;
+    min-height: 44px;
+    padding: 7px 9px;
+    scroll-snap-align: start;
+    white-space: nowrap;
+  }
+
+  .project-detail-tabs__label {
+    display: none;
+  }
+
+  .project-detail-tabs__mobile-label {
+    display: inline;
+  }
+
+  .project-detail-tabs__button small {
+    min-width: 18px;
+    padding: 2px 5px;
+  }
+
+  .projects-page[data-project-selected="true"] {
+    gap: 10px;
+  }
+
+  .projects-page[data-project-selected="true"] .project-detail {
+    gap: 10px;
   }
 
   .project-task-list li[data-task-depth="1"] {
@@ -9600,11 +9643,14 @@ svg {
 
   .project-detail__back {
     display: inline-flex;
+    min-height: 40px;
+    padding: 6px 2px;
   }
 
   .project-detail__heading {
     align-items: stretch;
     flex-direction: column;
+    gap: 12px;
   }
 
   .project-detail__heading-actions {

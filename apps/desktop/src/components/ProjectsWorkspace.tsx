@@ -399,6 +399,7 @@ export function ProjectsWorkspace({
       className="projects-page"
       aria-busy={loading || saving}
       data-refreshing={loading && loaded}
+      data-project-selected={Boolean(selectedProject)}
     >
       <header className="projects-heading">
         <div>
@@ -771,6 +772,7 @@ export function ProjectsWorkspace({
                   id="tasks"
                   active={activeProjectTab === "tasks"}
                   label={copy.projects.detailTabs.tasks}
+                  mobileLabel={copy.projects.detailTabsMobile.tasks}
                   count={openTasks.length}
                   icon={<ListTodo aria-hidden="true" />}
                   onSelect={setActiveProjectTab}
@@ -779,6 +781,7 @@ export function ProjectsWorkspace({
                   id="weekly"
                   active={activeProjectTab === "weekly"}
                   label={copy.projects.detailTabs.weekly}
+                  mobileLabel={copy.projects.detailTabsMobile.weekly}
                   count={selectedWeeklyReport ? 1 : 0}
                   icon={<BarChart3 aria-hidden="true" />}
                   onSelect={setActiveProjectTab}
@@ -787,6 +790,7 @@ export function ProjectsWorkspace({
                   id="inflow"
                   active={activeProjectTab === "inflow"}
                   label={copy.projects.detailTabs.inflow}
+                  mobileLabel={copy.projects.detailTabsMobile.inflow}
                   count={projectInflowItems.length}
                   icon={<MessageSquareText aria-hidden="true" />}
                   onSelect={setActiveProjectTab}
@@ -795,6 +799,7 @@ export function ProjectsWorkspace({
                   id="integrations"
                   active={activeProjectTab === "integrations"}
                   label={copy.projects.detailTabs.integrations}
+                  mobileLabel={copy.projects.detailTabsMobile.integrations}
                   count={webhooks.length}
                   icon={<PlugZap aria-hidden="true" />}
                   onSelect={setActiveProjectTab}
@@ -803,6 +808,7 @@ export function ProjectsWorkspace({
                   id="activity"
                   active={activeProjectTab === "activity"}
                   label={copy.projects.detailTabs.activity}
+                  mobileLabel={copy.projects.detailTabsMobile.activity}
                   count={completedTasks.length}
                   icon={<History aria-hidden="true" />}
                   onSelect={setActiveProjectTab}
@@ -1269,6 +1275,7 @@ function ProjectDetailTabButton({
   id,
   active,
   label,
+  mobileLabel,
   count,
   icon,
   onSelect,
@@ -1276,6 +1283,7 @@ function ProjectDetailTabButton({
   id: ProjectDetailTab;
   active: boolean;
   label: string;
+  mobileLabel: string;
   count: number;
   icon: ReactNode;
   onSelect(tab: ProjectDetailTab): void;
@@ -1314,7 +1322,8 @@ function ProjectDetailTabButton({
       }}
     >
       {icon}
-      <span>{label}</span>
+      <span className="project-detail-tabs__label">{label}</span>
+      <span className="project-detail-tabs__mobile-label">{mobileLabel}</span>
       <small>{count}</small>
     </button>
   );
