@@ -501,9 +501,10 @@ export function HomeWorkspace({
                   <TaskListSkeleton rows={4} visible={skeletonVisible} />
                 ) : snapshot?.tasks.length ? (
                   <ul className="home-task-list">
-                    {snapshot.tasks.map((task) => (
+                    {snapshot.tasks.map((task, index) => (
                       <li
                         key={task.id}
+                        data-mobile-overflow={index >= 3}
                         ref={
                           highlightedHomeTaskId === task.id
                             ? highlightedHomeTaskRef
@@ -567,6 +568,16 @@ export function HomeWorkspace({
                     ))}
                   </ul>
                 ) : null}
+                {!showingSkeleton && taskCount > 3 && (
+                  <button
+                    className="home-tasks__mobile-more focus-visible-control"
+                    type="button"
+                    onClick={onOpenPlanning}
+                  >
+                    {copy.home.showMoreTasks(taskCount - 3)}
+                    <ChevronRight aria-hidden="true" />
+                  </button>
+                )}
               </div>
             </section>
           )}
@@ -598,6 +609,7 @@ function NowBrief({
 }) {
   const [pendingId, setPendingId] = useState<string>();
   const [error, setError] = useState<string>();
+  const [mobileExpanded, setMobileExpanded] = useState(false);
 
   async function decide(
     recommendation: Recommendation,
@@ -638,7 +650,11 @@ function NowBrief({
   }
 
   return (
-    <section className="home-now-brief" aria-labelledby="home-now-brief-title">
+    <section
+      className="home-now-brief"
+      aria-labelledby="home-now-brief-title"
+      data-mobile-expanded={mobileExpanded}
+    >
       <header>
         <div>
           <span>{nowBriefHeading(period).eyebrow}</span>
@@ -652,10 +668,10 @@ function NowBrief({
         </p>
       )}
       <ol>
-        {recommendations.map((recommendation) => {
+        {recommendations.map((recommendation, index) => {
           const pending = pendingId === recommendation.id;
           return (
-            <li key={recommendation.id}>
+            <li key={recommendation.id} data-mobile-overflow={index >= 2}>
               <span className="home-now-brief__marker" aria-hidden="true">
                 <Sparkles />
               </span>
@@ -710,6 +726,18 @@ function NowBrief({
           );
         })}
       </ol>
+      {recommendations.length > 2 && (
+        <button
+          className="home-now-brief__mobile-toggle focus-visible-control"
+          type="button"
+          aria-expanded={mobileExpanded}
+          onClick={() => setMobileExpanded((current) => !current)}
+        >
+          {mobileExpanded
+            ? copy.home.collapseRecommendations
+            : copy.home.showMoreRecommendations(recommendations.length - 2)}
+        </button>
+      )}
     </section>
   );
 }

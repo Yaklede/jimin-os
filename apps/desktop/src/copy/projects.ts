@@ -155,6 +155,8 @@ export const projectCopy = {
   ) =>
     `기한 지난 일 ${overdue}개 · 정체된 일 ${stale}개 · 담당자 없는 일 ${unassigned}개`,
   editProject: "프로젝트 수정하기",
+  openProjectOverview: "프로젝트 정보 보기",
+  collapseProjectOverview: "프로젝트 정보 접기",
   editTitle: "프로젝트 수정",
   editDescription: "목표와 현재 상태, 다음 행동을 최신 내용으로 바꿔요.",
   stopEditing: "수정 그만두기",
@@ -221,6 +223,8 @@ export const projectCopy = {
   inflowHomeSelectedLabel: "선택한 업무",
   inflowHomeSelectedRequest: (senderName: string) =>
     senderName ? `${senderName}님의 요청` : "보낸 사람을 확인하고 있어요",
+  inflowHomeOpen: (count: number) => `업무 요청 ${count}건 확인하기`,
+  inflowHomeCollapse: "업무 요청 간단히 보기",
   inflowConnectAccount: "회사 Google 계정 연결",
   inflowConnectAnotherAccount: "다른 회사 계정 연결",
   inflowConnectDescription:

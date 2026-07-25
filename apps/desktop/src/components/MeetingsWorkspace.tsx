@@ -2,6 +2,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import {
   CalendarPlus,
   Check,
+  ChevronDown,
   ChevronRight,
   CircleAlert,
   Clock3,
@@ -88,6 +89,7 @@ export function MeetingsWorkspace({
   const [error, setError] = useState<string>();
   const [decisionBusyId, setDecisionBusyId] = useState<string>();
   const [retrying, setRetrying] = useState(false);
+  const [mobileListOpen, setMobileListOpen] = useState(false);
   const meetingListRef = useRef<HTMLDivElement>(null);
   const skeletonVisible = useDelayedSkeleton(loading || detailLoading);
 
@@ -254,10 +256,25 @@ export function MeetingsWorkspace({
       )}
 
       <div className="meetings-layout">
-        <aside className="meetings-list" aria-label={copy.meetings.listLabel}>
+        <aside
+          className="meetings-list"
+          aria-label={copy.meetings.listLabel}
+          data-mobile-expanded={mobileListOpen}
+        >
           <div className="meetings-section-heading">
             <h2>{copy.meetings.recent}</h2>
             <span>{copy.meetings.count(meetings.length)}</span>
+            <button
+              className="meetings-list__mobile-toggle focus-visible-control"
+              type="button"
+              aria-expanded={mobileListOpen}
+              onClick={() => setMobileListOpen((current) => !current)}
+            >
+              {mobileListOpen
+                ? copy.meetings.collapseList
+                : copy.meetings.openList}
+              <ChevronDown aria-hidden="true" />
+            </button>
           </div>
           {loading && meetings.length === 0 && (
             <SkeletonGroup
@@ -280,7 +297,10 @@ export function MeetingsWorkspace({
                   data-active={meeting.id === selectedMeetingId}
                   type="button"
                   key={meeting.id}
-                  onClick={() => setSelectedMeetingId(meeting.id)}
+                  onClick={() => {
+                    setSelectedMeetingId(meeting.id);
+                    setMobileListOpen(false);
+                  }}
                 >
                   <span className="meeting-list-item__icon" aria-hidden="true">
                     <FileAudio />

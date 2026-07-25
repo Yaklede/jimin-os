@@ -1,4 +1,4 @@
-import { MessageCircleMore } from "lucide-react";
+import { ChevronDown, MessageCircleMore } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { type ProjectInflowItem } from "../api/googleChat";
@@ -24,13 +24,18 @@ export function HomeInflowReview({
 }: HomeInflowReviewProps) {
   const visibleItems = useMemo(() => items.slice(0, 5), [items]);
   const [selectedId, setSelectedId] = useState(visibleItems[0]?.id);
+  const [mobileExpanded, setMobileExpanded] = useState(false);
   const selectedItem =
     visibleItems.find((item) => item.id === selectedId) ?? visibleItems[0];
 
   if (!selectedItem) return <></>;
 
   return (
-    <section className="home-inflow" aria-labelledby="home-inflow-title">
+    <section
+      className="home-inflow"
+      aria-labelledby="home-inflow-title"
+      data-mobile-expanded={mobileExpanded}
+    >
       <header className="home-inflow__heading">
         <div className="home-inflow__heading-copy">
           <span>{copy.projects.inflowHomeEyebrow}</span>
@@ -41,6 +46,21 @@ export function HomeInflowReview({
           {items.length}
         </strong>
       </header>
+
+      <button
+        className="home-inflow__mobile-toggle focus-visible-control"
+        type="button"
+        aria-expanded={mobileExpanded}
+        onClick={() => setMobileExpanded((current) => !current)}
+      >
+        <MessageCircleMore aria-hidden="true" />
+        <span>
+          {mobileExpanded
+            ? copy.projects.inflowHomeCollapse
+            : copy.projects.inflowHomeOpen(items.length)}
+        </span>
+        <ChevronDown aria-hidden="true" />
+      </button>
 
       <div className="home-inflow-review">
         <aside

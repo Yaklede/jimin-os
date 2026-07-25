@@ -263,6 +263,8 @@ export function ProjectsWorkspace({
   const [editingTaskId, setEditingTaskId] = useState<string>();
   const [activeProjectTab, setActiveProjectTab] =
     useState<ProjectDetailTab>("tasks");
+  const [mobileProjectOverviewOpen, setMobileProjectOverviewOpen] =
+    useState(false);
   const [restoreListFocus, setRestoreListFocus] = useState(false);
   const projectListHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const highlightedTaskRef = useRef<HTMLLIElement | null>(null);
@@ -308,6 +310,7 @@ export function ProjectsWorkspace({
     setSelectedTaskId(undefined);
     setEditingTaskId(undefined);
     setActiveProjectTab("tasks");
+    setMobileProjectOverviewOpen(false);
   }, [selectedProjectId]);
 
   useEffect(() => {
@@ -837,54 +840,85 @@ export function ProjectsWorkspace({
                     <button
                       className="secondary-button focus-visible-control"
                       type="button"
+                      aria-label={copy.projects.editProject}
                       disabled={saving}
                       onClick={() => {
                         setFormError(undefined);
                         setSavedProjectId(undefined);
                         setEditingProjectId(selectedProject.id);
+                        setMobileProjectOverviewOpen(true);
                       }}
                     >
                       <Pencil aria-hidden="true" />
-                      {copy.projects.editProject}
+                      <span>{copy.projects.editProject}</span>
                     </button>
                   </div>
                 </div>
-                <div
-                  className="project-detail__meta"
-                  aria-label={copy.projects.currentStateLabel}
+                {editingProjectId !== selectedProject.id && (
+                  <div className="project-next-action">
+                    <span>{copy.projects.nextActionLabel}</span>
+                    <strong>
+                      {selectedProject.nextAction || copy.projects.noNextAction}
+                    </strong>
+                  </div>
+                )}
+                <button
+                  className="project-detail__mobile-overview-toggle focus-visible-control"
+                  type="button"
+                  aria-expanded={mobileProjectOverviewOpen}
+                  onClick={() =>
+                    setMobileProjectOverviewOpen((current) => !current)
+                  }
                 >
-                  <span>
-                    <strong>{copy.projects.statusLabel}</strong>
-                    {statusLabel(selectedProject.status)}
-                  </span>
-                  <span>
-                    <strong>{copy.projects.managementModeLabel}</strong>
-                    {
-                      copy.projects.managementModes[
-                        selectedProject.managementMode
-                      ]
-                    }
-                  </span>
+                  {mobileProjectOverviewOpen
+                    ? copy.projects.collapseProjectOverview
+                    : copy.projects.openProjectOverview}
+                  <ChevronRight aria-hidden="true" />
+                </button>
+                <div
+                  className="project-detail__secondary"
+                  data-mobile-expanded={
+                    mobileProjectOverviewOpen ||
+                    editingProjectId === selectedProject.id
+                  }
+                >
+                  <div
+                    className="project-detail__meta"
+                    aria-label={copy.projects.currentStateLabel}
+                  >
+                    <span>
+                      <strong>{copy.projects.statusLabel}</strong>
+                      {statusLabel(selectedProject.status)}
+                    </span>
+                    <span>
+                      <strong>{copy.projects.managementModeLabel}</strong>
+                      {
+                        copy.projects.managementModes[
+                          selectedProject.managementMode
+                        ]
+                      }
+                    </span>
+                    {selectedProject.managementMode === "completion" ? (
+                      <span>
+                        <CalendarDays aria-hidden="true" />
+                        <strong>{copy.projects.dueDateLabel}</strong>
+                        {formatDueDate(selectedProject.dueAt)}
+                      </span>
+                    ) : (
+                      <span>
+                        <strong>{copy.projects.staleThresholdLabel}</strong>
+                        {copy.projects.staleThresholdOption(
+                          selectedProject.staleThresholdDays,
+                        )}
+                      </span>
+                    )}
+                  </div>
                   {selectedProject.managementMode === "completion" ? (
-                    <span>
-                      <CalendarDays aria-hidden="true" />
-                      <strong>{copy.projects.dueDateLabel}</strong>
-                      {formatDueDate(selectedProject.dueAt)}
-                    </span>
+                    <CompletionProjectProgress project={selectedProject} />
                   ) : (
-                    <span>
-                      <strong>{copy.projects.staleThresholdLabel}</strong>
-                      {copy.projects.staleThresholdOption(
-                        selectedProject.staleThresholdDays,
-                      )}
-                    </span>
+                    <OperationProjectHealth project={selectedProject} />
                   )}
                 </div>
-                {selectedProject.managementMode === "completion" ? (
-                  <CompletionProjectProgress project={selectedProject} />
-                ) : (
-                  <OperationProjectHealth project={selectedProject} />
-                )}
                 {editingProjectId === selectedProject.id ? (
                   <ProjectEditForm
                     key={`${selectedProject.id}:${selectedProject.version}`}
@@ -909,14 +943,7 @@ export function ProjectsWorkspace({
                       setRestoreListFocus(true);
                     }}
                   />
-                ) : (
-                  <div className="project-next-action">
-                    <span>{copy.projects.nextActionLabel}</span>
-                    <strong>
-                      {selectedProject.nextAction || copy.projects.noNextAction}
-                    </strong>
-                  </div>
-                )}
+                ) : null}
                 {savedProjectId === selectedProject.id && (
                   <p className="project-save-status" role="status">
                     {copy.projects.projectUpdated}
@@ -1296,7 +1323,14 @@ function ProjectDetailTabButton({
       role="tab"
       aria-selected={active}
       tabIndex={active ? 0 : -1}
-      onClick={() => onSelect(id)}
+      onClick={(event) => {
+        onSelect(id);
+        event.currentTarget.scrollIntoView({
+          behavior: preferredScrollBehavior(),
+          block: "nearest",
+          inline: "center",
+        });
+      }}
       onKeyDown={(event) => {
         if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
           return;
@@ -1319,12 +1353,17 @@ function ProjectDetailTabButton({
             '[role="tab"]',
           );
         buttons?.[nextIndex]?.focus();
+        buttons?.[nextIndex]?.scrollIntoView({
+          behavior: preferredScrollBehavior(),
+          block: "nearest",
+          inline: "center",
+        });
       }}
     >
       {icon}
       <span className="project-detail-tabs__label">{label}</span>
       <span className="project-detail-tabs__mobile-label">{mobileLabel}</span>
-      <small>{count}</small>
+      {count > 0 && <small>{count}</small>}
     </button>
   );
 }
