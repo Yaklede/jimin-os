@@ -158,6 +158,14 @@ export function HomeWorkspace({
     () => deadlineAttentionTasks(snapshot?.dueTasks ?? []),
     [snapshot?.dueTasks],
   );
+  const weeklyPriorityTasks = useMemo(
+    () => selectWeeklyPriorityTasks(snapshot?.weeklyReports ?? [], dueTasks),
+    [dueTasks, snapshot?.weeklyReports],
+  );
+  const remainingDueTasks = useMemo(() => {
+    const priorityTaskIds = new Set(weeklyPriorityTasks.map((task) => task.id));
+    return dueTasks.filter((task) => !priorityTaskIds.has(task.id));
+  }, [dueTasks, weeklyPriorityTasks]);
   const assistantState = homeAssistantState(
     assistantFocused,
     assistantJob,
@@ -363,7 +371,7 @@ export function HomeWorkspace({
           {!showingSkeleton && Boolean(snapshot?.weeklyReports.length) && (
             <WeeklyOperationsBrief
               reports={snapshot?.weeklyReports ?? []}
-              tasks={dueTasks}
+              priorityTasks={weeklyPriorityTasks}
               completingTaskId={completingTaskId}
               onCompleteTask={complete}
               onEditTask={onEditTask}
@@ -372,9 +380,9 @@ export function HomeWorkspace({
             />
           )}
 
-          {!showingSkeleton && dueTasks.length > 0 && (
+          {!showingSkeleton && remainingDueTasks.length > 0 && (
             <DeadlineBrief
-              tasks={dueTasks}
+              tasks={remainingDueTasks}
               completingTaskId={completingTaskId}
               onCompleteTask={complete}
               onEditTask={onEditTask}
@@ -992,7 +1000,7 @@ type WeeklyOperationProject = WeeklyProjectReport & {
 
 function WeeklyOperationsBrief({
   reports,
-  tasks,
+  priorityTasks,
   completingTaskId,
   onCompleteTask,
   onEditTask,
@@ -1000,7 +1008,7 @@ function WeeklyOperationsBrief({
   onOpenProject,
 }: {
   reports: WeeklyReport[];
-  tasks: Task[];
+  priorityTasks: Task[];
   completingTaskId: string | undefined;
   onCompleteTask(task: Task): Promise<void>;
   onEditTask(task: Task): void;
@@ -1022,31 +1030,7 @@ function WeeklyOperationsBrief({
     }),
     { created: 0, completed: 0, backlog: 0, overdue: 0, stale: 0 },
   );
-  const attentionProjects = activeReports
-    .flatMap((report) =>
-      report.projects.map((project) => ({
-        ...project,
-        workspaceId: report.workspaceId,
-      })),
-    )
-    .filter((project) => project.health !== "on_track")
-    .sort(
-      (left, right) =>
-        weeklyProjectAttentionRank(right) - weeklyProjectAttentionRank(left) ||
-        left.title.localeCompare(right.title, "ko"),
-    )
-    .slice(0, 4);
-  const attentionProjectIds = new Set(
-    attentionProjects.map((project) => project.projectId),
-  );
-  const priorityTasks = tasks
-    .filter(
-      (task) =>
-        task.status === "open" &&
-        Boolean(task.projectId) &&
-        attentionProjectIds.has(task.projectId ?? ""),
-    )
-    .slice(0, 3);
+  const attentionProjects = weeklyAttentionProjects(activeReports);
 
   return (
     <section
@@ -1160,28 +1144,32 @@ function WeeklyOperationsBrief({
       </section>
 
       {attentionProjects.length > 0 ? (
-        <ul className="home-weekly-operations__projects">
-          {attentionProjects.map((project) => (
-            <li key={project.projectId}>
-              <button
-                className="focus-visible-control"
-                type="button"
-                onClick={() =>
-                  void onOpenProject({
-                    id: project.projectId,
-                    workspaceId: project.workspaceId,
-                  })
-                }
-              >
-                <span>
-                  <strong>{project.title}</strong>
-                  <small>{weeklyProjectSummary(project)}</small>
-                </span>
-                <ChevronRight aria-hidden="true" />
-              </button>
-            </li>
-          ))}
-        </ul>
+        <>
+          <WeeklyProjectLinks
+            className="home-weekly-operations__projects"
+            projects={attentionProjects}
+            onOpenProject={onOpenProject}
+          />
+          <details className="home-weekly-operations__projects-mobile">
+            <summary className="focus-visible-control">
+              <span>
+                <strong>
+                  {copy.home.weeklyProjectsNeedAttention(
+                    attentionProjects.length,
+                  )}
+                </strong>
+                <small>
+                  {copy.home.weeklyProjectsNeedAttentionDescription}
+                </small>
+              </span>
+              <ChevronRight aria-hidden="true" />
+            </summary>
+            <WeeklyProjectLinks
+              projects={attentionProjects}
+              onOpenProject={onOpenProject}
+            />
+          </details>
+        </>
       ) : (
         <p className="home-weekly-operations__clear">
           <CheckCircle2 aria-hidden="true" />
@@ -1189,6 +1177,43 @@ function WeeklyOperationsBrief({
         </p>
       )}
     </section>
+  );
+}
+
+function WeeklyProjectLinks({
+  className,
+  projects,
+  onOpenProject,
+}: {
+  className?: string;
+  projects: WeeklyOperationProject[];
+  onOpenProject(
+    project: Pick<Project, "id" | "workspaceId">,
+  ): void | Promise<void>;
+}) {
+  return (
+    <ul className={className}>
+      {projects.map((project) => (
+        <li key={project.projectId}>
+          <button
+            className="focus-visible-control"
+            type="button"
+            onClick={() =>
+              void onOpenProject({
+                id: project.projectId,
+                workspaceId: project.workspaceId,
+              })
+            }
+          >
+            <span>
+              <strong>{project.title}</strong>
+              <small>{weeklyProjectSummary(project)}</small>
+            </span>
+            <ChevronRight aria-hidden="true" />
+          </button>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -1207,6 +1232,42 @@ function WeeklyOperationMetric({
       <dd>{copy.home.weeklyMetricCount(value)}</dd>
     </div>
   );
+}
+
+function weeklyAttentionProjects(
+  reports: WeeklyReport[],
+): WeeklyOperationProject[] {
+  return reports
+    .flatMap((report) =>
+      report.projects.map((project) => ({
+        ...project,
+        workspaceId: report.workspaceId,
+      })),
+    )
+    .filter((project) => project.health !== "on_track")
+    .sort(
+      (left, right) =>
+        weeklyProjectAttentionRank(right) - weeklyProjectAttentionRank(left) ||
+        left.title.localeCompare(right.title, "ko"),
+    )
+    .slice(0, 4);
+}
+
+export function selectWeeklyPriorityTasks(
+  reports: WeeklyReport[],
+  tasks: Task[],
+): Task[] {
+  const attentionProjectIds = new Set(
+    weeklyAttentionProjects(reports).map((project) => project.projectId),
+  );
+  return tasks
+    .filter(
+      (task) =>
+        task.status === "open" &&
+        Boolean(task.projectId) &&
+        attentionProjectIds.has(task.projectId ?? ""),
+    )
+    .slice(0, 3);
 }
 
 function weeklyProjectAttentionRank(project: WeeklyOperationProject): number {

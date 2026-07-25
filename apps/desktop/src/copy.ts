@@ -273,6 +273,10 @@ export const copy = {
       "기한과 프로젝트 상태를 기준으로 가장 먼저 확인할 일을 골랐어요.",
     weeklyPriorityEmpty:
       "바로 처리할 기한 문제는 없어요. 프로젝트 흐름을 확인해 보세요.",
+    weeklyProjectsNeedAttention: (count: number) =>
+      `확인이 필요한 프로젝트 ${count}개`,
+    weeklyProjectsNeedAttentionDescription:
+      "펼쳐서 프로젝트별 지연 원인을 확인해요.",
     overdue: "기한 지남",
     dueToday: "오늘 마감",
     dueTomorrow: "내일 마감",
