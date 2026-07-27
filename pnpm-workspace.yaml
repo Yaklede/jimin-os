@@ -2,3 +2,5 @@ packages:
   - apps/desktop
   - apps/mobile
   - packages/*
+allowBuilds:
+  sharp: true

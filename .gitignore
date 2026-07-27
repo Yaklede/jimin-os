@@ -55,3 +55,4 @@ docs/verification/local/
 # OpenDock local execution state
 .opendock/workdirs/
 .opendock/runs/
+.mobile-mcp/

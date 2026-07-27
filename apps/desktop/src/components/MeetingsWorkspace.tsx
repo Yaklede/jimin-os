@@ -1,4 +1,3 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
 import {
   CalendarPlus,
   Check,
@@ -36,6 +35,11 @@ import {
 } from "../api/meetings";
 import { type Project, type Workspace } from "../api/projects";
 import { copy } from "../copy";
+import {
+  cancelNativeVoiceDictation,
+  nativeVoiceDictationSupported,
+  startNativeVoiceDictation,
+} from "../mobile-capabilities";
 import { registerMobileBackHandler } from "../mobileBack";
 import {
   SkeletonBlock,
@@ -52,7 +56,6 @@ type MeetingsWorkspaceProps = {
   onSelectWorkspace(workspaceId: string): void;
 };
 
-type NativeVoiceResult = { transcript: string };
 type RecognitionResultLike = {
   isFinal: boolean;
   0: { transcript: string };
@@ -452,9 +455,7 @@ function MeetingComposer({
     dictatingRef.current = false;
     recognition.current?.stop();
     recognition.current = null;
-    if (usesAndroidNativeRecognition()) {
-      void invoke("plugin:voice-recognition|cancel").catch(() => undefined);
-    }
+    void cancelNativeVoiceDictation().catch(() => undefined);
     setDictating(false);
   }, []);
 
@@ -471,9 +472,7 @@ function MeetingComposer({
   async function startNativeDictation() {
     while (dictatingRef.current) {
       try {
-        const result = await invoke<NativeVoiceResult>(
-          "plugin:voice-recognition|start",
-        );
+        const result = await startNativeVoiceDictation();
         if (!dictatingRef.current) return;
         appendTranscript(result.transcript);
       } catch {
@@ -523,7 +522,7 @@ function MeetingComposer({
     dictatingRef.current = true;
     startedAt.current ??= new Date();
     setDictating(true);
-    if (usesAndroidNativeRecognition()) {
+    if (nativeVoiceDictationSupported()) {
       void startNativeDictation();
       return;
     }
@@ -1174,10 +1173,6 @@ function recognitionConstructor(): RecognitionConstructor | undefined {
     webkitSpeechRecognition?: RecognitionConstructor;
   };
   return source.SpeechRecognition ?? source.webkitSpeechRecognition;
-}
-
-function usesAndroidNativeRecognition(): boolean {
-  return isTauri() && /Android/i.test(navigator.userAgent);
 }
 
 function shortDate(value: string): string {

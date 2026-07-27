@@ -47,16 +47,16 @@ M0 probe는 Tauri 2 mobile로 먼저 만든다. 다음 조건을 모두 실기�
 
 ## 필요한 증거
 
-| 항목 | 상태 | 증거 위치 |
-|---|---|---|
+| 항목                                     | 상태    | 증거 위치      |
+| ---------------------------------------- | ------- | -------------- |
 | 대상 휴대폰 OS·version·architecture 확인 | Pending | M0 실기기 기록 |
-| release-equivalent 설치 | Pending | M0 실기기 기록 |
-| TLS/HTTPS/WSS | Pending | M0 실기기 기록 |
-| OAuth deep link 복귀 | Pending | M0 실기기 기록 |
-| secure storage round-trip | Pending | M0 실기기 기록 |
-| SQLite migration | Pending | M0 실기기 기록 |
-| lifecycle/reconnect | Pending | M0 실기기 기록 |
-| platform-specific code 비교 | Pending | ADR 최종 갱신 |
+| release-equivalent 설치                  | Pending | M0 실기기 기록 |
+| TLS/HTTPS/WSS                            | Pending | M0 실기기 기록 |
+| OAuth deep link 복귀                     | Pending | M0 실기기 기록 |
+| secure storage round-trip                | Pending | M0 실기기 기록 |
+| SQLite migration                         | Pending | M0 실기기 기록 |
+| lifecycle/reconnect                      | Pending | M0 실기기 기록 |
+| platform-specific code 비교              | Pending | ADR 최종 갱신  |
 
 실패도 증거다. 실패한 scenario, 재현 절차, 사용한 plugin/version, crash 또는 build error의 민감정보 제거 요약을 기록한 뒤 runtime을 결정한다.
 
@@ -67,6 +67,32 @@ M0 probe는 Tauri 2 mobile로 먼저 만든다. 다음 조건을 모두 실기�
 - App Server나 ChatGPT credential을 모바일에 배포하지 않는다.
 - 모바일은 항상 Jimin OS 서버에 연결하는 client로 유지한다.
 - 실제 기기 증거 없이 상태를 `Accepted`로 바꾸지 않는다.
+
+## 개발 검증 도구와 외부 구조 참고
+
+2026-07-27부터
+[Mobile MCP](https://github.com/mobile-next/mobile-mcp)를 개발·검수 경로에만
+사용한다. 고정된 개발 의존성과 wrapper를 통해 telemetry를 끄고, 자동 smoke는
+`io.jimin.os.dev`가 설치된 emulator/simulator만 허용한다. 운영 앱, 서버
+container와 Android 실기기에는 MCP server나 `mobilecli`를 포함하지 않는다.
+
+첫 자동 smoke에서 다음 증거를 확보했다.
+
+- Android API 36 emulator 식별
+- 개발 APK 설치 여부
+- cold start와 접근성 tree
+- native back 후 재실행
+- 각 단계 screenshot
+
+이는 개발 경로의 반복성을 보여주는 증거일 뿐 release-equivalent 실기기 판정은
+아니다. 위 표의 Pending 항목은 그대로 유지한다.
+
+[OpenMinis](https://github.com/OpenMinis/OpenMinis)는 모바일 native 기능을
+명시적인 capability 경계 뒤에 두는 구조만 참고한다. Jimin OS는 개인 Rust
+서버가 AI 실행과 데이터 원본을 담당하므로 on-device Linux runtime은 도입하지
+않는다. GPL-3.0 source를 MIT 저장소에 복사하거나 runtime 의존성으로 포함하지
+않으며, 음성 인식·알림·뒤로 가기는 Jimin OS가 소유한 Tauri plugin adapter를
+통해서만 사용한다.
 
 ## 후속 작업
 

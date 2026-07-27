@@ -16,6 +16,10 @@
     "client:build:web": "bash scripts/build-private-client.sh web",
     "client:build:macos": "bash scripts/build-private-client.sh macos",
     "client:build:android": "bash scripts/build-private-client.sh android",
+    "mobile:mcp": "node scripts/mobile-mcp-server.mjs",
+    "mobile:qa:doctor": "node scripts/mobile-mcp-qa.mjs doctor",
+    "mobile:qa:smoke": "node scripts/mobile-mcp-qa.mjs smoke",
+    "mobile:qa:test": "node --test scripts/mobile-mcp-qa.test.mjs",
     "assistant:contracts": "bash scripts/test-assistant-contracts.sh",
     "assistant:live-smoke": "node scripts/test-assistant-live-smoke.mjs",
     "backend:test:postgres": "bash scripts/test-postgres-integration.sh",
@@ -28,6 +32,12 @@
     "backend:test": "cargo test --workspace",
     "backend:build": "cargo build --workspace --release",
     "security:scan": "bash scripts/scan-secrets.sh",
-    "check": "pnpm backend:format && pnpm backend:lint && pnpm backend:test && pnpm frontend:format && pnpm frontend:lint && pnpm frontend:test && pnpm frontend:build && pnpm client:config:test && pnpm security:scan"
+    "check": "pnpm backend:format && pnpm backend:lint && pnpm backend:test && pnpm frontend:format && pnpm frontend:lint && pnpm frontend:test && pnpm frontend:build && pnpm client:config:test && pnpm mobile:qa:test && pnpm security:scan"
+  },
+  "devDependencies": {
+    "@mobilenext/mobile-mcp": "0.0.62",
+    "@modelcontextprotocol/sdk": "1.26.0",
+    "mobilecli": "0.3.85",
+    "zod": "4.3.6"
   }
 }

@@ -13,10 +13,15 @@ import {
   useRef,
   useState,
 } from "react";
-import { invoke, isTauri } from "@tauri-apps/api/core";
 
 import { type VoiceCommandResultItem } from "../api/voice";
 import { copy } from "../copy";
+import {
+  cancelNativeVoiceDictation,
+  nativeVoiceDictationSupported,
+  startNativeVoiceDictation,
+  stopNativeVoiceDictation,
+} from "../mobile-capabilities";
 
 type RecognitionState =
   | "listening"
@@ -26,10 +31,6 @@ type RecognitionState =
   | "permission"
   | "no-speech"
   | "error";
-
-type NativeVoiceResult = {
-  transcript: string;
-};
 
 type SpeechRecognitionResultLike = {
   isFinal: boolean;
@@ -150,11 +151,11 @@ export function VoiceCommandSheet({
     setProcessingCommand(false);
     resetSheetPosition();
 
-    if (usesAndroidNativeRecognition()) {
+    if (nativeVoiceDictationSupported()) {
       usingNativeRecognitionRef.current = true;
       let disposed = false;
 
-      void invoke<NativeVoiceResult>("plugin:voice-recognition|start")
+      void startNativeVoiceDictation()
         .then((result) => {
           if (disposed) return;
           completedRef.current = true;
@@ -171,7 +172,7 @@ export function VoiceCommandSheet({
       return () => {
         disposed = true;
         usingNativeRecognitionRef.current = false;
-        void invoke("plugin:voice-recognition|cancel").catch(() => undefined);
+        void cancelNativeVoiceDictation().catch(() => undefined);
       };
     }
 
@@ -329,7 +330,7 @@ export function VoiceCommandSheet({
   function finishListening() {
     if (usingNativeRecognitionRef.current) {
       setState("finalizing");
-      void invoke("plugin:voice-recognition|stop").catch((error: unknown) => {
+      void stopNativeVoiceDictation().catch((error: unknown) => {
         completedRef.current = true;
         setState(nativeErrorStateFor(error));
       });
@@ -682,10 +683,6 @@ function errorStateFor(value: string): RecognitionState {
   }
   if (value === "no-speech") return "no-speech";
   return "error";
-}
-
-function usesAndroidNativeRecognition() {
-  return isTauri() && /Android/i.test(navigator.userAgent);
 }
 
 function nativeErrorStateFor(error: unknown): RecognitionState {
