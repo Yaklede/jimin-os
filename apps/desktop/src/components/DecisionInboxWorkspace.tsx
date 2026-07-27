@@ -16,33 +16,28 @@ type DecisionInboxWorkspaceProps = {
   recommendations: Recommendation[];
   loading: boolean;
   error: string | undefined;
+  onOpenConversation(conversationId: string): void;
   onDecide(
     recommendation: Recommendation,
     decision: RecommendationDecision,
   ): Promise<boolean>;
 };
 
-const actionableStatuses = new Set<Recommendation["status"]>([
-  "pending",
-  "deferred",
-  "analysis_requested",
-]);
-
 export function DecisionInboxWorkspace({
   recommendations,
   loading,
   error,
+  onOpenConversation,
   onDecide,
 }: DecisionInboxWorkspaceProps) {
   const [pendingId, setPendingId] = useState<string>();
   const [decisionError, setDecisionError] = useState<string>();
   const pending = useMemo(
-    () => recommendations.filter((item) => actionableStatuses.has(item.status)),
+    () => recommendations.filter((item) => isDecisionActionableNow(item)),
     [recommendations],
   );
   const history = useMemo(
-    () =>
-      recommendations.filter((item) => !actionableStatuses.has(item.status)),
+    () => recommendations.filter((item) => !isDecisionActionableNow(item)),
     [recommendations],
   );
 
@@ -90,6 +85,7 @@ export function DecisionInboxWorkspace({
             pendingId={pendingId}
             emptyTitle={copy.decisions.emptyPendingTitle}
             emptyDescription={copy.decisions.emptyPendingDescription}
+            onOpenConversation={onOpenConversation}
             onDecide={decide}
           />
           <DecisionSection
@@ -99,6 +95,7 @@ export function DecisionInboxWorkspace({
             pendingId={pendingId}
             emptyTitle={copy.decisions.emptyHistoryTitle}
             emptyDescription={copy.decisions.emptyHistoryDescription}
+            onOpenConversation={onOpenConversation}
             onDecide={decide}
           />
         </>
@@ -114,6 +111,7 @@ function DecisionSection({
   pendingId,
   emptyTitle,
   emptyDescription,
+  onOpenConversation,
   onDecide,
 }: {
   id: string;
@@ -122,6 +120,7 @@ function DecisionSection({
   pendingId: string | undefined;
   emptyTitle: string;
   emptyDescription: string;
+  onOpenConversation(conversationId: string): void;
   onDecide(
     recommendation: Recommendation,
     decision: RecommendationDecision,
@@ -143,6 +142,7 @@ function DecisionSection({
               recommendation={recommendation}
               pending={pendingId === recommendation.id}
               interactionLocked={Boolean(pendingId)}
+              onOpenConversation={onOpenConversation}
               onDecide={onDecide}
             />
           ))}
@@ -156,17 +156,20 @@ function DecisionCard({
   recommendation,
   pending,
   interactionLocked,
+  onOpenConversation,
   onDecide,
 }: {
   recommendation: Recommendation;
   pending: boolean;
   interactionLocked: boolean;
+  onOpenConversation(conversationId: string): void;
   onDecide(
     recommendation: Recommendation,
     decision: RecommendationDecision,
   ): Promise<void>;
 }) {
-  const actionable = actionableStatuses.has(recommendation.status);
+  const actionable = isDecisionActionableNow(recommendation);
+  const conversationDecision = isConversationDecision(recommendation);
   return (
     <li className="decision-card" data-status={recommendation.status}>
       <span className="decision-card__icon" aria-hidden="true">
@@ -216,14 +219,48 @@ function DecisionCard({
             className="primary-button focus-visible-control"
             type="button"
             disabled={interactionLocked}
-            onClick={() => void onDecide(recommendation, "approve")}
+            onClick={() => {
+              if (conversationDecision && recommendation.suggestedEntityId) {
+                onOpenConversation(recommendation.suggestedEntityId);
+                return;
+              }
+              void onDecide(recommendation, "approve");
+            }}
           >
             {pending && <span className="button-spinner" aria-hidden="true" />}
-            {copy.decisions.approve}
+            {conversationDecision
+              ? copy.decisions.openConversation
+              : copy.decisions.approve}
           </button>
         </div>
       )}
     </li>
+  );
+}
+
+export function isDecisionActionableNow(
+  recommendation: Recommendation,
+  now = Date.now(),
+): boolean {
+  if (
+    recommendation.status === "pending" ||
+    recommendation.status === "analysis_requested"
+  ) {
+    return true;
+  }
+  if (recommendation.status !== "deferred" || !recommendation.revisitAt) {
+    return false;
+  }
+  const revisitAt = new Date(recommendation.revisitAt).getTime();
+  return Number.isFinite(revisitAt) && revisitAt <= now;
+}
+
+export function isConversationDecision(
+  recommendation: Recommendation,
+): boolean {
+  return (
+    recommendation.suggestedActionKind === "request_analysis" &&
+    Boolean(recommendation.suggestedEntityId)
   );
 }
 

@@ -2622,14 +2622,10 @@ async fn list_recommendations(
     let recommendations = match query.scope.unwrap_or(RecommendationListScope::Active) {
         RecommendationListScope::Active => {
             planning
-                .active_recommendations_for_user(user_id, OffsetDateTime::now_utc(), limit)
+                .active_decisions_for_user(user_id, OffsetDateTime::now_utc(), limit)
                 .await
         }
-        RecommendationListScope::All => {
-            planning
-                .recommendation_history_for_user(user_id, limit)
-                .await
-        }
+        RecommendationListScope::All => planning.decision_history_for_user(user_id, limit).await,
     };
     let recommendations = match recommendations {
         Ok(recommendations) => recommendations,

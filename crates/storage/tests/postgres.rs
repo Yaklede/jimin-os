@@ -6037,6 +6037,11 @@ async fn resolved_conversation_schedule_conflict_leaves_the_active_decision_inbo
         .expect("schedule conflict should enter the decision inbox");
     assert_eq!(recommendation.status, RecommendationStatus::Pending);
     assert_eq!(
+        recommendation.suggested_action_kind,
+        Some(SuggestedActionKind::RequestAnalysis)
+    );
+    assert_eq!(recommendation.suggested_entity_id, Some(conversation_id));
+    assert_eq!(
         database
             .active_recommendations_for_user(owner.profile.id, now, 10)
             .await
@@ -6044,6 +6049,13 @@ async fn resolved_conversation_schedule_conflict_leaves_the_active_decision_inbo
             .len(),
         1
     );
+
+    let decisions = database
+        .active_decisions_for_user(owner.profile.id, now, 10)
+        .await
+        .expect("active decisions should load");
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0].id, recommendation.id);
 
     let runner_id = "schedule-conflict-resolution";
     let claimed = database
@@ -6091,16 +6103,31 @@ async fn resolved_conversation_schedule_conflict_leaves_the_active_decision_inbo
             .expect("resolved inbox should load")
             .is_empty()
     );
+    assert!(
+        database
+            .active_decisions_for_user(owner.profile.id, now, 10)
+            .await
+            .expect("resolved decisions should load")
+            .is_empty()
+    );
     let history = database
         .recommendation_history_for_user(owner.profile.id, 10)
         .await
         .expect("decision history should load");
     assert_eq!(history[0].id, recommendation.id);
     assert_eq!(history[0].status, RecommendationStatus::Expired);
+    let decision_history = database
+        .decision_history_for_user(owner.profile.id, 10)
+        .await
+        .expect("decision history should load");
+    assert_eq!(decision_history.len(), 1);
+    assert_eq!(decision_history[0].id, recommendation.id);
+    assert_eq!(decision_history[0].status, RecommendationStatus::Expired);
     database.close().await;
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep brief filtering and the review-action lifecycle in one scenario.
 async fn work_brief_refresh_generates_one_actionable_recommendation_per_active_signal() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;
@@ -6139,6 +6166,13 @@ async fn work_brief_refresh_generates_one_actionable_recommendation_per_active_s
     assert_eq!(generated.len(), 1);
     assert_eq!(generated[0].suggested_entity_id, Some(task.id));
     assert_eq!(generated[0].status, RecommendationStatus::Pending);
+    assert!(
+        database
+            .active_decisions_for_user(owner.profile.id, now, 10)
+            .await
+            .expect("informational brief items should not enter decisions")
+            .is_empty()
+    );
 
     let repeated = database
         .refresh_work_brief(owner.profile.id, now + TimeDuration::minutes(1))
@@ -6192,6 +6226,13 @@ async fn work_brief_refresh_generates_one_actionable_recommendation_per_active_s
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].id, generated[0].id);
     assert_eq!(history[0].status, RecommendationStatus::Executed);
+    assert!(
+        database
+            .decision_history_for_user(owner.profile.id, 20)
+            .await
+            .expect("review history should stay out of decisions")
+            .is_empty()
+    );
     assert!(
         database
             .refresh_work_brief(owner.profile.id, now + TimeDuration::minutes(2))

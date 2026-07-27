@@ -3593,6 +3593,7 @@ export default function App() {
               recommendations={decisionRecommendations}
               loading={decisionsLoading || mode === "loading"}
               error={decisionsError}
+              onOpenConversation={selectConversation}
               onDecide={decideHomeRecommendation}
             />
           )}

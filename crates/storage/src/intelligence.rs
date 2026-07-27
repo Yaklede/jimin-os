@@ -69,6 +69,37 @@ const SELECT_RECOMMENDATION_HISTORY_SQL: &str = "
     WHERE user_id = $1
     ORDER BY updated_at DESC, created_at DESC, id DESC
     LIMIT $2";
+const SELECT_ACTIVE_DECISIONS_SQL: &str = "
+    SELECT
+        id, workspace_id, project_id, goal_id, signal_id,
+        title, rationale, expected_effect, risk_summary,
+        confidence, urgency, impact, risk_level, effort_minutes,
+        suggested_action_kind, suggested_entity_id, status, valid_until, revisit_at,
+        created_at, updated_at, version
+    FROM recommendations
+    WHERE user_id = $1
+      AND suggested_action_kind IS NOT NULL
+      AND suggested_action_kind <> 'review'
+      AND (
+          status IN ('pending', 'analysis_requested')
+          OR (status = 'deferred' AND revisit_at <= $2)
+      )
+      AND (valid_until IS NULL OR valid_until > $2)
+    ORDER BY urgency DESC, impact DESC, confidence DESC, created_at DESC, id DESC
+    LIMIT $3";
+const SELECT_DECISION_HISTORY_SQL: &str = "
+    SELECT
+        id, workspace_id, project_id, goal_id, signal_id,
+        title, rationale, expected_effect, risk_summary,
+        confidence, urgency, impact, risk_level, effort_minutes,
+        suggested_action_kind, suggested_entity_id, status, valid_until, revisit_at,
+        created_at, updated_at, version
+    FROM recommendations
+    WHERE user_id = $1
+      AND suggested_action_kind IS NOT NULL
+      AND suggested_action_kind <> 'review'
+    ORDER BY updated_at DESC, created_at DESC, id DESC
+    LIMIT $2";
 const UPDATE_RECOMMENDATION_DECISION_SQL: &str = "
     UPDATE recommendations
     SET status = $4, revisit_at = $5
@@ -505,13 +536,14 @@ impl Database {
                 status, valid_until
              ) VALUES (
                 $1, $2, $3, '일정 시간을 다시 정해 주세요', $4, $5,
-                $6, 100, 2, 2, 1, 5, 'review', $7, 'pending', $8
+                $6, 100, 2, 2, 1, 5, 'request_analysis', $7, 'pending', $8
              )
              ON CONFLICT (signal_id) WHERE signal_id IS NOT NULL
              DO UPDATE SET
                 rationale = EXCLUDED.rationale,
                 expected_effect = EXCLUDED.expected_effect,
                 risk_summary = EXCLUDED.risk_summary,
+                suggested_action_kind = EXCLUDED.suggested_action_kind,
                 suggested_entity_id = EXCLUDED.suggested_entity_id,
                 status = CASE
                     WHEN recommendations.status IN ('pending', 'deferred', 'analysis_requested')
@@ -533,7 +565,7 @@ impl Database {
         .bind(conflict.rationale.trim())
         .bind(conflict.expected_effect.trim())
         .bind(conflict.risk_summary.trim())
-        .bind(conflict.conflicting_schedule_id)
+        .bind(conflict.conversation_id)
         .bind(conflict.valid_until)
         .fetch_one(&mut *transaction)
         .await
@@ -599,6 +631,57 @@ impl Database {
             return Err(StorageError::InvalidConfiguration);
         }
         let rows = sqlx::query_as::<_, RecommendationRow>(SELECT_RECOMMENDATION_HISTORY_SQL)
+            .bind(user_id)
+            .bind(limit)
+            .fetch_all(self.pool())
+            .await
+            .map_err(classify)?;
+        rows.into_iter().map(Recommendation::try_from).collect()
+    }
+
+    /// Returns only recommendations that require an owner choice or can lead
+    /// to a concrete action. Informational review cards stay in the work brief
+    /// instead of occupying the decision inbox.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for an invalid owner or limit, or a
+    /// persistence error when the inbox cannot be loaded.
+    pub async fn active_decisions_for_user(
+        &self,
+        user_id: Uuid,
+        now: OffsetDateTime,
+        limit: i64,
+    ) -> Result<Vec<Recommendation>, StorageError> {
+        if !is_v7(user_id) || !(1..=MAX_RECOMMENDATION_LIST).contains(&limit) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let rows = sqlx::query_as::<_, RecommendationRow>(SELECT_ACTIVE_DECISIONS_SQL)
+            .bind(user_id)
+            .bind(now)
+            .bind(limit)
+            .fetch_all(self.pool())
+            .await
+            .map_err(classify)?;
+        rows.into_iter().map(Recommendation::try_from).collect()
+    }
+
+    /// Returns recent actionable decisions and their outcomes without the
+    /// informational review history shown in the work brief.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for an invalid owner or limit, or a
+    /// persistence error when history cannot be loaded.
+    pub async fn decision_history_for_user(
+        &self,
+        user_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<Recommendation>, StorageError> {
+        if !is_v7(user_id) || !(1..=MAX_RECOMMENDATION_LIST).contains(&limit) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let rows = sqlx::query_as::<_, RecommendationRow>(SELECT_DECISION_HISTORY_SQL)
             .bind(user_id)
             .bind(limit)
             .fetch_all(self.pool())
