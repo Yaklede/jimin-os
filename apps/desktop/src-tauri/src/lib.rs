@@ -89,6 +89,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(jimin_voice_recognition::init())
         .plugin(jimin_local_notifications::init())
+        .plugin(jimin_device_signals::init())
         .invoke_handler(tauri::generate_handler![
             read_device_session,
             save_device_session,
@@ -122,6 +123,22 @@ mod tests {
     fn android_manifest_declares_notification_permission() {
         const MANIFEST: &str = include_str!("../gen/android/app/src/main/AndroidManifest.xml");
         assert!(MANIFEST.contains("android.permission.POST_NOTIFICATIONS"));
+    }
+
+    #[test]
+    fn android_device_signal_plugin_is_registered_without_desktop_access() {
+        const SOURCE: &str = include_str!("lib.rs");
+        const CAPABILITY: &str = include_str!("../capabilities/default.json");
+        const MANIFEST: &str = include_str!(
+            "../../../../crates/device-signals-plugin/android/src/main/AndroidManifest.xml"
+        );
+
+        assert!(SOURCE.contains("jimin_device_signals::init()"));
+        assert!(CAPABILITY.contains("device-signals:allow-permissionStatus"));
+        assert!(CAPABILITY.contains("device-signals:allow-requestPermission"));
+        assert!(CAPABILITY.contains("device-signals:allow-openSettings"));
+        assert!(CAPABILITY.contains("device-signals:allow-missedCalls"));
+        assert!(MANIFEST.contains("android.permission.READ_CALL_LOG"));
     }
 
     #[test]

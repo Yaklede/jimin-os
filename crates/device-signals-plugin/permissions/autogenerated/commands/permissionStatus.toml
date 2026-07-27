@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-permissionStatus"
+description = "Enables the permissionStatus command without any pre-configured scope."
+commands.allow = ["permissionStatus"]
+
+[[permission]]
+identifier = "deny-permissionStatus"
+description = "Denies the permissionStatus command without any pre-configured scope."
+commands.deny = ["permissionStatus"]

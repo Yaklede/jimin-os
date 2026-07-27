@@ -8,6 +8,7 @@ pub mod agent;
 pub mod auth;
 pub mod calendar;
 pub mod calendar_mutation;
+pub mod device_signals;
 pub mod gmail;
 pub mod goals;
 pub mod google_chat;
@@ -21,7 +22,7 @@ pub mod webhook;
 pub mod weekly_report;
 pub mod work;
 
-pub const EXPECTED_SCHEMA_VERSION: i64 = 41;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 42;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 

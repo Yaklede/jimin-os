@@ -93,6 +93,11 @@ import {
 import { processVoiceCommand } from "./api/voice";
 import { disablePushRegistration, registerFcmToken } from "./api/push";
 import {
+  fetchDeviceSignalStates,
+  synchronizeMissedCalls,
+  type DeviceSignalState,
+} from "./api/deviceSignals";
+import {
   fetchSyncChanges,
   streamSyncCursor,
   type SyncChange,
@@ -138,6 +143,13 @@ import { ProjectsWorkspace } from "./components/ProjectsWorkspace";
 import { SettingsWorkspace } from "./components/SettingsWorkspace";
 import { type VoiceCommandOutcome } from "./components/VoiceCommandSheet";
 import { copy } from "./copy";
+import {
+  deviceSignalsSupported,
+  getCallLogPermission,
+  readNativeMissedCalls,
+  requestCallLogPermission,
+  type NativeCallLogPermission,
+} from "./device-signals";
 import {
   conversationIdForRequest,
   type ConversationSendOptions,
@@ -313,6 +325,13 @@ export default function App() {
   const [reminderSyncError, setReminderSyncError] = useState<string>();
   const [remoteReminderStatus, setRemoteReminderStatus] =
     useState<RemoteReminderStatus>("idle");
+  const [deviceSignalStates, setDeviceSignalStates] = useState<
+    DeviceSignalState[]
+  >([]);
+  const [nativeCallLogPermission, setNativeCallLogPermission] =
+    useState<NativeCallLogPermission>();
+  const [deviceSignalsLoading, setDeviceSignalsLoading] = useState(false);
+  const [deviceSignalsError, setDeviceSignalsError] = useState<string>();
   const pendingConversationId = useRef<string | undefined>(undefined);
   const homeConversationDetachedRef = useRef(false);
   const homeConversationStartingRef = useRef(false);
@@ -327,6 +346,9 @@ export default function App() {
   const syncCursorRef = useRef("0");
   const syncPullCoordinatorRef = useRef(new SyncPullCoordinator());
   const reminderSyncInFlightRef = useRef<Promise<boolean> | undefined>(
+    undefined,
+  );
+  const deviceSignalSyncInFlightRef = useRef<Promise<boolean> | undefined>(
     undefined,
   );
   const pendingReminderInFlightRef = useRef(false);
@@ -585,6 +607,67 @@ export default function App() {
         }
       }
     }, [apiBaseUrl, tokens, withAuthenticatedSession]);
+
+  const synchronizeDeviceSignals = useCallback(
+    async (askForPermission = false): Promise<boolean> => {
+      if (!tokens) return false;
+      if (deviceSignalSyncInFlightRef.current) {
+        return deviceSignalSyncInFlightRef.current;
+      }
+      const operation = (async () => {
+        setDeviceSignalsLoading(true);
+        setDeviceSignalsError(undefined);
+        try {
+          if (deviceSignalsSupported()) {
+            const permission = askForPermission
+              ? await requestCallLogPermission()
+              : await getCallLogPermission();
+            setNativeCallLogPermission(permission);
+            const snapshot =
+              permission.status === "granted"
+                ? await readNativeMissedCalls(
+                    Date.now() - 30 * 24 * 60 * 60 * 1_000,
+                    200,
+                  )
+                : { calls: [], platformVersion: permission.platformVersion };
+            await withAuthenticatedSession((accessToken) =>
+              synchronizeMissedCalls(apiBaseUrl, accessToken, {
+                permission: permission.status,
+                platformVersion: snapshot.platformVersion,
+                calls: snapshot.calls.map((call) => ({
+                  sourceId: call.sourceId,
+                  occurredAt: new Date(
+                    call.occurredAtEpochMillis,
+                  ).toISOString(),
+                  callerName: call.callerName,
+                  phoneNumber: call.phoneNumber,
+                })),
+              }),
+            );
+          }
+          const states = await withAuthenticatedSession((accessToken) =>
+            fetchDeviceSignalStates(apiBaseUrl, accessToken),
+          );
+          setDeviceSignalStates(states);
+          return true;
+        } catch {
+          setDeviceSignalsError(copy.settings.deviceSignalsLoadNotice);
+          return false;
+        } finally {
+          setDeviceSignalsLoading(false);
+        }
+      })();
+      deviceSignalSyncInFlightRef.current = operation;
+      try {
+        return await operation;
+      } finally {
+        if (deviceSignalSyncInFlightRef.current === operation) {
+          deviceSignalSyncInFlightRef.current = undefined;
+        }
+      }
+    },
+    [apiBaseUrl, tokens, withAuthenticatedSession],
+  );
 
   const loadAgentModelSettings = useCallback(async () => {
     if (!tokens) return;
@@ -1475,6 +1558,22 @@ export default function App() {
   useEffect(() => {
     void synchronizePlanningReminders();
   }, [planningSnapshot, synchronizePlanningReminders]);
+
+  useEffect(() => {
+    if (!tokens) return;
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        void synchronizeDeviceSignals(false);
+      }
+    };
+    void synchronizeDeviceSignals(false);
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [synchronizeDeviceSignals, tokens]);
 
   useEffect(() => {
     if (!tokens) return;
@@ -3749,6 +3848,10 @@ export default function App() {
               reminderSyncStatus={reminderSyncStatus}
               reminderSyncError={reminderSyncError}
               remoteReminderStatus={remoteReminderStatus}
+              deviceSignalStates={deviceSignalStates}
+              nativeCallLogPermission={nativeCallLogPermission}
+              deviceSignalsLoading={deviceSignalsLoading}
+              deviceSignalsError={deviceSignalsError}
               onStartAuthentication={beginAgentAuthentication}
               onReloadModels={loadAgentModelSettings}
               onSaveModel={saveAgentModelSettings}
@@ -3757,6 +3860,8 @@ export default function App() {
               onSyncCalendar={syncGoogleCalendar}
               onDisconnectCalendar={disconnectGoogleCalendarConnection}
               onRetryReminderSync={synchronizePlanningReminders}
+              onEnableDeviceSignals={() => synchronizeDeviceSignals(true)}
+              onRefreshDeviceSignals={() => synchronizeDeviceSignals(false)}
             />
           )}
           {destination === "chat" && (

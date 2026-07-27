@@ -148,4 +148,14 @@ task cancels an unsent reply, and
 `jimin_schema_metadata.schema_version = 40`. Rollback requires the verified
 pre-migration backup after a completion reply has been requested.
 
+Migration `0042_android_device_signals.sql` adds owner- and device-scoped
+Android signal health plus a 90-day private store for missed-call metadata.
+Apply it to an empty database and a restored version-41 backup, then verify
+that only an active Android device can upload, replaying the same provider call
+ID is idempotent, another owner cannot read the rows, and
+`jimin_schema_metadata.schema_version = 42`. The API and agent must not log
+caller names or phone numbers. Rollback after call data is uploaded requires
+the verified pre-migration backup so private device history is not silently
+discarded.
+
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.

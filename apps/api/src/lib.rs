@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod calendar_oauth;
 pub mod config;
+mod device_signals;
 pub mod google_chat_oauth;
 mod meetings;
 pub mod probe;
@@ -1504,7 +1505,10 @@ pub(crate) fn error_response(
         devices,
         push::get_push_registration,
         push::register_push_token,
-        push::delete_push_registration
+        push::delete_push_registration,
+        device_signals::sync_missed_calls,
+        device_signals::device_signal_status,
+        device_signals::list_missed_calls
     ),
     components(schemas(
         LiveStatus,
@@ -1516,6 +1520,15 @@ pub(crate) fn error_response(
         MeResponse,
         DeviceResponse,
         DeviceListResponse,
+        device_signals::CallLogPermissionRequest,
+        device_signals::SyncMissedCallsRequest,
+        device_signals::MissedCallRequest,
+        device_signals::DeviceSignalSyncResponse,
+        device_signals::DeviceSignalStateListResponse,
+        device_signals::DeviceSignalStateResponse,
+        device_signals::MissedCallListQuery,
+        device_signals::MissedCallListResponse,
+        device_signals::MissedCallResponse,
         DeviceSessionResponse,
         SyncChangeResponse,
         SyncChangeListResponse,
@@ -1719,6 +1732,7 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/v1/me", get(me))
         .route("/v1/devices", get(devices))
+        .merge(device_signals::routes())
         .merge(meetings::routes());
 
     let allowed_origins = allowed_client_origins(state.trusted_network());
@@ -8615,6 +8629,8 @@ mod tests {
                 "/v1/conversations/{conversation_id}/messages",
                 "/v1/conversations/{conversation_id}/stream",
                 "/v1/conversations/{conversation_id}/turns",
+                "/v1/device-signals/missed-calls",
+                "/v1/device-signals/status",
                 "/v1/devices",
                 "/v1/goals",
                 "/v1/goals/{goal_id}",

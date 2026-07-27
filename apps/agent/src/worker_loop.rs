@@ -9,6 +9,7 @@ use jimin_storage::{
         AssistantPresentationSection, AssistantPresentationSectionKind, AssistantPresentationView,
         ClaimedAgentJob, ConversationMessage, ConversationMessageRole, ConversationMessageStatus,
     },
+    device_signals::{DeviceSignalState, MissedCallSignal},
     gmail::GmailMessage,
     goals::{GoalHealth, GoalOverview, GoalStatus},
     intelligence::NewScheduleRequestConflict,
@@ -36,6 +37,7 @@ const CONTEXT_PROJECT_LIMIT: usize = 32;
 const CONTEXT_GOAL_LIMIT: usize = 16;
 const CONTEXT_INBOX_LIMIT: usize = 16;
 const CONTEXT_MENTION_NAME_LIMIT: usize = 64;
+const CONTEXT_MISSED_CALL_LIMIT: i64 = 50;
 const CONTEXT_MAX_BYTES: usize = 160 * 1024;
 const MAX_STREAMED_STRUCTURED_BYTES: usize = 512 * 1024;
 const MAX_PRESENTATION_ITEMS: usize = 512;
@@ -882,6 +884,8 @@ async fn contextualized_turn_context(
         goals,
         inbox,
         webhooks,
+        missed_calls,
+        device_signal_states,
         conversation_messages,
     ) = tokio::try_join!(
         database.schedule_entries_in_range(
@@ -896,6 +900,12 @@ async fn contextualized_turn_context(
         database.goal_overviews_for_user(job.user_id, now),
         database.recent_gmail_messages_for_user(job.user_id),
         database.user_project_webhooks(job.user_id),
+        database.recent_missed_calls_for_user(
+            job.user_id,
+            now - TimeDuration::days(30),
+            CONTEXT_MISSED_CALL_LIMIT,
+        ),
+        database.device_signal_states_for_user(job.user_id),
         database.conversation_messages_for_user(job.user_id, job.conversation_id),
     )?;
     let conversation_messages = conversation_messages
@@ -928,6 +938,8 @@ async fn contextualized_turn_context(
         &goals,
         &inbox,
         &webhooks,
+        &missed_calls,
+        &device_signal_states,
         &conversation_messages,
         now,
         daily_task_cutoff,
@@ -987,6 +999,8 @@ fn render_contextualized_turn(
     goals: &[GoalOverview],
     inbox: &[GmailMessage],
     webhooks: &[ProjectWebhook],
+    missed_calls: &[MissedCallSignal],
+    device_signal_states: &[DeviceSignalState],
     conversation_messages: &[ConversationMessage],
     now: OffsetDateTime,
     daily_task_cutoff: OffsetDateTime,
@@ -1054,6 +1068,11 @@ fn render_contextualized_turn(
          the selected task's 담당자, match that task's exact assignee to the same project webhook's mention_names and include \
          exactly @{Name}. Do not add a mention merely because a person's name appears, and leave names that are not listed \
          as plain text. \
+         missed_calls contains private, server-synced Android call-log data. Answer questions about 놓친 전화 or 부재중 전화 \
+         only from missed_calls, include the call time and caller name or phone number when present, and never invent a caller. \
+         device_signal_states tells whether an Android phone granted permission and when it last synced. If there are no rows \
+         and no granted device with a recent sync, explain that phone information has not synced yet instead of claiming there \
+         were no missed calls. A read-only phone question must not create planning actions or presentation sections. \
          Use exact existing entity, workspace, and project IDs; the server creates IDs for new records. \
          If the current request is a short affirmative confirmation such as 네, 넵, 응, 진행해, or 해줘, execute the exact \
          bounded action plan proposed by the immediately preceding assistant message and requested by the user just before it. \
@@ -1263,7 +1282,43 @@ fn render_contextualized_turn(
             );
         }
     }
-    prompt.push_str("</project_webhooks>\n<inbox>\n");
+    prompt.push_str("</project_webhooks>\n<device_signal_states>\n");
+    if device_signal_states.is_empty() {
+        prompt.push_str("(no connected Android device signal state)\n");
+    } else {
+        for state in device_signal_states {
+            let last_synced_at = state
+                .last_synced_at
+                .map_or_else(|| "never".to_owned(), korea_timestamp);
+            let _ = writeln!(
+                prompt,
+                "- [device {} | permission {} | last_synced_at {last_synced_at}] {}",
+                state.device_id,
+                state.permission.as_str(),
+                state.device_name,
+            );
+        }
+    }
+    prompt.push_str("</device_signal_states>\n<missed_calls>\n");
+    if missed_calls.is_empty() {
+        prompt.push_str("(no missed calls in the synced 30-day window)\n");
+    } else {
+        for call in missed_calls {
+            let caller = call
+                .caller_name
+                .as_deref()
+                .or(call.phone_number.as_deref())
+                .unwrap_or("알 수 없는 발신자");
+            let _ = writeln!(
+                prompt,
+                "- [id {} | device {} | occurred_at {}] {caller}",
+                call.id,
+                call.device_name,
+                korea_timestamp(call.occurred_at),
+            );
+        }
+    }
+    prompt.push_str("</missed_calls>\n<inbox>\n");
     if inbox.is_empty() {
         prompt.push_str("(no synced inbox metadata)\n");
     } else {
@@ -3618,6 +3673,7 @@ mod tests {
             AgentActionCommand, AssistantPresentationItem, AssistantPresentationSectionKind,
             ConversationMessage, ConversationMessageRole, ConversationMessageStatus,
         },
+        device_signals::{DeviceSignalState, MissedCallSignal},
         gmail::GmailMessage,
         goals::{Goal, GoalHealth, GoalOverview, GoalStatus},
         planning::{ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus},
@@ -3768,6 +3824,8 @@ mod tests {
             &[],
             &[inbox],
             &[],
+            &[],
+            &[],
             &[confirmed_conflict],
             now,
             korea_day_end(now).expect("Korea day boundary"),
@@ -3791,6 +3849,53 @@ mod tests {
         assert!(prompt.contains("It may be combined with"));
         assert!(prompt.contains("short affirmative confirmation"));
         assert!(prompt.contains("<user_request>\n내일 일정 알려줘"));
+    }
+
+    #[test]
+    fn context_prompt_exposes_synced_missed_calls_without_inventing_phone_state() {
+        let now = OffsetDateTime::parse("2026-07-27T03:00:00Z", &Rfc3339)
+            .expect("reference time should parse");
+        let device_id = Uuid::now_v7();
+        let state = DeviceSignalState {
+            device_id,
+            device_name: "Galaxy S26 Ultra".to_owned(),
+            permission: jimin_storage::device_signals::CallLogPermission::Granted,
+            platform_version: Some("16".to_owned()),
+            app_version: Some("0.1.0".to_owned()),
+            last_synced_at: Some(now - Duration::minutes(1)),
+        };
+        let call = MissedCallSignal {
+            id: Uuid::now_v7(),
+            device_id,
+            device_name: state.device_name.clone(),
+            occurred_at: now - Duration::minutes(10),
+            caller_name: Some("홍길동".to_owned()),
+            phone_number: Some("010-0000-0000".to_owned()),
+        };
+
+        let prompt = render_contextualized_turn(
+            "내가 놓친 전화 뭐 있어?",
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[call],
+            &[state],
+            &[],
+            now,
+            korea_day_end(now).expect("Korea day boundary"),
+        );
+
+        assert!(prompt.contains("<device_signal_states>"));
+        assert!(prompt.contains("permission granted"));
+        assert!(prompt.contains("<missed_calls>"));
+        assert!(prompt.contains("홍길동"));
+        assert!(prompt.contains("only from missed_calls"));
+        assert!(prompt.contains("must not create planning actions"));
     }
 
     #[test]
@@ -3818,6 +3923,8 @@ mod tests {
             &[],
             &[],
             &[completed_task],
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -3871,6 +3978,8 @@ mod tests {
             &[],
             &[],
             &[webhook],
+            &[],
+            &[],
             &[],
             now,
             korea_day_end(now).expect("Korea day boundary"),

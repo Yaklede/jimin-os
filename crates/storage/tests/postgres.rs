@@ -21,6 +21,7 @@ use jimin_storage::{
         ProviderCalendarVisibility,
     },
     calendar_mutation::{ScheduleCalendarMutationOperation, provider_event_id_for_schedule},
+    device_signals::{CallLogPermission, MissedCallSyncRequest, NewMissedCallSignal},
     gmail::ProviderGmailMessage,
     goals::{GoalHealth, GoalNextActionKind, GoalStatus, GoalUpdate, NewGoal},
     google_chat::{
@@ -78,6 +79,95 @@ fn encrypted_test_destination(marker: u8) -> EncryptedWebhookSecret {
         ciphertext: vec![marker; 48],
         nonce: vec![marker.saturating_add(1); 24],
     }
+}
+
+#[tokio::test]
+async fn missed_call_signals_are_idempotent_device_scoped_and_owner_private() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 2, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_android_login_command(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+        ))
+        .await
+        .expect("Android owner should exist");
+    let other_owner = database
+        .provision_login(&provision_android_login_command(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+        ))
+        .await
+        .expect("other Android owner should exist");
+    let now = OffsetDateTime::now_utc();
+    let call = NewMissedCallSignal {
+        id: Uuid::now_v7(),
+        source_event_id: "android-call-42".to_owned(),
+        occurred_at: now - TimeDuration::minutes(10),
+        caller_name: Some("홍길동".to_owned()),
+        phone_number: Some("010-0000-0000".to_owned()),
+    };
+
+    let first = database
+        .sync_missed_calls(MissedCallSyncRequest {
+            user_id: owner.profile.id,
+            device_id: owner.device.id,
+            permission: CallLogPermission::Granted,
+            platform_version: Some("16"),
+            app_version: Some("0.1.0"),
+            synced_at: now,
+            calls: std::slice::from_ref(&call),
+        })
+        .await
+        .expect("first call sync should succeed");
+    assert_eq!(first.inserted_count, 1);
+    let repeated = database
+        .sync_missed_calls(MissedCallSyncRequest {
+            user_id: owner.profile.id,
+            device_id: owner.device.id,
+            permission: CallLogPermission::Granted,
+            platform_version: Some("16"),
+            app_version: Some("0.1.0"),
+            synced_at: now + TimeDuration::seconds(1),
+            calls: std::slice::from_ref(&call),
+        })
+        .await
+        .expect("repeated call sync should be idempotent");
+    assert_eq!(repeated.inserted_count, 0);
+
+    let owner_calls = database
+        .recent_missed_calls_for_user(owner.profile.id, now - TimeDuration::days(1), 50)
+        .await
+        .expect("owner calls should load");
+    assert_eq!(owner_calls.len(), 1);
+    assert_eq!(owner_calls[0].caller_name.as_deref(), Some("홍길동"));
+    assert!(
+        database
+            .recent_missed_calls_for_user(other_owner.profile.id, now - TimeDuration::days(1), 50,)
+            .await
+            .expect("other owner calls should load")
+            .is_empty()
+    );
+    assert!(matches!(
+        database
+            .sync_missed_calls(MissedCallSyncRequest {
+                user_id: owner.profile.id,
+                device_id: other_owner.device.id,
+                permission: CallLogPermission::Granted,
+                platform_version: Some("16"),
+                app_version: None,
+                synced_at: now,
+                calls: &[],
+            })
+            .await,
+        Err(StorageError::InvalidConfiguration)
+    ));
+    database.close().await;
 }
 
 #[derive(sqlx::FromRow)]

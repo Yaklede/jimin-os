@@ -27,6 +27,7 @@ describe("mobile capability boundary", () => {
       nativeVoiceDictation: true,
       localNotifications: true,
       nativeBackNavigation: true,
+      missedCallHistory: true,
     });
   });
 
@@ -40,6 +41,7 @@ describe("mobile capability boundary", () => {
       nativeVoiceDictation: false,
       localNotifications: false,
       nativeBackNavigation: false,
+      missedCallHistory: false,
     });
     expect(
       mobileCapabilitySnapshot(

@@ -25,6 +25,10 @@
     "local-notifications:allow-takePendingNavigation",
     "local-notifications:allow-peekPendingNavigation",
     "local-notifications:allow-ackPendingNavigation",
-    "local-notifications:allow-pushToken"
+    "local-notifications:allow-pushToken",
+    "device-signals:allow-permissionStatus",
+    "device-signals:allow-requestPermission",
+    "device-signals:allow-openSettings",
+    "device-signals:allow-missedCalls"
   ]
 }

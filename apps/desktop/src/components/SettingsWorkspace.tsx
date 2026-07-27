@@ -9,6 +9,7 @@ import {
   Link2,
   LoaderCircle,
   RefreshCw,
+  Smartphone,
   Unlink,
 } from "lucide-react";
 import { isTauri } from "@tauri-apps/api/core";
@@ -20,7 +21,13 @@ import {
   type AgentModelSettings,
 } from "../api/agent";
 import { type GoogleCalendarConnection } from "../api/calendar";
+import { type DeviceSignalState } from "../api/deviceSignals";
 import { copy } from "../copy";
+import {
+  deviceSignalsSupported,
+  openCallLogSettings,
+  type NativeCallLogPermission,
+} from "../device-signals";
 import {
   getNotificationPermissionStatus,
   localNotificationsSupported,
@@ -46,6 +53,10 @@ type SettingsWorkspaceProps = {
   reminderSyncStatus: ReminderSyncStatus;
   reminderSyncError: string | undefined;
   remoteReminderStatus: RemoteReminderStatus;
+  deviceSignalStates: DeviceSignalState[];
+  nativeCallLogPermission: NativeCallLogPermission | undefined;
+  deviceSignalsLoading: boolean;
+  deviceSignalsError: string | undefined;
   onStartAuthentication(): Promise<void>;
   onReloadModels(): Promise<void>;
   onSaveModel(
@@ -57,6 +68,8 @@ type SettingsWorkspaceProps = {
   onSyncCalendar(): Promise<void>;
   onDisconnectCalendar(): Promise<boolean>;
   onRetryReminderSync(): Promise<boolean>;
+  onEnableDeviceSignals(): Promise<boolean>;
+  onRefreshDeviceSignals(): Promise<boolean>;
 };
 
 export function SettingsWorkspace({
@@ -74,6 +87,10 @@ export function SettingsWorkspace({
   reminderSyncStatus,
   reminderSyncError,
   remoteReminderStatus,
+  deviceSignalStates,
+  nativeCallLogPermission,
+  deviceSignalsLoading,
+  deviceSignalsError,
   onStartAuthentication,
   onReloadModels,
   onSaveModel,
@@ -82,6 +99,8 @@ export function SettingsWorkspace({
   onSyncCalendar,
   onDisconnectCalendar,
   onRetryReminderSync,
+  onEnableDeviceSignals,
+  onRefreshDeviceSignals,
 }: SettingsWorkspaceProps) {
   const savedModelId = modelSettings?.selectedModelId ?? "";
   const savedReasoningEffort = modelSettings?.selectedReasoningEffort ?? "";
@@ -107,6 +126,10 @@ export function SettingsWorkspace({
     useState<string>();
   const [notificationSettingsOpening, setNotificationSettingsOpening] =
     useState(false);
+  const [deviceSignalSettingsOpening, setDeviceSignalSettingsOpening] =
+    useState(false);
+  const [deviceSignalSettingsError, setDeviceSignalSettingsError] =
+    useState<string>();
   const calendarDisconnectTrigger = useRef<HTMLButtonElement>(null);
   const calendarDisconnectSafeAction = useRef<HTMLButtonElement>(null);
   const calendarConnectionRow = useRef<HTMLDivElement>(null);
@@ -158,6 +181,18 @@ export function SettingsWorkspace({
     calendarConnection,
     calendarLoading,
     calendarAuthorizationPending,
+  );
+  const localDeviceSignals = deviceSignalsSupported();
+  const connectedDeviceSignal = deviceSignalStates.find(
+    (state) =>
+      state.callLogPermission === "granted" && Boolean(state.lastSyncedAt),
+  );
+  const deviceSignalsConnected = Boolean(connectedDeviceSignal);
+  const deviceSignalsDetail = deviceSignalConnectionDetail(
+    connectedDeviceSignal,
+    localDeviceSignals,
+    nativeCallLogPermission,
+    deviceSignalsLoading,
   );
 
   useEffect(() => {
@@ -269,6 +304,19 @@ export function SettingsWorkspace({
       setNotificationPermissionError(copy.settings.notificationsSettingsNotice);
     } finally {
       setNotificationSettingsOpening(false);
+    }
+  }
+
+  async function openPhoneCallLogSettings() {
+    if (deviceSignalSettingsOpening) return;
+    setDeviceSignalSettingsOpening(true);
+    setDeviceSignalSettingsError(undefined);
+    try {
+      await openCallLogSettings();
+    } catch {
+      setDeviceSignalSettingsError(copy.settings.deviceSignalsLoadNotice);
+    } finally {
+      setDeviceSignalSettingsOpening(false);
     }
   }
 
@@ -690,6 +738,83 @@ export function SettingsWorkspace({
             )}
           </div>
         </div>
+        <div
+          className="settings-row"
+          aria-busy={deviceSignalsLoading || deviceSignalSettingsOpening}
+          data-state={
+            deviceSignalsError
+              ? "error"
+              : deviceSignalsConnected
+                ? "granted"
+                : nativeCallLogPermission?.status
+          }
+        >
+          <span className="settings-row__icon" aria-hidden="true">
+            {deviceSignalsLoading || deviceSignalSettingsOpening ? (
+              <LoaderCircle className="spin" />
+            ) : deviceSignalsError ||
+              nativeCallLogPermission?.status === "denied" ? (
+              <CircleAlert />
+            ) : deviceSignalsConnected ? (
+              <CheckCircle2 />
+            ) : (
+              <Smartphone />
+            )}
+          </span>
+          <div className="settings-row__copy">
+            <strong>{copy.settings.deviceSignalsTitle}</strong>
+            <p>{deviceSignalsDetail}</p>
+            <p>{copy.settings.deviceSignalsPrivacy}</p>
+            {deviceSignalsError || deviceSignalSettingsError ? (
+              <p className="settings-row__error" role="alert">
+                {deviceSignalsError ?? deviceSignalSettingsError}
+              </p>
+            ) : null}
+          </div>
+          <div className="settings-row__actions">
+            {localDeviceSignals &&
+            nativeCallLogPermission?.status === "not_determined" ? (
+              <button
+                className="text-button focus-visible-control"
+                type="button"
+                disabled={deviceSignalsLoading}
+                onClick={() => void onEnableDeviceSignals()}
+              >
+                <Smartphone aria-hidden="true" />
+                {copy.settings.deviceSignalsAllow}
+              </button>
+            ) : localDeviceSignals &&
+              nativeCallLogPermission?.status === "denied" ? (
+              <button
+                className="text-button focus-visible-control"
+                type="button"
+                disabled={deviceSignalSettingsOpening}
+                onClick={() => void openPhoneCallLogSettings()}
+              >
+                {deviceSignalSettingsOpening ? (
+                  <LoaderCircle className="spin" aria-hidden="true" />
+                ) : (
+                  <Smartphone aria-hidden="true" />
+                )}
+                {copy.settings.deviceSignalsOpenSettings}
+              </button>
+            ) : (
+              <button
+                className="text-button focus-visible-control"
+                type="button"
+                disabled={deviceSignalsLoading}
+                onClick={() => void onRefreshDeviceSignals()}
+              >
+                {deviceSignalsLoading ? (
+                  <LoaderCircle className="spin" aria-hidden="true" />
+                ) : (
+                  <RefreshCw aria-hidden="true" />
+                )}
+                {copy.settings.deviceSignalsRefresh}
+              </button>
+            )}
+          </div>
+        </div>
         {localNotificationsSupported() ? (
           <div
             className="settings-row"
@@ -837,6 +962,45 @@ export function SettingsWorkspace({
       </section>
     </section>
   );
+}
+
+function deviceSignalConnectionDetail(
+  connected: DeviceSignalState | undefined,
+  localSupported: boolean,
+  nativePermission: NativeCallLogPermission | undefined,
+  loading: boolean,
+): string {
+  if (loading) return copy.settings.deviceSignalsChecking;
+  if (localSupported && !nativePermission) {
+    return copy.settings.deviceSignalsChecking;
+  }
+  if (localSupported && nativePermission?.status === "not_determined") {
+    return copy.settings.deviceSignalsNeedsPermission;
+  }
+  if (localSupported && nativePermission?.status === "denied") {
+    return copy.settings.deviceSignalsNeedsSettings;
+  }
+  if (connected?.lastSyncedAt) {
+    return copy.settings.deviceSignalsReady(
+      connected.deviceName,
+      formatDeviceSignalTime(connected.lastSyncedAt),
+    );
+  }
+  if (localSupported && nativePermission?.status === "granted") {
+    return copy.settings.deviceSignalsChecking;
+  }
+  return copy.settings.deviceSignalsNotConnected;
+}
+
+function formatDeviceSignalTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
 }
 
 function calendarConnectionDetail(

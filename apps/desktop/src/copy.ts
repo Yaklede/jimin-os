@@ -347,7 +347,7 @@ export const copy = {
     applyFailed: "후속 일을 반영하지 못했어요. 연결 내용을 확인해 주세요.",
     updateFailed:
       "실행할 일을 저장하지 못했어요. 최신 내용을 다시 불러온 뒤 수정해 주세요.",
-    bulkApplyFailed: "일부 항목만 반영됐어요. 남은 항목을 확인한 뒤 다시 시도해 주세요.",
+    bulkApplyFailed: "일부만 반영했어요. 남은 항목을 다시 확인해 주세요.",
     rejectFailed: "이 항목을 제외하지 못했어요. 잠시 후 다시 시도해 주세요.",
     emptyTitle: "아직 정리한 회의가 없어요",
     emptyDescription:
@@ -670,6 +670,22 @@ export const copy = {
       "연결을 해제하지 못했어요. 다시 확인한 뒤 시도해 주세요.",
     calendarAuthorizationExpired:
       "연결 시간이 지났어요. Google Calendar 연결을 다시 시작해 주세요.",
+    deviceSignalsTitle: "휴대폰 정보",
+    deviceSignalsChecking: "휴대폰 연결 상태를 확인하고 있어요.",
+    deviceSignalsNeedsPermission:
+      "놓친 전화를 비서에게 물어보려면 통화 기록을 허용해 주세요.",
+    deviceSignalsNeedsSettings:
+      "휴대폰 설정에서 통화 기록 권한을 다시 확인해 주세요.",
+    deviceSignalsNotConnected:
+      "연결된 Android 휴대폰이 없어요. 휴대폰 앱에서 로그인해 주세요.",
+    deviceSignalsReady: (deviceName: string, lastSyncedAt: string) =>
+      `${deviceName}에서 부재중 전화를 확인하고 있어요. 마지막 확인 ${lastSyncedAt}`,
+    deviceSignalsAllow: "통화 기록 허용하기",
+    deviceSignalsOpenSettings: "휴대폰 설정 열기",
+    deviceSignalsRefresh: "다시 확인하기",
+    deviceSignalsLoadNotice:
+      "휴대폰 정보를 확인하지 못했어요. 연결을 확인한 뒤 다시 확인해 주세요.",
+    deviceSignalsPrivacy: "최근 30일의 부재중 전화만 개인 서버에 보관해요.",
     notificationsTitle: "휴대폰 알림",
     notificationsChecking: "알림 권한을 확인하고 있어요.",
     notificationsReady:

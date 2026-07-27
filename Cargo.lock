@@ -2634,6 +2634,7 @@ dependencies = [
  "keyring-core",
  "tauri",
  "tauri-build",
+ "tauri-plugin-device-signals",
  "tauri-plugin-local-notifications",
  "tauri-plugin-opener",
  "tauri-plugin-voice-recognition",
@@ -5348,6 +5349,14 @@ dependencies = [
  "serde_json",
  "tauri-utils",
  "walkdir",
+]
+
+[[package]]
+name = "tauri-plugin-device-signals"
+version = "0.1.0"
+dependencies = [
+ "tauri",
+ "tauri-plugin",
 ]
 
 [[package]]

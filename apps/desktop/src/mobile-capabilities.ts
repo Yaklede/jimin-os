@@ -7,6 +7,7 @@ export type MobileCapabilitySnapshot = {
   nativeVoiceDictation: boolean;
   localNotifications: boolean;
   nativeBackNavigation: boolean;
+  missedCallHistory: boolean;
 };
 
 export type NativeVoiceResult = {
@@ -30,6 +31,7 @@ export function mobileCapabilitySnapshot(
     nativeVoiceDictation: isAndroidTauri,
     localNotifications: isAndroidTauri,
     nativeBackNavigation: isAndroidTauri,
+    missedCallHistory: isAndroidTauri,
   };
 }
 
