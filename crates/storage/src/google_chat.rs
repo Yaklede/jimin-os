@@ -347,6 +347,54 @@ impl From<GoogleChatCompletionDeliveryRow> for GoogleChatCompletionDelivery {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoogleChatTaskCompletionDelivery {
+    pub inflow_id: Uuid,
+    pub user_id: Uuid,
+    pub source_id: Uuid,
+    pub provider_thread_name: Option<String>,
+    pub task_id: Uuid,
+    pub task_version: i64,
+    pub task_title: String,
+    pub assignee_name: Option<String>,
+    pub completed_at: OffsetDateTime,
+    pub reply_completed: bool,
+    pub attempt_count: i32,
+}
+
+#[derive(sqlx::FromRow)]
+struct GoogleChatTaskCompletionDeliveryRow {
+    inflow_id: Uuid,
+    user_id: Uuid,
+    source_id: Uuid,
+    provider_thread_name: Option<String>,
+    task_id: Uuid,
+    task_version: i64,
+    task_title: String,
+    assignee_name: Option<String>,
+    completed_at: OffsetDateTime,
+    reply_completed: bool,
+    attempt_count: i32,
+}
+
+impl From<GoogleChatTaskCompletionDeliveryRow> for GoogleChatTaskCompletionDelivery {
+    fn from(row: GoogleChatTaskCompletionDeliveryRow) -> Self {
+        Self {
+            inflow_id: row.inflow_id,
+            user_id: row.user_id,
+            source_id: row.source_id,
+            provider_thread_name: row.provider_thread_name,
+            task_id: row.task_id,
+            task_version: row.task_version,
+            task_title: row.task_title,
+            assignee_name: row.assignee_name,
+            completed_at: row.completed_at,
+            reply_completed: row.reply_completed,
+            attempt_count: row.attempt_count,
+        }
+    }
+}
+
 pub struct ProviderGoogleChatMessage {
     pub provider_message_name: String,
     pub provider_thread_name: Option<String>,
@@ -886,12 +934,33 @@ impl Database {
         let mut acknowledgements = Vec::new();
         for message in messages {
             let inflow_id = Uuid::now_v7();
+            let linked_task_id = if let Some(thread_name) = &message.provider_thread_name {
+                sqlx::query_scalar::<_, Uuid>(
+                    "SELECT promoted_task_id
+                     FROM project_inflow_items
+                     WHERE source_id = $1 AND provider_thread_name = $2
+                       AND status = 'promoted' AND promoted_task_id IS NOT NULL
+                     ORDER BY updated_at DESC, received_at DESC, id DESC
+                     LIMIT 1",
+                )
+                .bind(connection.source_id)
+                .bind(thread_name)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(classify)?
+            } else {
+                None
+            };
             let inserted = sqlx::query_scalar::<_, Uuid>(
                 "INSERT INTO project_inflow_items (
                     id, user_id, project_id, source_id, provider_message_name,
                     provider_thread_name, sender_provider_name, sender_name,
-                    content_text, received_at
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    content_text, received_at, status, promoted_task_id
+                 ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                    CASE WHEN $11::UUID IS NULL THEN 'pending' ELSE 'promoted' END,
+                    $11
+                 )
                  ON CONFLICT (source_id, provider_message_name) DO NOTHING
                  RETURNING id",
             )
@@ -905,6 +974,7 @@ impl Database {
             .bind(&message.sender_name)
             .bind(message.content_text.trim())
             .bind(message.received_at)
+            .bind(linked_task_id)
             .fetch_optional(&mut *transaction)
             .await
             .map_err(classify)?;
@@ -1182,6 +1252,110 @@ impl Database {
         )
         .await?;
         transaction.commit().await.map_err(classify)?;
+        Ok(())
+    }
+
+    /// Lists task-completion replies that are ready for an idempotent provider
+    /// attempt. Only the task version that originally requested the reply is
+    /// eligible, so restoring or changing the task cannot emit stale status.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when identifiers, bounds, or persistence are invalid.
+    pub async fn pending_google_chat_task_completion_deliveries(
+        &self,
+        source_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<GoogleChatTaskCompletionDelivery>, StorageError> {
+        if !is_v7(source_id) || !(1..=20).contains(&limit) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let rows = sqlx::query_as::<_, GoogleChatTaskCompletionDeliveryRow>(
+            "SELECT delivery.inflow_id, delivery.user_id, delivery.source_id,
+                item.provider_thread_name, delivery.task_id,
+                delivery.task_version, delivery.task_title,
+                delivery.assignee_name, delivery.completed_at,
+                delivery.reply_at IS NOT NULL AS reply_completed,
+                delivery.delivery_attempt_count AS attempt_count
+             FROM google_chat_task_completion_deliveries AS delivery
+             JOIN project_inflow_items AS item
+               ON item.id = delivery.inflow_id
+              AND item.user_id = delivery.user_id
+              AND item.source_id = delivery.source_id
+             WHERE delivery.source_id = $1
+               AND delivery.reply_at IS NULL
+               AND delivery.cancelled_at IS NULL
+               AND delivery.delivery_attempt_count < 10
+               AND delivery.delivery_next_attempt_at <= NOW()
+             ORDER BY delivery.delivery_next_attempt_at,
+                delivery.task_id, delivery.task_version
+             LIMIT $2",
+        )
+        .bind(source_id)
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await
+        .map_err(classify)?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    /// Persists one task-completion reply attempt with version fencing and
+    /// bounded exponential backoff.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the result shape or persistence is invalid.
+    pub async fn record_google_chat_task_completion_delivery(
+        &self,
+        delivery: &GoogleChatTaskCompletionDelivery,
+        reply_completed: bool,
+        failure_code: Option<&str>,
+    ) -> Result<(), StorageError> {
+        if ![
+            delivery.inflow_id,
+            delivery.user_id,
+            delivery.source_id,
+            delivery.task_id,
+        ]
+        .into_iter()
+        .all(is_v7)
+            || delivery.task_version <= 0
+            || (!reply_completed && !failure_code.is_some_and(valid_failure_code))
+            || failure_code.is_some_and(|code| !valid_failure_code(code))
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let next_attempt_seconds = i64::from(30_u32.saturating_mul(
+            2_u32.saturating_pow(u32::try_from(delivery.attempt_count.clamp(0, 7)).unwrap_or(7)),
+        ))
+        .min(3_600);
+        let updated = sqlx::query(
+            "UPDATE google_chat_task_completion_deliveries
+             SET reply_at = CASE WHEN $5 THEN NOW() ELSE NULL END,
+                 delivery_attempt_count = delivery_attempt_count + 1,
+                 delivery_error_code = CASE WHEN $5 THEN NULL ELSE $6 END,
+                 delivery_next_attempt_at = CASE
+                     WHEN $5 THEN NULL
+                     ELSE NOW() + make_interval(secs => $7)
+                 END
+             WHERE inflow_id = $1 AND user_id = $2 AND source_id = $3
+               AND task_id = $4 AND task_version = $8
+               AND reply_at IS NULL AND cancelled_at IS NULL",
+        )
+        .bind(delivery.inflow_id)
+        .bind(delivery.user_id)
+        .bind(delivery.source_id)
+        .bind(delivery.task_id)
+        .bind(reply_completed)
+        .bind(failure_code)
+        .bind(next_attempt_seconds)
+        .bind(delivery.task_version)
+        .execute(self.pool())
+        .await
+        .map_err(classify)?;
+        if updated.rows_affected() != 1 {
+            return Err(StorageError::InvalidConfiguration);
+        }
         Ok(())
     }
 
@@ -1755,6 +1929,70 @@ impl Database {
         transaction.commit().await.map_err(classify)?;
         Ok(selected)
     }
+}
+
+pub(crate) async fn queue_google_chat_task_completion_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    task_id: Uuid,
+    task_version: i64,
+) -> Result<(), StorageError> {
+    if ![user_id, task_id].into_iter().all(is_v7) || task_version <= 0 {
+        return Err(StorageError::InvalidConfiguration);
+    }
+    sqlx::query(
+        "INSERT INTO google_chat_task_completion_deliveries (
+            task_id, task_version, inflow_id, user_id, source_id,
+            task_title, assignee_name, completed_at
+         )
+         SELECT $2, $3, item.id, item.user_id, item.source_id,
+            task.title, task.assignee_name, task.completed_at
+         FROM project_inflow_items AS item
+         JOIN tasks AS task
+           ON task.id = $2 AND task.user_id = $1
+          AND task.version = $3 AND task.status = 'completed'
+          AND task.completed_at IS NOT NULL
+         WHERE item.user_id = $1
+           AND item.promoted_task_id = $2
+           AND item.status = 'promoted'
+         ORDER BY
+           CASE WHEN item.completion_requested_at IS NOT NULL THEN 0 ELSE 1 END,
+           item.received_at ASC,
+           item.id ASC
+         LIMIT 1
+         ON CONFLICT (task_id, task_version) DO NOTHING",
+    )
+    .bind(user_id)
+    .bind(task_id)
+    .bind(task_version)
+    .execute(&mut **transaction)
+    .await
+    .map_err(classify)?;
+    Ok(())
+}
+
+pub(crate) async fn cancel_google_chat_task_completion_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    task_id: Uuid,
+) -> Result<(), StorageError> {
+    if ![user_id, task_id].into_iter().all(is_v7) {
+        return Err(StorageError::InvalidConfiguration);
+    }
+    sqlx::query(
+        "UPDATE google_chat_task_completion_deliveries
+         SET cancelled_at = NOW(),
+             delivery_error_code = NULL,
+             delivery_next_attempt_at = NULL
+         WHERE user_id = $1 AND task_id = $2
+           AND reply_at IS NULL AND cancelled_at IS NULL",
+    )
+    .bind(user_id)
+    .bind(task_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(classify)?;
+    Ok(())
 }
 
 type InflowMessageEvidence = (Uuid, Option<String>, String, OffsetDateTime);

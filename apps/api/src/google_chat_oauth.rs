@@ -16,7 +16,7 @@ use jimin_storage::{
     google_chat::{
         ClaimedGoogleChatOAuthAuthorization, CompleteGoogleChatOAuthAuthorization,
         GoogleChatAccountConnection, GoogleChatCompletionDelivery, GoogleChatSourceSyncConnection,
-        ProviderGoogleChatMessage,
+        GoogleChatTaskCompletionDelivery, ProviderGoogleChatMessage,
     },
 };
 use rand::Rng;
@@ -60,6 +60,11 @@ pub struct GoogleChatCompletionOutcome {
     pub reply_completed: bool,
     pub reaction_failure_code: Option<&'static str>,
     pub reply_failure_code: Option<&'static str>,
+    pub failure_code: Option<&'static str>,
+}
+
+pub struct GoogleChatTaskCompletionOutcome {
+    pub reply_completed: bool,
     pub failure_code: Option<&'static str>,
 }
 
@@ -369,6 +374,81 @@ impl GoogleChatOAuthRuntime {
             reaction_failure_code: reaction_failure,
             reply_failure_code: reply_failure,
             failure_code,
+        }
+    }
+
+    /// Posts one idempotent completion reply for a task that originated from
+    /// the selected Chat thread.
+    pub async fn deliver_task_completion(
+        &self,
+        connection: &GoogleChatSourceSyncConnection,
+        delivery: &GoogleChatTaskCompletionDelivery,
+        reply_text: &str,
+    ) -> GoogleChatTaskCompletionOutcome {
+        if delivery.reply_completed {
+            return GoogleChatTaskCompletionOutcome {
+                reply_completed: true,
+                failure_code: None,
+            };
+        }
+        let refresh_token = match self.crypto.decrypt(
+            &connection.refresh_token,
+            &refresh_token_aad(connection.user_id, &connection.provider_subject),
+        ) {
+            Ok(token) => token,
+            Err(error) => {
+                return GoogleChatTaskCompletionOutcome {
+                    reply_completed: false,
+                    failure_code: Some(error.failure_code()),
+                };
+            }
+        };
+        let access_token = match self.chat.refresh_access_token(&refresh_token).await {
+            Ok(token) => token,
+            Err(error) => {
+                let error = GoogleChatOAuthError::from_google(error);
+                return GoogleChatTaskCompletionOutcome {
+                    reply_completed: false,
+                    failure_code: Some(error.failure_code()),
+                };
+            }
+        };
+        if !Self::completion_scope_granted(&connection.granted_scopes) {
+            return GoogleChatTaskCompletionOutcome {
+                reply_completed: false,
+                failure_code: Some("google_chat.write_scope_missing"),
+            };
+        }
+        let Some(thread_name) = delivery.provider_thread_name.as_deref() else {
+            return GoogleChatTaskCompletionOutcome {
+                reply_completed: false,
+                failure_code: Some("google_chat.thread_unavailable"),
+            };
+        };
+        let request_id = format!(
+            "{}-done-{}",
+            delivery.task_id.as_simple(),
+            delivery.task_version
+        );
+        match self
+            .chat
+            .reply_to_thread(
+                &access_token,
+                &connection.space_name,
+                thread_name,
+                reply_text,
+                &request_id,
+            )
+            .await
+        {
+            Ok(()) => GoogleChatTaskCompletionOutcome {
+                reply_completed: true,
+                failure_code: None,
+            },
+            Err(error) => GoogleChatTaskCompletionOutcome {
+                reply_completed: false,
+                failure_code: Some(completion_reply_failure_code(error)),
+            },
         }
     }
 

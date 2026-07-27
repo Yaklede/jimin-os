@@ -51,8 +51,9 @@ use jimin_storage::{
     goals::{GoalHealth, GoalNextActionKind, GoalOverview, GoalStatus, GoalUpdate, NewGoal},
     google_chat::{
         CreateGoogleChatOAuthAuthorization, GoogleChatAccount, GoogleChatAccountStatus,
-        GoogleChatCompletionDelivery, GoogleChatSourceSyncConnection, NewProjectGoogleChatSource,
-        ProjectGoogleChatSource, ProjectInflowItem, ProjectInflowStatus, PromoteProjectInflowItem,
+        GoogleChatCompletionDelivery, GoogleChatSourceSyncConnection,
+        GoogleChatTaskCompletionDelivery, NewProjectGoogleChatSource, ProjectGoogleChatSource,
+        ProjectInflowItem, ProjectInflowStatus, PromoteProjectInflowItem,
     },
     inflow_analysis::{
         InflowAnalysisState, InflowClassification, ProjectInflowAnalysis,
@@ -6408,6 +6409,33 @@ async fn deliver_google_chat_completions(
             );
         }
     }
+    let task_deliveries = planning
+        .pending_google_chat_task_completion_deliveries(connection.source_id, 20)
+        .await
+        .map_err(|_| GoogleChatOAuthError::ProviderUnavailable)?;
+    for delivery in task_deliveries {
+        let reply = google_chat_task_completion_reply(&delivery);
+        let outcome = runtime
+            .deliver_task_completion(connection, &delivery, &reply)
+            .await;
+        planning
+            .record_google_chat_task_completion_delivery(
+                &delivery,
+                outcome.reply_completed,
+                outcome.failure_code,
+            )
+            .await
+            .map_err(|_| GoogleChatOAuthError::ProviderUnavailable)?;
+        if let Some(error_code) = outcome.failure_code {
+            warn!(
+                event = "google_chat.task_completion_delivery_failed",
+                source_id = %connection.source_id,
+                attempt = delivery.attempt_count + 1,
+                error_code,
+                "Google Chat task completion reply is incomplete"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -6419,6 +6447,15 @@ fn google_chat_completion_reply(delivery: &GoogleChatCompletionDelivery) -> Stri
     format!(
         "✅ Jimin OS에서 할 일로 정리했어요.\n할 일: {}\n담당자: {assignee}\n마감일: {due_at}",
         delivery.task_title
+    )
+}
+
+fn google_chat_task_completion_reply(delivery: &GoogleChatTaskCompletionDelivery) -> String {
+    let assignee = delivery.assignee_name.as_deref().unwrap_or("정하지 않음");
+    format!(
+        "✅ 요청하신 작업을 완료했어요.\n할 일: {}\n담당자: {assignee}\n완료일: {}",
+        delivery.task_title,
+        format_google_chat_due_at(delivery.completed_at)
     )
 }
 
@@ -9405,6 +9442,30 @@ mod tests {
         assert_eq!(
             reply,
             "✅ Jimin OS에서 할 일로 정리했어요.\n할 일: 정산 오류 원인 확인\n담당자: 김경주\n마감일: 2026년 7월 24일 11:30"
+        );
+    }
+
+    #[test]
+    fn google_chat_task_completion_reply_confirms_the_finished_work() {
+        let completed_at = OffsetDateTime::parse("2026-07-27T05:45:00Z", &Rfc3339)
+            .expect("completion time should parse");
+        let reply = google_chat_task_completion_reply(&GoogleChatTaskCompletionDelivery {
+            inflow_id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            source_id: Uuid::now_v7(),
+            provider_thread_name: Some("spaces/company/threads/thread-1".to_owned()),
+            task_id: Uuid::now_v7(),
+            task_version: 2,
+            task_title: "권한 오류 수정".to_owned(),
+            assignee_name: Some("주홍석".to_owned()),
+            completed_at,
+            reply_completed: false,
+            attempt_count: 0,
+        });
+
+        assert_eq!(
+            reply,
+            "✅ 요청하신 작업을 완료했어요.\n할 일: 권한 오류 수정\n담당자: 주홍석\n완료일: 2026년 7월 27일 14:45"
         );
     }
 

@@ -140,4 +140,12 @@ home conversation archives the previous home context and
 `jimin_schema_metadata.schema_version = 39`. Rollback requires the verified
 pre-migration backup after clients begin relying on the durable home marker.
 
+Migration `0040_google_chat_task_completion.sql` records an idempotent Google
+Chat thread reply for every completion cycle of a task promoted from Chat.
+Apply it to an empty database and a restored version-39 backup, then verify a
+task completion queues one reply, retrying does not duplicate it, restoring the
+task cancels an unsent reply, and
+`jimin_schema_metadata.schema_version = 40`. Rollback requires the verified
+pre-migration backup after a completion reply has been requested.
+
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.

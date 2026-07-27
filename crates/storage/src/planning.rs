@@ -13,6 +13,10 @@ use crate::{
         ScheduleCalendarMutationOperation, ScheduleCalendarMutationPayload,
         attach_schedule_and_queue_create, queue_linked_schedule_mutation,
     },
+    google_chat::{
+        cancel_google_chat_task_completion_in_transaction,
+        queue_google_chat_task_completion_in_transaction,
+    },
     webhook::{project_event_payload, queue_project_event_in_transaction},
 };
 
@@ -1234,8 +1238,8 @@ impl Database {
             task.version,
         )
         .await?;
-        let event_type = task_update_event_type(previous_status.as_deref(), task.status);
-        queue_task_webhook_in_transaction(&mut transaction, update.user_id, &task, event_type)
+        let previous_status = previous_status.as_deref();
+        queue_task_update_side_effects(&mut transaction, update.user_id, previous_status, &task)
             .await?;
         transaction.commit().await.map_err(classify)?;
         Ok(Some(task))
@@ -1325,6 +1329,8 @@ impl Database {
             )
             .await?;
         }
+        cancel_google_chat_task_completion_in_transaction(&mut transaction, user_id, task_id)
+            .await?;
         transaction.commit().await.map_err(classify)?;
         Ok(DeleteTaskOutcome::Deleted)
     }
@@ -1371,6 +1377,13 @@ impl Database {
         append_change(&mut transaction, user_id, "task", task.id, task.version).await?;
         queue_task_webhook_in_transaction(&mut transaction, user_id, &task, "task.completed")
             .await?;
+        queue_google_chat_task_completion_in_transaction(
+            &mut transaction,
+            user_id,
+            task.id,
+            task.version,
+        )
+        .await?;
         transaction.commit().await.map_err(classify)?;
         Ok(Some(task))
     }
@@ -1756,6 +1769,37 @@ fn task_update_event_type(
         (_, TaskStatus::Cancelled) => "task.deleted",
         _ => "task.updated",
     }
+}
+
+async fn reconcile_google_chat_task_completion(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    previous_status: Option<&str>,
+    task: &Task,
+) -> Result<(), StorageError> {
+    if previous_status != Some("completed") && task.status == TaskStatus::Completed {
+        queue_google_chat_task_completion_in_transaction(
+            transaction,
+            user_id,
+            task.id,
+            task.version,
+        )
+        .await?;
+    } else if previous_status == Some("completed") && task.status != TaskStatus::Completed {
+        cancel_google_chat_task_completion_in_transaction(transaction, user_id, task.id).await?;
+    }
+    Ok(())
+}
+
+async fn queue_task_update_side_effects(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    previous_status: Option<&str>,
+    task: &Task,
+) -> Result<(), StorageError> {
+    let event_type = task_update_event_type(previous_status, task.status);
+    queue_task_webhook_in_transaction(transaction, user_id, task, event_type).await?;
+    reconcile_google_chat_task_completion(transaction, user_id, previous_status, task).await
 }
 
 fn task_status_name(status: TaskStatus) -> &'static str {

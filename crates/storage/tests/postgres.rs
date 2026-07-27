@@ -153,13 +153,20 @@ async fn sync_change_feed_pages_task_mutations_in_order() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The integration test keeps snapshot refresh, reminder delivery, and owner isolation in one lifecycle."
+)]
 async fn weekly_report_snapshots_refresh_idempotently_and_stay_owner_scoped() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;
     };
-    let database =
-        Database::connect_lazy(&SecretString::from(database_url), 2, Duration::from_secs(2))
-            .expect("test database URL should be valid");
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        2,
+        Duration::from_secs(2),
+    )
+    .expect("test database URL should be valid");
     database.migrate().await.expect("migration should succeed");
     let owner = database
         .provision_login(&provision_android_login_command(
@@ -245,7 +252,13 @@ async fn weekly_report_snapshots_refresh_idempotently_and_stay_owner_scoped() {
     assert_eq!(history[0].report.projects[0].project_id, project.id);
     let friday_evening =
         history[0].report.period_start + TimeDuration::days(4) + TimeDuration::hours(18);
-    assert_weekly_report_push_is_idempotent(&database, history[0].id, friday_evening).await;
+    assert_weekly_report_push_is_idempotent(
+        &database,
+        &database_url,
+        history[0].id,
+        friday_evening,
+    )
+    .await;
     assert!(
         database
             .weekly_report_history_for_workspace(other_owner.profile.id, workspace.id, 8)
@@ -258,6 +271,7 @@ async fn weekly_report_snapshots_refresh_idempotently_and_stay_owner_scoped() {
 
 async fn assert_weekly_report_push_is_idempotent(
     database: &Database,
+    database_url: &str,
     snapshot_id: Uuid,
     friday_evening: OffsetDateTime,
 ) {
@@ -275,6 +289,19 @@ async fn assert_weekly_report_push_is_idempotent(
             .expect("Friday report notification should stay idempotent"),
         0
     );
+    let pool = sqlx::PgPool::connect(database_url)
+        .await
+        .expect("test database should accept delivery clock adjustment");
+    sqlx::query(
+        "UPDATE push_deliveries
+         SET notify_at = NOW()
+         WHERE item_type = 'weekly_report' AND item_id = $1",
+    )
+    .bind(snapshot_id)
+    .execute(&pool)
+    .await
+    .expect("queued report should become claimable without depending on the wall clock");
+    pool.close().await;
     let deliveries = database
         .claim_push_deliveries("weekly-report-test-worker", 10)
         .await
@@ -1030,6 +1057,79 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         .expect("retargeted completion delivery should load");
     assert_eq!(retry_deliveries.len(), 1);
     assert_eq!(retry_deliveries[0].inflow_id, retried.id);
+    let task_id = promoted
+        .promoted_task_id
+        .expect("promoted inflow should retain its task");
+    let task = database
+        .task_for_user(owner.profile.id, task_id)
+        .await
+        .expect("promoted task should load")
+        .expect("promoted task should exist");
+    let completed_task = database
+        .complete_task(owner.profile.id, task.id, task.version)
+        .await
+        .expect("promoted task should complete")
+        .expect("open promoted task should be version matched");
+    let task_completion_deliveries = database
+        .pending_google_chat_task_completion_deliveries(source.id, 20)
+        .await
+        .expect("task completion reply should load");
+    assert_eq!(task_completion_deliveries.len(), 1);
+    assert_eq!(task_completion_deliveries[0].task_id, completed_task.id);
+    assert_eq!(
+        task_completion_deliveries[0].task_version,
+        completed_task.version
+    );
+    let restored_task = database
+        .update_task(&TaskUpdate {
+            id: completed_task.id,
+            user_id: owner.profile.id,
+            project_id: completed_task.project_id,
+            parent_task_id: completed_task.parent_task_id,
+            title: completed_task.title.clone(),
+            notes: completed_task.notes.clone(),
+            assignee_name: completed_task.assignee_name.clone(),
+            status: TaskStatus::Open,
+            priority: completed_task.priority,
+            due_at: completed_task.due_at,
+            expected_version: completed_task.version,
+        })
+        .await
+        .expect("completed task should restore")
+        .expect("completed task should remain version matched");
+    assert!(
+        database
+            .pending_google_chat_task_completion_deliveries(source.id, 20)
+            .await
+            .expect("cancelled stale completion should be readable")
+            .is_empty(),
+        "restoring the task must cancel its unsent completion reply"
+    );
+    let completed_again = database
+        .complete_task(owner.profile.id, restored_task.id, restored_task.version)
+        .await
+        .expect("restored task should complete again")
+        .expect("restored task should remain version matched");
+    let second_completion_deliveries = database
+        .pending_google_chat_task_completion_deliveries(source.id, 20)
+        .await
+        .expect("second completion reply should load");
+    assert_eq!(second_completion_deliveries.len(), 1);
+    assert_eq!(
+        second_completion_deliveries[0].task_version, completed_again.version,
+        "a later completion cycle must use a distinct idempotency version"
+    );
+    database
+        .record_google_chat_task_completion_delivery(&second_completion_deliveries[0], true, None)
+        .await
+        .expect("successful task completion reply should persist");
+    assert!(
+        database
+            .pending_google_chat_task_completion_deliveries(source.id, 20)
+            .await
+            .expect("completed delivery queue should be readable")
+            .is_empty()
+    );
     let follow_up_message = ProviderGoogleChatMessage {
         provider_message_name: "spaces/company-room/messages/message-3.message-3".to_owned(),
         provider_thread_name: Some("spaces/company-room/threads/thread-1".to_owned()),
@@ -1046,6 +1146,31 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             .len(),
         1
     );
+    assert!(
+        database
+            .project_inflow_items(
+                owner.profile.id,
+                first_project.id,
+                Some(ProjectInflowStatus::Pending),
+            )
+            .await
+            .expect("pending inflow should remain readable")
+            .is_empty(),
+        "a reply in an already promoted thread must not become another task candidate"
+    );
+    let promoted_with_follow_up = database
+        .project_inflow_items(
+            owner.profile.id,
+            first_project.id,
+            Some(ProjectInflowStatus::Promoted),
+        )
+        .await
+        .expect("promoted thread with its follow-up should load");
+    assert_eq!(promoted_with_follow_up.len(), 3);
+    assert!(promoted_with_follow_up.iter().all(|item| {
+        item.promoted_task_id == promoted.promoted_task_id
+            && item.provider_thread_name == promoted.provider_thread_name
+    }));
     let follow_up_analysis = database
         .claim_next_inflow_analysis(analysis_runner, Duration::from_secs(30))
         .await

@@ -17,6 +17,10 @@ use crate::{
         ScheduleCalendarMutationOperation, ScheduleCalendarMutationPayload,
         attach_schedule_to_active_primary_and_queue_create, queue_linked_schedule_mutation,
     },
+    google_chat::{
+        cancel_google_chat_task_completion_in_transaction,
+        queue_google_chat_task_completion_in_transaction,
+    },
     planning::{TaskStatus, queue_owned_task_webhook_by_id_in_transaction},
     webhook::{project_event_payload, queue_project_event_in_transaction},
     work::ProjectStatus,
@@ -3219,6 +3223,18 @@ async fn persist_agent_action(
             .await
             .map_err(|error| classify(&error))?
             .ok_or(StorageError::IdentityConflict)?;
+            if status == "completed" {
+                queue_google_chat_task_completion_in_transaction(
+                    transaction,
+                    user_id,
+                    *id,
+                    version,
+                )
+                .await?;
+            } else if status == "open" {
+                cancel_google_chat_task_completion_in_transaction(transaction, user_id, *id)
+                    .await?;
+            }
             ("task", *id, version)
         }
         AgentActionCommand::CreateSchedule {
