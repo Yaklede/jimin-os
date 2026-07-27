@@ -1196,12 +1196,12 @@ fn operation_project_attention_content(project: &Project) -> Option<ProjectAtten
     if project.management_mode != ProjectManagementMode::Operation {
         return None;
     }
-    if project.backlog_delta > 0 {
-        let severity = if project.backlog_delta >= 3 { 2 } else { 1 };
+    if project.backlog_delta >= 3 {
+        let severity = 2;
         return Some(ProjectAttentionContent {
-            title: format!("{}에 밀린 일이 늘었어요", project.title),
+            title: format!("{}의 열린 일이 늘었어요", project.title),
             summary: format!(
-                "이번 주 새 일 {}개 중 {}개를 마쳐 밀린 일이 {}개 늘었어요.",
+                "이번 주 새 일 {}개 중 {}개를 마쳐 열린 일이 {}개 늘었어요.",
                 project.weekly_created_task_count,
                 project.weekly_completed_task_count,
                 project.backlog_delta
@@ -1930,12 +1930,47 @@ mod tests {
         let observation = project_attention_observation(&project, OffsetDateTime::now_utc())
             .expect("growing operation backlog should need attention");
 
-        assert_eq!(observation.title, "고객 요청 운영에 밀린 일이 늘었어요");
+        assert_eq!(observation.title, "고객 요청 운영의 열린 일이 늘었어요");
         assert!(observation.summary.contains("새 일 7개"));
         assert!(observation.summary.contains("4개를 마쳐"));
         assert!(observation.summary.contains("3개 늘었어요"));
         assert!(!observation.summary.contains("80%"));
         assert_eq!(observation.urgency, 2);
+    }
+
+    #[test]
+    fn one_new_operation_task_is_not_treated_as_delayed_work() {
+        let project = Project {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            title: "고객 요청 운영".to_owned(),
+            objective: Some("고객 요청을 빠짐없이 처리".to_owned()),
+            status: ProjectStatus::Active,
+            management_mode: ProjectManagementMode::Operation,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
+            risk_level: 0,
+            next_action: Some("새 요청 확인".to_owned()),
+            due_at: None,
+            open_task_count: 1,
+            total_task_count: 1,
+            completed_task_count: 0,
+            overdue_task_count: 0,
+            unassigned_task_count: 0,
+            progress_percent: 0,
+            weekly_created_task_count: 1,
+            weekly_completed_task_count: 0,
+            backlog_delta: 1,
+            stale_task_count: 0,
+            average_cycle_time_hours: 0,
+            on_time_completion_percent: None,
+            version: 1,
+        };
+
+        assert!(
+            project_attention_observation(&project, OffsetDateTime::now_utc()).is_none(),
+            "one newly opened task must not create a delay recommendation"
+        );
     }
 
     #[test]

@@ -139,11 +139,9 @@ export const copy = {
     resultTaskCompleteFailed: "완료하지 못했어요. 확인하고 다시 눌러 주세요.",
     resultTaskRestore: "다시 할 일로 열기",
     resultTaskRestoring: "다시 여는 중",
-    resultTaskRestoreFailed:
-      "할 일을 다시 열지 못했어요. 최신 상태를 확인한 뒤 다시 눌러 주세요.",
+    resultTaskRestoreFailed: "다시 열지 못했어요. 새로고침 후 시도해 주세요.",
     resultTaskDetailsLoading: "상세 내용을 불러오는 중이에요",
-    resultTaskDetailsFailed:
-      "상세 내용을 불러오지 못했어요. 잠시 후 다시 선택해 주세요.",
+    resultTaskDetailsFailed: "불러오지 못했어요. 잠시 후 다시 선택해 주세요.",
     resultTaskNotesLabel: "처리할 내용",
     resultTasksHandled: "이 결과의 할 일을 모두 처리했어요.",
     taskGroupViewLabel: "보기 기준",
@@ -264,7 +262,7 @@ export const copy = {
       completed: number,
       backlog: number,
     ) =>
-      `새 일 ${created}개 중 ${completed}개를 마쳤고, ${backlog > 0 ? `밀린 일이 ${backlog}개 늘었어요.` : backlog < 0 ? `밀린 일을 ${Math.abs(backlog)}개 줄였어요.` : "밀린 일은 늘지 않았어요."}`,
+      `새 일 ${created}개 중 ${completed}개를 마쳤고, ${backlog > 0 ? `열린 일이 ${backlog}개 늘었어요.` : backlog < 0 ? `열린 일을 ${Math.abs(backlog)}개 줄였어요.` : "열린 일 수는 그대로예요."}`,
     weeklyNewWork: "새로 들어온 일",
     weeklyCompletedWork: "완료한 일",
     weeklyOverdueWork: "기한이 지난 일",
@@ -274,7 +272,7 @@ export const copy = {
       "기한이 지난 일이나 정체된 일이 없어요. 현재 흐름을 유지해 보세요.",
     weeklyProjectOverdue: (count: number) =>
       `기한이 지난 일 ${count}개를 먼저 확인해 주세요.`,
-    weeklyProjectBacklog: (count: number) => `밀린 일이 ${count}개 늘었어요.`,
+    weeklyProjectBacklog: (count: number) => `열린 일이 ${count}개 늘었어요.`,
     weeklyProjectStale: (count: number) =>
       `정체된 일 ${count}개를 확인해 주세요.`,
     weeklyProjectUnassigned: (count: number) =>

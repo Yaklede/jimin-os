@@ -268,17 +268,17 @@ impl Database {
                         CASE
                             WHEN snapshot.backlog_end_count > snapshot.backlog_start_count
                                 THEN CONCAT(
-                                    '밀린 일이 ',
+                                    '열린 일이 ',
                                     snapshot.backlog_end_count - snapshot.backlog_start_count,
                                     '개 늘었어요.'
                                 )
                             WHEN snapshot.backlog_end_count < snapshot.backlog_start_count
                                 THEN CONCAT(
-                                    '밀린 일을 ',
+                                    '열린 일을 ',
                                     snapshot.backlog_start_count - snapshot.backlog_end_count,
                                     '개 줄였어요.'
                                 )
-                            ELSE '밀린 일은 늘지 않았어요.'
+                            ELSE '열린 일 수는 그대로예요.'
                         END,
                         CASE
                             WHEN snapshot.overdue_task_count > 0
@@ -749,14 +749,14 @@ mod tests {
             item_version: 1,
             project_id: None,
             raw_title: "회사".to_owned(),
-            raw_body: Some("새 일 8개 중 6개를 마쳤고, 밀린 일이 2개 늘었어요.".to_owned()),
+            raw_body: Some("새 일 8개 중 6개를 마쳤고, 열린 일이 2개 늘었어요.".to_owned()),
             target_at: OffsetDateTime::now_utc() + Duration::days(2),
             notify_at: OffsetDateTime::now_utc(),
         };
         let (destination, title, body) = reminder_copy(&candidate);
         assert_eq!(destination, "home");
         assert_eq!(title, "주간 운영 리포트 · 회사");
-        assert_eq!(body, "새 일 8개 중 6개를 마쳤고, 밀린 일이 2개 늘었어요.");
+        assert_eq!(body, "새 일 8개 중 6개를 마쳤고, 열린 일이 2개 늘었어요.");
     }
 
     #[test]

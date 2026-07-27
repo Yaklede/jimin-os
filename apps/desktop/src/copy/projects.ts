@@ -31,7 +31,7 @@ export const projectCopy = {
   },
   managementModeDescription: {
     completion: "끝나는 조건이 있는 프로젝트로 진행률을 확인해요.",
-    operation: "계속 들어오는 일을 처리량과 밀린 일로 확인해요.",
+    operation: "계속 들어오는 일을 유입량과 처리량으로 확인해요.",
   },
   weeklyReportingLabel: "주간 리포트 받기",
   weeklyReportingDescription:
@@ -70,12 +70,12 @@ export const projectCopy = {
   operationHealthTitle: "운영 상태",
   operationPeriod: "최근 7일",
   operationSummary: (open: number, backlogDelta: number) =>
-    `열린 일 ${open}개 · 밀린 일 ${backlogDelta > 0 ? `+${backlogDelta}` : backlogDelta}`,
+    `열린 일 ${open}개 · 주간 변화 ${backlogDelta > 0 ? `+${backlogDelta}` : backlogDelta}`,
   operationMetrics: {
     open: "열린 일",
     inflow: "새로 들어온 일",
     completed: "완료한 일",
-    backlog: "밀린 일 변화",
+    backlog: "열린 일 변화",
     overdue: "기한 지난 일",
     stale: "정체된 일",
     unassigned: "담당자 없는 일",
@@ -120,9 +120,9 @@ export const projectCopy = {
     completed: number,
     backlogDelta: number,
   ) =>
-    `새로 들어온 일 ${created}개 · 완료 ${completed}개 · 밀린 일 ${backlogDelta > 0 ? `+${backlogDelta}` : backlogDelta}`,
+    `새로 들어온 일 ${created}개 · 완료 ${completed}개 · 열린 일 변화 ${backlogDelta > 0 ? `+${backlogDelta}` : backlogDelta}`,
   weeklyProjectSummary: (completed: number, backlogDelta: number) =>
-    `완료 ${completed}개 · 밀린 일 ${backlogDelta > 0 ? `+${backlogDelta}` : backlogDelta}`,
+    `완료 ${completed}개 · 열린 일 변화 ${backlogDelta > 0 ? `+${backlogDelta}` : backlogDelta}`,
   weeklyReportProjectTitle: (title: string) => `${title} 주간 리포트`,
   weeklyReportDisabledTitle: "주간 리포트가 꺼져 있어요",
   weeklyReportDisabledDescription:
@@ -141,7 +141,7 @@ export const projectCopy = {
   weeklyFocusUnassigned: (count: number) =>
     `담당자 없는 일 ${count}개를 배정해요.`,
   weeklyFocusBacklog: (count: number) =>
-    `이번 주 밀린 일이 ${count}개 늘었어요.`,
+    `이번 주 열린 일이 ${count}개 늘었어요.`,
   weeklyFocusClear: "기한·정체·담당자 누락 없이 안정적으로 운영 중이에요.",
   weeklyOpenTasks: "열린 일 확인하기",
   weeklyHistoryTitle: "지난 주간 리포트",
