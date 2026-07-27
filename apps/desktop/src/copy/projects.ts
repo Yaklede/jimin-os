@@ -262,7 +262,8 @@ export const projectCopy = {
   inflowAssigneeLabel: "담당자",
   inflowNoAssignee: "담당자 없이 등록",
   inflowDueAtLabel: "마감일",
-  inflowDueAtProblem: "마감일을 다시 선택해 주세요.",
+  inflowDueAtProblem: "마감일을 선택하거나 ‘기한 없이 등록’을 선택해 주세요.",
+  inflowWithoutDeadline: "기한 없이 등록",
   inflowPriorityLabel: "우선순위",
   inflowSenderPending: "보낸 사람 확인 중",
   inflowAssigneeWillBeNotified: (name: string) =>

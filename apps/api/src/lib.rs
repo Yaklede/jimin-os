@@ -826,6 +826,8 @@ pub struct ProjectInflowDecisionRequest {
     assignee_name: Option<String>,
     priority: Option<i16>,
     due_at: Option<String>,
+    #[serde(default)]
+    without_deadline: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -6218,12 +6220,7 @@ async fn apply_project_inflow_decision(
             let Some(title) = request.title.as_deref() else {
                 return Err(StorageError::InvalidConfiguration);
             };
-            let due_at = request
-                .due_at
-                .as_deref()
-                .map(|value| OffsetDateTime::parse(value, &Rfc3339).map_err(|_| ()))
-                .transpose()
-                .map_err(|()| StorageError::InvalidConfiguration)?;
+            let due_at = project_inflow_deadline(request)?;
             planning
                 .promote_project_inflow_item(&PromoteProjectInflowItem {
                     user_id,
@@ -6276,6 +6273,18 @@ async fn apply_project_inflow_decision(
                 .await
                 .map(|items| items.into_iter().find(|item| item.id == item_id))
         }
+        _ => Err(StorageError::InvalidConfiguration),
+    }
+}
+
+fn project_inflow_deadline(
+    request: &ProjectInflowDecisionRequest,
+) -> Result<Option<OffsetDateTime>, StorageError> {
+    match (request.without_deadline, request.due_at.as_deref()) {
+        (true, None) => Ok(None),
+        (false, Some(value)) => OffsetDateTime::parse(value, &Rfc3339)
+            .map(Some)
+            .map_err(|_| StorageError::InvalidConfiguration),
         _ => Err(StorageError::InvalidConfiguration),
     }
 }
@@ -9341,6 +9350,65 @@ mod tests {
             reply,
             "✅ Jimin OS에서 할 일로 정리했어요.\n할 일: 정산 오류 원인 확인\n담당자: 김경주\n마감일: 2026년 7월 24일 11:30"
         );
+    }
+
+    #[test]
+    fn project_inflow_promotion_requires_an_explicit_deadline_choice() {
+        let missing = ProjectInflowDecisionRequest {
+            decision: "promote".to_owned(),
+            expected_version: 1,
+            title: Some("요청 확인".to_owned()),
+            notes: None,
+            assignee_name: None,
+            priority: Some(1),
+            due_at: None,
+            without_deadline: false,
+        };
+        assert!(matches!(
+            project_inflow_deadline(&missing),
+            Err(StorageError::InvalidConfiguration)
+        ));
+
+        let scheduled = ProjectInflowDecisionRequest {
+            due_at: Some("2026-07-29T09:30:00Z".to_owned()),
+            ..missing
+        };
+        assert_eq!(
+            project_inflow_deadline(&scheduled)
+                .expect("scheduled deadline should be accepted")
+                .and_then(|value| value.format(&Rfc3339).ok()),
+            Some("2026-07-29T09:30:00Z".to_owned())
+        );
+
+        let without_deadline = ProjectInflowDecisionRequest {
+            due_at: None,
+            without_deadline: true,
+            ..scheduled
+        };
+        assert_eq!(
+            project_inflow_deadline(&without_deadline)
+                .expect("explicit no-deadline choice should be accepted"),
+            None
+        );
+    }
+
+    #[test]
+    fn project_inflow_promotion_rejects_conflicting_deadline_fields() {
+        let request = ProjectInflowDecisionRequest {
+            decision: "promote".to_owned(),
+            expected_version: 1,
+            title: Some("요청 확인".to_owned()),
+            notes: None,
+            assignee_name: None,
+            priority: Some(1),
+            due_at: Some("2026-07-29T09:30:00Z".to_owned()),
+            without_deadline: true,
+        };
+
+        assert!(matches!(
+            project_inflow_deadline(&request),
+            Err(StorageError::InvalidConfiguration)
+        ));
     }
 
     #[tokio::test]

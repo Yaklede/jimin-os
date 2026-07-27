@@ -274,7 +274,8 @@ export async function decideProjectInflow(
         notes: string;
         assigneeName?: string;
         priority: number;
-        dueAt?: string;
+        dueAt: string | null;
+        withoutDeadline: boolean;
       },
 ): Promise<ProjectInflowItem> {
   return request<ProjectInflowItem>(

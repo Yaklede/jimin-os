@@ -8,7 +8,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   type GoogleChatAccount,
@@ -49,7 +49,8 @@ export type PromoteInflowInput = {
   notes: string;
   assigneeName?: string;
   priority: number;
-  dueAt?: string;
+  dueAt: string | null;
+  withoutDeadline: boolean;
 };
 
 export function ProjectInflowPanel({
@@ -387,7 +388,9 @@ export function InflowItemRow({
   const [dueAt, setDueAt] = useState(() =>
     isoToLocalInput(item.suggestedDueAt),
   );
+  const [withoutDeadline, setWithoutDeadline] = useState(false);
   const [dueProblem, setDueProblem] = useState(false);
+  const dueAtInputRef = useRef<HTMLInputElement>(null);
   const [priority, setPriority] = useState(() =>
     String(item.suggestedPriority ?? 1),
   );
@@ -408,6 +411,7 @@ export function InflowItemRow({
         : "",
     );
     setDueAt(isoToLocalInput(item.suggestedDueAt));
+    setWithoutDeadline(false);
     setPriority(String(item.suggestedPriority ?? 1));
   }, [
     analysisReady,
@@ -423,8 +427,11 @@ export function InflowItemRow({
   async function submitPromotion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!title.trim()) return;
-    const parsedDueAt = localInputToIso(dueAt);
-    if (dueAt && !parsedDueAt) {
+    const deadline = resolvePromotionDeadline(
+      dueAtInputRef.current?.value ?? dueAt,
+      withoutDeadline,
+    );
+    if (!deadline) {
       setDueProblem(true);
       return;
     }
@@ -434,7 +441,7 @@ export function InflowItemRow({
       notes: notes.trim(),
       assigneeName: assigneeName || undefined,
       priority: Number(priority),
-      dueAt: parsedDueAt,
+      ...deadline,
     });
     setEditing(false);
   }
@@ -634,15 +641,20 @@ export function InflowItemRow({
             <label>
               <span>{copy.projects.inflowDueAtLabel}</span>
               <input
+                ref={dueAtInputRef}
                 type="datetime-local"
                 name="dueAt"
                 value={dueAt}
-                disabled={saving}
+                disabled={saving || withoutDeadline}
                 aria-invalid={dueProblem}
                 aria-describedby={
                   dueProblem ? `inflow-due-problem-${item.id}` : undefined
                 }
                 onInput={(event) => {
+                  setDueAt(event.currentTarget.value);
+                  setDueProblem(false);
+                }}
+                onChange={(event) => {
                   setDueAt(event.currentTarget.value);
                   setDueProblem(false);
                 }}
@@ -652,6 +664,18 @@ export function InflowItemRow({
                   {copy.projects.inflowDueAtProblem}
                 </small>
               )}
+            </label>
+            <label className="project-inflow-item__no-deadline">
+              <input
+                type="checkbox"
+                checked={withoutDeadline}
+                disabled={saving}
+                onChange={(event) => {
+                  setWithoutDeadline(event.currentTarget.checked);
+                  setDueProblem(false);
+                }}
+              />
+              <span>{copy.projects.inflowWithoutDeadline}</span>
             </label>
             <label>
               <span>{copy.projects.inflowPriorityLabel}</span>
@@ -722,6 +746,17 @@ export function localInputToIso(value: string): string | undefined {
   if (!value) return undefined;
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
+}
+
+export function resolvePromotionDeadline(
+  value: string,
+  withoutDeadline: boolean,
+): Pick<PromoteInflowInput, "dueAt" | "withoutDeadline"> | undefined {
+  if (withoutDeadline) {
+    return { dueAt: null, withoutDeadline: true };
+  }
+  const dueAt = localInputToIso(value);
+  return dueAt ? { dueAt, withoutDeadline: false } : undefined;
 }
 
 function isoToLocalInput(value: string | null): string {

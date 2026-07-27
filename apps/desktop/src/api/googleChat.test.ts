@@ -65,6 +65,7 @@ describe("Google Chat work intake API", () => {
         "업무 목적\nQR 결제 통보 연동 개발\n\n완료 기준\n연동 결과를 공유합니다.",
       priority: 1,
       dueAt: "2026-07-27T14:30:00.000Z",
+      withoutDeadline: false,
     });
 
     const init = fetch.mock.calls[0]?.[1] as RequestInit;
@@ -72,7 +73,40 @@ describe("Google Chat work intake API", () => {
     expect(body.notes).toContain("업무 목적");
     expect(body.notes).not.toContain("보낸 사람 정보 없음");
     expect(body.dueAt).toBe("2026-07-27T14:30:00.000Z");
+    expect(body.withoutDeadline).toBe(false);
     expect(body.expectedVersion).toBe(3);
+  });
+
+  it("sends an explicit choice when a task has no deadline", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ id: "inflow", status: "promoted" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetch);
+    const item = {
+      id: "inflow",
+      projectId: "project",
+      version: 4,
+    } as ProjectInflowItem;
+
+    await decideProjectInflow("https://example.test", "access", item, {
+      decision: "promote",
+      title: "기한을 정하지 않은 업무",
+      notes: "추후 일정을 정합니다.",
+      priority: 1,
+      dueAt: null,
+      withoutDeadline: true,
+    });
+
+    const init = fetch.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      decision: "promote",
+      dueAt: null,
+      withoutDeadline: true,
+      expectedVersion: 4,
+    });
   });
 
   it("can retry Chat completion delivery for an already promoted item", async () => {

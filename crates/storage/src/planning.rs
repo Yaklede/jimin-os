@@ -1643,10 +1643,12 @@ fn task_event_message(event_type: &str, project_title: &str, task: &Task) -> Str
         format!("프로젝트: {project_title}"),
         format!("할 일: {title}"),
         format!("담당자: {assignee}"),
+        format!(
+            "마감: {}",
+            task.due_at
+                .map_or_else(|| "정하지 않음".to_owned(), korean_deadline)
+        ),
     ];
-    if let Some(due_at) = task.due_at {
-        lines.push(format!("마감: {}", korean_deadline(due_at)));
-    }
     if let Some(summary) = task.notes.as_deref().and_then(task_summary_for_webhook) {
         lines.push(format!("요약: {summary}"));
     }
@@ -1834,6 +1836,7 @@ mod tests {
 
         assert!(message.starts_with("새 할 일이 등록됐어요."));
         assert!(message.contains("담당자: 미정"));
+        assert!(message.contains("마감: 정하지 않음"));
         assert!(message.ends_with('…'));
         assert!(message.chars().count() <= 800);
     }
@@ -1860,6 +1863,7 @@ mod tests {
         let message = task_event_message("task.created", "비스킷링크", &task);
 
         assert!(message.contains("요약: 거래내역에 정산방식을 표시한다."));
+        assert!(message.contains("마감: 정하지 않음"));
         assert!(message.contains("관련 링크: https://itsm.example/issues/3876"));
         assert!(!message.contains("@조지민"));
         assert!(message.chars().count() <= MAX_WEBHOOK_MESSAGE_CHARS);
