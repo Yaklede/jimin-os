@@ -35,10 +35,11 @@ use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness, StorageError,
     agent::{
         AgentAuthentication, AgentAuthenticationState, AgentJob, AgentJobState,
-        AgentModelCatalogEntry, AgentModelSettings, AgentReasoningEffort, AssistantPresentation,
-        AssistantPresentationItem, AssistantPresentationKind, AssistantPresentationLayout,
-        AssistantPresentationSection, AssistantPresentationSectionKind, AssistantPresentationView,
-        Conversation, ConversationMessage, ConversationMessageRole, ConversationMessageStatus,
+        AgentModelCatalogEntry, AgentModelSettings, AgentReasoningEffort,
+        ArchiveConversationOutcome, AssistantPresentation, AssistantPresentationItem,
+        AssistantPresentationKind, AssistantPresentationLayout, AssistantPresentationSection,
+        AssistantPresentationSectionKind, AssistantPresentationView, Conversation,
+        ConversationMessage, ConversationMessageRole, ConversationMessageStatus,
         ConversationStatus, ConversationSurface, NewAgentTurn, NewConversation, PendingAgentAction,
         PendingAgentActionDecision, QueuedAgentTurn,
     },
@@ -1479,6 +1480,7 @@ pub(crate) fn error_response(
         execute_voice_command,
         list_conversations,
         create_conversation,
+        archive_conversation,
         list_conversation_messages,
         stream_conversation_updates,
         get_latest_conversation_job,
@@ -1678,6 +1680,10 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/conversations",
             get(list_conversations).post(create_conversation),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/archive",
+            post(archive_conversation),
         )
         .route(
             "/v1/conversations/{conversation_id}/turns",
@@ -4669,6 +4675,45 @@ async fn create_conversation(
             Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
             Err(()) => unavailable_response(request_id),
         },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/conversations/{conversation_id}/archive",
+    tag = "agent",
+    params(("conversation_id" = String, Path)),
+    responses((status = 204), (status = 401), (status = 404), (status = 409), (status = 503))
+)]
+async fn archive_conversation(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(conversation_id): Path<uuid::Uuid>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(agent) = state.agent() else {
+        return unavailable_response(request_id);
+    };
+    match agent
+        .archive_conversation_for_user(principal.identity().user_id(), conversation_id)
+        .await
+    {
+        Ok(ArchiveConversationOutcome::Archived | ArchiveConversationOutcome::AlreadyArchived) => {
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(ArchiveConversationOutcome::Busy) => error_response(
+            StatusCode::CONFLICT,
+            "conversation.busy",
+            "이 요청을 처리하고 있어요. 끝난 뒤 새 요청을 시작해 주세요.",
+            request_id,
+            false,
+        ),
+        Ok(ArchiveConversationOutcome::NotFound) => agent_not_found_response(request_id),
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -8526,6 +8571,7 @@ mod tests {
                 "/v1/calendar/connections/google/authorizations",
                 "/v1/calendar/connections/google/sync",
                 "/v1/conversations",
+                "/v1/conversations/{conversation_id}/archive",
                 "/v1/conversations/{conversation_id}/jobs/latest",
                 "/v1/conversations/{conversation_id}/messages",
                 "/v1/conversations/{conversation_id}/stream",
@@ -8654,6 +8700,20 @@ mod tests {
                     .body(Body::from(
                         r#"{"clientConversationId":"019f68cb-9400-7000-8000-000000000000","title":null,"surface":"chat"}"#,
                     ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let (state, _, _) = signed_auth_state(true);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/conversations/019f68cb-9400-7000-8000-000000000000/archive")
+                    .body(Body::empty())
                     .expect("request should be valid"),
             )
             .await

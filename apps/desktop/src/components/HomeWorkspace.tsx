@@ -60,7 +60,7 @@ type HomeWorkspaceProps = {
   assistantMessage: ConversationMessage | undefined;
   onOpenAssistant(): void;
   onOpenPlanning(): void;
-  onStartNewAssistant(): void;
+  onStartNewAssistant(): Promise<boolean>;
   onSendAssistant(text: string, clientMessageId: string): Promise<boolean>;
   onCompleteTask(task: Task): Promise<void>;
   onLoadAssistantTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
@@ -776,7 +776,7 @@ function HomeAssistantCommand({
   focused: boolean;
   onFocusChange(focused: boolean): void;
   onOpenAssistant(): void;
-  onStartNew(): void;
+  onStartNew(): Promise<boolean>;
   onSend(text: string, clientMessageId: string): Promise<boolean>;
   onLoadTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
   onCompleteTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
@@ -797,6 +797,7 @@ function HomeAssistantCommand({
   const [submitted, setSubmitted] = useState(false);
   const [submittedRequest, setSubmittedRequest] = useState("");
   const [sending, setSending] = useState(false);
+  const [startingNew, setStartingNew] = useState(false);
   const [error, setError] = useState<string>();
   const inputRef = useRef<HTMLInputElement>(null);
   const focusFrameRef = useRef<number | undefined>(undefined);
@@ -900,12 +901,20 @@ function HomeAssistantCommand({
     </form>
   );
 
-  function startNewRequest() {
+  async function startNewRequest() {
+    if (startingNew) return;
+    setStartingNew(true);
+    setError(undefined);
+    const started = await onStartNew();
+    setStartingNew(false);
+    if (!started) {
+      setError(copy.home.startNewRequestProblem);
+      return;
+    }
     setDraft("");
     setSubmitted(false);
     setSubmittedRequest("");
     setError(undefined);
-    onStartNew();
     onFocusChange(false);
     if (focusFrameRef.current !== undefined) {
       cancelAnimationFrame(focusFrameRef.current);
@@ -1021,10 +1030,12 @@ function HomeAssistantCommand({
             <button
               className="text-button focus-visible-control"
               type="button"
-              onClick={startNewRequest}
-              disabled={sending || active}
+              onClick={() => void startNewRequest()}
+              disabled={sending || active || startingNew}
             >
-              {copy.home.startNewRequest}
+              {startingNew
+                ? copy.home.startingNewRequest
+                : copy.home.startNewRequest}
             </button>
           </div>
           {composer}

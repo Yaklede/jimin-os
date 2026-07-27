@@ -248,6 +248,7 @@ export const projectCopy = {
   inflowNoSource: "아직 확인할 Chat 공간을 연결하지 않았어요.",
   inflowPromote: "할 일로 정리하기",
   inflowPromoteAndNotify: "할 일로 정리하고 알리기",
+  inflowPromoting: "할 일로 정리하는 중",
   inflowDismiss: "업무 아님",
   inflowAnalyzing: "대화 맥락을 읽고 업무 내용을 정리하고 있어요.",
   inflowAnalysisHelp:

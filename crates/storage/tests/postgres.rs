@@ -6,9 +6,9 @@ use jimin_storage::{
     Database, EXPECTED_SCHEMA_VERSION, Readiness, StorageError,
     agent::{
         AgentActionCommand, AgentJobState, AgentModelCatalogEntry, AgentReasoningEffort,
-        AssistantPresentation, AssistantPresentationKind, AssistantPresentationLayout,
-        ConversationMessageRole, ConversationSurface, NewAgentTurn, NewConversation,
-        PendingAgentAction, PendingAgentActionDecision,
+        ArchiveConversationOutcome, AssistantPresentation, AssistantPresentationKind,
+        AssistantPresentationLayout, ConversationMessageRole, ConversationSurface, NewAgentTurn,
+        NewConversation, PendingAgentAction, PendingAgentActionDecision,
     },
     auth::{
         ConsumeDevicePairing, CreateDevicePairing, PairingConsumption, ProvisionLogin,
@@ -4080,6 +4080,29 @@ async fn a_new_home_conversation_replaces_the_previous_home_across_devices() {
         !active
             .iter()
             .any(|conversation| conversation.id == first_home.id)
+    );
+    assert_eq!(
+        database
+            .archive_conversation_for_user(owner.profile.id, latest_home.id)
+            .await
+            .expect("the owner should archive the completed home request"),
+        ArchiveConversationOutcome::Archived
+    );
+    assert_eq!(
+        database
+            .archive_conversation_for_user(owner.profile.id, latest_home.id)
+            .await
+            .expect("archiving the same request should be idempotent"),
+        ArchiveConversationOutcome::AlreadyArchived
+    );
+    let active = database
+        .active_conversations_for_user(owner.profile.id)
+        .await
+        .expect("archived home requests should leave the active surface");
+    assert!(
+        active
+            .iter()
+            .all(|conversation| conversation.id != latest_home.id)
     );
 
     database.close().await;

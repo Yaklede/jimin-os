@@ -100,6 +100,7 @@ import {
 import { SyncPullCoordinator } from "./syncPullCoordinator";
 import {
   AgentRequestError,
+  archiveConversation,
   createConversation,
   fetchAgentAuthentication,
   fetchAgentModelSettings,
@@ -1816,10 +1817,31 @@ export default function App() {
     pendingConversationId.current = undefined;
   }
 
-  function startHomeConversation() {
+  async function startHomeConversation(): Promise<boolean> {
+    if (!tokens || !homeConversationId) return true;
     homeConversationDetachedRef.current = true;
-    setHomeConversationId(undefined);
-    startConversation();
+    setConversationError(undefined);
+    try {
+      await withAuthenticatedSession((accessToken) =>
+        archiveConversation(apiBaseUrl, accessToken, homeConversationId),
+      );
+      const archivedId = homeConversationId;
+      setConversations((current) =>
+        current.filter((conversation) => conversation.id !== archivedId),
+      );
+      setConversationJobs((current) => {
+        const next = { ...current };
+        delete next[archivedId];
+        return next;
+      });
+      setHomeConversationId(undefined);
+      startConversation();
+      return true;
+    } catch {
+      homeConversationDetachedRef.current = false;
+      setConversationError(copy.messages.conversationArchiveNotice);
+      return false;
+    }
   }
 
   function openHomeAssistant() {
@@ -3033,6 +3055,7 @@ export default function App() {
       }
     } catch (error) {
       setInflowError(copy.projects.inflowDecisionProblem);
+      await loadHomeSnapshot().catch(() => undefined);
       throw error;
     } finally {
       setInflowSaving(false);

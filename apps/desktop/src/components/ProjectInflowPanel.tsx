@@ -361,6 +361,8 @@ export function InflowItemRow({
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
+  const [promoting, setPromoting] = useState(false);
+  const [promotionError, setPromotionError] = useState<string>();
   const messages = item.messages ?? [
     {
       senderName: item.senderName,
@@ -426,24 +428,34 @@ export function InflowItemRow({
 
   async function submitPromotion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!title.trim()) return;
+    if (!title.trim() || promoting || saving) return;
     const deadline = resolvePromotionDeadline(
       dueAtInputRef.current?.value ?? dueAt,
       withoutDeadline,
     );
     if (!deadline) {
       setDueProblem(true);
+      setPromotionError(copy.projects.inflowDueAtProblem);
+      dueAtInputRef.current?.focus();
       return;
     }
     setDueProblem(false);
-    await onPromote(item, {
-      title: title.trim(),
-      notes: notes.trim(),
-      assigneeName: assigneeName || undefined,
-      priority: Number(priority),
-      ...deadline,
-    });
-    setEditing(false);
+    setPromoting(true);
+    setPromotionError(undefined);
+    try {
+      await onPromote(item, {
+        title: title.trim(),
+        notes: notes.trim(),
+        assigneeName: assigneeName || undefined,
+        priority: Number(priority),
+        ...deadline,
+      });
+      setEditing(false);
+    } catch {
+      setPromotionError(copy.projects.inflowDecisionProblem);
+    } finally {
+      setPromoting(false);
+    }
   }
 
   return (
@@ -653,10 +665,12 @@ export function InflowItemRow({
                 onInput={(event) => {
                   setDueAt(event.currentTarget.value);
                   setDueProblem(false);
+                  setPromotionError(undefined);
                 }}
                 onChange={(event) => {
                   setDueAt(event.currentTarget.value);
                   setDueProblem(false);
+                  setPromotionError(undefined);
                 }}
               />
               {dueProblem && (
@@ -673,6 +687,7 @@ export function InflowItemRow({
                 onChange={(event) => {
                   setWithoutDeadline(event.currentTarget.checked);
                   setDueProblem(false);
+                  setPromotionError(undefined);
                 }}
               />
               <span>{copy.projects.inflowWithoutDeadline}</span>
@@ -690,6 +705,15 @@ export function InflowItemRow({
               </select>
             </label>
           </div>
+          {promotionError && (
+            <p
+              className="assistant-inline-alert"
+              role="alert"
+              aria-live="assertive"
+            >
+              {promotionError}
+            </p>
+          )}
           {assigneeName && (
             <p className="project-inflow-item__notification-note">
               {canNotifyAssignee
@@ -701,18 +725,27 @@ export function InflowItemRow({
             <button
               className="primary-button focus-visible-control"
               type="submit"
-              disabled={!title.trim() || saving}
+              disabled={!title.trim() || saving || promoting}
             >
-              <Check aria-hidden="true" />
-              {canNotifyAssignee
-                ? copy.projects.inflowPromoteAndNotify
-                : copy.projects.inflowPromote}
+              {promoting ? (
+                <span className="button-spinner" aria-hidden="true" />
+              ) : (
+                <Check aria-hidden="true" />
+              )}
+              {promoting
+                ? copy.projects.inflowPromoting
+                : canNotifyAssignee
+                  ? copy.projects.inflowPromoteAndNotify
+                  : copy.projects.inflowPromote}
             </button>
             <button
               className="secondary-button focus-visible-control"
               type="button"
-              disabled={saving}
-              onClick={() => setEditing(false)}
+              disabled={saving || promoting}
+              onClick={() => {
+                setPromotionError(undefined);
+                setEditing(false);
+              }}
             >
               <X aria-hidden="true" /> 취소
             </button>
@@ -724,7 +757,10 @@ export function InflowItemRow({
             className="primary-button focus-visible-control"
             type="button"
             disabled={saving}
-            onClick={() => setEditing(true)}
+            onClick={() => {
+              setPromotionError(undefined);
+              setEditing(true);
+            }}
           >
             <Check aria-hidden="true" /> {copy.projects.inflowPromote}
           </button>

@@ -246,6 +246,21 @@ export async function createConversation(
   });
 }
 
+export async function archiveConversation(
+  baseUrl: string,
+  access: string,
+  conversationId: string,
+): Promise<void> {
+  const response = await fetch(
+    `${normalizeBaseUrl(baseUrl)}/v1/conversations/${encodeURIComponent(conversationId)}/archive`,
+    {
+      method: "POST",
+      headers: authHeaders(access),
+    },
+  );
+  if (!response.ok) throw errorFromStatus(response.status);
+}
+
 export async function fetchConversationMessages(
   baseUrl: string,
   access: string,

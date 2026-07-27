@@ -111,6 +111,9 @@ export const copy = {
     followUpPlaceholder: "예: 그중 내일 할 것만 다시 정리해 줘",
     followUpSend: "후속 요청 보내기",
     startNewRequest: "새 요청 시작하기",
+    startingNewRequest: "새 요청 여는 중",
+    startNewRequestProblem:
+      "새 요청을 열지 못했어요. 잠시 후 다시 시도해 주세요.",
     collapseResult: "결과 접기",
     commandNeedsConnection: "ChatGPT를 연결하면 바로 요청할 수 있어요",
     commandSend: "요청 보내기",
@@ -795,6 +798,8 @@ export const copy = {
       "대화를 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
     conversationSendNotice:
       "요청을 보내지 못했어요. 연결을 다시 확인한 뒤 같은 요청을 보내 주세요.",
+    conversationArchiveNotice:
+      "이전 요청을 닫지 못했어요. 잠시 후 다시 시도해 주세요.",
     conversationBusy:
       "이 요청을 처리하고 있어요. 끝난 뒤 새 요청을 보낼 수 있어요.",
     conversationChanged:

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  archiveConversation,
   createConversation,
   fetchAgentAuthentication,
   fetchAgentJob,
@@ -78,6 +79,29 @@ describe("agent API", () => {
       title: "오늘 일정",
       surface: "home",
     });
+  });
+
+  it("archives a completed home request before starting another one", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await archiveConversation(
+      "https://jimin-os.example/",
+      "session-access",
+      "conversation-1",
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://jimin-os.example/v1/conversations/conversation-1/archive",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          Authorization: "Bearer session-access",
+        }),
+      }),
+    );
   });
 
   it("reads the managed ChatGPT connection state before enabling requests", async () => {

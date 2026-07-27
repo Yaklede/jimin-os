@@ -552,6 +552,14 @@ pub enum ConversationStatus {
     Archived,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveConversationOutcome {
+    Archived,
+    AlreadyArchived,
+    Busy,
+    NotFound,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedAgentTurn {
     pub job_id: Uuid,
@@ -1873,6 +1881,99 @@ impl Database {
         .await
         .map_err(|error| classify(&error))?;
         rows.into_iter().map(Conversation::try_from).collect()
+    }
+
+    /// Removes one owned conversation from active surfaces while preserving its
+    /// message history. A conversation with an active agent job stays visible
+    /// until that job reaches a terminal state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed IDs and a
+    /// classified storage error when persistence is unavailable.
+    pub async fn archive_conversation_for_user(
+        &self,
+        user_id: Uuid,
+        conversation_id: Uuid,
+    ) -> Result<ArchiveConversationOutcome, StorageError> {
+        if !is_v7(user_id) || !is_v7(conversation_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| classify(&error))?;
+        let state = sqlx::query_as::<_, (String, bool)>(
+            "\
+            SELECT c.status,
+                   EXISTS(
+                       SELECT 1
+                       FROM agent_jobs j
+                       WHERE j.conversation_id = c.id
+                         AND j.state IN (
+                             'queued', 'claimed', 'running',
+                             'waiting_approval', 'retry_wait'
+                         )
+                   )
+            FROM conversations c
+            WHERE c.id = $1 AND c.user_id = $2
+            FOR UPDATE",
+        )
+        .bind(conversation_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        let Some((status, busy)) = state else {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| classify(&error))?;
+            return Ok(ArchiveConversationOutcome::NotFound);
+        };
+        if status == "archived" {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| classify(&error))?;
+            return Ok(ArchiveConversationOutcome::AlreadyArchived);
+        }
+        if status != "active" {
+            return Err(StorageError::PersistenceUnavailable);
+        }
+        if busy {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| classify(&error))?;
+            return Ok(ArchiveConversationOutcome::Busy);
+        }
+        let version = sqlx::query_scalar::<_, i64>(
+            "\
+            UPDATE conversations
+            SET status = 'archived'
+            WHERE id = $1 AND user_id = $2 AND status = 'active'
+            RETURNING version",
+        )
+        .bind(conversation_id)
+        .bind(user_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        append_change(
+            &mut transaction,
+            user_id,
+            "conversation",
+            conversation_id,
+            version,
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| classify(&error))?;
+        Ok(ArchiveConversationOutcome::Archived)
     }
 
     /// Returns the ordered message history only when the conversation belongs
