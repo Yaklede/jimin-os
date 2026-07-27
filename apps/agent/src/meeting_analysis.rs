@@ -46,6 +46,7 @@ struct StructuredMeetingActionItem {
     project_id: String,
     title: String,
     notes: String,
+    assignee_name: String,
     priority: i16,
     due_at: String,
     starts_at: String,
@@ -157,6 +158,12 @@ fn analysis_prompt(job: &ClaimedMeetingAnalysis) -> String {
     );
     let _ = writeln!(prompt, "분석 기준 시각: {}", OffsetDateTime::now_utc());
     let _ = writeln!(prompt, "회의 제목: {}", job.title);
+    if let Some(purpose) = job.purpose.as_deref() {
+        let _ = writeln!(prompt, "회의 목적: {purpose}");
+    }
+    if !job.participants.is_empty() {
+        let _ = writeln!(prompt, "참석자: {}", job.participants.join(", "));
+    }
     if let Some(started_at) = job.started_at {
         let _ = writeln!(prompt, "회의 시작: {started_at}");
     }
@@ -234,6 +241,7 @@ fn analysis_schema() -> Value {
                         "projectId": { "type": "string" },
                         "title": { "type": "string", "maxLength": 200 },
                         "notes": { "type": "string", "maxLength": 4000 },
+                        "assigneeName": { "type": "string", "maxLength": 120 },
                         "priority": { "type": "integer", "minimum": 0, "maximum": 3 },
                         "dueAt": { "type": "string" },
                         "startsAt": { "type": "string" },
@@ -243,7 +251,7 @@ fn analysis_schema() -> Value {
                         "confidence": { "type": "integer", "minimum": 0, "maximum": 100 }
                     },
                     "required": [
-                        "kind", "projectId", "title", "notes", "priority", "dueAt",
+                        "kind", "projectId", "title", "notes", "assigneeName", "priority", "dueAt",
                         "startsAt", "endsAt", "timeZone", "sourceExcerpt", "confidence"
                     ],
                     "additionalProperties": false
@@ -305,8 +313,8 @@ fn validated_action_item(
     let due_at = optional_datetime(&item.due_at).ok()?;
     let starts_at = optional_datetime(&item.starts_at).ok()?;
     let ends_at = optional_datetime(&item.ends_at).ok()?;
-    let (kind, starts_at, ends_at, time_zone) = match item.kind {
-        StructuredMeetingActionKind::Task => (MeetingActionKind::Task, None, None, None),
+    let (kind, due_at, starts_at, ends_at, time_zone) = match item.kind {
+        StructuredMeetingActionKind::Task => (MeetingActionKind::Task, due_at, None, None, None),
         StructuredMeetingActionKind::Schedule => {
             let (Some(starts_at), Some(ends_at)) = (starts_at, ends_at) else {
                 return None;
@@ -316,6 +324,7 @@ fn validated_action_item(
             }
             (
                 MeetingActionKind::Schedule,
+                None,
                 Some(starts_at),
                 Some(ends_at),
                 Some(item.time_zone),
@@ -329,6 +338,7 @@ fn validated_action_item(
         project_id,
         title: item.title,
         notes: optional_string(&item.notes),
+        assignee_name: optional_string(&item.assignee_name),
         priority: item.priority,
         due_at,
         starts_at,
@@ -403,6 +413,8 @@ mod tests {
             meeting_id: Uuid::now_v7(),
             user_id: Uuid::now_v7(),
             title: "출시 회의".to_owned(),
+            purpose: Some("출시 전 계약 검토 범위를 확정한다.".to_owned()),
+            participants: vec!["조지민".to_owned(), "김경주".to_owned()],
             transcript: "계약 검토를 내일까지 마쳐 주세요.".to_owned(),
             project_id: None,
             project_title: None,
@@ -429,7 +441,7 @@ mod tests {
             "decisions":[],
             "actionItems":[{
                 "kind":"schedule","projectId":"","title":"계약 검토","notes":"",
-                "priority":1,"dueAt":"","startsAt":"","endsAt":"",
+                "assigneeName":"","priority":1,"dueAt":"","startsAt":"","endsAt":"",
                 "timeZone":"","sourceExcerpt":"내일까지 마쳐 주세요.","confidence":90
             }]
         }"#;
@@ -447,7 +459,7 @@ mod tests {
             "decisions":[],
             "actionItems":[{
                 "kind":"task","projectId":"","title":"계약 검토","notes":"누락 조항 확인",
-                "priority":1,"dueAt":"2026-07-22T15:00:00+09:00",
+                "assigneeName":"","priority":1,"dueAt":"2026-07-22T15:00:00+09:00",
                 "startsAt":"2026-07-22T14:00:00+09:00",
                 "endsAt":"2026-07-22T15:00:00+09:00","timeZone":"Asia/Seoul",
                 "sourceExcerpt":"내일까지 마쳐 주세요.","confidence":90

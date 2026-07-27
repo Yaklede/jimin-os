@@ -11,6 +11,8 @@ export interface Meeting {
   projectId: string | null;
   projectTitle: string | null;
   title: string;
+  purpose: string | null;
+  participants: string[];
   transcript: string;
   startedAt: string | null;
   durationSeconds: number | null;
@@ -42,6 +44,7 @@ export interface MeetingActionItem {
   projectId: string | null;
   title: string;
   notes: string | null;
+  assigneeName: string | null;
   priority: number;
   dueAt: string | null;
   startsAt: string | null;
@@ -103,6 +106,8 @@ export async function createMeeting(
   access: string,
   input: {
     title: string;
+    purpose?: string;
+    participants?: string[];
     transcript: string;
     workspaceId?: string;
     projectId?: string;
@@ -112,12 +117,49 @@ export async function createMeeting(
 ): Promise<Meeting> {
   return request<Meeting>(baseUrl, access, "/v1/meetings", {
     title: input.title,
+    purpose: input.purpose ?? null,
+    participants: input.participants ?? [],
     transcript: input.transcript,
     workspaceId: input.workspaceId ?? null,
     projectId: input.projectId ?? null,
     startedAt: input.startedAt ?? null,
     durationSeconds: input.durationSeconds ?? null,
   });
+}
+
+export async function updateMeetingAction(
+  baseUrl: string,
+  access: string,
+  meetingId: string,
+  item: MeetingActionItem,
+  input: {
+    title: string;
+    notes?: string;
+    assigneeName?: string;
+    priority: number;
+    dueAt?: string;
+    startsAt?: string;
+    endsAt?: string;
+    timeZone?: string;
+  },
+): Promise<MeetingActionItem> {
+  return request<MeetingActionItem>(
+    baseUrl,
+    access,
+    `/v1/meetings/${encodeURIComponent(meetingId)}/action-items/${encodeURIComponent(item.id)}`,
+    {
+      expectedVersion: item.version,
+      title: input.title,
+      notes: input.notes ?? null,
+      assigneeName: input.assigneeName ?? null,
+      priority: input.priority,
+      dueAt: input.dueAt ?? null,
+      startsAt: input.startsAt ?? null,
+      endsAt: input.endsAt ?? null,
+      timeZone: input.timeZone ?? null,
+    },
+    "PUT",
+  );
 }
 
 export async function decideMeetingAction(
@@ -140,9 +182,10 @@ async function request<T>(
   access: string,
   path: string,
   body: unknown,
+  method: "POST" | "PUT" = "POST",
 ): Promise<T> {
   const response = await fetch(`${normalizeBaseUrl(baseUrl)}${path}`, {
-    method: "POST",
+    method,
     headers: {
       ...authHeaders(access),
       "Content-Type": "application/json",

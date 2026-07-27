@@ -11,9 +11,12 @@ import {
   ListChecks,
   LoaderCircle,
   Mic,
+  Pencil,
   Plus,
   Quote,
+  Save,
   Square,
+  Users,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -25,6 +28,7 @@ import {
   fetchMeeting,
   fetchMeetings,
   reanalyzeMeeting,
+  updateMeetingAction,
   type Meeting,
   type MeetingActionItem,
   type MeetingDetail,
@@ -88,6 +92,8 @@ export function MeetingsWorkspace({
   const [showComposer, setShowComposer] = useState(false);
   const [error, setError] = useState<string>();
   const [decisionBusyId, setDecisionBusyId] = useState<string>();
+  const [savingItemId, setSavingItemId] = useState<string>();
+  const [bulkApplying, setBulkApplying] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [mobileListOpen, setMobileListOpen] = useState(false);
   const meetingListRef = useRef<HTMLDivElement>(null);
@@ -227,6 +233,58 @@ export function MeetingsWorkspace({
     }
   }
 
+  async function updateAction(
+    item: MeetingActionItem,
+    input: Parameters<typeof updateMeetingAction>[4],
+  ) {
+    if (!detail) return false;
+    setSavingItemId(item.id);
+    setError(undefined);
+    try {
+      await updateMeetingAction(
+        apiBaseUrl,
+        accessToken,
+        detail.id,
+        item,
+        input,
+      );
+      await loadDetail(detail.id, true);
+      return true;
+    } catch {
+      setError(copy.meetings.updateFailed);
+      return false;
+    } finally {
+      setSavingItemId(undefined);
+    }
+  }
+
+  async function applyRemaining() {
+    if (!detail) return;
+    const pending = detail.actionItems.filter(
+      (item) => item.status === "suggested",
+    );
+    if (pending.length === 0) return;
+    setBulkApplying(true);
+    setError(undefined);
+    try {
+      for (const item of pending) {
+        await decideMeetingAction(
+          apiBaseUrl,
+          accessToken,
+          detail.id,
+          item.id,
+          "approve",
+        );
+      }
+      await loadDetail(detail.id, true);
+    } catch {
+      setError(copy.meetings.bulkApplyFailed);
+      await loadDetail(detail.id, true);
+    } finally {
+      setBulkApplying(false);
+    }
+  }
+
   return (
     <section className="meetings-page" aria-labelledby="meetings-title">
       <header className="page-heading meetings-page__heading">
@@ -327,8 +385,12 @@ export function MeetingsWorkspace({
             <MeetingReview
               detail={detail}
               busyItemId={decisionBusyId}
+              savingItemId={savingItemId}
+              bulkApplying={bulkApplying}
               retrying={retrying}
               onDecide={decide}
+              onUpdate={updateAction}
+              onApplyRemaining={applyRemaining}
               onRetry={retryAnalysis}
             />
           ) : (
@@ -376,6 +438,8 @@ function MeetingComposer({
   onSubmit(input: MeetingComposerInput): Promise<void>;
 }) {
   const [title, setTitle] = useState("");
+  const [purpose, setPurpose] = useState("");
+  const [participants, setParticipants] = useState("");
   const [projectId, setProjectId] = useState("");
   const [transcript, setTranscript] = useState("");
   const [dictating, setDictating] = useState(false);
@@ -482,6 +546,8 @@ function MeetingComposer({
     const started = startedAt.current;
     await onSubmit({
       title: title.trim(),
+      purpose: purpose.trim() || undefined,
+      participants: normalizedParticipants(participants),
       transcript: transcript.trim(),
       workspaceId: selectedWorkspaceId,
       projectId: projectId || undefined,
@@ -527,6 +593,23 @@ function MeetingComposer({
               maxLength={200}
               placeholder={copy.meetings.namePlaceholder}
               onChange={(event) => setTitle(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>{copy.meetings.purposeLabel}</span>
+            <input
+              value={purpose}
+              maxLength={2_000}
+              placeholder={copy.meetings.purposePlaceholder}
+              onChange={(event) => setPurpose(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>{copy.meetings.participantsLabel}</span>
+            <input
+              value={participants}
+              placeholder={copy.meetings.participantsPlaceholder}
+              onChange={(event) => setParticipants(event.target.value)}
             />
           </label>
           <div className="meeting-composer__scope">
@@ -630,14 +713,25 @@ function MeetingComposer({
 function MeetingReview({
   detail,
   busyItemId,
+  savingItemId,
+  bulkApplying,
   retrying,
   onDecide,
+  onUpdate,
+  onApplyRemaining,
   onRetry,
 }: {
   detail: MeetingDetail;
   busyItemId: string | undefined;
+  savingItemId: string | undefined;
+  bulkApplying: boolean;
   retrying: boolean;
   onDecide(item: MeetingActionItem, decision: "approve" | "reject"): void;
+  onUpdate(
+    item: MeetingActionItem,
+    input: Parameters<typeof updateMeetingAction>[4],
+  ): Promise<boolean>;
+  onApplyRemaining(): void;
   onRetry(): void;
 }) {
   if (["queued", "analyzing"].includes(detail.status)) {
@@ -676,6 +770,10 @@ function MeetingReview({
     );
   }
 
+  const pendingActionCount = detail.actionItems.filter(
+    (item) => item.status === "suggested",
+  ).length;
+
   return (
     <article className="meeting-review">
       <header className="meeting-review__header">
@@ -686,6 +784,17 @@ function MeetingReview({
             {detail.projectTitle ?? copy.meetings.noProject} ·{" "}
             {longDate(detail.startedAt ?? detail.createdAt)}
           </p>
+          {(detail.purpose || detail.participants.length > 0) && (
+            <div className="meeting-review__context">
+              {detail.purpose && <span>{detail.purpose}</span>}
+              {detail.participants.length > 0 && (
+                <span>
+                  <Users aria-hidden="true" />
+                  {detail.participants.join(", ")}
+                </span>
+              )}
+            </div>
+          )}
         </div>
         {detail.durationSeconds && (
           <span className="meeting-review__duration">
@@ -742,7 +851,24 @@ function MeetingReview({
               <ListChecks aria-hidden="true" />
               {copy.meetings.actionsTitle}
             </h3>
-            <span>{copy.meetings.count(detail.actionItems.length)}</span>
+            <div className="meetings-section-heading__actions">
+              <span>{copy.meetings.count(detail.actionItems.length)}</span>
+              {pendingActionCount > 1 && (
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={bulkApplying || Boolean(busyItemId)}
+                  onClick={onApplyRemaining}
+                >
+                  {bulkApplying && (
+                    <LoaderCircle className="spin" aria-hidden="true" />
+                  )}
+                  {bulkApplying
+                    ? copy.meetings.applyingRemaining
+                    : copy.meetings.applyRemaining(pendingActionCount)}
+                </button>
+              )}
+            </div>
           </div>
           {detail.actionItems.length === 0 ? (
             <p className="meeting-review__empty-copy">
@@ -754,8 +880,10 @@ function MeetingReview({
                 <MeetingActionCard
                   item={item}
                   busy={busyItemId === item.id}
+                  saving={savingItemId === item.id}
                   key={item.id}
                   onDecide={onDecide}
+                  onUpdate={onUpdate}
                 />
               ))}
             </div>
@@ -786,13 +914,53 @@ function MeetingReview({
 function MeetingActionCard({
   item,
   busy,
+  saving,
   onDecide,
+  onUpdate,
 }: {
   item: MeetingActionItem;
   busy: boolean;
+  saving: boolean;
   onDecide(item: MeetingActionItem, decision: "approve" | "reject"): void;
+  onUpdate(
+    item: MeetingActionItem,
+    input: Parameters<typeof updateMeetingAction>[4],
+  ): Promise<boolean>;
 }) {
   const pending = item.status === "suggested";
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(item.title);
+  const [notes, setNotes] = useState(item.notes ?? "");
+  const [assigneeName, setAssigneeName] = useState(item.assigneeName ?? "");
+  const [priority, setPriority] = useState(String(item.priority));
+  const [dueAt, setDueAt] = useState(datetimeLocalValue(item.dueAt));
+  const [startsAt, setStartsAt] = useState(datetimeLocalValue(item.startsAt));
+  const [endsAt, setEndsAt] = useState(datetimeLocalValue(item.endsAt));
+
+  useEffect(() => {
+    setTitle(item.title);
+    setNotes(item.notes ?? "");
+    setAssigneeName(item.assigneeName ?? "");
+    setPriority(String(item.priority));
+    setDueAt(datetimeLocalValue(item.dueAt));
+    setStartsAt(datetimeLocalValue(item.startsAt));
+    setEndsAt(datetimeLocalValue(item.endsAt));
+  }, [item]);
+
+  async function save() {
+    const saved = await onUpdate(item, {
+      title: title.trim(),
+      notes: notes.trim() || undefined,
+      assigneeName: assigneeName.trim() || undefined,
+      priority: Number(priority),
+      dueAt: item.kind === "task" ? isoValue(dueAt) : undefined,
+      startsAt: item.kind === "schedule" ? isoValue(startsAt) : undefined,
+      endsAt: item.kind === "schedule" ? isoValue(endsAt) : undefined,
+      timeZone: item.kind === "schedule" ? "Asia/Seoul" : undefined,
+    });
+    if (saved) setEditing(false);
+  }
+
   return (
     <article className="meeting-action-card" data-status={item.status}>
       <div className="meeting-action-card__icon" aria-hidden="true">
@@ -809,15 +977,129 @@ function MeetingActionCard({
         </div>
         <strong>{item.title}</strong>
         {item.notes && <p>{item.notes}</p>}
+        {item.assigneeName && (
+          <small className="meeting-action-card__assignee">
+            {copy.meetings.assignee(item.assigneeName)}
+          </small>
+        )}
         <small>{actionTimeLabel(item)}</small>
         <blockquote>{item.sourceExcerpt}</blockquote>
       </div>
+      {pending && editing && (
+        <div className="meeting-action-editor">
+          <label>
+            <span>{copy.meetings.actionTitleLabel}</span>
+            <input
+              value={title}
+              maxLength={200}
+              onChange={(event) => setTitle(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>{copy.meetings.actionNotesLabel}</span>
+            <textarea
+              value={notes}
+              maxLength={4_000}
+              rows={3}
+              onChange={(event) => setNotes(event.target.value)}
+            />
+          </label>
+          <div className="meeting-action-editor__row">
+            <label>
+              <span>{copy.meetings.assigneeLabel}</span>
+              <input
+                value={assigneeName}
+                maxLength={120}
+                placeholder={copy.meetings.assigneePlaceholder}
+                onChange={(event) => setAssigneeName(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>{copy.meetings.priorityLabel}</span>
+              <select
+                value={priority}
+                onChange={(event) => setPriority(event.target.value)}
+              >
+                <option value="0">{copy.meetings.priorityOptions.low}</option>
+                <option value="1">
+                  {copy.meetings.priorityOptions.normal}
+                </option>
+                <option value="2">{copy.meetings.priorityOptions.high}</option>
+                <option value="3">
+                  {copy.meetings.priorityOptions.urgent}
+                </option>
+              </select>
+            </label>
+          </div>
+          {item.kind === "task" ? (
+            <label>
+              <span>{copy.meetings.dueAtLabel}</span>
+              <input
+                type="datetime-local"
+                value={dueAt}
+                onChange={(event) => setDueAt(event.target.value)}
+              />
+            </label>
+          ) : (
+            <div className="meeting-action-editor__row">
+              <label>
+                <span>{copy.meetings.startsAtLabel}</span>
+                <input
+                  type="datetime-local"
+                  value={startsAt}
+                  onChange={(event) => setStartsAt(event.target.value)}
+                />
+              </label>
+              <label>
+                <span>{copy.meetings.endsAtLabel}</span>
+                <input
+                  type="datetime-local"
+                  value={endsAt}
+                  onChange={(event) => setEndsAt(event.target.value)}
+                />
+              </label>
+            </div>
+          )}
+          <div className="meeting-action-editor__actions">
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={saving}
+              onClick={() => setEditing(false)}
+            >
+              {copy.actions.cancel}
+            </button>
+            <button
+              className="primary-button"
+              type="button"
+              disabled={saving || !title.trim()}
+              onClick={() => void save()}
+            >
+              {saving ? (
+                <LoaderCircle className="spin" aria-hidden="true" />
+              ) : (
+                <Save aria-hidden="true" />
+              )}
+              {saving ? copy.meetings.savingAction : copy.meetings.saveAction}
+            </button>
+          </div>
+        </div>
+      )}
       {pending ? (
         <div className="meeting-action-card__actions">
           <button
             className="secondary-button"
             type="button"
-            disabled={busy}
+            disabled={busy || saving}
+            onClick={() => setEditing((current) => !current)}
+          >
+            <Pencil aria-hidden="true" />
+            {editing ? copy.meetings.closeEdit : copy.meetings.editAction}
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={busy || saving}
             onClick={() => onDecide(item, "reject")}
           >
             {copy.meetings.exclude}
@@ -825,7 +1107,7 @@ function MeetingActionCard({
           <button
             className="primary-button"
             type="button"
-            disabled={busy}
+            disabled={busy || saving || editing}
             onClick={() => onDecide(item, "approve")}
           >
             {busy ? (
@@ -931,4 +1213,28 @@ function actionTimeLabel(item: MeetingActionItem): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function normalizedParticipants(value: string): string[] {
+  return Array.from(
+    new Set(
+      value
+        .split(/[,\n]/)
+        .map((participant) => participant.trim())
+        .filter(Boolean),
+    ),
+  ).slice(0, 100);
+}
+
+function datetimeLocalValue(value: string | null): string {
+  if (!value) return "";
+  const date = new Date(value);
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
+
+function isoValue(value: string): string | undefined {
+  if (!value) return undefined;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 }

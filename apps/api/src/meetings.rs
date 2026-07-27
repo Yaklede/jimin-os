@@ -3,13 +3,13 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use jimin_observability::RequestId;
 use jimin_storage::{
     meetings::{
-        Meeting, MeetingActionItem, MeetingActionKind, MeetingActionStatus, MeetingDecision,
-        MeetingDetail, MeetingStatus, NewMeeting,
+        Meeting, MeetingActionItem, MeetingActionItemUpdate, MeetingActionKind,
+        MeetingActionStatus, MeetingDecision, MeetingDetail, MeetingStatus, NewMeeting,
     },
     planning::{NewScheduleEntry, NewTask},
 };
@@ -26,11 +26,28 @@ use crate::{
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CreateMeetingRequest {
     title: String,
+    purpose: Option<String>,
+    #[serde(default)]
+    participants: Vec<String>,
     transcript: String,
     workspace_id: Option<Uuid>,
     project_id: Option<Uuid>,
     started_at: Option<String>,
     duration_seconds: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateMeetingActionRequest {
+    expected_version: i64,
+    title: String,
+    notes: Option<String>,
+    assignee_name: Option<String>,
+    priority: i16,
+    due_at: Option<String>,
+    starts_at: Option<String>,
+    ends_at: Option<String>,
+    time_zone: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -54,6 +71,8 @@ pub(crate) struct MeetingResponse {
     project_id: Option<Uuid>,
     project_title: Option<String>,
     title: String,
+    purpose: Option<String>,
+    participants: Vec<String>,
     transcript: String,
     started_at: Option<String>,
     duration_seconds: Option<i32>,
@@ -82,6 +101,8 @@ pub(crate) struct MeetingListItemResponse {
     project_id: Option<Uuid>,
     project_title: Option<String>,
     title: String,
+    purpose: Option<String>,
+    participants: Vec<String>,
     started_at: Option<String>,
     duration_seconds: Option<i32>,
     status: MeetingStatusResponse,
@@ -123,6 +144,7 @@ pub(crate) struct MeetingActionItemResponse {
     project_id: Option<Uuid>,
     title: String,
     notes: Option<String>,
+    assignee_name: Option<String>,
     priority: i16,
     due_at: Option<String>,
     starts_at: Option<String>,
@@ -167,6 +189,10 @@ pub(crate) fn routes() -> Router<ApiState> {
         .route(
             "/v1/meetings/{meeting_id}/reanalyze",
             post(reanalyze_meeting),
+        )
+        .route(
+            "/v1/meetings/{meeting_id}/action-items/{item_id}",
+            put(update_meeting_action),
         )
         .route(
             "/v1/meetings/{meeting_id}/action-items/{item_id}/decisions",
@@ -274,6 +300,8 @@ pub(crate) async fn create_meeting(
             workspace_id: body.workspace_id,
             project_id: body.project_id,
             title: body.title,
+            purpose: body.purpose,
+            participants: body.participants,
             transcript: body.transcript,
             started_at,
             duration_seconds: body.duration_seconds,
@@ -284,6 +312,73 @@ pub(crate) async fn create_meeting(
             Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
             Err(()) => unavailable_response(request_id),
         },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/meetings/{meeting_id}/action-items/{item_id}",
+    tag = "meetings",
+    params(("meeting_id" = Uuid, Path), ("item_id" = Uuid, Path)),
+    request_body = UpdateMeetingActionRequest,
+    responses((status = 200, body = MeetingActionItemResponse), (status = 400), (status = 401), (status = 404), (status = 409), (status = 503))
+)]
+pub(crate) async fn update_meeting_action(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path((meeting_id, item_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<UpdateMeetingActionRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(database) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let user_id = principal.identity().user_id();
+    let item = match database
+        .meeting_action_item_for_user(user_id, meeting_id, item_id)
+        .await
+    {
+        Ok(Some(item)) => item,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    let Ok(due_at) = parse_optional_datetime(body.due_at.as_deref()) else {
+        return invalid_request_response(request_id);
+    };
+    let Ok(starts_at) = parse_optional_datetime(body.starts_at.as_deref()) else {
+        return invalid_request_response(request_id);
+    };
+    let Ok(ends_at) = parse_optional_datetime(body.ends_at.as_deref()) else {
+        return invalid_request_response(request_id);
+    };
+    match database
+        .update_meeting_action_item(&MeetingActionItemUpdate {
+            id: item_id,
+            meeting_id,
+            user_id,
+            expected_version: body.expected_version,
+            kind: item.kind,
+            title: body.title,
+            notes: body.notes,
+            assignee_name: body.assignee_name,
+            priority: body.priority,
+            due_at,
+            starts_at,
+            ends_at,
+            time_zone: body.time_zone,
+        })
+        .await
+    {
+        Ok(Some(item)) => meeting_action_item_response(item).map(Json).map_or_else(
+            |()| unavailable_response(request_id),
+            IntoResponse::into_response,
+        ),
+        Ok(None) => StatusCode::CONFLICT.into_response(),
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -389,7 +484,7 @@ async fn apply_action(
                 parent_task_id: None,
                 title: item.title.clone(),
                 notes: item.notes.clone(),
-                assignee_name: None,
+                assignee_name: item.assignee_name.clone(),
                 priority: item.priority,
                 due_at: item.due_at,
             })
@@ -456,6 +551,8 @@ fn meeting_response(meeting: Meeting) -> Result<MeetingResponse, ()> {
         project_id: meeting.project_id,
         project_title: meeting.project_title,
         title: meeting.title,
+        purpose: meeting.purpose,
+        participants: meeting.participants,
         transcript: meeting.transcript,
         started_at: format_optional(meeting.started_at)?,
         duration_seconds: meeting.duration_seconds,
@@ -478,6 +575,8 @@ fn meeting_list_item_response(meeting: Meeting) -> Result<MeetingListItemRespons
         project_id: meeting.project_id,
         project_title: meeting.project_title,
         title: meeting.title,
+        purpose: meeting.purpose,
+        participants: meeting.participants,
         started_at: format_optional(meeting.started_at)?,
         duration_seconds: meeting.duration_seconds,
         status: meeting_status_response(meeting.status),
@@ -510,6 +609,7 @@ fn meeting_action_item_response(item: MeetingActionItem) -> Result<MeetingAction
         project_id: item.project_id,
         title: item.title,
         notes: item.notes,
+        assignee_name: item.assignee_name,
         priority: item.priority,
         due_at: format_optional(item.due_at)?,
         starts_at: format_optional(item.starts_at)?,
@@ -552,6 +652,13 @@ const fn meeting_action_status_response(
 
 fn format_optional(value: Option<OffsetDateTime>) -> Result<Option<String>, ()> {
     value.map(format_datetime).transpose()
+}
+
+fn parse_optional_datetime(value: Option<&str>) -> Result<Option<OffsetDateTime>, ()> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| OffsetDateTime::parse(value, &Rfc3339).map_err(|_| ()))
+        .transpose()
 }
 
 fn format_datetime(value: OffsetDateTime) -> Result<String, ()> {

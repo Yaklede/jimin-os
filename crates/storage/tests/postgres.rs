@@ -35,8 +35,8 @@ use jimin_storage::{
         SuggestedActionKind,
     },
     meetings::{
-        MeetingActionKind, MeetingActionStatus, MeetingAnalysisResult, MeetingStatus, NewMeeting,
-        NewMeetingActionItem, NewMeetingDecision,
+        MeetingActionItemUpdate, MeetingActionKind, MeetingActionStatus, MeetingAnalysisResult,
+        MeetingStatus, NewMeeting, NewMeetingActionItem, NewMeetingDecision,
     },
     planning::{
         DeleteTaskOutcome, NewScheduleEntry, NewTask, ScheduleEntryUpdate, TaskStatus, TaskUpdate,
@@ -6484,6 +6484,10 @@ async fn work_brief_connects_schedule_goal_and_inbox_context() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The integration scenario intentionally verifies the complete meeting analysis and review transaction."
+)]
 async fn meeting_analysis_moves_from_transcript_to_owner_review() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;
@@ -6504,6 +6508,8 @@ async fn meeting_analysis_moves_from_transcript_to_owner_review() {
             workspace_id: None,
             project_id: None,
             title: "출시 준비 회의".to_owned(),
+            purpose: Some("출시 전 계약 검토 범위와 담당자를 확정한다.".to_owned()),
+            participants: vec!["조지민".to_owned(), "김경주".to_owned()],
             transcript: "지민: 내일까지 계약 흐름을 검토해요.\n담당자: 오전에 확인할게요."
                 .to_owned(),
             started_at: Some(OffsetDateTime::now_utc()),
@@ -6548,6 +6554,7 @@ async fn meeting_analysis_moves_from_transcript_to_owner_review() {
                     project_id: None,
                     title: "계약 등록 흐름 검토".to_owned(),
                     notes: Some("출시 전 주요 경로를 확인해요.".to_owned()),
+                    assignee_name: None,
                     priority: 2,
                     due_at: Some(OffsetDateTime::now_utc() + TimeDuration::days(1)),
                     starts_at: None,
@@ -6574,6 +6581,33 @@ async fn meeting_analysis_moves_from_transcript_to_owner_review() {
         detail.action_items[0].status,
         MeetingActionStatus::Suggested
     );
+    assert_eq!(
+        detail.meeting.purpose.as_deref(),
+        Some("출시 전 계약 검토 범위와 담당자를 확정한다.")
+    );
+    assert_eq!(detail.meeting.participants, ["조지민", "김경주"]);
+
+    let reviewed = database
+        .update_meeting_action_item(&MeetingActionItemUpdate {
+            id: detail.action_items[0].id,
+            meeting_id,
+            user_id: owner.profile.id,
+            expected_version: detail.action_items[0].version,
+            kind: MeetingActionKind::Task,
+            title: "계약 등록 흐름 최종 검토".to_owned(),
+            notes: Some("출시 전에 누락 조항까지 확인해요.".to_owned()),
+            assignee_name: Some("김경주".to_owned()),
+            priority: 3,
+            due_at: Some(OffsetDateTime::now_utc() + TimeDuration::days(2)),
+            starts_at: None,
+            ends_at: None,
+            time_zone: None,
+        })
+        .await
+        .expect("suggestion update should persist")
+        .expect("current suggestion version should match");
+    assert_eq!(reviewed.assignee_name.as_deref(), Some("김경주"));
+    assert_eq!(reviewed.priority, 3);
 
     database.close().await;
 }

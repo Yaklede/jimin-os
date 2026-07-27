@@ -8,11 +8,15 @@ use uuid::Uuid;
 use crate::{Database, StorageError, auth::append_change};
 
 const MAX_TITLE_CHARS: usize = 200;
+const MAX_PURPOSE_CHARS: usize = 2_000;
+const MAX_PARTICIPANTS: usize = 100;
+const MAX_PARTICIPANT_CHARS: usize = 120;
 const MAX_TRANSCRIPT_CHARS: usize = 120_000;
 const MAX_SUMMARY_CHARS: usize = 20_000;
 const MAX_DETAIL_CHARS: usize = 4_000;
 const MAX_EXCERPT_CHARS: usize = 2_000;
 const MAX_ANALYSIS_ITEMS: usize = 32;
+const MAX_TIME_ZONE_CHARS: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeetingStatus {
@@ -43,6 +47,8 @@ pub struct Meeting {
     pub project_id: Option<Uuid>,
     pub project_title: Option<String>,
     pub title: String,
+    pub purpose: Option<String>,
+    pub participants: Vec<String>,
     pub transcript: String,
     pub started_at: Option<OffsetDateTime>,
     pub duration_seconds: Option<i32>,
@@ -74,6 +80,7 @@ pub struct MeetingActionItem {
     pub project_id: Option<Uuid>,
     pub title: String,
     pub notes: Option<String>,
+    pub assignee_name: Option<String>,
     pub priority: i16,
     pub due_at: Option<OffsetDateTime>,
     pub starts_at: Option<OffsetDateTime>,
@@ -99,6 +106,8 @@ pub struct NewMeeting {
     pub workspace_id: Option<Uuid>,
     pub project_id: Option<Uuid>,
     pub title: String,
+    pub purpose: Option<String>,
+    pub participants: Vec<String>,
     pub transcript: String,
     pub started_at: Option<OffsetDateTime>,
     pub duration_seconds: Option<i32>,
@@ -121,6 +130,7 @@ pub struct NewMeetingActionItem {
     pub project_id: Option<Uuid>,
     pub title: String,
     pub notes: Option<String>,
+    pub assignee_name: Option<String>,
     pub priority: i16,
     pub due_at: Option<OffsetDateTime>,
     pub starts_at: Option<OffsetDateTime>,
@@ -128,6 +138,23 @@ pub struct NewMeetingActionItem {
     pub time_zone: Option<String>,
     pub source_excerpt: String,
     pub confidence: i16,
+}
+
+#[derive(Debug, Clone)]
+pub struct MeetingActionItemUpdate {
+    pub id: Uuid,
+    pub meeting_id: Uuid,
+    pub user_id: Uuid,
+    pub expected_version: i64,
+    pub kind: MeetingActionKind,
+    pub title: String,
+    pub notes: Option<String>,
+    pub assignee_name: Option<String>,
+    pub priority: i16,
+    pub due_at: Option<OffsetDateTime>,
+    pub starts_at: Option<OffsetDateTime>,
+    pub ends_at: Option<OffsetDateTime>,
+    pub time_zone: Option<String>,
 }
 
 pub struct MeetingAnalysisResult {
@@ -145,6 +172,8 @@ pub struct ClaimedMeetingAnalysis {
     pub meeting_id: Uuid,
     pub user_id: Uuid,
     pub title: String,
+    pub purpose: Option<String>,
+    pub participants: Vec<String>,
     pub transcript: String,
     pub project_id: Option<Uuid>,
     pub project_title: Option<String>,
@@ -160,6 +189,8 @@ struct MeetingRow {
     project_id: Option<Uuid>,
     project_title: Option<String>,
     title: String,
+    purpose: Option<String>,
+    participants: Vec<String>,
     transcript: String,
     started_at: Option<OffsetDateTime>,
     duration_seconds: Option<i32>,
@@ -191,6 +222,7 @@ struct MeetingActionItemRow {
     project_id: Option<Uuid>,
     title: String,
     notes: Option<String>,
+    assignee_name: Option<String>,
     priority: i16,
     due_at: Option<OffsetDateTime>,
     starts_at: Option<OffsetDateTime>,
@@ -209,6 +241,8 @@ struct ClaimedMeetingAnalysisRow {
     meeting_id: Uuid,
     user_id: Uuid,
     title: String,
+    purpose: Option<String>,
+    participants: Vec<String>,
     transcript: String,
     project_id: Option<Uuid>,
     project_title: Option<String>,
@@ -232,6 +266,12 @@ impl NewMeeting {
             || !valid_optional_id(self.workspace_id)
             || !valid_optional_id(self.project_id)
             || !valid_text(&self.title, MAX_TITLE_CHARS)
+            || !valid_optional_body_text(self.purpose.as_deref(), MAX_PURPOSE_CHARS)
+            || self.participants.len() > MAX_PARTICIPANTS
+            || !self
+                .participants
+                .iter()
+                .all(|participant| valid_text(participant, MAX_PARTICIPANT_CHARS))
             || !valid_body_text(&self.transcript, MAX_TRANSCRIPT_CHARS)
             || !duration_valid
         {
@@ -317,12 +357,49 @@ impl NewMeetingActionItem {
             && valid_optional_id(self.project_id)
             && valid_text(&self.title, MAX_TITLE_CHARS)
             && valid_optional_body_text(self.notes.as_deref(), MAX_DETAIL_CHARS)
+            && valid_optional_body_text(self.assignee_name.as_deref(), MAX_PARTICIPANT_CHARS)
             && (0..=3).contains(&self.priority)
             && valid_body_text(&self.source_excerpt, MAX_EXCERPT_CHARS)
             && (0..=100).contains(&self.confidence)
             && schedule_fields_valid)
             .then_some(())
             .ok_or(StorageError::InvalidConfiguration)
+    }
+}
+
+impl MeetingActionItemUpdate {
+    /// Validates an owner-reviewed action before replacing the AI suggestion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid configuration error for incomplete or inconsistent data.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        let common_valid = is_v7(self.id)
+            && is_v7(self.meeting_id)
+            && is_v7(self.user_id)
+            && self.expected_version > 0
+            && valid_text(&self.title, MAX_TITLE_CHARS)
+            && valid_optional_body_text(self.notes.as_deref(), MAX_DETAIL_CHARS)
+            && valid_optional_body_text(self.assignee_name.as_deref(), MAX_PARTICIPANT_CHARS)
+            && (0..=3).contains(&self.priority);
+        let schedule_valid = match self.kind {
+            MeetingActionKind::Task => {
+                self.starts_at.is_none() && self.ends_at.is_none() && self.time_zone.is_none()
+            }
+            MeetingActionKind::Schedule => {
+                matches!((self.starts_at, self.ends_at), (Some(start), Some(end)) if end > start)
+                    && self.due_at.is_none()
+                    && self
+                        .time_zone
+                        .as_deref()
+                        .is_some_and(|value| valid_text(value, MAX_TIME_ZONE_CHARS))
+            }
+        };
+        if common_valid && schedule_valid {
+            Ok(())
+        } else {
+            Err(StorageError::InvalidConfiguration)
+        }
     }
 }
 
@@ -336,6 +413,8 @@ impl TryFrom<MeetingRow> for Meeting {
             project_id: row.project_id,
             project_title: row.project_title,
             title: row.title,
+            purpose: row.purpose,
+            participants: row.participants,
             transcript: row.transcript,
             started_at: row.started_at,
             duration_seconds: row.duration_seconds,
@@ -377,6 +456,7 @@ impl TryFrom<MeetingActionItemRow> for MeetingActionItem {
             project_id: row.project_id,
             title: row.title,
             notes: row.notes,
+            assignee_name: row.assignee_name,
             priority: row.priority,
             due_at: row.due_at,
             starts_at: row.starts_at,
@@ -398,6 +478,8 @@ impl From<ClaimedMeetingAnalysisRow> for ClaimedMeetingAnalysis {
             meeting_id: row.meeting_id,
             user_id: row.user_id,
             title: row.title,
+            purpose: row.purpose,
+            participants: row.participants,
             transcript: row.transcript,
             project_id: row.project_id,
             project_title: row.project_title,
@@ -430,19 +512,22 @@ impl Database {
         }
         let row = sqlx::query_as::<_, MeetingRow>(
             "INSERT INTO meetings (
-                id, user_id, workspace_id, project_id, title, transcript,
-                started_at, duration_seconds
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                id, user_id, workspace_id, project_id, title, purpose,
+                participants, transcript, started_at, duration_seconds
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              RETURNING id, workspace_id, project_id,
-                NULL::text AS project_title, title, transcript, started_at,
-                duration_seconds, status, summary, topics, risks, follow_up,
-                analyzed_at, created_at, updated_at, version",
+                NULL::text AS project_title, title, purpose, participants,
+                transcript, started_at, duration_seconds, status, summary,
+                topics, risks, follow_up, analyzed_at, created_at, updated_at,
+                version",
         )
         .bind(meeting.id)
         .bind(meeting.user_id)
         .bind(meeting.workspace_id)
         .bind(meeting.project_id)
         .bind(meeting.title.trim())
+        .bind(trimmed_optional(meeting.purpose.as_deref()))
+        .bind(trimmed_strings(&meeting.participants))
         .bind(meeting.transcript.trim())
         .bind(meeting.started_at)
         .bind(meeting.duration_seconds)
@@ -492,9 +577,10 @@ impl Database {
         }
         sqlx::query_as::<_, MeetingRow>(
             "SELECT meeting.id, meeting.workspace_id, meeting.project_id,
-                project.title AS project_title, meeting.title, ''::text AS transcript,
-                meeting.started_at, meeting.duration_seconds, meeting.status,
-                meeting.summary, meeting.topics, meeting.risks, meeting.follow_up,
+                project.title AS project_title, meeting.title, meeting.purpose,
+                meeting.participants, ''::text AS transcript, meeting.started_at,
+                meeting.duration_seconds, meeting.status, meeting.summary,
+                meeting.topics, meeting.risks, meeting.follow_up,
                 meeting.analyzed_at, meeting.created_at, meeting.updated_at,
                 meeting.version
              FROM meetings AS meeting
@@ -527,9 +613,10 @@ impl Database {
         }
         let row = sqlx::query_as::<_, MeetingRow>(
             "SELECT meeting.id, meeting.workspace_id, meeting.project_id,
-                project.title AS project_title, meeting.title, meeting.transcript,
-                meeting.started_at, meeting.duration_seconds, meeting.status,
-                meeting.summary, meeting.topics, meeting.risks, meeting.follow_up,
+                project.title AS project_title, meeting.title, meeting.purpose,
+                meeting.participants, meeting.transcript, meeting.started_at,
+                meeting.duration_seconds, meeting.status, meeting.summary,
+                meeting.topics, meeting.risks, meeting.follow_up,
                 meeting.analyzed_at, meeting.created_at, meeting.updated_at,
                 meeting.version
              FROM meetings AS meeting
@@ -601,8 +688,9 @@ impl Database {
                 RETURNING job.id, job.meeting_id, job.user_id
              )
              SELECT claimed.id, claimed.meeting_id, claimed.user_id,
-                meeting.title, meeting.transcript, meeting.project_id,
-                project.title AS project_title, meeting.started_at,
+                meeting.title, meeting.purpose, meeting.participants,
+                meeting.transcript, meeting.project_id, project.title AS project_title,
+                meeting.started_at,
                 selected_model.id AS processing_model_id,
                 selected_effort.effort AS processing_reasoning_effort
              FROM claimed
@@ -752,11 +840,11 @@ impl Database {
         for item in &result.action_items {
             sqlx::query(
                 "INSERT INTO meeting_action_items (
-                    id, meeting_id, kind, project_id, title, notes, priority,
-                    due_at, starts_at, ends_at, time_zone, source_excerpt,
-                    confidence, target_entity_id
+                    id, meeting_id, kind, project_id, title, notes,
+                    assignee_name, priority, due_at, starts_at, ends_at,
+                    time_zone, source_excerpt, confidence, target_entity_id
                  ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
                  )",
             )
             .bind(item.id)
@@ -765,6 +853,7 @@ impl Database {
             .bind(item.project_id)
             .bind(item.title.trim())
             .bind(trimmed_optional(item.notes.as_deref()))
+            .bind(trimmed_optional(item.assignee_name.as_deref()))
             .bind(item.priority)
             .bind(item.due_at)
             .bind(item.starts_at)
@@ -927,9 +1016,10 @@ impl Database {
                  follow_up = NULL, analyzed_at = NULL
              WHERE meeting.id = $2 AND meeting.user_id = $1
              RETURNING meeting.id, meeting.workspace_id, meeting.project_id,
-                NULL::text AS project_title, meeting.title, meeting.transcript,
-                meeting.started_at, meeting.duration_seconds, meeting.status,
-                meeting.summary, meeting.topics, meeting.risks, meeting.follow_up,
+                NULL::text AS project_title, meeting.title, meeting.purpose,
+                meeting.participants, meeting.transcript, meeting.started_at,
+                meeting.duration_seconds, meeting.status, meeting.summary,
+                meeting.topics, meeting.risks, meeting.follow_up,
                 meeting.analyzed_at, meeting.created_at, meeting.updated_at,
                 meeting.version",
         )
@@ -1030,7 +1120,7 @@ impl Database {
         }
         sqlx::query_as::<_, MeetingActionItemRow>(
             "SELECT item.id, item.meeting_id, item.kind, item.project_id,
-                item.title, item.notes, item.priority, item.due_at,
+                item.title, item.notes, item.assignee_name, item.priority, item.due_at,
                 item.starts_at, item.ends_at, item.time_zone,
                 item.source_excerpt, item.confidence, item.status,
                 item.target_entity_id, item.version
@@ -1046,6 +1136,64 @@ impl Database {
         .map_err(classify)?
         .map(MeetingActionItem::try_from)
         .transpose()
+    }
+
+    /// Replaces a suggested action with the owner's reviewed values.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, ownership, version-conflict, or persistence error.
+    pub async fn update_meeting_action_item(
+        &self,
+        update: &MeetingActionItemUpdate,
+    ) -> Result<Option<MeetingActionItem>, StorageError> {
+        update.validate()?;
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let row = sqlx::query_as::<_, MeetingActionItemRow>(
+            "UPDATE meeting_action_items AS item
+             SET title = $5, notes = $6, assignee_name = $7, priority = $8,
+                 due_at = $9, starts_at = $10, ends_at = $11, time_zone = $12
+             FROM meetings AS meeting
+             WHERE item.id = $3 AND item.meeting_id = $2
+               AND meeting.id = item.meeting_id AND meeting.user_id = $1
+               AND item.status = 'suggested' AND item.version = $4
+               AND item.kind = $13
+             RETURNING item.id, item.meeting_id, item.kind, item.project_id,
+                item.title, item.notes, item.assignee_name, item.priority,
+                item.due_at, item.starts_at, item.ends_at, item.time_zone,
+                item.source_excerpt, item.confidence, item.status,
+                item.target_entity_id, item.version",
+        )
+        .bind(update.user_id)
+        .bind(update.meeting_id)
+        .bind(update.id)
+        .bind(update.expected_version)
+        .bind(update.title.trim())
+        .bind(trimmed_optional(update.notes.as_deref()))
+        .bind(trimmed_optional(update.assignee_name.as_deref()))
+        .bind(update.priority)
+        .bind(update.due_at)
+        .bind(update.starts_at)
+        .bind(update.ends_at)
+        .bind(trimmed_optional(update.time_zone.as_deref()))
+        .bind(action_kind_value(update.kind))
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some(row) = row else {
+            transaction.rollback().await.map_err(classify)?;
+            return Ok(None);
+        };
+        append_change(
+            &mut transaction,
+            update.user_id,
+            "meeting_action_item",
+            update.id,
+            row.version,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        MeetingActionItem::try_from(row).map(Some)
     }
 
     /// Records the owner's final decision after a target action succeeds.
@@ -1078,7 +1226,7 @@ impl Database {
                AND meeting.id = item.meeting_id AND meeting.user_id = $1
                AND item.status IN ('suggested', $4)
              RETURNING item.id, item.meeting_id, item.kind, item.project_id,
-                item.title, item.notes, item.priority, item.due_at,
+                item.title, item.notes, item.assignee_name, item.priority, item.due_at,
                 item.starts_at, item.ends_at, item.time_zone,
                 item.source_excerpt, item.confidence, item.status,
                 item.target_entity_id, item.version",
@@ -1136,7 +1284,7 @@ async fn meeting_action_rows(
 ) -> Result<Vec<MeetingActionItemRow>, StorageError> {
     sqlx::query_as::<_, MeetingActionItemRow>(
         "SELECT item.id, item.meeting_id, item.kind, item.project_id,
-            item.title, item.notes, item.priority, item.due_at,
+            item.title, item.notes, item.assignee_name, item.priority, item.due_at,
             item.starts_at, item.ends_at, item.time_zone,
             item.source_excerpt, item.confidence, item.status,
             item.target_entity_id, item.version
@@ -1292,6 +1440,8 @@ mod tests {
             workspace_id: None,
             project_id: None,
             title: "제품 회의".to_owned(),
+            purpose: Some("출시 전 검토 범위를 확정한다.".to_owned()),
+            participants: vec!["조지민".to_owned()],
             transcript: "지민: 출시 전 흐름을 다시 검토해요.\n담당자: 내일까지 확인할게요."
                 .to_owned(),
             started_at: None,
@@ -1321,6 +1471,7 @@ mod tests {
                 project_id: None,
                 title: "계약 등록 검토".to_owned(),
                 notes: None,
+                assignee_name: None,
                 priority: 1,
                 due_at: None,
                 starts_at: None,
