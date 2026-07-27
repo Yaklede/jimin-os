@@ -4184,11 +4184,11 @@ async fn a_new_home_conversation_replaces_the_previous_home_across_devices() {
         .create_conversation(&NewConversation {
             id: Uuid::now_v7(),
             user_id: owner.profile.id,
-            title: Some("새 홈 요청".to_owned()),
+            title: None,
             surface: ConversationSurface::Home,
         })
         .await
-        .expect("new home conversation should replace the prior home");
+        .expect("empty new home conversation should replace the prior home");
 
     let active = database
         .active_conversations_for_user(owner.profile.id)
@@ -4199,7 +4199,10 @@ async fn a_new_home_conversation_replaces_the_previous_home_across_devices() {
         conversation.id == chat.id && conversation.surface == ConversationSurface::Chat
     }));
     assert!(active.iter().any(|conversation| {
-        conversation.id == latest_home.id && conversation.surface == ConversationSurface::Home
+        conversation.id == latest_home.id
+            && conversation.surface == ConversationSurface::Home
+            && conversation.title.is_none()
+            && conversation.last_message_at.is_none()
     }));
     assert!(
         !active
@@ -4259,7 +4262,7 @@ async fn queued_agent_turn_is_leased_and_completed_once() {
         .create_conversation(&NewConversation {
             id: conversation_id,
             user_id: provisioned.profile.id,
-            title: Some("개인 운영체제".to_owned()),
+            title: None,
             surface: ConversationSurface::Chat,
         })
         .await
@@ -4268,7 +4271,7 @@ async fn queued_agent_turn_is_leased_and_completed_once() {
         .create_conversation(&NewConversation {
             id: conversation_id,
             user_id: provisioned.profile.id,
-            title: Some("개인 운영체제".to_owned()),
+            title: None,
             surface: ConversationSurface::Chat,
         })
         .await
@@ -4285,6 +4288,17 @@ async fn queued_agent_turn_is_leased_and_completed_once() {
         })
         .await
         .expect("turn should queue");
+    let titled_conversation = database
+        .active_conversations_for_user(provisioned.profile.id)
+        .await
+        .expect("conversation title should reload")
+        .into_iter()
+        .find(|conversation| conversation.id == conversation_id)
+        .expect("queued conversation should stay active");
+    assert_eq!(
+        titled_conversation.title.as_deref(),
+        Some("오늘 일정을 정리해줘")
+    );
     let replayed = database
         .enqueue_agent_turn(&NewAgentTurn {
             job_id: Uuid::now_v7(),

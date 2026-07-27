@@ -28,6 +28,7 @@ use crate::{
 
 const MAX_CONTENT_CHARS: usize = 24_000;
 const MAX_TITLE_CHARS: usize = 200;
+const CONVERSATION_TITLE_PREVIEW_CHARS: usize = 36;
 const MAX_RUNNER_ID_CHARS: usize = 200;
 const MAX_AUTH_URL_CHARS: usize = 2_048;
 const MAX_AUTH_USER_CODE_CHARS: usize = 256;
@@ -2216,12 +2217,14 @@ impl Database {
         let conversation_version = sqlx::query_scalar::<_, i64>(
             "\
             UPDATE conversations
-            SET last_message_at = NOW()
+            SET last_message_at = NOW(),
+                title = COALESCE(title, $3)
             WHERE id = $1 AND user_id = $2
             RETURNING version",
         )
         .bind(turn.conversation_id)
         .bind(turn.user_id)
+        .bind(conversation_title_from_content(&turn.content))
         .fetch_one(&mut *transaction)
         .await
         .map_err(|error| classify(&error))?;
@@ -3005,6 +3008,16 @@ impl Database {
             .map_err(|error| classify(&error))?;
         Ok(true)
     }
+}
+
+fn conversation_title_from_content(content: &str) -> String {
+    content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(CONVERSATION_TITLE_PREVIEW_CHARS)
+        .collect()
 }
 
 async fn resolve_conversation_schedule_conflicts(
@@ -3998,8 +4011,9 @@ mod tests {
     use super::{
         AgentActionCommand, AssistantPresentation, AssistantPresentationItem,
         AssistantPresentationKind, AssistantPresentationLayout, AssistantPresentationSection,
-        AssistantPresentationSectionKind, AssistantPresentationView, ConversationSurface,
-        NewAgentTurn, NewConversation,
+        AssistantPresentationSectionKind, AssistantPresentationView,
+        CONVERSATION_TITLE_PREVIEW_CHARS, ConversationSurface, NewAgentTurn, NewConversation,
+        conversation_title_from_content,
     };
     use crate::{StorageError, planning::TaskStatus};
     use uuid::Uuid;
@@ -4016,6 +4030,22 @@ mod tests {
             invalid.validate(),
             Err(StorageError::InvalidConfiguration)
         ));
+    }
+
+    #[test]
+    fn first_turn_title_is_normalized_and_bounded() {
+        assert_eq!(
+            conversation_title_from_content("  내일   해야 할 일을 정리하고 우선순위를 알려줘  "),
+            "내일 해야 할 일을 정리하고 우선순위를 알려줘"
+        );
+        assert_eq!(
+            conversation_title_from_content(
+                "가나다라마바사아자차카타파하가나다라마바사아자차카타파하가나다라마바사아자차카타파하"
+            )
+            .chars()
+            .count(),
+            CONVERSATION_TITLE_PREVIEW_CHARS
+        );
     }
 
     #[test]

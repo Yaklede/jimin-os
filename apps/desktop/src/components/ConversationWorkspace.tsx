@@ -51,7 +51,7 @@ type ConversationWorkspaceProps = {
     | undefined;
   onSelect(conversationId: string): void;
   onInitialDraftApplied(): void;
-  onStartConversation(): void;
+  onStartConversation(): Promise<boolean>;
   onStartAuthentication(): Promise<void>;
   onSend(text: string, clientMessageId: string): Promise<boolean>;
   onResolveAction(decision: "approve" | "decline"): Promise<void>;
@@ -76,13 +76,22 @@ export function ConversationWorkspace({
   onResolveAction,
 }: ConversationWorkspaceProps) {
   const [draft, setDraft] = useState("");
+  const [startingNew, setStartingNew] = useState(false);
   const composer = useRef<HTMLTextAreaElement>(null);
   const pendingMessageId = useRef<string | undefined>(undefined);
   const pendingMessageText = useRef<string | undefined>(undefined);
   const appliedInitialDraftId = useRef<string | undefined>(undefined);
   const transcriptEnd = useRef<HTMLDivElement>(null);
   const isWaiting = hasActiveJob;
-  const isNewConversation = !selectedConversationId;
+  const selectedConversation = conversations.find(
+    (conversation) => conversation.id === selectedConversationId,
+  );
+  const isNewConversation =
+    !selectedConversationId ||
+    (selectedConversation?.title === null &&
+      selectedConversation.lastMessageAt === null &&
+      messages.length === 0 &&
+      !job);
   const canSend = authentication?.state === "ready";
 
   useEffect(() => {
@@ -132,11 +141,15 @@ export function ConversationWorkspace({
     await sendText(draft);
   }
 
-  function startConversation() {
+  async function startConversation() {
+    if (startingNew || isWaiting) return;
+    setStartingNew(true);
+    const started = await onStartConversation();
+    setStartingNew(false);
+    if (!started) return;
     pendingMessageId.current = undefined;
     pendingMessageText.current = undefined;
     setDraft("");
-    onStartConversation();
     requestAnimationFrame(() => composer.current?.focus());
   }
 
@@ -167,16 +180,19 @@ export function ConversationWorkspace({
           conversations={conversations}
           loading={loading}
           selectedConversationId={selectedConversationId}
-          disabled={isWaiting}
+          disabled={isWaiting || startingNew}
           onSelect={onSelect}
-          onStartConversation={startConversation}
+          onStartConversation={() => void startConversation()}
         />
 
         <section
           className="assistant-conversation"
           aria-label={copy.conversations.identity}
         >
-          <MobileAssistantHeader onStartConversation={startConversation} />
+          <MobileAssistantHeader
+            disabled={isWaiting || startingNew}
+            onStartConversation={() => void startConversation()}
+          />
           {isNewConversation ? (
             <AssistantWelcome
               authentication={authentication}
@@ -191,7 +207,7 @@ export function ConversationWorkspace({
               messages={messages}
               job={job}
               loading={loading}
-              onStartConversation={startConversation}
+              onStartConversation={() => void startConversation()}
               onResolveAction={onResolveAction}
               onRetry={retryLastRequest}
               transcriptEnd={transcriptEnd}
@@ -222,8 +238,10 @@ export function ConversationWorkspace({
 }
 
 function MobileAssistantHeader({
+  disabled,
   onStartConversation,
 }: {
+  disabled: boolean;
   onStartConversation(): void;
 }) {
   return (
@@ -240,6 +258,7 @@ function MobileAssistantHeader({
         type="button"
         aria-label={copy.actions.startConversation}
         onClick={onStartConversation}
+        disabled={disabled}
       >
         <Plus aria-hidden="true" />
       </button>
@@ -419,6 +438,7 @@ function ConversationThread({
           type="button"
           aria-label={copy.actions.startConversation}
           onClick={onStartConversation}
+          disabled={loading || Boolean(job && !isTerminalJob(job.state))}
         >
           <Plus aria-hidden="true" />
           <span>{copy.conversations.newConversation}</span>

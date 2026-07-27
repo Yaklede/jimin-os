@@ -97,6 +97,7 @@ import {
   streamSyncCursor,
   type SyncChange,
 } from "./api/sync";
+import { LatestRequestGate } from "./latestRequestGate";
 import { SyncPullCoordinator } from "./syncPullCoordinator";
 import {
   AgentRequestError,
@@ -314,6 +315,10 @@ export default function App() {
     useState<RemoteReminderStatus>("idle");
   const pendingConversationId = useRef<string | undefined>(undefined);
   const homeConversationDetachedRef = useRef(false);
+  const homeConversationStartingRef = useRef(false);
+  const selectedConversationIdRef = useRef<string | undefined>(undefined);
+  const conversationListRequestGateRef = useRef(new LatestRequestGate());
+  const conversationMessageRequestGateRef = useRef(new LatestRequestGate());
   const openedAuthenticationUrl = useRef<string | undefined>(undefined);
   const activeSessionRef = useRef<SessionTokens | undefined>(undefined);
   const refreshInFlightRef = useRef<Promise<SessionTokens> | undefined>(
@@ -326,6 +331,16 @@ export default function App() {
   );
   const pendingReminderInFlightRef = useRef(false);
   const [message, setMessage] = useState<string | undefined>(undefined);
+
+  const setCurrentConversationId = useCallback(
+    (conversationId: string | undefined) => {
+      selectedConversationIdRef.current = conversationId;
+      conversationMessageRequestGateRef.current.invalidate();
+      setConversationLoading(false);
+      setSelectedConversationId(conversationId);
+    },
+    [],
+  );
 
   const applyActiveSession = useCallback((session: SessionTokens) => {
     activeSessionRef.current = session;
@@ -407,18 +422,24 @@ export default function App() {
 
   const refreshConversations = useCallback(async () => {
     if (!tokens) return;
+    const requestGeneration = conversationListRequestGateRef.current.begin();
     setConversationLoading(true);
     setConversationError(undefined);
     try {
-      setConversations(
-        await withAuthenticatedSession((accessToken) =>
-          fetchConversations(apiBaseUrl, accessToken),
-        ),
+      const nextConversations = await withAuthenticatedSession((accessToken) =>
+        fetchConversations(apiBaseUrl, accessToken),
       );
+      if (conversationListRequestGateRef.current.isCurrent(requestGeneration)) {
+        setConversations(nextConversations);
+      }
     } catch {
-      setConversationError(copy.messages.conversationLoadNotice);
+      if (conversationListRequestGateRef.current.isCurrent(requestGeneration)) {
+        setConversationError(copy.messages.conversationLoadNotice);
+      }
     } finally {
-      setConversationLoading(false);
+      if (conversationListRequestGateRef.current.isCurrent(requestGeneration)) {
+        setConversationLoading(false);
+      }
     }
   }, [apiBaseUrl, tokens, withAuthenticatedSession]);
 
@@ -983,19 +1004,35 @@ export default function App() {
 
   const loadConversationMessages = useCallback(
     async (conversationId: string, background = false) => {
-      if (!tokens) return;
+      if (!tokens || selectedConversationIdRef.current !== conversationId) {
+        return;
+      }
+      const requestGeneration =
+        conversationMessageRequestGateRef.current.begin();
       if (!background) {
         setConversationLoading(true);
         setConversationError(undefined);
       }
       try {
-        setConversationMessages(
-          await withAuthenticatedSession((accessToken) =>
-            fetchConversationMessages(apiBaseUrl, accessToken, conversationId),
-          ),
+        const nextMessages = await withAuthenticatedSession((accessToken) =>
+          fetchConversationMessages(apiBaseUrl, accessToken, conversationId),
         );
+        if (
+          conversationMessageRequestGateRef.current.isCurrent(
+            requestGeneration,
+          ) &&
+          selectedConversationIdRef.current === conversationId
+        ) {
+          setConversationMessages(nextMessages);
+        }
       } catch (error) {
-        if (!background) {
+        if (
+          !background &&
+          conversationMessageRequestGateRef.current.isCurrent(
+            requestGeneration,
+          ) &&
+          selectedConversationIdRef.current === conversationId
+        ) {
           setConversationMessages([]);
           setConversationError(
             error instanceof AgentRequestError && error.code === "notFound"
@@ -1004,7 +1041,14 @@ export default function App() {
           );
         }
       } finally {
-        if (!background) setConversationLoading(false);
+        if (
+          conversationMessageRequestGateRef.current.isCurrent(
+            requestGeneration,
+          ) &&
+          selectedConversationIdRef.current === conversationId
+        ) {
+          setConversationLoading(false);
+        }
       }
     },
     [apiBaseUrl, tokens, withAuthenticatedSession],
@@ -1013,6 +1057,8 @@ export default function App() {
   const refresh = useCallback(async () => {
     if (!sessionLoaded) return;
     if (!tokens) return;
+    const conversationRequestGeneration =
+      conversationListRequestGateRef.current.begin();
     setMode("loading");
     setMessage(undefined);
     try {
@@ -1026,7 +1072,13 @@ export default function App() {
         loadHomeSnapshot(),
         loadGoogleCalendarConnection(),
       ]);
-      setConversations(nextConversations);
+      if (
+        conversationListRequestGateRef.current.isCurrent(
+          conversationRequestGeneration,
+        )
+      ) {
+        setConversations(nextConversations);
+      }
       setAgentAuthentication(authentication);
       setMode("ready");
     } catch (error) {
@@ -1152,20 +1204,20 @@ export default function App() {
         );
       }
       if (affectsConversations) {
+        const conversationRequestGeneration =
+          conversationListRequestGateRef.current.begin();
         const synchronizedConversations = await withAuthenticatedSession(
           (accessToken) => fetchConversations(apiBaseUrl, accessToken),
         );
-        setConversations(synchronizedConversations);
+        if (
+          conversationListRequestGateRef.current.isCurrent(
+            conversationRequestGeneration,
+          )
+        ) {
+          setConversations(synchronizedConversations);
+        }
         if (selectedConversationId) {
-          setConversationMessages(
-            await withAuthenticatedSession((accessToken) =>
-              fetchConversationMessages(
-                apiBaseUrl,
-                accessToken,
-                selectedConversationId,
-              ),
-            ),
-          );
+          await loadConversationMessages(selectedConversationId, true);
         }
       }
       if (affectsAgentSettings) {
@@ -1196,6 +1248,7 @@ export default function App() {
       selectedWorkspaceId,
       loadGoogleChatAccounts,
       loadProjectInflow,
+      loadConversationMessages,
       withAuthenticatedSession,
     ],
   );
@@ -1258,7 +1311,7 @@ export default function App() {
       setWeeklyReportError(undefined);
       setGoalsError(undefined);
       setConversationMessages([]);
-      setSelectedConversationId(undefined);
+      setCurrentConversationId(undefined);
       setHomeConversationId(undefined);
       setAssistantDraft(undefined);
       setConversationJobs({});
@@ -1274,6 +1327,9 @@ export default function App() {
       setRemoteReminderStatus("idle");
       pendingConversationId.current = undefined;
       homeConversationDetachedRef.current = false;
+      homeConversationStartingRef.current = false;
+      conversationListRequestGateRef.current.invalidate();
+      conversationMessageRequestGateRef.current.invalidate();
       await bootstrapTrustedNetworkDevice();
     }
   }
@@ -1334,7 +1390,7 @@ export default function App() {
     }
     if (destination !== "home") return;
     if (selectedConversationId === durableHome.id) return;
-    setSelectedConversationId(durableHome.id);
+    setCurrentConversationId(durableHome.id);
     setConversationMessages([]);
     void Promise.all([
       loadConversationMessages(durableHome.id),
@@ -1787,7 +1843,7 @@ export default function App() {
   function selectConversation(conversationId: string) {
     navigate("chat");
     setAssistantDraft(undefined);
-    setSelectedConversationId(conversationId);
+    setCurrentConversationId(conversationId);
     setConversationMessages([]);
     void loadConversationMessages(conversationId);
     void restoreConversationJob(conversationId);
@@ -1811,48 +1867,88 @@ export default function App() {
   }
 
   function startConversation() {
-    setSelectedConversationId(undefined);
+    setCurrentConversationId(undefined);
     setConversationMessages([]);
+    setConversationLoading(false);
     setConversationError(undefined);
     pendingConversationId.current = undefined;
   }
 
   async function startHomeConversation(): Promise<boolean> {
-    if (!tokens || !homeConversationId) return true;
+    if (!tokens || homeConversationStartingRef.current) return false;
+    homeConversationStartingRef.current = true;
     homeConversationDetachedRef.current = true;
+    conversationListRequestGateRef.current.invalidate();
+    conversationMessageRequestGateRef.current.invalidate();
+    setConversationLoading(true);
     setConversationError(undefined);
+    const previousConversationId = homeConversationId;
+    let previousConversationArchived = false;
     try {
-      await withAuthenticatedSession((accessToken) =>
-        archiveConversation(apiBaseUrl, accessToken, homeConversationId),
+      if (previousConversationId) {
+        await withAuthenticatedSession((accessToken) =>
+          archiveConversation(apiBaseUrl, accessToken, previousConversationId),
+        );
+        previousConversationArchived = true;
+        conversationListRequestGateRef.current.invalidate();
+        setConversations((current) =>
+          current.filter(
+            (conversation) => conversation.id !== previousConversationId,
+          ),
+        );
+        setConversationJobs((current) => {
+          const next = { ...current };
+          delete next[previousConversationId];
+          return next;
+        });
+        setHomeConversationId(undefined);
+        startConversation();
+      }
+
+      const clientConversationId = createUuidV7();
+      const conversation = await withAuthenticatedSession((accessToken) =>
+        createConversation(
+          apiBaseUrl,
+          accessToken,
+          clientConversationId,
+          null,
+          "home",
+        ),
       );
-      const archivedId = homeConversationId;
-      setConversations((current) =>
-        current.filter((conversation) => conversation.id !== archivedId),
-      );
-      setConversationJobs((current) => {
-        const next = { ...current };
-        delete next[archivedId];
-        return next;
-      });
-      setHomeConversationId(undefined);
-      startConversation();
+      conversationListRequestGateRef.current.invalidate();
+      conversationMessageRequestGateRef.current.invalidate();
+      setConversations((current) => [
+        conversation,
+        ...current.filter(
+          (known) => known.id !== conversation.id && known.surface !== "home",
+        ),
+      ]);
+      setHomeConversationId(conversation.id);
+      setCurrentConversationId(conversation.id);
+      setConversationMessages([]);
+      setAssistantDraft(undefined);
+      pendingConversationId.current = undefined;
+      homeConversationDetachedRef.current = false;
       return true;
     } catch {
-      homeConversationDetachedRef.current = false;
+      homeConversationDetachedRef.current = previousConversationArchived;
       setConversationError(copy.messages.conversationArchiveNotice);
       return false;
+    } finally {
+      setConversationLoading(false);
+      homeConversationStartingRef.current = false;
     }
   }
 
   function openHomeAssistant() {
     if (!homeConversationId) {
-      openNewAssistantRequest();
+      void openNewAssistantRequest();
       return;
     }
     setAssistantDraft(undefined);
     navigate("chat");
     if (selectedConversationId !== homeConversationId) {
-      setSelectedConversationId(homeConversationId);
+      setCurrentConversationId(homeConversationId);
       setConversationMessages([]);
       void loadConversationMessages(homeConversationId);
     }
@@ -3133,14 +3229,15 @@ export default function App() {
     }
   }
 
-  function openNewAssistantRequest() {
-    startConversation();
+  async function openNewAssistantRequest(): Promise<void> {
     setAssistantDraft(undefined);
     navigate("chat");
+    await startHomeConversation();
   }
 
-  function handleVoiceTranscript(value: string) {
-    startConversation();
+  async function handleVoiceTranscript(value: string): Promise<void> {
+    const started = await startHomeConversation();
+    if (!started) return;
     setAssistantDraft({ id: createUuidV7(), text: value, autoSend: true });
     navigate("chat");
   }
@@ -3239,6 +3336,7 @@ export default function App() {
         );
         pendingConversationId.current = undefined;
         conversationId = conversation.id;
+        conversationListRequestGateRef.current.invalidate();
         setConversations((current) => [
           conversation,
           ...current.filter(
@@ -3247,7 +3345,7 @@ export default function App() {
               !(conversation.surface === "home" && known.surface === "home"),
           ),
         ]);
-        setSelectedConversationId(conversation.id);
+        setCurrentConversationId(conversation.id);
       }
       if (!conversationId) {
         setConversationError(copy.messages.conversationSendNotice);
@@ -3255,7 +3353,7 @@ export default function App() {
       }
       const targetConversationId = conversationId;
       if (selectedConversationId !== targetConversationId) {
-        setSelectedConversationId(targetConversationId);
+        setCurrentConversationId(targetConversationId);
         setConversationMessages([]);
       }
       if (options.rememberForHome) {
@@ -3355,7 +3453,7 @@ export default function App() {
       homeConversationId &&
       selectedConversationId !== homeConversationId
     ) {
-      setSelectedConversationId(homeConversationId);
+      setCurrentConversationId(homeConversationId);
       setConversationMessages([]);
       void loadConversationMessages(homeConversationId);
       void restoreConversationJob(homeConversationId);
@@ -3687,7 +3785,7 @@ export default function App() {
               initialDraft={assistantDraft}
               onSelect={selectConversation}
               onInitialDraftApplied={() => setAssistantDraft(undefined)}
-              onStartConversation={startConversation}
+              onStartConversation={startHomeConversation}
               onStartAuthentication={beginAgentAuthentication}
               onSend={sendConversationRequest}
               onResolveAction={resolveConversationAction}
