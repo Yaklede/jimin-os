@@ -64,12 +64,14 @@ describe("Google Chat work intake API", () => {
       notes:
         "업무 목적\nQR 결제 통보 연동 개발\n\n완료 기준\n연동 결과를 공유합니다.",
       priority: 1,
+      dueAt: "2026-07-27T14:30:00.000Z",
     });
 
     const init = fetch.mock.calls[0]?.[1] as RequestInit;
     const body = JSON.parse(String(init.body));
     expect(body.notes).toContain("업무 목적");
     expect(body.notes).not.toContain("보낸 사람 정보 없음");
+    expect(body.dueAt).toBe("2026-07-27T14:30:00.000Z");
     expect(body.expectedVersion).toBe(3);
   });
 

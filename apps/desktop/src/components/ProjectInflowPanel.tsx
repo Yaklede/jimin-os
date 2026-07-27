@@ -423,11 +423,8 @@ export function InflowItemRow({
   async function submitPromotion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!title.trim()) return;
-    const rawDueAt = String(
-      new FormData(event.currentTarget).get("dueAt") ?? "",
-    );
-    const parsedDueAt = localInputToIso(rawDueAt);
-    if (rawDueAt && !parsedDueAt) {
+    const parsedDueAt = localInputToIso(dueAt);
+    if (dueAt && !parsedDueAt) {
       setDueProblem(true);
       return;
     }
@@ -645,8 +642,8 @@ export function InflowItemRow({
                 aria-describedby={
                   dueProblem ? `inflow-due-problem-${item.id}` : undefined
                 }
-                onChange={(event) => {
-                  setDueAt(event.target.value);
+                onInput={(event) => {
+                  setDueAt(event.currentTarget.value);
                   setDueProblem(false);
                 }}
               />
