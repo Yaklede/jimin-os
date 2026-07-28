@@ -14,7 +14,6 @@ import {
   Plus,
   Quote,
   Save,
-  Square,
   Users,
   X,
 } from "lucide-react";
@@ -22,12 +21,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import {
+  cancelMeetingRecording,
   createMeeting,
   decideMeetingAction,
+  finalizeMeetingRecording,
   fetchMeeting,
   fetchMeetings,
   reanalyzeMeeting,
+  startMeetingRecording,
   updateMeetingAction,
+  updateMeetingRecordingNotes,
+  uploadMeetingRecordingChunk,
   type Meeting,
   type MeetingActionItem,
   type MeetingDetail,
@@ -35,11 +39,6 @@ import {
 } from "../api/meetings";
 import { type Project, type Workspace } from "../api/projects";
 import { copy } from "../copy";
-import {
-  cancelNativeVoiceDictation,
-  nativeVoiceDictationSupported,
-  startNativeVoiceDictation,
-} from "../mobile-capabilities";
 import { registerMobileBackHandler } from "../mobileBack";
 import {
   SkeletonBlock,
@@ -55,28 +54,6 @@ type MeetingsWorkspaceProps = {
   selectedWorkspaceId: string | undefined;
   onSelectWorkspace(workspaceId: string): void;
 };
-
-type RecognitionResultLike = {
-  isFinal: boolean;
-  0: { transcript: string };
-};
-type RecognitionEventLike = {
-  resultIndex: number;
-  results: ArrayLike<RecognitionResultLike>;
-};
-type RecognitionErrorLike = { error: string };
-type RecognitionLike = {
-  lang: string;
-  interimResults: boolean;
-  continuous: boolean;
-  onresult: ((event: RecognitionEventLike) => void) | null;
-  onerror: ((event: RecognitionErrorLike) => void) | null;
-  onend: (() => void) | null;
-  start(): void;
-  stop(): void;
-  abort(): void;
-};
-type RecognitionConstructor = new () => RecognitionLike;
 
 export function MeetingsWorkspace({
   apiBaseUrl,
@@ -101,15 +78,6 @@ export function MeetingsWorkspace({
   const [mobileListOpen, setMobileListOpen] = useState(false);
   const meetingListRef = useRef<HTMLDivElement>(null);
   const skeletonVisible = useDelayedSkeleton(loading || detailLoading);
-
-  useEffect(() => {
-    if (!showComposer) return;
-    return registerMobileBackHandler(() => {
-      if (creating) return true;
-      setShowComposer(false);
-      return true;
-    }, 100);
-  }, [creating, showComposer]);
 
   const loadList = useCallback(async () => {
     try {
@@ -158,7 +126,13 @@ export function MeetingsWorkspace({
   }, [loadDetail, selectedMeetingId]);
 
   useEffect(() => {
-    if (!detail || !["queued", "analyzing"].includes(detail.status)) return;
+    if (
+      !detail ||
+      !["recording", "transcribing", "queued", "analyzing"].includes(
+        detail.status,
+      )
+    )
+      return;
     const timer = window.setInterval(() => {
       void loadDetail(detail.id, true);
     }, 1_800);
@@ -193,6 +167,12 @@ export function MeetingsWorkspace({
     } finally {
       setCreating(false);
     }
+  }
+
+  async function recordedMeeting(meetingId: string) {
+    setShowComposer(false);
+    await loadList();
+    setSelectedMeetingId(meetingId);
   }
 
   async function decide(
@@ -408,12 +388,15 @@ export function MeetingsWorkspace({
 
       {showComposer && (
         <MeetingComposer
+          apiBaseUrl={apiBaseUrl}
+          accessToken={accessToken}
           workspaces={workspaces}
           projects={projects}
           selectedWorkspaceId={selectedWorkspaceId}
           saving={creating}
           onSelectWorkspace={onSelectWorkspace}
           onClose={() => setShowComposer(false)}
+          onRecorded={recordedMeeting}
           onSubmit={submitMeeting}
         />
       )}
@@ -424,20 +407,26 @@ export function MeetingsWorkspace({
 type MeetingComposerInput = Parameters<typeof createMeeting>[2];
 
 function MeetingComposer({
+  apiBaseUrl,
+  accessToken,
   workspaces,
   projects,
   selectedWorkspaceId,
   saving,
   onSelectWorkspace,
   onClose,
+  onRecorded,
   onSubmit,
 }: {
+  apiBaseUrl: string;
+  accessToken: string;
   workspaces: Workspace[];
   projects: Project[];
   selectedWorkspaceId: string | undefined;
   saving: boolean;
   onSelectWorkspace(workspaceId: string): void;
   onClose(): void;
+  onRecorded(meetingId: string): Promise<void>;
   onSubmit(input: MeetingComposerInput): Promise<void>;
 }) {
   const [title, setTitle] = useState("");
@@ -445,104 +434,307 @@ function MeetingComposer({
   const [participants, setParticipants] = useState("");
   const [projectId, setProjectId] = useState("");
   const [transcript, setTranscript] = useState("");
-  const [dictating, setDictating] = useState(false);
-  const [dictationError, setDictationError] = useState<string>();
-  const recognition = useRef<RecognitionLike | null>(null);
-  const dictatingRef = useRef(false);
-  const startedAt = useRef<Date | null>(null);
+  const [notes, setNotes] = useState("");
+  const [recordingSession, setRecordingSession] = useState<{
+    meetingId: string;
+    recordingId: string;
+    mimeType: string;
+    startedAt: number;
+  }>();
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [recordingBusy, setRecordingBusy] = useState(false);
+  const [recordingError, setRecordingError] = useState<string>();
+  const [exitConfirmOpen, setExitConfirmOpen] = useState(false);
+  const [notesState, setNotesState] = useState<
+    "idle" | "saving" | "saved" | "failed"
+  >("idle");
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const sequenceRef = useRef(0);
+  const uploadChainRef = useRef<Promise<void>>(Promise.resolve());
+  const notesRef = useRef(notes);
+  const pendingWindowCloseRef = useRef(false);
 
-  const stopDictation = useCallback(() => {
-    dictatingRef.current = false;
-    recognition.current?.stop();
-    recognition.current = null;
-    void cancelNativeVoiceDictation().catch(() => undefined);
-    setDictating(false);
-  }, []);
+  useEffect(() => {
+    notesRef.current = notes;
+  }, [notes]);
 
-  useEffect(() => stopDictation, [stopDictation]);
+  const recordingActive = Boolean(recordingSession);
 
-  function appendTranscript(value: string) {
-    const text = value.trim();
-    if (!text) return;
-    setTranscript(
-      (current) => `${current.trim()}${current.trim() ? "\n" : ""}${text}`,
+  const requestClose = useCallback(() => {
+    if (recordingActive) {
+      setExitConfirmOpen(true);
+      return;
+    }
+    if (!saving && !recordingBusy) onClose();
+  }, [onClose, recordingActive, recordingBusy, saving]);
+
+  useEffect(() => {
+    return registerMobileBackHandler(() => {
+      requestClose();
+      return true;
+    }, 110);
+  }, [requestClose]);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (exitConfirmOpen) {
+        setExitConfirmOpen(false);
+        return;
+      }
+      requestClose();
+    }
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [exitConfirmOpen, requestClose]);
+
+  useEffect(() => {
+    if (!recordingActive) return;
+    function beforeUnload(event: BeforeUnloadEvent) {
+      event.preventDefault();
+      event.returnValue = "";
+    }
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, [recordingActive]);
+
+  useEffect(() => {
+    if (!recordingActive || !("__TAURI_INTERNALS__" in window)) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) =>
+        getCurrentWindow().onCloseRequested((event) => {
+          event.preventDefault();
+          pendingWindowCloseRef.current = true;
+          setExitConfirmOpen(true);
+        }),
+      )
+      .then((nextUnlisten) => {
+        if (disposed) {
+          nextUnlisten();
+          return;
+        }
+        unlisten = nextUnlisten;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [recordingActive]);
+
+  useEffect(() => {
+    if (!recordingSession) return;
+    const timer = window.setInterval(() => {
+      setRecordingSeconds(
+        Math.max(
+          0,
+          Math.floor((Date.now() - recordingSession.startedAt) / 1_000),
+        ),
+      );
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [recordingSession]);
+
+  useEffect(() => {
+    if (!recordingSession) return;
+    setNotesState("saving");
+    const timer = window.setTimeout(() => {
+      void updateMeetingRecordingNotes(
+        apiBaseUrl,
+        accessToken,
+        recordingSession.recordingId,
+        notes,
+      )
+        .then(() => setNotesState("saved"))
+        .catch(() => setNotesState("failed"));
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [accessToken, apiBaseUrl, notes, recordingSession]);
+
+  useEffect(
+    () => () => {
+      recorderRef.current?.stop();
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+    },
+    [],
+  );
+
+  function enqueueChunk(
+    blob: Blob,
+    session: NonNullable<typeof recordingSession>,
+  ) {
+    if (blob.size === 0) return;
+    const sequence = sequenceRef.current;
+    sequenceRef.current += 1;
+    uploadChainRef.current = uploadChainRef.current.then(async () => {
+      await uploadMeetingRecordingChunk(
+        apiBaseUrl,
+        accessToken,
+        session.recordingId,
+        sequence,
+        blob,
+        session.mimeType,
+      );
+    });
+    uploadChainRef.current.catch(() =>
+      setRecordingError(copy.meetings.recordingUploadFailed),
     );
   }
 
-  async function startNativeDictation() {
-    while (dictatingRef.current) {
-      try {
-        const result = await startNativeVoiceDictation();
-        if (!dictatingRef.current) return;
-        appendTranscript(result.transcript);
-      } catch {
-        if (dictatingRef.current) {
-          setDictationError(copy.meetings.dictationFailed);
-          stopDictation();
-        }
-      }
-    }
-  }
-
-  function startBrowserDictation(Constructor: RecognitionConstructor) {
-    const recognizer = new Constructor();
-    recognition.current = recognizer;
-    recognizer.lang = "ko-KR";
-    recognizer.interimResults = false;
-    recognizer.continuous = true;
-    recognizer.onresult = (event) => {
-      for (
-        let index = event.resultIndex;
-        index < event.results.length;
-        index += 1
-      ) {
-        const result = event.results[index];
-        if (result?.isFinal) appendTranscript(result[0]?.transcript ?? "");
-      }
-    };
-    recognizer.onerror = (event) => {
-      if (event.error === "no-speech") return;
-      setDictationError(copy.meetings.dictationFailed);
-      stopDictation();
-    };
-    recognizer.onend = () => {
-      if (!dictatingRef.current) return;
-      try {
-        recognizer.start();
-      } catch {
-        setDictationError(copy.meetings.dictationFailed);
-        stopDictation();
-      }
-    };
-    recognizer.start();
-  }
-
-  function startDictation() {
-    setDictationError(undefined);
-    dictatingRef.current = true;
-    startedAt.current ??= new Date();
-    setDictating(true);
-    if (nativeVoiceDictationSupported()) {
-      void startNativeDictation();
+  async function startRecording() {
+    if (!title.trim() || recordingBusy) {
+      setRecordingError(copy.meetings.recordingNameRequired);
       return;
     }
-    const Constructor = recognitionConstructor();
-    if (!Constructor) {
-      setDictationError(copy.meetings.dictationUnsupported);
-      stopDictation();
+    if (
+      !navigator.mediaDevices?.getUserMedia ||
+      typeof MediaRecorder === "undefined"
+    ) {
+      setRecordingError(copy.meetings.recordingUnsupported);
       return;
     }
+    setRecordingBusy(true);
+    setRecordingError(undefined);
+    let created: Awaited<ReturnType<typeof startMeetingRecording>> | undefined;
     try {
-      startBrowserDictation(Constructor);
+      created = await startMeetingRecording(apiBaseUrl, accessToken, {
+        title: title.trim(),
+        purpose: purpose.trim() || undefined,
+        participants: normalizedParticipants(participants),
+        workspaceId: selectedWorkspaceId,
+        projectId: projectId || undefined,
+        startedAt: new Date().toISOString(),
+      });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+      });
+      const mimeType = preferredRecordingMimeType();
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+      const session = {
+        meetingId: created.meeting.id,
+        recordingId: created.recording.id,
+        mimeType: recorder.mimeType || mimeType || "audio/webm",
+        startedAt: Date.now(),
+      };
+      sequenceRef.current = 0;
+      uploadChainRef.current = Promise.resolve();
+      streamRef.current = stream;
+      recorderRef.current = recorder;
+      recorder.addEventListener("dataavailable", (event) => {
+        enqueueChunk(event.data, session);
+      });
+      recorder.start(4_000);
+      setRecordingSession(session);
+      setRecordingSeconds(0);
+      setNotes("");
+      setNotesState("idle");
     } catch {
-      setDictationError(copy.meetings.dictationPermission);
-      stopDictation();
+      if (created) {
+        await cancelMeetingRecording(
+          apiBaseUrl,
+          accessToken,
+          created.recording.id,
+        ).catch(() => undefined);
+      }
+      setRecordingError(copy.meetings.recordingPermission);
+    } finally {
+      setRecordingBusy(false);
+    }
+  }
+
+  async function stopMediaRecorder() {
+    const recorder = recorderRef.current;
+    if (!recorder || recorder.state === "inactive") return;
+    await new Promise<void>((resolve) => {
+      recorder.addEventListener("stop", () => resolve(), { once: true });
+      recorder.stop();
+    });
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    recorderRef.current = null;
+    streamRef.current = null;
+  }
+
+  async function destroyWindowIfRequested() {
+    if (!pendingWindowCloseRef.current || !("__TAURI_INTERNALS__" in window))
+      return;
+    pendingWindowCloseRef.current = false;
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().destroy();
+  }
+
+  async function saveRecordingAndClose() {
+    if (!recordingSession || recordingBusy) return;
+    setRecordingBusy(true);
+    setRecordingError(undefined);
+    try {
+      await updateMeetingRecordingNotes(
+        apiBaseUrl,
+        accessToken,
+        recordingSession.recordingId,
+        notesRef.current,
+      );
+      await stopMediaRecorder();
+      await uploadChainRef.current;
+      await finalizeMeetingRecording(
+        apiBaseUrl,
+        accessToken,
+        recordingSession.recordingId,
+        {
+          mimeType: recordingSession.mimeType,
+          durationMilliseconds: Math.max(
+            1,
+            Date.now() - recordingSession.startedAt,
+          ),
+        },
+      );
+      const meetingId = recordingSession.meetingId;
+      setRecordingSession(undefined);
+      setExitConfirmOpen(false);
+      await onRecorded(meetingId);
+      await destroyWindowIfRequested();
+    } catch {
+      setRecordingError(copy.meetings.recordingFinishFailed);
+    } finally {
+      setRecordingBusy(false);
+    }
+  }
+
+  async function discardRecording() {
+    if (!recordingSession || recordingBusy) return;
+    setRecordingBusy(true);
+    setRecordingError(undefined);
+    try {
+      await stopMediaRecorder();
+      await uploadChainRef.current.catch(() => undefined);
+      await cancelMeetingRecording(
+        apiBaseUrl,
+        accessToken,
+        recordingSession.recordingId,
+      );
+      setRecordingSession(undefined);
+      setExitConfirmOpen(false);
+      onClose();
+      await destroyWindowIfRequested();
+    } catch {
+      setRecordingError(copy.meetings.recordingDiscardFailed);
+    } finally {
+      setRecordingBusy(false);
     }
   }
 
   async function submit() {
-    stopDictation();
-    const started = startedAt.current;
     await onSubmit({
       title: title.trim(),
       purpose: purpose.trim() || undefined,
@@ -550,19 +742,20 @@ function MeetingComposer({
       transcript: transcript.trim(),
       workspaceId: selectedWorkspaceId,
       projectId: projectId || undefined,
-      startedAt: started?.toISOString(),
-      durationSeconds: started
-        ? Math.max(1, Math.round((Date.now() - started.getTime()) / 1_000))
-        : undefined,
     });
   }
 
   const canSubmit = title.trim().length > 0 && transcript.trim().length > 0;
 
   return createPortal(
-    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={requestClose}
+    >
       <section
         className="meeting-composer"
+        data-recording={recordingActive}
         role="dialog"
         aria-modal="true"
         aria-labelledby="meeting-composer-title"
@@ -578,131 +771,236 @@ function MeetingComposer({
             className="icon-button focus-visible-control"
             type="button"
             aria-label={copy.actions.cancel}
-            onClick={onClose}
+            onClick={requestClose}
           >
             <X aria-hidden="true" />
           </button>
         </header>
 
-        <div className="meeting-composer__fields">
-          <label>
-            <span>{copy.meetings.nameLabel}</span>
-            <input
-              value={title}
-              maxLength={200}
-              placeholder={copy.meetings.namePlaceholder}
-              onChange={(event) => setTitle(event.target.value)}
-            />
-          </label>
-          <label>
-            <span>{copy.meetings.purposeLabel}</span>
-            <input
-              value={purpose}
-              maxLength={2_000}
-              placeholder={copy.meetings.purposePlaceholder}
-              onChange={(event) => setPurpose(event.target.value)}
-            />
-          </label>
-          <label>
-            <span>{copy.meetings.participantsLabel}</span>
-            <input
-              value={participants}
-              placeholder={copy.meetings.participantsPlaceholder}
-              onChange={(event) => setParticipants(event.target.value)}
-            />
-          </label>
-          <div className="meeting-composer__scope">
+        {!recordingActive ? (
+          <div className="meeting-composer__fields">
             <label>
-              <span>{copy.meetings.workspaceLabel}</span>
-              <select
-                value={selectedWorkspaceId ?? ""}
-                onChange={(event) => {
-                  setProjectId("");
-                  onSelectWorkspace(event.target.value);
-                }}
-              >
-                {workspaces.map((workspace) => (
-                  <option key={workspace.id} value={workspace.id}>
-                    {workspace.name}
-                  </option>
-                ))}
-              </select>
+              <span>{copy.meetings.nameLabel}</span>
+              <input
+                value={title}
+                maxLength={200}
+                placeholder={copy.meetings.namePlaceholder}
+                onChange={(event) => setTitle(event.target.value)}
+              />
             </label>
             <label>
-              <span>{copy.meetings.projectLabel}</span>
-              <select
-                value={projectId}
-                onChange={(event) => setProjectId(event.target.value)}
-              >
-                <option value="">{copy.meetings.noProject}</option>
-                {projects.map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.title}
-                  </option>
-                ))}
-              </select>
+              <span>{copy.meetings.purposeLabel}</span>
+              <input
+                value={purpose}
+                maxLength={2_000}
+                placeholder={copy.meetings.purposePlaceholder}
+                onChange={(event) => setPurpose(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>{copy.meetings.participantsLabel}</span>
+              <input
+                value={participants}
+                placeholder={copy.meetings.participantsPlaceholder}
+                onChange={(event) => setParticipants(event.target.value)}
+              />
+            </label>
+            <div className="meeting-composer__scope">
+              <label>
+                <span>{copy.meetings.workspaceLabel}</span>
+                <select
+                  value={selectedWorkspaceId ?? ""}
+                  onChange={(event) => {
+                    setProjectId("");
+                    onSelectWorkspace(event.target.value);
+                  }}
+                >
+                  {workspaces.map((workspace) => (
+                    <option key={workspace.id} value={workspace.id}>
+                      {workspace.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>{copy.meetings.projectLabel}</span>
+                <select
+                  value={projectId}
+                  onChange={(event) => setProjectId(event.target.value)}
+                >
+                  <option value="">{copy.meetings.noProject}</option>
+                  {projects.map((project) => (
+                    <option key={project.id} value={project.id}>
+                      {project.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <label className="meeting-composer__transcript">
+              <span>{copy.meetings.transcriptLabel}</span>
+              <textarea
+                value={transcript}
+                maxLength={120_000}
+                rows={7}
+                placeholder={copy.meetings.transcriptPlaceholder}
+                onChange={(event) => setTranscript(event.target.value)}
+              />
             </label>
           </div>
-          <label className="meeting-composer__transcript">
-            <span>{copy.meetings.transcriptLabel}</span>
-            <textarea
-              value={transcript}
-              maxLength={120_000}
-              rows={7}
-              placeholder={copy.meetings.transcriptPlaceholder}
-              onChange={(event) => setTranscript(event.target.value)}
-            />
-          </label>
-        </div>
+        ) : (
+          <div className="meeting-recorder">
+            <div className="meeting-recorder__status" role="status">
+              <span className="meeting-recorder__pulse" aria-hidden="true" />
+              <div>
+                <strong>{copy.meetings.recordingTitle}</strong>
+                <p>{copy.meetings.recordingDescription}</p>
+              </div>
+              <time>{recordingTime(recordingSeconds)}</time>
+            </div>
+            <label className="meeting-recorder__notes">
+              <span>
+                <strong>{copy.meetings.notesPadLabel}</strong>
+                <small data-state={notesState}>
+                  {notesSaveLabel(notesState)}
+                </small>
+              </span>
+              <textarea
+                autoFocus
+                value={notes}
+                maxLength={40_000}
+                rows={12}
+                placeholder={copy.meetings.notesPadPlaceholder}
+                onChange={(event) => setNotes(event.target.value)}
+              />
+            </label>
+          </div>
+        )}
 
-        <div className="meeting-composer__dictation" data-active={dictating}>
-          <button
-            className="dictation-button focus-visible-control"
-            type="button"
-            onClick={dictating ? stopDictation : startDictation}
-          >
-            {dictating ? (
-              <Square aria-hidden="true" />
-            ) : (
-              <Mic aria-hidden="true" />
-            )}
-            {dictating
-              ? copy.meetings.stopDictation
-              : copy.meetings.startDictation}
-          </button>
-          <div>
-            <strong>
-              {dictating
-                ? copy.meetings.dictatingTitle
-                : copy.meetings.dictationTitle}
-            </strong>
-            <p>
-              {dictating
-                ? copy.meetings.dictatingDescription
-                : copy.meetings.dictationDescription}
-            </p>
+        {!recordingActive && (
+          <div className="meeting-composer__dictation" data-active="false">
+            <button
+              className="dictation-button focus-visible-control"
+              type="button"
+              disabled={!title.trim() || recordingBusy}
+              onClick={() => void startRecording()}
+            >
+              {recordingBusy ? (
+                <LoaderCircle className="spin" aria-hidden="true" />
+              ) : (
+                <Mic aria-hidden="true" />
+              )}
+              {recordingBusy
+                ? copy.meetings.startingRecording
+                : copy.meetings.startRecording}
+            </button>
+            <div>
+              <strong>{copy.meetings.recordingReadyTitle}</strong>
+              <p>{copy.meetings.recordingReadyDescription}</p>
+            </div>
           </div>
-        </div>
-        {dictationError && (
+        )}
+        {recordingError && (
           <p className="meeting-composer__error" role="alert">
-            {dictationError}
+            {recordingError}
           </p>
         )}
 
         <footer>
-          <button className="secondary-button" type="button" onClick={onClose}>
-            {copy.actions.cancel}
-          </button>
-          <button
-            className="primary-button"
-            type="button"
-            disabled={!canSubmit || saving}
-            onClick={() => void submit()}
-          >
-            {saving && <LoaderCircle className="spin" aria-hidden="true" />}
-            {saving ? copy.meetings.queuing : copy.meetings.analyze}
-          </button>
+          {recordingActive ? (
+            <>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={recordingBusy}
+                onClick={requestClose}
+              >
+                {copy.meetings.closeRecording}
+              </button>
+              <button
+                className="primary-button"
+                type="button"
+                disabled={recordingBusy}
+                onClick={() => void saveRecordingAndClose()}
+              >
+                {recordingBusy && (
+                  <LoaderCircle className="spin" aria-hidden="true" />
+                )}
+                {recordingBusy
+                  ? copy.meetings.savingRecording
+                  : copy.meetings.finishRecording}
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={requestClose}
+              >
+                {copy.actions.cancel}
+              </button>
+              <button
+                className="primary-button"
+                type="button"
+                disabled={!canSubmit || saving}
+                onClick={() => void submit()}
+              >
+                {saving && <LoaderCircle className="spin" aria-hidden="true" />}
+                {saving ? copy.meetings.queuing : copy.meetings.analyze}
+              </button>
+            </>
+          )}
         </footer>
+
+        {exitConfirmOpen && (
+          <div
+            className="meeting-recording-exit"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="meeting-recording-exit-title"
+          >
+            <div>
+              <CircleAlert aria-hidden="true" />
+              <h3 id="meeting-recording-exit-title">
+                {copy.meetings.exitRecordingTitle}
+              </h3>
+              <p>{copy.meetings.exitRecordingDescription}</p>
+              <div>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={recordingBusy}
+                  onClick={() => {
+                    pendingWindowCloseRef.current = false;
+                    setExitConfirmOpen(false);
+                  }}
+                >
+                  {copy.meetings.continueRecording}
+                </button>
+                <button
+                  className="secondary-button meeting-recording-exit__discard"
+                  type="button"
+                  disabled={recordingBusy}
+                  onClick={() => void discardRecording()}
+                >
+                  {copy.meetings.discardRecording}
+                </button>
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={recordingBusy}
+                  onClick={() => void saveRecordingAndClose()}
+                >
+                  {recordingBusy && (
+                    <LoaderCircle className="spin" aria-hidden="true" />
+                  )}
+                  {copy.meetings.saveAndExitRecording}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </section>
     </div>,
     document.body,
@@ -733,7 +1031,10 @@ function MeetingReview({
   onApplyRemaining(): void;
   onRetry(): void;
 }) {
-  if (["queued", "analyzing"].includes(detail.status)) {
+  if (
+    ["recording", "transcribing", "queued", "analyzing"].includes(detail.status)
+  ) {
+    const transcribing = detail.status === "transcribing";
     return (
       <div className="meeting-analysis-state" role="status">
         <span className="meeting-analysis-state__mark">
@@ -741,8 +1042,16 @@ function MeetingReview({
         </span>
         <div>
           <MeetingStatusLabel status={detail.status} />
-          <h2>{copy.meetings.analyzingTitle}</h2>
-          <p>{copy.meetings.analyzingDescription}</p>
+          <h2>
+            {transcribing
+              ? copy.meetings.transcribingTitle
+              : copy.meetings.analyzingTitle}
+          </h2>
+          <p>
+            {transcribing
+              ? copy.meetings.transcribingDescription
+              : copy.meetings.analyzingDescription}
+          </p>
         </div>
         <div className="meeting-analysis-state__progress" aria-hidden="true">
           <span />
@@ -814,6 +1123,42 @@ function MeetingReview({
           </div>
         )}
       </section>
+
+      {(detail.transcriptSegments.length > 0 || detail.recording?.notes) && (
+        <details className="meeting-transcript-timeline">
+          <summary>
+            <span>
+              <FileAudio aria-hidden="true" />
+              {copy.meetings.transcriptTimeline}
+            </span>
+            <small>
+              {copy.meetings.segmentCount(detail.transcriptSegments.length)}
+            </small>
+          </summary>
+          {detail.recording?.notes && (
+            <section className="meeting-transcript-timeline__notes">
+              <strong>{copy.meetings.recordedNotes}</strong>
+              <p>{detail.recording.notes}</p>
+            </section>
+          )}
+          {detail.transcriptSegments.length > 0 && (
+            <ol>
+              {detail.transcriptSegments.map((segment) => (
+                <li key={segment.id}>
+                  <time>{segmentTimestamp(segment.startsAtMilliseconds)}</time>
+                  <div>
+                    <strong>
+                      {segment.speakerName ??
+                        copy.meetings.unknownSpeaker(segment.speakerKey)}
+                    </strong>
+                    <p>{segment.text}</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+          )}
+        </details>
+      )}
 
       <div className="meeting-review__columns">
         <section className="meeting-review__section">
@@ -1167,12 +1512,38 @@ function MeetingDetailSkeleton({ visible }: { visible: boolean }) {
   );
 }
 
-function recognitionConstructor(): RecognitionConstructor | undefined {
-  const source = window as typeof window & {
-    SpeechRecognition?: RecognitionConstructor;
-    webkitSpeechRecognition?: RecognitionConstructor;
-  };
-  return source.SpeechRecognition ?? source.webkitSpeechRecognition;
+function preferredRecordingMimeType(): string | undefined {
+  return [
+    "audio/webm;codecs=opus",
+    "audio/mp4;codecs=mp4a.40.2",
+    "audio/mp4",
+    "audio/webm",
+  ].find((mimeType) => MediaRecorder.isTypeSupported(mimeType));
+}
+
+function recordingTime(seconds: number): string {
+  const hours = Math.floor(seconds / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  const remainder = seconds % 60;
+  return [hours, minutes, remainder]
+    .map((value) => String(value).padStart(2, "0"))
+    .join(":");
+}
+
+function segmentTimestamp(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1_000));
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+}
+
+function notesSaveLabel(state: "idle" | "saving" | "saved" | "failed"): string {
+  return {
+    idle: copy.meetings.notesReady,
+    saving: copy.meetings.notesSaving,
+    saved: copy.meetings.notesSaved,
+    failed: copy.meetings.notesSaveFailed,
+  }[state];
 }
 
 function shortDate(value: string): string {

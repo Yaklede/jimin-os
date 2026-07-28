@@ -4,8 +4,12 @@ import {
   createMeeting,
   decideMeetingAction,
   fetchMeetings,
+  finalizeMeetingRecording,
   reanalyzeMeeting,
+  startMeetingRecording,
   updateMeetingAction,
+  updateMeetingRecordingNotes,
+  uploadMeetingRecordingChunk,
   type MeetingActionItem,
 } from "./meetings";
 
@@ -124,5 +128,59 @@ describe("meeting API", () => {
       "https://os.example/v1/meetings/meeting-1/reanalyze",
       expect.objectContaining({ method: "POST" }),
     );
+  });
+
+  it("uploads resumable audio and autosaved notes before finalizing", async () => {
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            meeting: { id: "meeting-1", status: "recording" },
+            recording: { id: "recording-1", state: "recording" },
+          }),
+          {
+            status: 201,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await startMeetingRecording("https://os.example", "access", {
+      title: "주간 회의",
+      startedAt: "2026-07-28T06:00:00.000Z",
+    });
+    await uploadMeetingRecordingChunk(
+      "https://os.example",
+      "access",
+      "recording-1",
+      0,
+      new Blob([new Uint8Array([1, 2, 3])]),
+      "audio/webm;codecs=opus",
+    );
+    await updateMeetingRecordingNotes(
+      "https://os.example",
+      "access",
+      "recording-1",
+      "마감일 확인",
+    );
+    await finalizeMeetingRecording(
+      "https://os.example",
+      "access",
+      "recording-1",
+      {
+        mimeType: "audio/webm;codecs=opus",
+        durationMilliseconds: 12_000,
+      },
+    );
+
+    expect(fetchMock.mock.calls[1][0]).toContain("/chunks/0");
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({
+      mimeType: "audio/webm;codecs=opus",
+      audioBase64: "AQID",
+    });
+    expect(fetchMock.mock.calls[2][0]).toContain("/notes");
+    expect(fetchMock.mock.calls[3][0]).toContain("/finalize");
   });
 });

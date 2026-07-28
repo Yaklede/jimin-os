@@ -22,6 +22,7 @@ pub(crate) struct AgentConfig {
     claim_lease: Duration,
     poll_interval: Duration,
     runner_id: String,
+    meeting_transcriber_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Error)]
@@ -80,6 +81,15 @@ impl AgentConfig {
         if !valid_runner_id(&runner_id) {
             return Err(ConfigError::InvalidRunner);
         }
+        let meeting_transcriber_url =
+            env_string("JIMIN_MEETING_TRANSCRIBER_URL")?.filter(|value| !value.trim().is_empty());
+        if meeting_transcriber_url.as_deref().is_some_and(|value| {
+            !(value.starts_with("http://") || value.starts_with("https://"))
+                || value.chars().count() > 2_000
+                || value.chars().any(char::is_control)
+        }) {
+            return Err(ConfigError::InvalidRunner);
+        }
 
         Ok(Self {
             database_url,
@@ -88,6 +98,7 @@ impl AgentConfig {
             claim_lease,
             poll_interval,
             runner_id,
+            meeting_transcriber_url,
         })
     }
 
@@ -110,6 +121,10 @@ impl AgentConfig {
 
     pub(crate) fn runner_id(&self) -> &str {
         &self.runner_id
+    }
+
+    pub(crate) fn meeting_transcriber_url(&self) -> Option<&str> {
+        self.meeting_transcriber_url.as_deref()
     }
 }
 

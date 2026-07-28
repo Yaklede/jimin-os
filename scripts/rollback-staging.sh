@@ -36,7 +36,11 @@ validate_runtime_secrets
 validate_staging_images
 
 info "Pulling rollback image digests"
-compose pull gateway api agent
+services=(gateway api agent)
+if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
+  services+=(meeting-transcriber)
+fi
+compose pull "${services[@]}"
 info "Applying application-only rollback; database volumes are not replaced"
 compose up --detach --remove-orphans --no-build --wait --wait-timeout 180
 

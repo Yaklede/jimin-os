@@ -371,21 +371,56 @@ export const copy = {
     transcriptLabel: "회의 내용",
     transcriptPlaceholder:
       "회의 중 받아쓰기를 시작하거나, 이미 작성한 회의록을 붙여 넣어 주세요.",
-    dictationTitle: "말한 내용을 바로 적을 수 있어요",
-    dictationDescription:
-      "받아쓰기는 문장 단위로 이어 붙여져요. 끝난 뒤 원문을 고칠 수 있어요.",
-    dictatingTitle: "회의 내용을 듣고 있어요",
-    dictatingDescription:
-      "말을 멈춰도 계속 이어서 들을게요. 끝나면 중지를 눌러 주세요.",
-    startDictation: "받아쓰기 시작",
-    stopDictation: "받아쓰기 중지",
+    recordingReadyTitle: "녹음하면서 메모할 수 있어요",
+    recordingReadyDescription:
+      "원음은 안전하게 나눠 저장하고, 끝난 뒤 발언자별 회의록으로 정리해요.",
+    startRecording: "녹음 시작",
+    startingRecording: "녹음을 준비하는 중",
+    recordingTitle: "회의를 녹음하고 있어요",
+    recordingDescription:
+      "음성은 나눠서 저장하고 있어요. 중요한 내용은 아래 메모장에 바로 적어 두세요.",
+    recordingNameRequired: "먼저 회의 이름을 적어 주세요.",
+    recordingUnsupported:
+      "이 기기에서는 회의 녹음을 시작할 수 없어요. 기존 회의록을 붙여 넣어 주세요.",
+    recordingPermission:
+      "마이크를 사용할 수 없어요. 기기 설정에서 마이크 권한을 허용한 뒤 다시 시도해 주세요.",
+    // prettier-ignore
+    recordingUploadFailed: "음성을 저장하지 못했어요. 연결을 확인하고 다시 시도해 주세요.",
+    // prettier-ignore
+    recordingFinishFailed: "녹음을 마치지 못했어요. 잠시 후 다시 시도해 주세요.",
+    // prettier-ignore
+    recordingDiscardFailed: "녹음을 버리지 못했어요. 연결을 확인하고 다시 시도해 주세요.",
+    notesPadLabel: "회의 중 메모",
+    notesPadPlaceholder:
+      "결정사항, 담당자, 꼭 다시 들을 부분을 자유롭게 적어 주세요.",
+    notesReady: "입력하면 자동 저장해요",
+    notesSaving: "메모 저장 중",
+    notesSaved: "메모 저장됨",
+    // prettier-ignore
+    notesSaveFailed: "메모를 저장하지 못했어요. 연결을 확인하고 다시 시도해 주세요.",
+    closeRecording: "나가기",
+    finishRecording: "녹음 마치고 정리하기",
+    savingRecording: "음성과 메모를 저장하는 중",
+    exitRecordingTitle: "녹음을 마치고 나갈까요?",
+    exitRecordingDescription:
+      "지금 나가면 먼저 음성과 메모를 안전하게 저장할지 선택해야 해요.",
+    continueRecording: "계속 녹음하기",
+    discardRecording: "녹음과 메모 버리기",
+    saveAndExitRecording: "저장하고 나가기",
     dictationFailed: "받아쓰기가 멈췄어요. 직접 입력하거나 다시 시작해 주세요.",
     dictationUnsupported:
       "이 기기에서는 받아쓰기를 바로 사용할 수 없어요. 회의록을 직접 붙여 넣어 주세요.",
     dictationPermission:
-      "마이크를 사용할 수 없어요. 기기 설정에서 권한을 허용한 뒤 다시 시도해 주세요.",
+      "받아쓰기에 필요한 권한이 꺼져 있어요. 기기 설정에서 마이크와 음성 인식을 허용한 뒤 다시 시도해 주세요.",
+    dictationNoSpeech:
+      "말소리를 듣지 못했어요. 마이크 가까이에서 다시 말해 주세요.",
+    dictationNoMicrophone:
+      "사용할 수 있는 마이크를 찾지 못했어요. 마이크 연결을 확인한 뒤 다시 시도해 주세요.",
     analyze: "정리 시작하기",
     queuing: "정리를 시작하는 중",
+    transcribingTitle: "발언자를 나눠 회의록을 만들고 있어요",
+    transcribingDescription:
+      "저장한 음성을 시간순으로 맞추고 발언자별 문장으로 정리하고 있어요.",
     analyzingTitle: "회의 내용을 정리하고 있어요",
     analyzingDescription:
       "원문을 바탕으로 요약, 결정사항, 실행 후보를 나누고 있어요. 잠시 후 자동으로 보여드릴게요.",
@@ -395,6 +430,11 @@ export const copy = {
     retrying: "다시 정리하는 중",
     retryFailed: "회의를 다시 정리하지 못했어요. 연결 상태를 확인해 주세요.",
     summaryLabel: "한눈에 보기",
+    transcriptTimeline: "발언자별 회의 내용",
+    segmentCount: (count: number) => `발언 ${count}개`,
+    recordedNotes: "회의 중 메모",
+    unknownSpeaker: (speakerKey: string) =>
+      `발언자 ${speakerKey.replace("SPEAKER_", "")}`,
     decisionsTitle: "결정사항",
     actionsTitle: "실행할 일",
     noDecisions: "명확하게 확정된 결정은 없어요.",
@@ -430,6 +470,8 @@ export const copy = {
     excluded: "이 회의에서는 제외했어요",
     timeNotSet: "날짜가 정해지지 않았어요",
     status: {
+      recording: "녹음 중",
+      transcribing: "화자별 정리 중",
       queued: "정리 대기",
       analyzing: "정리 중",
       review_ready: "확인 필요",
@@ -685,6 +727,8 @@ export const copy = {
     deviceSignalsRefresh: "다시 확인하기",
     deviceSignalsLoadNotice:
       "휴대폰 정보를 확인하지 못했어요. 연결을 확인한 뒤 다시 확인해 주세요.",
+    deviceSignalsSettingsNotice:
+      "휴대폰 설정을 열지 못했어요. 설정 앱에서 Jimin OS의 통화 기록 권한을 확인해 주세요.",
     deviceSignalsPrivacy: "최근 30일의 부재중 전화만 개인 서버에 보관해요.",
     notificationsTitle: "휴대폰 알림",
     notificationsChecking: "알림 권한을 확인하고 있어요.",

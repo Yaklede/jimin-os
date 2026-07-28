@@ -17,6 +17,7 @@ path = "src/main.rs"
 clap.workspace = true
 jimin-codex-client = { path = "../../crates/codex-client" }
 jimin-storage = { path = "../../crates/storage" }
+reqwest.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true

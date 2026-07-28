@@ -17,7 +17,11 @@ pending="${DEPLOY_STATE_ROOT}/desired.env"
 write_desired_release "${pending}"
 
 info "Pulling immutable staging images"
-compose pull gateway api agent postgres
+services=(gateway api agent postgres)
+if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
+  services+=(meeting-transcriber)
+fi
+compose pull "${services[@]}"
 info "Starting staging services without local builds"
 compose up --detach --remove-orphans --no-build --wait --wait-timeout 180
 

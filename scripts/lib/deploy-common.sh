@@ -137,6 +137,13 @@ init_deployment() {
   if [[ "${fcm_enabled}" == "1" ]]; then
     COMPOSE_ARGS+=(--file "${REPO_ROOT}/deploy/compose.fcm.yaml")
   fi
+  meeting_transcriber_enabled="$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)"
+  meeting_transcriber_enabled="${meeting_transcriber_enabled:-0}"
+  [[ "${meeting_transcriber_enabled}" =~ ^[01]$ ]] \
+    || die "JIMIN_MEETING_TRANSCRIBER_ENABLED must be 0 or 1"
+  if [[ "${meeting_transcriber_enabled}" == "1" ]]; then
+    COMPOSE_ARGS+=(--file "${REPO_ROOT}/deploy/compose.meeting-transcriber.yaml")
+  fi
   if [[ -n "${JIMIN_RELEASE_ENV:-}" ]]; then
     [[ -f "${JIMIN_RELEASE_ENV}" ]] || die "release env not found: ${JIMIN_RELEASE_ENV}"
     COMPOSE_ARGS+=(--env-file "${JIMIN_RELEASE_ENV}")
@@ -234,6 +241,9 @@ validate_runtime_secrets() {
   if [[ "$(effective_value JIMIN_FIREBASE_MESSAGING_ENABLED)" == "1" ]]; then
     validate_secret_file "${secrets_dir}/firebase_service_account" "Firebase service-account file"
   fi
+  if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
+    validate_secret_file "${secrets_dir}/hugging_face_token" "Hugging Face token file"
+  fi
   if [[ "${DEPLOY_TLS_MODE}" == "files" ]]; then
     validate_secret_file "${secrets_dir}/gateway_tls_cert" "gateway certificate"
     validate_secret_file "${secrets_dir}/gateway_tls_key" "gateway private key"
@@ -250,6 +260,11 @@ validate_staging_images() {
   assert_digest_reference "$(effective_value JIMIN_API_IMAGE)" "JIMIN_API_IMAGE"
   assert_digest_reference "$(effective_value JIMIN_AGENT_IMAGE)" "JIMIN_AGENT_IMAGE"
   assert_digest_reference "$(effective_value JIMIN_GATEWAY_IMAGE)" "JIMIN_GATEWAY_IMAGE"
+  if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
+    assert_digest_reference \
+      "$(effective_value JIMIN_MEETING_TRANSCRIBER_IMAGE)" \
+      "JIMIN_MEETING_TRANSCRIBER_IMAGE"
+  fi
   assert_digest_reference "$(effective_value POSTGRES_IMAGE)" "POSTGRES_IMAGE"
 
   local build_sha
@@ -272,6 +287,8 @@ write_desired_release() {
     printf 'JIMIN_API_IMAGE=%s\n' "$(effective_value JIMIN_API_IMAGE)"
     printf 'JIMIN_AGENT_IMAGE=%s\n' "$(effective_value JIMIN_AGENT_IMAGE)"
     printf 'JIMIN_GATEWAY_IMAGE=%s\n' "$(effective_value JIMIN_GATEWAY_IMAGE)"
+    printf 'JIMIN_MEETING_TRANSCRIBER_IMAGE=%s\n' \
+      "$(effective_value JIMIN_MEETING_TRANSCRIBER_IMAGE)"
     printf 'JIMIN_BUILD_SHA=%s\n' "$(effective_value JIMIN_BUILD_SHA)"
   } > "${temporary}"
   chmod 600 "${temporary}"

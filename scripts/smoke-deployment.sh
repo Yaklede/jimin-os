@@ -56,7 +56,13 @@ compose exec -T agent codex --version | grep -F "${codex_version}" >/dev/null ||
 compose exec -T agent /usr/bin/test -r /opt/jimin-agent/fixtures/generic-prompt.txt \
   || die "Agent verification fixture is missing or unreadable"
 
-for service in gateway api agent postgres; do
+services=(gateway api agent postgres)
+if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
+  services+=(meeting-transcriber)
+  compose exec -T meeting-transcriber python -c \
+    "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3).read()"
+fi
+for service in "${services[@]}"; do
   container_id="$(compose ps --quiet "${service}")"
   [[ -n "${container_id}" ]] || die "service is not running: ${service}"
   configured_user="$(docker inspect --format '{{.Config.User}}' "${container_id}")"
@@ -66,4 +72,4 @@ for service in gateway api agent postgres; do
   fi
 done
 
-info "TLS, API readiness, Codex version, non-root, and socket checks passed"
+info "TLS, API readiness, Codex version, transcriber readiness, non-root, and socket checks passed"

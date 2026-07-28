@@ -17,6 +17,7 @@ mod config;
 mod health;
 mod inflow_analysis;
 mod meeting_analysis;
+mod meeting_transcription;
 mod worker_loop;
 
 use config::{AgentConfig, ConfigError};
@@ -521,6 +522,7 @@ async fn run_agent_jobs(
         config.claim_lease(),
         config.poll_interval(),
         &workspace,
+        config.meeting_transcriber_url(),
     )
     .await
 }

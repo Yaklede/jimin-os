@@ -1,0 +1,61 @@
+services:
+  agent:
+    environment:
+      JIMIN_MEETING_TRANSCRIBER_URL: http://meeting-transcriber:8090
+    depends_on:
+      meeting-transcriber:
+        condition: service_healthy
+        restart: true
+
+  meeting-transcriber:
+    image: ${JIMIN_MEETING_TRANSCRIBER_IMAGE:?set JIMIN_MEETING_TRANSCRIBER_IMAGE}
+    build:
+      context: .
+      dockerfile: services/meeting-transcriber/Dockerfile
+      args:
+        JIMIN_BUILD_SHA: ${JIMIN_BUILD_SHA:?set JIMIN_BUILD_SHA}
+        PYTHON_RUNTIME_IMAGE: ${PYTHON_RUNTIME_IMAGE:?set PYTHON_RUNTIME_IMAGE}
+    user: "10002:10002"
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      HF_TOKEN_FILE: /run/secrets/hugging_face_token
+      JIMIN_TRANSCRIBER_DEVICE: ${JIMIN_TRANSCRIBER_DEVICE:-cpu}
+      JIMIN_TRANSCRIBER_LANGUAGE: ${JIMIN_TRANSCRIBER_LANGUAGE:-ko}
+      JIMIN_TRANSCRIBER_MODE: ${JIMIN_TRANSCRIBER_MODE:-production}
+      JIMIN_WHISPER_COMPUTE_TYPE: ${JIMIN_WHISPER_COMPUTE_TYPE:-int8}
+      JIMIN_WHISPER_MODEL: ${JIMIN_WHISPER_MODEL:-medium}
+    secrets:
+      - hugging_face_token
+    volumes:
+      - type: volume
+        source: meeting_transcriber_cache
+        target: /home/transcriber/.cache/huggingface
+      - type: volume
+        source: meeting_transcriber_tmp
+        target: /var/lib/jimin-transcriber/tmp
+    networks:
+      - agent_egress
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3).read()
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 8
+    stop_grace_period: 30s
+
+volumes:
+  meeting_transcriber_cache: {}
+  meeting_transcriber_tmp: {}
+
+secrets:
+  hugging_face_token:
+    file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/hugging_face_token

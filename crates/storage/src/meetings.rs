@@ -17,14 +17,33 @@ const MAX_DETAIL_CHARS: usize = 4_000;
 const MAX_EXCERPT_CHARS: usize = 2_000;
 const MAX_ANALYSIS_ITEMS: usize = 32;
 const MAX_TIME_ZONE_CHARS: usize = 100;
+const MAX_RECORDING_NOTES_CHARS: usize = 40_000;
+const MAX_RECORDING_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+const MAX_RECORDING_BYTES: i64 = 512 * 1024 * 1024;
+const MAX_RECORDING_CHUNKS: i32 = 10_000;
+const MAX_TRANSCRIPT_SEGMENTS: usize = 100_000;
+const MAX_SEGMENT_CHARS: usize = 8_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeetingStatus {
+    Recording,
+    Transcribing,
     Queued,
     Analyzing,
     ReviewReady,
     Applied,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeetingRecordingState {
+    Recording,
+    Queued,
+    Claimed,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,8 +115,121 @@ pub struct MeetingActionItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeetingDetail {
     pub meeting: Meeting,
+    pub recording: Option<MeetingRecording>,
+    pub speakers: Vec<MeetingSpeaker>,
+    pub transcript_segments: Vec<MeetingTranscriptSegment>,
     pub decisions: Vec<MeetingDecision>,
     pub action_items: Vec<MeetingActionItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeetingRecording {
+    pub id: Uuid,
+    pub meeting_id: Uuid,
+    pub state: MeetingRecordingState,
+    pub mime_type: Option<String>,
+    pub notes: String,
+    pub duration_milliseconds: Option<i64>,
+    pub chunk_count: i32,
+    pub byte_length: i64,
+    pub error_code: Option<String>,
+    pub started_at: OffsetDateTime,
+    pub finalized_at: Option<OffsetDateTime>,
+    pub finished_at: Option<OffsetDateTime>,
+    pub updated_at: OffsetDateTime,
+    pub version: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeetingSpeaker {
+    pub id: Uuid,
+    pub meeting_id: Uuid,
+    pub speaker_key: String,
+    pub display_name: Option<String>,
+    pub ordinal: i16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeetingTranscriptSegment {
+    pub id: Uuid,
+    pub meeting_id: Uuid,
+    pub speaker_id: Uuid,
+    pub speaker_key: String,
+    pub speaker_name: Option<String>,
+    pub ordinal: i32,
+    pub starts_at_milliseconds: i64,
+    pub ends_at_milliseconds: i64,
+    pub text: String,
+    pub confidence: Option<i16>,
+    pub is_final: bool,
+}
+
+pub struct NewRecordedMeeting {
+    pub meeting_id: Uuid,
+    pub recording_id: Uuid,
+    pub user_id: Uuid,
+    pub workspace_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
+    pub title: String,
+    pub purpose: Option<String>,
+    pub participants: Vec<String>,
+    pub started_at: OffsetDateTime,
+}
+
+pub struct RecordingChunk {
+    pub recording_id: Uuid,
+    pub user_id: Uuid,
+    pub sequence: i32,
+    pub mime_type: String,
+    pub audio_data: Vec<u8>,
+}
+
+pub struct RecordingNoteUpdate {
+    pub recording_id: Uuid,
+    pub user_id: Uuid,
+    pub notes: String,
+}
+
+pub struct RecordingFinalize {
+    pub recording_id: Uuid,
+    pub user_id: Uuid,
+    pub mime_type: String,
+    pub duration_milliseconds: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedMeetingTranscription {
+    pub recording_id: Uuid,
+    pub meeting_id: Uuid,
+    pub user_id: Uuid,
+    pub mime_type: String,
+    pub audio_data: Vec<u8>,
+    pub participants: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewMeetingSpeaker {
+    pub id: Uuid,
+    pub speaker_key: String,
+    pub display_name: Option<String>,
+    pub ordinal: i16,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewMeetingTranscriptSegment {
+    pub id: Uuid,
+    pub speaker_key: String,
+    pub ordinal: i32,
+    pub starts_at_milliseconds: i64,
+    pub ends_at_milliseconds: i64,
+    pub text: String,
+    pub confidence: Option<i16>,
+}
+
+pub struct MeetingTranscriptionResult {
+    pub transcript: String,
+    pub speakers: Vec<NewMeetingSpeaker>,
+    pub segments: Vec<NewMeetingTranscriptSegment>,
 }
 
 pub struct NewMeeting {
@@ -236,6 +368,58 @@ struct MeetingActionItemRow {
 }
 
 #[derive(sqlx::FromRow)]
+struct MeetingRecordingRow {
+    id: Uuid,
+    meeting_id: Uuid,
+    state: String,
+    mime_type: Option<String>,
+    notes: String,
+    duration_milliseconds: Option<i64>,
+    chunk_count: i32,
+    byte_length: i64,
+    error_code: Option<String>,
+    started_at: OffsetDateTime,
+    finalized_at: Option<OffsetDateTime>,
+    finished_at: Option<OffsetDateTime>,
+    updated_at: OffsetDateTime,
+    version: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct MeetingSpeakerRow {
+    id: Uuid,
+    meeting_id: Uuid,
+    speaker_key: String,
+    display_name: Option<String>,
+    ordinal: i16,
+}
+
+#[derive(sqlx::FromRow)]
+struct MeetingTranscriptSegmentRow {
+    id: Uuid,
+    meeting_id: Uuid,
+    speaker_id: Uuid,
+    speaker_key: String,
+    speaker_name: Option<String>,
+    ordinal: i32,
+    starts_at_milliseconds: i64,
+    ends_at_milliseconds: i64,
+    text: String,
+    confidence: Option<i16>,
+    is_final: bool,
+}
+
+#[derive(sqlx::FromRow)]
+struct ClaimedMeetingTranscriptionRow {
+    recording_id: Uuid,
+    meeting_id: Uuid,
+    user_id: Uuid,
+    mime_type: String,
+    audio_data: Vec<u8>,
+    participants: Vec<String>,
+}
+
+#[derive(sqlx::FromRow)]
 struct ClaimedMeetingAnalysisRow {
     id: Uuid,
     meeting_id: Uuid,
@@ -278,6 +462,143 @@ impl NewMeeting {
             return Err(StorageError::InvalidConfiguration);
         }
         Ok(())
+    }
+}
+
+impl NewRecordedMeeting {
+    /// Validates metadata before a resumable meeting recording is opened.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed input.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        if !is_v7(self.meeting_id)
+            || !is_v7(self.recording_id)
+            || !is_v7(self.user_id)
+            || !valid_optional_id(self.workspace_id)
+            || !valid_optional_id(self.project_id)
+            || !valid_text(&self.title, MAX_TITLE_CHARS)
+            || !valid_optional_body_text(self.purpose.as_deref(), MAX_PURPOSE_CHARS)
+            || self.participants.len() > MAX_PARTICIPANTS
+            || !self
+                .participants
+                .iter()
+                .all(|participant| valid_text(participant, MAX_PARTICIPANT_CHARS))
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
+impl RecordingChunk {
+    /// Validates one bounded audio chunk before persistence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed input.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        if !is_v7(self.recording_id)
+            || !is_v7(self.user_id)
+            || !(0..MAX_RECORDING_CHUNKS).contains(&self.sequence)
+            || !valid_text(&self.mime_type, 120)
+            || self.audio_data.is_empty()
+            || self.audio_data.len() > MAX_RECORDING_CHUNK_BYTES
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
+impl RecordingNoteUpdate {
+    /// Validates an autosaved note update.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed input.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        if !is_v7(self.recording_id)
+            || !is_v7(self.user_id)
+            || self.notes.chars().count() > MAX_RECORDING_NOTES_CHARS
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
+impl RecordingFinalize {
+    /// Validates the final recording metadata before transcription is queued.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for malformed input.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        if !is_v7(self.recording_id)
+            || !is_v7(self.user_id)
+            || !valid_text(&self.mime_type, 120)
+            || !(1..=43_200_000).contains(&self.duration_milliseconds)
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
+impl MeetingTranscriptionResult {
+    /// Validates speaker-attributed transcription output before it replaces a draft.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for incomplete or
+    /// internally inconsistent output.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        let unique_speakers = self
+            .speakers
+            .iter()
+            .map(|speaker| speaker.speaker_key.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let unique_ordinals = self
+            .segments
+            .iter()
+            .map(|segment| segment.ordinal)
+            .collect::<std::collections::HashSet<_>>();
+        let valid_speakers = !self.speakers.is_empty()
+            && self.speakers.len() <= 100
+            && unique_speakers.len() == self.speakers.len()
+            && self.speakers.iter().all(|speaker| {
+                is_v7(speaker.id)
+                    && valid_text(&speaker.speaker_key, 80)
+                    && valid_optional_body_text(
+                        speaker.display_name.as_deref(),
+                        MAX_PARTICIPANT_CHARS,
+                    )
+                    && (0..=99).contains(&speaker.ordinal)
+            });
+        let valid_segments = !self.segments.is_empty()
+            && self.segments.len() <= MAX_TRANSCRIPT_SEGMENTS
+            && unique_ordinals.len() == self.segments.len()
+            && self.segments.iter().all(|segment| {
+                is_v7(segment.id)
+                    && unique_speakers.contains(segment.speaker_key.as_str())
+                    && (0..=100_000).contains(&segment.ordinal)
+                    && (0..43_200_000).contains(&segment.starts_at_milliseconds)
+                    && segment.ends_at_milliseconds > segment.starts_at_milliseconds
+                    && segment.ends_at_milliseconds <= 43_200_000
+                    && valid_body_text(&segment.text, MAX_SEGMENT_CHARS)
+                    && segment
+                        .confidence
+                        .is_none_or(|value| (0..=100).contains(&value))
+            });
+        if valid_body_text(&self.transcript, MAX_TRANSCRIPT_CHARS)
+            && valid_speakers
+            && valid_segments
+        {
+            Ok(())
+        } else {
+            Err(StorageError::InvalidConfiguration)
+        }
     }
 }
 
@@ -471,6 +792,72 @@ impl TryFrom<MeetingActionItemRow> for MeetingActionItem {
     }
 }
 
+impl TryFrom<MeetingRecordingRow> for MeetingRecording {
+    type Error = StorageError;
+
+    fn try_from(row: MeetingRecordingRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: row.id,
+            meeting_id: row.meeting_id,
+            state: parse_recording_state(&row.state)?,
+            mime_type: row.mime_type,
+            notes: row.notes,
+            duration_milliseconds: row.duration_milliseconds,
+            chunk_count: row.chunk_count,
+            byte_length: row.byte_length,
+            error_code: row.error_code,
+            started_at: row.started_at,
+            finalized_at: row.finalized_at,
+            finished_at: row.finished_at,
+            updated_at: row.updated_at,
+            version: row.version,
+        })
+    }
+}
+
+impl From<MeetingSpeakerRow> for MeetingSpeaker {
+    fn from(row: MeetingSpeakerRow) -> Self {
+        Self {
+            id: row.id,
+            meeting_id: row.meeting_id,
+            speaker_key: row.speaker_key,
+            display_name: row.display_name,
+            ordinal: row.ordinal,
+        }
+    }
+}
+
+impl From<MeetingTranscriptSegmentRow> for MeetingTranscriptSegment {
+    fn from(row: MeetingTranscriptSegmentRow) -> Self {
+        Self {
+            id: row.id,
+            meeting_id: row.meeting_id,
+            speaker_id: row.speaker_id,
+            speaker_key: row.speaker_key,
+            speaker_name: row.speaker_name,
+            ordinal: row.ordinal,
+            starts_at_milliseconds: row.starts_at_milliseconds,
+            ends_at_milliseconds: row.ends_at_milliseconds,
+            text: row.text,
+            confidence: row.confidence,
+            is_final: row.is_final,
+        }
+    }
+}
+
+impl From<ClaimedMeetingTranscriptionRow> for ClaimedMeetingTranscription {
+    fn from(row: ClaimedMeetingTranscriptionRow) -> Self {
+        Self {
+            recording_id: row.recording_id,
+            meeting_id: row.meeting_id,
+            user_id: row.user_id,
+            mime_type: row.mime_type,
+            audio_data: row.audio_data,
+            participants: row.participants,
+        }
+    }
+}
+
 impl From<ClaimedMeetingAnalysisRow> for ClaimedMeetingAnalysis {
     fn from(row: ClaimedMeetingAnalysisRow) -> Self {
         Self {
@@ -566,6 +953,622 @@ impl Database {
         Meeting::try_from(row)
     }
 
+    /// Opens an owner-scoped recording draft without queuing analysis yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, ownership, or persistence error.
+    pub async fn create_recorded_meeting(
+        &self,
+        input: &NewRecordedMeeting,
+    ) -> Result<(Meeting, MeetingRecording), StorageError> {
+        input.validate()?;
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        if !meeting_scope_is_owned(
+            &mut transaction,
+            input.user_id,
+            input.workspace_id,
+            input.project_id,
+        )
+        .await?
+        {
+            transaction.rollback().await.map_err(classify)?;
+            return Err(StorageError::IdentityConflict);
+        }
+        let meeting_row = sqlx::query_as::<_, MeetingRow>(
+            "INSERT INTO meetings (
+                id, user_id, workspace_id, project_id, title, purpose,
+                participants, transcript, started_at, status
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, '', $8, 'recording')
+             RETURNING id, workspace_id, project_id,
+                NULL::text AS project_title, title, purpose, participants,
+                transcript, started_at, duration_seconds, status, summary,
+                topics, risks, follow_up, analyzed_at, created_at, updated_at,
+                version",
+        )
+        .bind(input.meeting_id)
+        .bind(input.user_id)
+        .bind(input.workspace_id)
+        .bind(input.project_id)
+        .bind(input.title.trim())
+        .bind(trimmed_optional(input.purpose.as_deref()))
+        .bind(trimmed_strings(&input.participants))
+        .bind(input.started_at)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let recording_row = sqlx::query_as::<_, MeetingRecordingRow>(
+            "INSERT INTO meeting_recordings (
+                id, meeting_id, user_id, started_at
+             ) VALUES ($1, $2, $3, $4)
+             RETURNING id, meeting_id, state, mime_type, notes,
+                duration_milliseconds, chunk_count, byte_length, error_code,
+                started_at, finalized_at, finished_at, updated_at, version",
+        )
+        .bind(input.recording_id)
+        .bind(input.meeting_id)
+        .bind(input.user_id)
+        .bind(input.started_at)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        append_change(
+            &mut transaction,
+            input.user_id,
+            "meeting",
+            input.meeting_id,
+            meeting_row.version,
+        )
+        .await?;
+        append_change(
+            &mut transaction,
+            input.user_id,
+            "meeting_recording",
+            input.recording_id,
+            recording_row.version,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        Ok((
+            Meeting::try_from(meeting_row)?,
+            MeetingRecording::try_from(recording_row)?,
+        ))
+    }
+
+    /// Appends one idempotent audio chunk while a recording is active.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, ownership, state, or persistence error.
+    pub async fn append_meeting_recording_chunk(
+        &self,
+        chunk: &RecordingChunk,
+    ) -> Result<MeetingRecording, StorageError> {
+        chunk.validate()?;
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let recording = sqlx::query_as::<_, MeetingRecordingRow>(
+            "SELECT id, meeting_id, state, mime_type, notes,
+                duration_milliseconds, chunk_count, byte_length, error_code,
+                started_at, finalized_at, finished_at, updated_at, version
+             FROM meeting_recordings
+             WHERE id = $1 AND user_id = $2
+             FOR UPDATE",
+        )
+        .bind(chunk.recording_id)
+        .bind(chunk.user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?
+        .ok_or(StorageError::IdentityConflict)?;
+        if parse_recording_state(&recording.state)? != MeetingRecordingState::Recording {
+            transaction.rollback().await.map_err(classify)?;
+            return Err(StorageError::IdentityConflict);
+        }
+        let existing = sqlx::query_as::<_, (String, Vec<u8>)>(
+            "SELECT mime_type, audio_data
+             FROM meeting_recording_chunks
+             WHERE recording_id = $1 AND sequence = $2",
+        )
+        .bind(chunk.recording_id)
+        .bind(chunk.sequence)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        if let Some((mime_type, audio_data)) = existing {
+            if mime_type != chunk.mime_type || audio_data != chunk.audio_data {
+                transaction.rollback().await.map_err(classify)?;
+                return Err(StorageError::IdentityConflict);
+            }
+            transaction.commit().await.map_err(classify)?;
+            return MeetingRecording::try_from(recording);
+        }
+        let next_byte_length = recording
+            .byte_length
+            .checked_add(
+                i64::try_from(chunk.audio_data.len())
+                    .map_err(|_| StorageError::InvalidConfiguration)?,
+            )
+            .filter(|value| *value <= MAX_RECORDING_BYTES)
+            .ok_or(StorageError::InvalidConfiguration)?;
+        if recording.chunk_count >= MAX_RECORDING_CHUNKS {
+            transaction.rollback().await.map_err(classify)?;
+            return Err(StorageError::InvalidConfiguration);
+        }
+        sqlx::query(
+            "INSERT INTO meeting_recording_chunks (
+                recording_id, sequence, mime_type, audio_data, byte_length
+             ) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(chunk.recording_id)
+        .bind(chunk.sequence)
+        .bind(chunk.mime_type.trim())
+        .bind(&chunk.audio_data)
+        .bind(
+            i32::try_from(chunk.audio_data.len())
+                .map_err(|_| StorageError::InvalidConfiguration)?,
+        )
+        .execute(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let updated = sqlx::query_as::<_, MeetingRecordingRow>(
+            "UPDATE meeting_recordings
+             SET chunk_count = chunk_count + 1, byte_length = $3,
+                 mime_type = COALESCE(mime_type, $4)
+             WHERE id = $1 AND user_id = $2 AND state = 'recording'
+             RETURNING id, meeting_id, state, mime_type, notes,
+                duration_milliseconds, chunk_count, byte_length, error_code,
+                started_at, finalized_at, finished_at, updated_at, version",
+        )
+        .bind(chunk.recording_id)
+        .bind(chunk.user_id)
+        .bind(next_byte_length)
+        .bind(chunk.mime_type.trim())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        append_change(
+            &mut transaction,
+            chunk.user_id,
+            "meeting_recording",
+            chunk.recording_id,
+            updated.version,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        MeetingRecording::try_from(updated)
+    }
+
+    /// Autosaves notes without stopping an active recording.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, ownership, state, or persistence error.
+    pub async fn update_meeting_recording_notes(
+        &self,
+        input: &RecordingNoteUpdate,
+    ) -> Result<MeetingRecording, StorageError> {
+        input.validate()?;
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let row = sqlx::query_as::<_, MeetingRecordingRow>(
+            "UPDATE meeting_recordings
+             SET notes = $3
+             WHERE id = $1 AND user_id = $2 AND state = 'recording'
+             RETURNING id, meeting_id, state, mime_type, notes,
+                duration_milliseconds, chunk_count, byte_length, error_code,
+                started_at, finalized_at, finished_at, updated_at, version",
+        )
+        .bind(input.recording_id)
+        .bind(input.user_id)
+        .bind(input.notes.trim_end())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?
+        .ok_or(StorageError::IdentityConflict)?;
+        append_change(
+            &mut transaction,
+            input.user_id,
+            "meeting_recording",
+            input.recording_id,
+            row.version,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        MeetingRecording::try_from(row)
+    }
+
+    /// Finalizes a non-empty recording and queues speaker transcription.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, ownership, state, or persistence error.
+    pub async fn finalize_meeting_recording(
+        &self,
+        input: &RecordingFinalize,
+    ) -> Result<MeetingRecording, StorageError> {
+        input.validate()?;
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let row = sqlx::query_as::<_, MeetingRecordingRow>(
+            "UPDATE meeting_recordings
+             SET state = 'queued', mime_type = $3,
+                 duration_milliseconds = $4, finalized_at = NOW(),
+                 error_code = NULL
+             WHERE id = $1 AND user_id = $2 AND state = 'recording'
+               AND chunk_count > 0 AND byte_length > 0
+             RETURNING id, meeting_id, state, mime_type, notes,
+                duration_milliseconds, chunk_count, byte_length, error_code,
+                started_at, finalized_at, finished_at, updated_at, version",
+        )
+        .bind(input.recording_id)
+        .bind(input.user_id)
+        .bind(input.mime_type.trim())
+        .bind(input.duration_milliseconds)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?
+        .ok_or(StorageError::IdentityConflict)?;
+        let duration_seconds = i32::try_from((input.duration_milliseconds + 999) / 1_000)
+            .map_err(|_| StorageError::InvalidConfiguration)?;
+        let meeting_version = sqlx::query_scalar::<_, i64>(
+            "UPDATE meetings
+             SET status = 'transcribing', duration_seconds = $3
+             WHERE id = $1 AND user_id = $2 AND status = 'recording'
+             RETURNING version",
+        )
+        .bind(row.meeting_id)
+        .bind(input.user_id)
+        .bind(duration_seconds)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        append_change(
+            &mut transaction,
+            input.user_id,
+            "meeting_recording",
+            input.recording_id,
+            row.version,
+        )
+        .await?;
+        append_change(
+            &mut transaction,
+            input.user_id,
+            "meeting",
+            row.meeting_id,
+            meeting_version,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        MeetingRecording::try_from(row)
+    }
+
+    /// Cancels an owner-scoped recording draft and keeps no audio or notes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, ownership, state, or persistence error.
+    pub async fn cancel_meeting_recording(
+        &self,
+        user_id: Uuid,
+        recording_id: Uuid,
+    ) -> Result<(), StorageError> {
+        if !is_v7(user_id) || !is_v7(recording_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let row = sqlx::query_as::<_, (Uuid, i64)>(
+            "UPDATE meeting_recordings
+             SET state = 'cancelled', claim_owner = NULL,
+                 claim_expires_at = NULL, finalized_at = NOW(),
+                 finished_at = NOW(), notes = ''
+             WHERE id = $1 AND user_id = $2 AND state = 'recording'
+             RETURNING meeting_id, version",
+        )
+        .bind(recording_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?
+        .ok_or(StorageError::IdentityConflict)?;
+        sqlx::query("DELETE FROM meeting_recording_chunks WHERE recording_id = $1")
+            .bind(recording_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(classify)?;
+        sqlx::query("DELETE FROM meetings WHERE id = $1 AND user_id = $2 AND status = 'recording'")
+            .bind(row.0)
+            .bind(user_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(classify)?;
+        transaction.commit().await.map_err(classify)
+    }
+
+    /// Claims the oldest finalized recording for speaker-aware transcription.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation or persistence error.
+    pub async fn claim_next_meeting_transcription(
+        &self,
+        runner_id: &str,
+        lease: Duration,
+    ) -> Result<Option<ClaimedMeetingTranscription>, StorageError> {
+        let lease_millis = claim_lease_millis(runner_id, lease)?;
+        let row = sqlx::query_as::<_, ClaimedMeetingTranscriptionRow>(
+            "WITH recovered AS (
+                UPDATE meeting_recordings
+                SET state = 'queued', claim_owner = NULL, claim_expires_at = NULL
+                WHERE state IN ('claimed', 'running') AND claim_expires_at < NOW()
+             ), candidate AS (
+                SELECT id FROM meeting_recordings
+                WHERE state = 'queued'
+                ORDER BY finalized_at, id
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+             ), claimed AS (
+                UPDATE meeting_recordings AS recording
+                SET state = 'claimed', claim_owner = $1,
+                    claim_expires_at = NOW() + ($2 * INTERVAL '1 millisecond'),
+                    attempt_count = attempt_count + 1
+                FROM candidate
+                WHERE recording.id = candidate.id
+                RETURNING recording.id, recording.meeting_id,
+                    recording.user_id, recording.mime_type
+             )
+             SELECT claimed.id AS recording_id, claimed.meeting_id,
+                claimed.user_id, claimed.mime_type,
+                COALESCE(chunks.audio_data, ''::bytea) AS audio_data,
+                meeting.participants
+             FROM claimed
+             INNER JOIN meetings AS meeting ON meeting.id = claimed.meeting_id
+             LEFT JOIN LATERAL (
+                SELECT decode(
+                    string_agg(encode(chunk.audio_data, 'hex'), '' ORDER BY chunk.sequence),
+                    'hex'
+                ) AS audio_data
+                FROM meeting_recording_chunks AS chunk
+                WHERE chunk.recording_id = claimed.id
+             ) AS chunks ON TRUE",
+        )
+        .bind(runner_id)
+        .bind(lease_millis)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(classify)?;
+        Ok(row.map(ClaimedMeetingTranscription::from))
+    }
+
+    /// Marks a claimed recording as actively transcribing.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation or persistence error.
+    pub async fn start_meeting_transcription(
+        &self,
+        recording_id: Uuid,
+        runner_id: &str,
+        lease: Duration,
+    ) -> Result<bool, StorageError> {
+        let lease_millis = claim_lease_millis(runner_id, lease)?;
+        if !is_v7(recording_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let result = sqlx::query(
+            "UPDATE meeting_recordings
+             SET state = 'running',
+                 claim_expires_at = NOW() + ($3 * INTERVAL '1 millisecond')
+             WHERE id = $1 AND claim_owner = $2 AND state = 'claimed'",
+        )
+        .bind(recording_id)
+        .bind(runner_id)
+        .bind(lease_millis)
+        .execute(self.pool())
+        .await
+        .map_err(classify)?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Stores a final speaker-attributed transcript and queues meeting analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, lease, ownership, or persistence error.
+    pub async fn complete_meeting_transcription(
+        &self,
+        job: &ClaimedMeetingTranscription,
+        runner_id: &str,
+        result: &MeetingTranscriptionResult,
+    ) -> Result<bool, StorageError> {
+        result.validate()?;
+        if !valid_runner_id(runner_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let owned = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                SELECT 1 FROM meeting_recordings
+                WHERE id = $1 AND meeting_id = $2 AND user_id = $3
+                  AND claim_owner = $4 AND state = 'running'
+            )",
+        )
+        .bind(job.recording_id)
+        .bind(job.meeting_id)
+        .bind(job.user_id)
+        .bind(runner_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        if !owned {
+            transaction.rollback().await.map_err(classify)?;
+            return Ok(false);
+        }
+        for speaker in &result.speakers {
+            sqlx::query(
+                "INSERT INTO meeting_speakers (
+                    id, meeting_id, speaker_key, display_name, ordinal
+                 ) VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(speaker.id)
+            .bind(job.meeting_id)
+            .bind(speaker.speaker_key.trim())
+            .bind(trimmed_optional(speaker.display_name.as_deref()))
+            .bind(speaker.ordinal)
+            .execute(&mut *transaction)
+            .await
+            .map_err(classify)?;
+        }
+        for segment in &result.segments {
+            let speaker_id = result
+                .speakers
+                .iter()
+                .find(|speaker| speaker.speaker_key == segment.speaker_key)
+                .map(|speaker| speaker.id)
+                .ok_or(StorageError::InvalidConfiguration)?;
+            sqlx::query(
+                "INSERT INTO meeting_transcript_segments (
+                    id, meeting_id, speaker_id, ordinal,
+                    starts_at_milliseconds, ends_at_milliseconds,
+                    text, confidence
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            )
+            .bind(segment.id)
+            .bind(job.meeting_id)
+            .bind(speaker_id)
+            .bind(segment.ordinal)
+            .bind(segment.starts_at_milliseconds)
+            .bind(segment.ends_at_milliseconds)
+            .bind(segment.text.trim())
+            .bind(segment.confidence)
+            .execute(&mut *transaction)
+            .await
+            .map_err(classify)?;
+        }
+        let meeting_version = sqlx::query_scalar::<_, i64>(
+            "UPDATE meetings SET transcript = $3, status = 'queued'
+             WHERE id = $1 AND user_id = $2 AND status = 'transcribing'
+             RETURNING version",
+        )
+        .bind(job.meeting_id)
+        .bind(job.user_id)
+        .bind(result.transcript.trim())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let recording_version = sqlx::query_scalar::<_, i64>(
+            "UPDATE meeting_recordings
+             SET state = 'completed', claim_owner = NULL,
+                 claim_expires_at = NULL, finished_at = NOW(),
+                 error_code = NULL
+             WHERE id = $1 AND claim_owner = $2 AND state = 'running'
+             RETURNING version",
+        )
+        .bind(job.recording_id)
+        .bind(runner_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let analysis_job_id = Uuid::now_v7();
+        let analysis_job_version = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO meeting_analysis_jobs (id, meeting_id, user_id)
+             VALUES ($1, $2, $3)
+             RETURNING version",
+        )
+        .bind(analysis_job_id)
+        .bind(job.meeting_id)
+        .bind(job.user_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        append_change(
+            &mut transaction,
+            job.user_id,
+            "meeting",
+            job.meeting_id,
+            meeting_version,
+        )
+        .await?;
+        append_change(
+            &mut transaction,
+            job.user_id,
+            "meeting_recording",
+            job.recording_id,
+            recording_version,
+        )
+        .await?;
+        append_change(
+            &mut transaction,
+            job.user_id,
+            "meeting_analysis_job",
+            analysis_job_id,
+            analysis_job_version,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        Ok(true)
+    }
+
+    /// Fails a lease-owned transcription without storing provider detail.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation or persistence error.
+    pub async fn fail_meeting_transcription(
+        &self,
+        recording_id: Uuid,
+        runner_id: &str,
+        error_code: &str,
+    ) -> Result<bool, StorageError> {
+        if !is_v7(recording_id) || !valid_runner_id(runner_id) || !valid_error_code(error_code) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let row = sqlx::query_as::<_, (Uuid, Uuid, i64)>(
+            "UPDATE meeting_recordings
+             SET state = 'failed', claim_owner = NULL,
+                 claim_expires_at = NULL, error_code = $3, finished_at = NOW()
+             WHERE id = $1 AND claim_owner = $2
+               AND state IN ('claimed', 'running')
+             RETURNING user_id, meeting_id, version",
+        )
+        .bind(recording_id)
+        .bind(runner_id)
+        .bind(error_code)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some((user_id, meeting_id, recording_version)) = row else {
+            transaction.rollback().await.map_err(classify)?;
+            return Ok(false);
+        };
+        let meeting_version = sqlx::query_scalar::<_, i64>(
+            "UPDATE meetings SET status = 'failed'
+             WHERE id = $1 AND user_id = $2
+             RETURNING version",
+        )
+        .bind(meeting_id)
+        .bind(user_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        append_change(
+            &mut transaction,
+            user_id,
+            "meeting_recording",
+            recording_id,
+            recording_version,
+        )
+        .await?;
+        append_change(
+            &mut transaction,
+            user_id,
+            "meeting",
+            meeting_id,
+            meeting_version,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        Ok(true)
+    }
+
     /// Lists recent meeting summaries without transferring source transcripts.
     ///
     /// # Errors
@@ -649,8 +1652,64 @@ impl Database {
             .into_iter()
             .map(MeetingActionItem::try_from)
             .collect::<Result<Vec<_>, _>>()?;
+        let recording = sqlx::query_as::<_, MeetingRecordingRow>(
+            "SELECT recording.id, recording.meeting_id, recording.state,
+                recording.mime_type, recording.notes,
+                recording.duration_milliseconds, recording.chunk_count,
+                recording.byte_length, recording.error_code,
+                recording.started_at, recording.finalized_at,
+                recording.finished_at, recording.updated_at, recording.version
+             FROM meeting_recordings AS recording
+             WHERE recording.user_id = $1 AND recording.meeting_id = $2",
+        )
+        .bind(user_id)
+        .bind(meeting_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(classify)?
+        .map(MeetingRecording::try_from)
+        .transpose()?;
+        let speakers = sqlx::query_as::<_, MeetingSpeakerRow>(
+            "SELECT speaker.id, speaker.meeting_id, speaker.speaker_key,
+                speaker.display_name, speaker.ordinal
+             FROM meeting_speakers AS speaker
+             INNER JOIN meetings AS meeting ON meeting.id = speaker.meeting_id
+             WHERE meeting.user_id = $1 AND speaker.meeting_id = $2
+             ORDER BY speaker.ordinal, speaker.id",
+        )
+        .bind(user_id)
+        .bind(meeting_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(classify)?
+        .into_iter()
+        .map(MeetingSpeaker::from)
+        .collect();
+        let transcript_segments = sqlx::query_as::<_, MeetingTranscriptSegmentRow>(
+            "SELECT segment.id, segment.meeting_id, segment.speaker_id,
+                speaker.speaker_key, speaker.display_name AS speaker_name,
+                segment.ordinal, segment.starts_at_milliseconds,
+                segment.ends_at_milliseconds, segment.text,
+                segment.confidence, segment.is_final
+             FROM meeting_transcript_segments AS segment
+             INNER JOIN meeting_speakers AS speaker ON speaker.id = segment.speaker_id
+             INNER JOIN meetings AS meeting ON meeting.id = segment.meeting_id
+             WHERE meeting.user_id = $1 AND segment.meeting_id = $2
+             ORDER BY segment.ordinal, segment.id",
+        )
+        .bind(user_id)
+        .bind(meeting_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(classify)?
+        .into_iter()
+        .map(MeetingTranscriptSegment::from)
+        .collect();
         Ok(Some(MeetingDetail {
             meeting: Meeting::try_from(row)?,
+            recording,
+            speakers,
+            transcript_segments,
             decisions,
             action_items,
         }))
@@ -1342,11 +2401,26 @@ const fn action_status_value(status: MeetingActionStatus) -> &'static str {
 
 fn parse_meeting_status(value: &str) -> Result<MeetingStatus, StorageError> {
     match value {
+        "recording" => Ok(MeetingStatus::Recording),
+        "transcribing" => Ok(MeetingStatus::Transcribing),
         "queued" => Ok(MeetingStatus::Queued),
         "analyzing" => Ok(MeetingStatus::Analyzing),
         "review_ready" => Ok(MeetingStatus::ReviewReady),
         "applied" => Ok(MeetingStatus::Applied),
         "failed" => Ok(MeetingStatus::Failed),
+        _ => Err(StorageError::PersistenceUnavailable),
+    }
+}
+
+fn parse_recording_state(value: &str) -> Result<MeetingRecordingState, StorageError> {
+    match value {
+        "recording" => Ok(MeetingRecordingState::Recording),
+        "queued" => Ok(MeetingRecordingState::Queued),
+        "claimed" => Ok(MeetingRecordingState::Claimed),
+        "running" => Ok(MeetingRecordingState::Running),
+        "completed" => Ok(MeetingRecordingState::Completed),
+        "failed" => Ok(MeetingRecordingState::Failed),
+        "cancelled" => Ok(MeetingRecordingState::Cancelled),
         _ => Err(StorageError::PersistenceUnavailable),
     }
 }
@@ -1427,8 +2501,9 @@ fn classify(_: sqlx::Error) -> StorageError {
 #[cfg(test)]
 mod tests {
     use super::{
-        MeetingActionKind, MeetingAnalysisResult, NewMeeting, NewMeetingActionItem,
-        NewMeetingDecision,
+        MeetingActionKind, MeetingAnalysisResult, MeetingTranscriptionResult, NewMeeting,
+        NewMeetingActionItem, NewMeetingDecision, NewMeetingSpeaker, NewMeetingTranscriptSegment,
+        RecordingChunk, RecordingFinalize, RecordingNoteUpdate,
     };
     use uuid::Uuid;
 
@@ -1479,6 +2554,64 @@ mod tests {
                 time_zone: None,
                 source_excerpt: "내일 다시 검토하죠.".to_owned(),
                 confidence: 90,
+            }],
+        };
+        assert!(result.validate().is_err());
+    }
+
+    #[test]
+    fn recording_inputs_keep_chunks_notes_and_duration_bounded() {
+        let recording_id = Uuid::now_v7();
+        assert!(
+            RecordingChunk {
+                recording_id,
+                user_id: Uuid::now_v7(),
+                sequence: 0,
+                mime_type: "audio/webm;codecs=opus".to_owned(),
+                audio_data: vec![1, 2, 3],
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            RecordingNoteUpdate {
+                recording_id,
+                user_id: Uuid::now_v7(),
+                notes: "담당자와 마감일을 다시 확인".to_owned(),
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            RecordingFinalize {
+                recording_id,
+                user_id: Uuid::now_v7(),
+                mime_type: "audio/webm;codecs=opus".to_owned(),
+                duration_milliseconds: 65_000,
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn transcript_segments_must_reference_a_known_speaker() {
+        let result = MeetingTranscriptionResult {
+            transcript: "화자 1: 출시 범위를 정해요.".to_owned(),
+            speakers: vec![NewMeetingSpeaker {
+                id: Uuid::now_v7(),
+                speaker_key: "SPEAKER_00".to_owned(),
+                display_name: None,
+                ordinal: 0,
+            }],
+            segments: vec![NewMeetingTranscriptSegment {
+                id: Uuid::now_v7(),
+                speaker_key: "SPEAKER_01".to_owned(),
+                ordinal: 0,
+                starts_at_milliseconds: 0,
+                ends_at_milliseconds: 1_500,
+                text: "출시 범위를 정해요.".to_owned(),
+                confidence: Some(92),
             }],
         };
         assert!(result.validate().is_err());

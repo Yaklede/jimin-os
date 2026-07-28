@@ -40,6 +40,9 @@ compose config --quiet
 compose config > "${rendered}"
 
 expected_services=$'agent\napi\ngateway\npostgres'
+if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
+  expected_services=$'agent\napi\ngateway\nmeeting-transcriber\npostgres'
+fi
 actual_services="$(compose config --services | sort)"
 [[ "${actual_services}" == "${expected_services}" ]] || die "unexpected Compose service set"
 
@@ -117,24 +120,36 @@ assert_dependency_condition() {
   ' "${rendered}" || die "service ${service} dependency ${dependency} must use ${condition}"
 }
 
-for service in gateway api agent postgres; do
+services=(gateway api agent postgres)
+if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
+  services+=(meeting-transcriber)
+fi
+for service in "${services[@]}"; do
   assert_service_setting "${service}" 'read_only: true'
   assert_service_setting "${service}" 'no-new-privileges:true'
   assert_service_non_root_user "${service}"
 done
 
-for service in api agent postgres; do
+for service in api agent postgres meeting-transcriber; do
+  if [[ "${service}" == "meeting-transcriber" ]] \
+    && [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" != "1" ]]; then
+    continue
+  fi
   assert_service_without_ports "${service}"
 done
 
 assert_dependency_condition gateway api service_started
 assert_dependency_condition api postgres service_started
 assert_dependency_condition agent postgres service_started
+if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
+  assert_dependency_condition agent meeting-transcriber service_healthy
+fi
 
 for dockerfile in \
   "${REPO_ROOT}/deploy/docker/api.Dockerfile" \
   "${REPO_ROOT}/deploy/docker/agent.Dockerfile" \
-  "${REPO_ROOT}/deploy/gateway/Dockerfile"; do
+  "${REPO_ROOT}/deploy/gateway/Dockerfile" \
+  "${REPO_ROOT}/services/meeting-transcriber/Dockerfile"; do
   grep -Eq '^USER [^[:space:]]+' "${dockerfile}" || die "Dockerfile has no non-root USER: ${dockerfile}"
   if grep -Eq '(^|[:=])latest([@[:space:]]|$)' "${dockerfile}"; then
     die "Dockerfile contains a floating latest reference: ${dockerfile}"

@@ -1,15 +1,18 @@
 use axum::{
     Extension, Json, Router,
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use jimin_observability::RequestId;
 use jimin_storage::{
     meetings::{
         Meeting, MeetingActionItem, MeetingActionItemUpdate, MeetingActionKind,
-        MeetingActionStatus, MeetingDecision, MeetingDetail, MeetingStatus, NewMeeting,
+        MeetingActionStatus, MeetingDecision, MeetingDetail, MeetingRecording,
+        MeetingRecordingState, MeetingSpeaker, MeetingStatus, MeetingTranscriptSegment, NewMeeting,
+        NewRecordedMeeting, RecordingChunk, RecordingFinalize, RecordingNoteUpdate,
     },
     planning::{NewScheduleEntry, NewTask},
 };
@@ -34,6 +37,38 @@ pub(crate) struct CreateMeetingRequest {
     project_id: Option<Uuid>,
     started_at: Option<String>,
     duration_seconds: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StartMeetingRecordingRequest {
+    title: String,
+    purpose: Option<String>,
+    #[serde(default)]
+    participants: Vec<String>,
+    workspace_id: Option<Uuid>,
+    project_id: Option<Uuid>,
+    started_at: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateMeetingRecordingNotesRequest {
+    notes: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UploadMeetingRecordingChunkRequest {
+    mime_type: String,
+    audio_base64: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FinalizeMeetingRecordingRequest {
+    mime_type: String,
+    duration_milliseconds: i64,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -121,8 +156,63 @@ pub(crate) struct MeetingListItemResponse {
 pub(crate) struct MeetingDetailResponse {
     #[serde(flatten)]
     meeting: MeetingResponse,
+    recording: Option<MeetingRecordingResponse>,
+    speakers: Vec<MeetingSpeakerResponse>,
+    transcript_segments: Vec<MeetingTranscriptSegmentResponse>,
     decisions: Vec<MeetingDecisionResponse>,
     action_items: Vec<MeetingActionItemResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StartMeetingRecordingResponse {
+    meeting: MeetingResponse,
+    recording: MeetingRecordingResponse,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MeetingRecordingResponse {
+    id: Uuid,
+    meeting_id: Uuid,
+    state: MeetingRecordingStateResponse,
+    mime_type: Option<String>,
+    notes: String,
+    duration_milliseconds: Option<i64>,
+    chunk_count: i32,
+    byte_length: i64,
+    error_code: Option<String>,
+    started_at: String,
+    finalized_at: Option<String>,
+    finished_at: Option<String>,
+    updated_at: String,
+    version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MeetingSpeakerResponse {
+    id: Uuid,
+    meeting_id: Uuid,
+    speaker_key: String,
+    display_name: Option<String>,
+    ordinal: i16,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MeetingTranscriptSegmentResponse {
+    id: Uuid,
+    meeting_id: Uuid,
+    speaker_id: Uuid,
+    speaker_key: String,
+    speaker_name: Option<String>,
+    ordinal: i32,
+    starts_at_milliseconds: i64,
+    ends_at_milliseconds: i64,
+    text: String,
+    confidence: Option<i16>,
+    is_final: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -160,11 +250,25 @@ pub(crate) struct MeetingActionItemResponse {
 #[derive(Debug, Clone, Copy, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum MeetingStatusResponse {
+    Recording,
+    Transcribing,
     Queued,
     Analyzing,
     ReviewReady,
     Applied,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MeetingRecordingStateResponse {
+    Recording,
+    Queued,
+    Claimed,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, ToSchema)]
@@ -186,6 +290,23 @@ pub(crate) fn routes() -> Router<ApiState> {
     Router::new()
         .route("/v1/meetings", get(list_meetings).post(create_meeting))
         .route("/v1/meetings/{meeting_id}", get(get_meeting))
+        .route("/v1/meeting-recordings", post(start_meeting_recording))
+        .route(
+            "/v1/meeting-recordings/{recording_id}/chunks/{sequence}",
+            put(upload_meeting_recording_chunk).layer(DefaultBodyLimit::max(12 * 1024 * 1024)),
+        )
+        .route(
+            "/v1/meeting-recordings/{recording_id}/notes",
+            put(update_meeting_recording_notes),
+        )
+        .route(
+            "/v1/meeting-recordings/{recording_id}/finalize",
+            post(finalize_meeting_recording),
+        )
+        .route(
+            "/v1/meeting-recordings/{recording_id}/cancel",
+            post(cancel_meeting_recording),
+        )
         .route(
             "/v1/meetings/{meeting_id}/reanalyze",
             post(reanalyze_meeting),
@@ -198,6 +319,209 @@ pub(crate) fn routes() -> Router<ApiState> {
             "/v1/meetings/{meeting_id}/action-items/{item_id}/decisions",
             post(decide_meeting_action),
         )
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/meeting-recordings",
+    tag = "meetings",
+    request_body = StartMeetingRecordingRequest,
+    responses((status = 201, body = StartMeetingRecordingResponse), (status = 400), (status = 401), (status = 409), (status = 503))
+)]
+pub(crate) async fn start_meeting_recording(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Json(body): Json<StartMeetingRecordingRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Ok(started_at) = OffsetDateTime::parse(&body.started_at, &Rfc3339) else {
+        return invalid_request_response(request_id);
+    };
+    let Some(database) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match database
+        .create_recorded_meeting(&NewRecordedMeeting {
+            meeting_id: Uuid::now_v7(),
+            recording_id: Uuid::now_v7(),
+            user_id: principal.identity().user_id(),
+            workspace_id: body.workspace_id,
+            project_id: body.project_id,
+            title: body.title,
+            purpose: body.purpose,
+            participants: body.participants,
+            started_at,
+        })
+        .await
+    {
+        Ok((meeting, recording)) => {
+            match (
+                meeting_response(meeting),
+                meeting_recording_response(recording),
+            ) {
+                (Ok(meeting), Ok(recording)) => (
+                    StatusCode::CREATED,
+                    Json(StartMeetingRecordingResponse { meeting, recording }),
+                )
+                    .into_response(),
+                _ => unavailable_response(request_id),
+            }
+        }
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/meeting-recordings/{recording_id}/chunks/{sequence}",
+    tag = "meetings",
+    params(("recording_id" = Uuid, Path), ("sequence" = i32, Path)),
+    request_body = UploadMeetingRecordingChunkRequest,
+    responses((status = 200, body = MeetingRecordingResponse), (status = 400), (status = 401), (status = 409), (status = 413), (status = 503))
+)]
+pub(crate) async fn upload_meeting_recording_chunk(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path((recording_id, sequence)): Path<(Uuid, i32)>,
+    Json(body): Json<UploadMeetingRecordingChunkRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Ok(audio_data) = STANDARD.decode(body.audio_base64) else {
+        return invalid_request_response(request_id);
+    };
+    let Some(database) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match database
+        .append_meeting_recording_chunk(&RecordingChunk {
+            recording_id,
+            user_id: principal.identity().user_id(),
+            sequence,
+            mime_type: body.mime_type,
+            audio_data,
+        })
+        .await
+    {
+        Ok(recording) => meeting_recording_response(recording).map(Json).map_or_else(
+            |()| unavailable_response(request_id),
+            IntoResponse::into_response,
+        ),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/meeting-recordings/{recording_id}/notes",
+    tag = "meetings",
+    params(("recording_id" = Uuid, Path)),
+    request_body = UpdateMeetingRecordingNotesRequest,
+    responses((status = 200, body = MeetingRecordingResponse), (status = 400), (status = 401), (status = 409), (status = 503))
+)]
+pub(crate) async fn update_meeting_recording_notes(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(recording_id): Path<Uuid>,
+    Json(body): Json<UpdateMeetingRecordingNotesRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(database) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match database
+        .update_meeting_recording_notes(&RecordingNoteUpdate {
+            recording_id,
+            user_id: principal.identity().user_id(),
+            notes: body.notes,
+        })
+        .await
+    {
+        Ok(recording) => meeting_recording_response(recording).map(Json).map_or_else(
+            |()| unavailable_response(request_id),
+            IntoResponse::into_response,
+        ),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/meeting-recordings/{recording_id}/finalize",
+    tag = "meetings",
+    params(("recording_id" = Uuid, Path)),
+    request_body = FinalizeMeetingRecordingRequest,
+    responses((status = 200, body = MeetingRecordingResponse), (status = 400), (status = 401), (status = 409), (status = 503))
+)]
+pub(crate) async fn finalize_meeting_recording(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(recording_id): Path<Uuid>,
+    Json(body): Json<FinalizeMeetingRecordingRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(database) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match database
+        .finalize_meeting_recording(&RecordingFinalize {
+            recording_id,
+            user_id: principal.identity().user_id(),
+            mime_type: body.mime_type,
+            duration_milliseconds: body.duration_milliseconds,
+        })
+        .await
+    {
+        Ok(recording) => meeting_recording_response(recording).map(Json).map_or_else(
+            |()| unavailable_response(request_id),
+            IntoResponse::into_response,
+        ),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/meeting-recordings/{recording_id}/cancel",
+    tag = "meetings",
+    params(("recording_id" = Uuid, Path)),
+    responses((status = 204), (status = 401), (status = 409), (status = 503))
+)]
+pub(crate) async fn cancel_meeting_recording(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(recording_id): Path<Uuid>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(database) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match database
+        .cancel_meeting_recording(principal.identity().user_id(), recording_id)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => storage_error_response(&error, request_id),
+    }
 }
 
 #[utoipa::path(
@@ -531,6 +855,20 @@ async fn apply_action(
 fn meeting_detail_response(detail: MeetingDetail) -> Result<MeetingDetailResponse, ()> {
     Ok(MeetingDetailResponse {
         meeting: meeting_response(detail.meeting)?,
+        recording: detail
+            .recording
+            .map(meeting_recording_response)
+            .transpose()?,
+        speakers: detail
+            .speakers
+            .into_iter()
+            .map(meeting_speaker_response)
+            .collect(),
+        transcript_segments: detail
+            .transcript_segments
+            .into_iter()
+            .map(meeting_transcript_segment_response)
+            .collect(),
         decisions: detail
             .decisions
             .into_iter()
@@ -542,6 +880,53 @@ fn meeting_detail_response(detail: MeetingDetail) -> Result<MeetingDetailRespons
             .map(meeting_action_item_response)
             .collect::<Result<Vec<_>, _>>()?,
     })
+}
+
+fn meeting_recording_response(recording: MeetingRecording) -> Result<MeetingRecordingResponse, ()> {
+    Ok(MeetingRecordingResponse {
+        id: recording.id,
+        meeting_id: recording.meeting_id,
+        state: meeting_recording_state_response(recording.state),
+        mime_type: recording.mime_type,
+        notes: recording.notes,
+        duration_milliseconds: recording.duration_milliseconds,
+        chunk_count: recording.chunk_count,
+        byte_length: recording.byte_length,
+        error_code: recording.error_code,
+        started_at: format_datetime(recording.started_at)?,
+        finalized_at: format_optional(recording.finalized_at)?,
+        finished_at: format_optional(recording.finished_at)?,
+        updated_at: format_datetime(recording.updated_at)?,
+        version: recording.version,
+    })
+}
+
+fn meeting_speaker_response(speaker: MeetingSpeaker) -> MeetingSpeakerResponse {
+    MeetingSpeakerResponse {
+        id: speaker.id,
+        meeting_id: speaker.meeting_id,
+        speaker_key: speaker.speaker_key,
+        display_name: speaker.display_name,
+        ordinal: speaker.ordinal,
+    }
+}
+
+fn meeting_transcript_segment_response(
+    segment: MeetingTranscriptSegment,
+) -> MeetingTranscriptSegmentResponse {
+    MeetingTranscriptSegmentResponse {
+        id: segment.id,
+        meeting_id: segment.meeting_id,
+        speaker_id: segment.speaker_id,
+        speaker_key: segment.speaker_key,
+        speaker_name: segment.speaker_name,
+        ordinal: segment.ordinal,
+        starts_at_milliseconds: segment.starts_at_milliseconds,
+        ends_at_milliseconds: segment.ends_at_milliseconds,
+        text: segment.text,
+        confidence: segment.confidence,
+        is_final: segment.is_final,
+    }
 }
 
 fn meeting_response(meeting: Meeting) -> Result<MeetingResponse, ()> {
@@ -625,11 +1010,27 @@ fn meeting_action_item_response(item: MeetingActionItem) -> Result<MeetingAction
 
 const fn meeting_status_response(status: MeetingStatus) -> MeetingStatusResponse {
     match status {
+        MeetingStatus::Recording => MeetingStatusResponse::Recording,
+        MeetingStatus::Transcribing => MeetingStatusResponse::Transcribing,
         MeetingStatus::Queued => MeetingStatusResponse::Queued,
         MeetingStatus::Analyzing => MeetingStatusResponse::Analyzing,
         MeetingStatus::ReviewReady => MeetingStatusResponse::ReviewReady,
         MeetingStatus::Applied => MeetingStatusResponse::Applied,
         MeetingStatus::Failed => MeetingStatusResponse::Failed,
+    }
+}
+
+const fn meeting_recording_state_response(
+    state: MeetingRecordingState,
+) -> MeetingRecordingStateResponse {
+    match state {
+        MeetingRecordingState::Recording => MeetingRecordingStateResponse::Recording,
+        MeetingRecordingState::Queued => MeetingRecordingStateResponse::Queued,
+        MeetingRecordingState::Claimed => MeetingRecordingStateResponse::Claimed,
+        MeetingRecordingState::Running => MeetingRecordingStateResponse::Running,
+        MeetingRecordingState::Completed => MeetingRecordingStateResponse::Completed,
+        MeetingRecordingState::Failed => MeetingRecordingStateResponse::Failed,
+        MeetingRecordingState::Cancelled => MeetingRecordingStateResponse::Cancelled,
     }
 }
 

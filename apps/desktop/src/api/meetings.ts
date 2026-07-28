@@ -1,7 +1,22 @@
 import { PlanningRequestError } from "./planning";
 
 export type MeetingStatus =
-  "queued" | "analyzing" | "review_ready" | "applied" | "failed";
+  | "recording"
+  | "transcribing"
+  | "queued"
+  | "analyzing"
+  | "review_ready"
+  | "applied"
+  | "failed";
+
+export type MeetingRecordingState =
+  | "recording"
+  | "queued"
+  | "claimed"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export type MeetingActionStatus = "suggested" | "applied" | "rejected";
 
@@ -58,8 +73,50 @@ export interface MeetingActionItem {
 }
 
 export interface MeetingDetail extends Meeting {
+  recording: MeetingRecording | null;
+  speakers: MeetingSpeaker[];
+  transcriptSegments: MeetingTranscriptSegment[];
   decisions: MeetingDecision[];
   actionItems: MeetingActionItem[];
+}
+
+export interface MeetingRecording {
+  id: string;
+  meetingId: string;
+  state: MeetingRecordingState;
+  mimeType: string | null;
+  notes: string;
+  durationMilliseconds: number | null;
+  chunkCount: number;
+  byteLength: number;
+  errorCode: string | null;
+  startedAt: string;
+  finalizedAt: string | null;
+  finishedAt: string | null;
+  updatedAt: string;
+  version: number;
+}
+
+export interface MeetingSpeaker {
+  id: string;
+  meetingId: string;
+  speakerKey: string;
+  displayName: string | null;
+  ordinal: number;
+}
+
+export interface MeetingTranscriptSegment {
+  id: string;
+  meetingId: string;
+  speakerId: string;
+  speakerKey: string;
+  speakerName: string | null;
+  ordinal: number;
+  startsAtMilliseconds: number;
+  endsAtMilliseconds: number;
+  text: string;
+  confidence: number | null;
+  isFinal: boolean;
 }
 
 export async function fetchMeetings(
@@ -125,6 +182,92 @@ export async function createMeeting(
     startedAt: input.startedAt ?? null,
     durationSeconds: input.durationSeconds ?? null,
   });
+}
+
+export async function startMeetingRecording(
+  baseUrl: string,
+  access: string,
+  input: {
+    title: string;
+    purpose?: string;
+    participants?: string[];
+    workspaceId?: string;
+    projectId?: string;
+    startedAt: string;
+  },
+): Promise<{ meeting: Meeting; recording: MeetingRecording }> {
+  return request(baseUrl, access, "/v1/meeting-recordings", {
+    title: input.title,
+    purpose: input.purpose ?? null,
+    participants: input.participants ?? [],
+    workspaceId: input.workspaceId ?? null,
+    projectId: input.projectId ?? null,
+    startedAt: input.startedAt,
+  });
+}
+
+export async function uploadMeetingRecordingChunk(
+  baseUrl: string,
+  access: string,
+  recordingId: string,
+  sequence: number,
+  blob: Blob,
+  mimeType: string,
+): Promise<MeetingRecording> {
+  return request(
+    baseUrl,
+    access,
+    `/v1/meeting-recordings/${encodeURIComponent(recordingId)}/chunks/${sequence}`,
+    {
+      mimeType,
+      audioBase64: await blobAsBase64(blob),
+    },
+    "PUT",
+  );
+}
+
+export async function updateMeetingRecordingNotes(
+  baseUrl: string,
+  access: string,
+  recordingId: string,
+  notes: string,
+): Promise<MeetingRecording> {
+  return request(
+    baseUrl,
+    access,
+    `/v1/meeting-recordings/${encodeURIComponent(recordingId)}/notes`,
+    { notes },
+    "PUT",
+  );
+}
+
+export async function finalizeMeetingRecording(
+  baseUrl: string,
+  access: string,
+  recordingId: string,
+  input: { mimeType: string; durationMilliseconds: number },
+): Promise<MeetingRecording> {
+  return request(
+    baseUrl,
+    access,
+    `/v1/meeting-recordings/${encodeURIComponent(recordingId)}/finalize`,
+    input,
+  );
+}
+
+export async function cancelMeetingRecording(
+  baseUrl: string,
+  access: string,
+  recordingId: string,
+): Promise<void> {
+  const response = await fetch(
+    `${normalizeBaseUrl(baseUrl)}/v1/meeting-recordings/${encodeURIComponent(recordingId)}/cancel`,
+    {
+      method: "POST",
+      headers: authHeaders(access),
+    },
+  );
+  if (!response.ok) throw errorFrom(response.status);
 }
 
 export async function updateMeetingAction(
@@ -228,4 +371,16 @@ function isMeetingList(value: unknown): value is { items: MeetingSummary[] } {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+async function blobAsBase64(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  const batchSize = 32_768;
+  for (let offset = 0; offset < bytes.length; offset += batchSize) {
+    binary += String.fromCharCode(
+      ...bytes.subarray(offset, offset + batchSize),
+    );
+  }
+  return btoa(binary);
 }

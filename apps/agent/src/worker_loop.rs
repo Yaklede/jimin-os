@@ -227,6 +227,7 @@ pub(crate) async fn run_until_shutdown<R, W>(
     lease: Duration,
     poll_interval: Duration,
     workspace: &Path,
+    meeting_transcriber_url: Option<&str>,
 ) -> Result<WorkerExit, WorkerError>
 where
     R: AsyncBufRead + Unpin,
@@ -269,6 +270,16 @@ where
         }
         if crate::inflow_analysis::process_next(client, database, runner_id, lease, workspace)
             .await?
+        {
+            continue;
+        }
+        if crate::meeting_transcription::process_next(
+            database,
+            runner_id,
+            lease,
+            meeting_transcriber_url,
+        )
+        .await?
         {
             continue;
         }
