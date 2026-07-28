@@ -5394,10 +5394,8 @@ dependencies = [
 name = "tauri-plugin-voice-recognition"
 version = "0.1.0"
 dependencies = [
- "serde",
  "tauri",
  "tauri-plugin",
- "tokio",
 ]
 
 [[package]]
