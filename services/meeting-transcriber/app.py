@@ -2,6 +2,8 @@ import json
 import os
 import subprocess
 import tempfile
+from bisect import bisect_left, bisect_right
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Annotated
@@ -16,6 +18,8 @@ MAX_AUDIO_BYTES = 512 * 1024 * 1024
 MAX_SECRET_FILE_BYTES = 16 * 1024
 DEFAULT_DIARIZATION_MODEL_REVISION = "3533c8cf8e369892e6b79ff1bf80f7b0286a54ee"
 FFMPEG_TIMEOUT_SECONDS = 15 * 60
+MAX_WORD_GROUP_GAP_SECONDS = 1.5
+MAX_SEGMENT_TEXT_CHARS = 8_000
 MODEL_LOCK = Lock()
 WHISPER_MODEL = None
 DIARIZATION_PIPELINE = None
@@ -41,6 +45,77 @@ class Transcription(BaseModel):
     transcript: str
     speakers: list[Speaker]
     segments: list[Segment]
+
+
+@dataclass(frozen=True)
+class AttributedWord:
+    speaker_key: str
+    start: float
+    end: float
+    text: str
+    confidence: int | None
+
+
+@dataclass(frozen=True)
+class SpeakerTrack:
+    start: float
+    end: float
+    speaker_key: str
+
+
+class SpeakerTimeline:
+    def __init__(self, tracks: list[SpeakerTrack]) -> None:
+        self.tracks = tracks
+        self.starts = [track.start for track in tracks]
+        self.prefix_max_ends: list[float] = []
+        self.prefix_max_end_indices: list[int] = []
+        max_end = float("-inf")
+        max_end_index = 0
+        for index, track in enumerate(tracks):
+            if track.end > max_end:
+                max_end = track.end
+                max_end_index = index
+            self.prefix_max_ends.append(max_end)
+            self.prefix_max_end_indices.append(max_end_index)
+
+    def speaker_for(self, start: float, end: float) -> str:
+        if not self.tracks:
+            return "SPEAKER_00"
+
+        first_possible_overlap = bisect_right(self.prefix_max_ends, start)
+        after_last_possible_overlap = bisect_left(self.starts, end)
+        best_speaker: str | None = None
+        best_overlap = 0.0
+        for index in range(
+            first_possible_overlap,
+            after_last_possible_overlap,
+        ):
+            track = self.tracks[index]
+            overlap = max(0.0, min(end, track.end) - max(start, track.start))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_speaker = track.speaker_key
+        if best_speaker is not None:
+            return best_speaker
+
+        insertion_index = bisect_left(self.starts, start)
+        nearest: list[tuple[float, int, str]] = []
+        if insertion_index > 0:
+            previous_index = self.prefix_max_end_indices[insertion_index - 1]
+            previous = self.tracks[previous_index]
+            nearest.append(
+                (
+                    max(0.0, start - previous.end),
+                    previous_index,
+                    previous.speaker_key,
+                )
+            )
+        if insertion_index < len(self.tracks):
+            upcoming = self.tracks[insertion_index]
+            nearest.append(
+                (max(0.0, upcoming.start - end), insertion_index, upcoming.speaker_key)
+            )
+        return min(nearest)[2] if nearest else "SPEAKER_00"
 
 
 @app.get("/healthz")
@@ -84,34 +159,24 @@ def _transcribe_file(source: Path, participants: list[str]) -> Transcription:
         language=os.getenv("JIMIN_TRANSCRIBER_LANGUAGE", "ko"),
         vad_filter=True,
         beam_size=5,
+        word_timestamps=True,
     )
     diarization = diarizer(str(source))
-    diarization_tracks = list(diarization.speaker_diarization.itertracks(yield_label=True))
+    speaker_timeline = SpeakerTimeline(_diarization_tracks(diarization))
 
-    result_segments: list[Segment] = []
-    speaker_keys: list[str] = []
+    attributed_words: list[AttributedWord] = []
     for raw in segments:
-        text = raw.text.strip()
-        if not text:
-            continue
-        speaker_key = _speaker_for(raw.start, raw.end, diarization_tracks)
-        if speaker_key not in speaker_keys:
-            speaker_keys.append(speaker_key)
-        probability = getattr(raw, "avg_logprob", None)
-        confidence = None
-        if probability is not None:
-            confidence = max(0, min(100, round((1 + float(probability)) * 100)))
-        result_segments.append(
-            Segment(
-                speakerKey=speaker_key,
-                startsAtMilliseconds=round(raw.start * 1000),
-                endsAtMilliseconds=max(round(raw.end * 1000), round(raw.start * 1000) + 1),
-                text=text,
-                confidence=confidence,
-            )
-        )
+        attributed_words.extend(_attribute_segment_words(raw, speaker_timeline))
+    attributed_words.sort(key=lambda word: (word.start, word.end))
+    result_segments = _group_attributed_words(attributed_words)
     if not result_segments:
         raise HTTPException(status_code=422, detail="speech_not_detected")
+
+    speaker_keys: list[str] = []
+    for segment in result_segments:
+        speaker_key = segment.speaker_key
+        if speaker_key not in speaker_keys:
+            speaker_keys.append(speaker_key)
 
     speakers = [
         Speaker(
@@ -249,15 +314,138 @@ def _verify_model_access(token: str) -> None:
         MODEL_ACCESS_READY = True
 
 
-def _speaker_for(start: float, end: float, tracks) -> str:
-    best_label = "SPEAKER_00"
-    best_overlap = 0.0
-    for turn, _, label in tracks:
-        overlap = max(0.0, min(end, turn.end) - max(start, turn.start))
-        if overlap > best_overlap:
-            best_overlap = overlap
-            best_label = str(label)
-    return best_label
+def _diarization_tracks(diarization) -> list[SpeakerTrack]:
+    exclusive = getattr(diarization, "exclusive_speaker_diarization", None)
+    if exclusive is not None:
+        exclusive_tracks = _sorted_diarization_tracks(exclusive)
+        if exclusive_tracks:
+            return exclusive_tracks
+    return _sorted_diarization_tracks(
+        getattr(diarization, "speaker_diarization", diarization)
+    )
+
+
+def _sorted_diarization_tracks(annotation) -> list[SpeakerTrack]:
+    return sorted(
+        (
+            SpeakerTrack(
+                start=float(turn.start),
+                end=float(turn.end),
+                speaker_key=_speaker_key(label),
+            )
+            for turn, _, label in annotation.itertracks(yield_label=True)
+        ),
+        key=lambda track: (track.start, track.end, track.speaker_key),
+    )
+
+
+def _attribute_segment_words(
+    raw, speaker_timeline: SpeakerTimeline
+) -> list[AttributedWord]:
+    words = getattr(raw, "words", None)
+    attributed: list[AttributedWord] = []
+    if words:
+        for word in words:
+            text = str(getattr(word, "word", ""))
+            start = getattr(word, "start", None)
+            end = getattr(word, "end", None)
+            if not text.strip() or start is None or end is None:
+                continue
+            start_value = float(start)
+            end_value = max(float(end), start_value + 0.001)
+            attributed.append(
+                AttributedWord(
+                    speaker_key=speaker_timeline.speaker_for(start_value, end_value),
+                    start=start_value,
+                    end=end_value,
+                    text=text,
+                    confidence=_word_confidence(getattr(word, "probability", None)),
+                )
+            )
+    if attributed:
+        return attributed
+
+    text = str(getattr(raw, "text", "")).strip()
+    if not text:
+        return []
+    start = float(getattr(raw, "start", 0.0))
+    end = max(float(getattr(raw, "end", start + 0.001)), start + 0.001)
+    return [
+        AttributedWord(
+            speaker_key=speaker_timeline.speaker_for(start, end),
+            start=start,
+            end=end,
+            text=f" {text}",
+            confidence=_segment_confidence(getattr(raw, "avg_logprob", None)),
+        )
+    ]
+
+
+def _group_attributed_words(words: list[AttributedWord]) -> list[Segment]:
+    groups: list[list[AttributedWord]] = []
+    group_text_lengths: list[int] = []
+    for word in words:
+        combined_text_length = (
+            group_text_lengths[-1] + len(word.text)
+            if groups
+            else len(word.text)
+        )
+        if (
+            groups
+            and groups[-1][-1].speaker_key == word.speaker_key
+            and word.start - groups[-1][-1].end <= MAX_WORD_GROUP_GAP_SECONDS
+            and combined_text_length <= MAX_SEGMENT_TEXT_CHARS
+        ):
+            groups[-1].append(word)
+            group_text_lengths[-1] = combined_text_length
+        else:
+            groups.append([word])
+            group_text_lengths.append(len(word.text))
+
+    result: list[Segment] = []
+    for group in groups:
+        text = "".join(word.text for word in group).strip()
+        if not text:
+            continue
+        confidences = [
+            word.confidence for word in group if word.confidence is not None
+        ]
+        starts_at = round(group[0].start * 1000)
+        ends_at = max(
+            round(max(word.end for word in group) * 1000),
+            starts_at + 1,
+        )
+        result.append(
+            Segment(
+                speakerKey=group[0].speaker_key,
+                startsAtMilliseconds=starts_at,
+                endsAtMilliseconds=ends_at,
+                text=text,
+                confidence=(
+                    round(sum(confidences) / len(confidences))
+                    if confidences
+                    else None
+                ),
+            )
+        )
+    return result
+
+
+def _word_confidence(probability) -> int | None:
+    if probability is None:
+        return None
+    return max(0, min(100, round(float(probability) * 100)))
+
+
+def _segment_confidence(avg_logprob) -> int | None:
+    if avg_logprob is None:
+        return None
+    return max(0, min(100, round((1 + float(avg_logprob)) * 100)))
+
+
+def _speaker_key(label) -> str:
+    value = str(label).strip()
+    return value[:80] or "SPEAKER_00"
 
 
 def _participants(raw: str) -> list[str]:
