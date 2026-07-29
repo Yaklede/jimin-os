@@ -35,7 +35,9 @@ import {
   type Meeting,
   type MeetingActionItem,
   type MeetingDetail,
+  type MeetingSpeaker,
   type MeetingSummary,
+  type MeetingTranscriptSegment,
 } from "../api/meetings";
 import { type Project, type Workspace } from "../api/projects";
 import { copy } from "../copy";
@@ -45,6 +47,10 @@ import {
   SkeletonGroup,
   useDelayedSkeleton,
 } from "./ContentSkeleton";
+
+const RECORDER_METER_WEIGHTS = [
+  0.42, 0.68, 0.9, 0.58, 1, 0.76, 0.48, 0.82, 0.62, 0.94, 0.7, 0.46,
+];
 
 type MeetingsWorkspaceProps = {
   apiBaseUrl: string;
@@ -454,6 +460,10 @@ function MeetingComposer({
   const uploadChainRef = useRef<Promise<void>>(Promise.resolve());
   const notesRef = useRef(notes);
   const pendingWindowCloseRef = useRef(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioMeterFrameRef = useRef<number | null>(null);
+  const audioMeterLastUpdateRef = useRef(0);
+  const [audioLevel, setAudioLevel] = useState(0);
 
   useEffect(() => {
     notesRef.current = notes;
@@ -556,12 +566,61 @@ function MeetingComposer({
     return () => window.clearTimeout(timer);
   }, [accessToken, apiBaseUrl, notes, recordingSession]);
 
+  const stopAudioMeter = useCallback((resetLevel = true) => {
+    if (audioMeterFrameRef.current !== null) {
+      window.cancelAnimationFrame(audioMeterFrameRef.current);
+      audioMeterFrameRef.current = null;
+    }
+    const context = audioContextRef.current;
+    audioContextRef.current = null;
+    if (context && context.state !== "closed") {
+      void context.close();
+    }
+    if (resetLevel) setAudioLevel(0);
+  }, []);
+
+  const startAudioMeter = useCallback(
+    (stream: MediaStream) => {
+      stopAudioMeter();
+      if (typeof window.AudioContext === "undefined") return;
+
+      const context = new window.AudioContext();
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.72;
+      context.createMediaStreamSource(stream).connect(analyser);
+      audioContextRef.current = context;
+      audioMeterLastUpdateRef.current = 0;
+      const samples = new Uint8Array(analyser.fftSize);
+
+      const measure = (timestamp: number) => {
+        analyser.getByteTimeDomainData(samples);
+        if (timestamp - audioMeterLastUpdateRef.current >= 80) {
+          let squared = 0;
+          for (const sample of samples) {
+            const normalized = (sample - 128) / 128;
+            squared += normalized * normalized;
+          }
+          const level = Math.min(1, Math.sqrt(squared / samples.length) * 3.8);
+          setAudioLevel(level);
+          audioMeterLastUpdateRef.current = timestamp;
+        }
+        audioMeterFrameRef.current = window.requestAnimationFrame(measure);
+      };
+
+      void context.resume().catch(() => undefined);
+      audioMeterFrameRef.current = window.requestAnimationFrame(measure);
+    },
+    [stopAudioMeter],
+  );
+
   useEffect(
     () => () => {
       recorderRef.current?.stop();
       streamRef.current?.getTracks().forEach((track) => track.stop());
+      stopAudioMeter(false);
     },
-    [],
+    [stopAudioMeter],
   );
 
   function enqueueChunk(
@@ -618,6 +677,14 @@ function MeetingComposer({
           channelCount: 1,
         },
       });
+      streamRef.current = stream;
+      const audioTrack = stream.getAudioTracks()[0];
+      audioTrack?.addEventListener(
+        "ended",
+        () => setRecordingError(copy.meetings.recordingInterrupted),
+        { once: true },
+      );
+      startAudioMeter(stream);
       const mimeType = preferredRecordingMimeType();
       const recorder = mimeType
         ? new MediaRecorder(stream, { mimeType })
@@ -630,7 +697,6 @@ function MeetingComposer({
       };
       sequenceRef.current = 0;
       uploadChainRef.current = Promise.resolve();
-      streamRef.current = stream;
       recorderRef.current = recorder;
       recorder.addEventListener("dataavailable", (event) => {
         enqueueChunk(event.data, session);
@@ -641,6 +707,9 @@ function MeetingComposer({
       setNotes("");
       setNotesState("idle");
     } catch {
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+      stopAudioMeter();
       if (created) {
         await cancelMeetingRecording(
           apiBaseUrl,
@@ -664,6 +733,7 @@ function MeetingComposer({
     streamRef.current?.getTracks().forEach((track) => track.stop());
     recorderRef.current = null;
     streamRef.current = null;
+    stopAudioMeter();
   }
 
   async function destroyWindowIfRequested() {
@@ -764,13 +834,25 @@ function MeetingComposer({
         <header>
           <div>
             <span>{copy.meetings.composerEyebrow}</span>
-            <h2 id="meeting-composer-title">{copy.meetings.composerTitle}</h2>
-            <p>{copy.meetings.composerDescription}</p>
+            <h2 id="meeting-composer-title">
+              {recordingActive
+                ? copy.meetings.recordingTitle
+                : copy.meetings.composerTitle}
+            </h2>
+            <p>
+              {recordingActive
+                ? copy.meetings.recordingSignalDescription
+                : copy.meetings.composerDescription}
+            </p>
           </div>
           <button
             className="icon-button focus-visible-control"
             type="button"
-            aria-label={copy.actions.cancel}
+            aria-label={
+              recordingActive
+                ? copy.meetings.openRecordingExit
+                : copy.actions.cancel
+            }
             onClick={requestClose}
           >
             <X aria-hidden="true" />
@@ -850,13 +932,40 @@ function MeetingComposer({
           </div>
         ) : (
           <div className="meeting-recorder">
-            <div className="meeting-recorder__status" role="status">
+            <span className="sr-only" role="status">
+              {copy.meetings.recordingTitle}
+            </span>
+            <MeetingPipeline stage="recording" />
+            <div className="meeting-recorder__status">
               <span className="meeting-recorder__pulse" aria-hidden="true" />
               <div>
-                <strong>{copy.meetings.recordingTitle}</strong>
+                <strong>
+                  {audioLevel > 0.035
+                    ? copy.meetings.recordingSignalActive
+                    : copy.meetings.recordingSignalWaiting}
+                </strong>
                 <p>{copy.meetings.recordingDescription}</p>
               </div>
-              <time>{recordingTime(recordingSeconds)}</time>
+              <time
+                aria-label={copy.meetings.recordingElapsed(
+                  recordingTime(recordingSeconds),
+                )}
+              >
+                {recordingTime(recordingSeconds)}
+              </time>
+              <div className="meeting-recorder__meter" aria-hidden="true">
+                {RECORDER_METER_WEIGHTS.map((weight, index) => (
+                  <span
+                    key={`${weight}-${index}`}
+                    style={{
+                      height: `${Math.max(
+                        6,
+                        Math.round(7 + audioLevel * weight * 38),
+                      )}px`,
+                    }}
+                  />
+                ))}
+              </div>
             </div>
             <label className="meeting-recorder__notes">
               <span>
@@ -1007,6 +1116,57 @@ function MeetingComposer({
   );
 }
 
+function MeetingPipeline({
+  stage,
+}: {
+  stage: "recording" | "transcribing" | "analyzing";
+}) {
+  const activeIndex =
+    stage === "recording" ? 0 : stage === "transcribing" ? 1 : 2;
+  const steps = [
+    {
+      label: copy.meetings.pipelineRecording,
+      description: copy.meetings.pipelineRecordingDescription,
+    },
+    {
+      label: copy.meetings.pipelineTranscribing,
+      description: copy.meetings.pipelineTranscribingDescription,
+    },
+    {
+      label: copy.meetings.pipelineAnalyzing,
+      description: copy.meetings.pipelineAnalyzingDescription,
+    },
+  ];
+
+  return (
+    <ol className="meeting-pipeline" aria-label={copy.meetings.pipelineLabel}>
+      {steps.map((step, index) => {
+        const state =
+          index < activeIndex
+            ? "complete"
+            : index === activeIndex
+              ? "active"
+              : "pending";
+        return (
+          <li
+            key={step.label}
+            data-state={state}
+            aria-current={state === "active" ? "step" : undefined}
+          >
+            <span aria-hidden="true">
+              {state === "complete" ? <Check /> : index + 1}
+            </span>
+            <div>
+              <strong>{step.label}</strong>
+              <small>{step.description}</small>
+            </div>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
 function MeetingReview({
   detail,
   busyItemId,
@@ -1035,6 +1195,12 @@ function MeetingReview({
     ["recording", "transcribing", "queued", "analyzing"].includes(detail.status)
   ) {
     const transcribing = detail.status === "transcribing";
+    const recording = detail.status === "recording";
+    const pipelineStage = recording
+      ? "recording"
+      : transcribing
+        ? "transcribing"
+        : "analyzing";
     return (
       <div className="meeting-analysis-state" role="status">
         <span className="meeting-analysis-state__mark">
@@ -1043,16 +1209,21 @@ function MeetingReview({
         <div>
           <MeetingStatusLabel status={detail.status} />
           <h2>
-            {transcribing
-              ? copy.meetings.transcribingTitle
-              : copy.meetings.analyzingTitle}
+            {recording
+              ? copy.meetings.recordingQueuedTitle
+              : transcribing
+                ? copy.meetings.transcribingTitle
+                : copy.meetings.analyzingTitle}
           </h2>
           <p>
-            {transcribing
-              ? copy.meetings.transcribingDescription
-              : copy.meetings.analyzingDescription}
+            {recording
+              ? copy.meetings.recordingQueuedDescription
+              : transcribing
+                ? copy.meetings.transcribingDescription
+                : copy.meetings.analyzingDescription}
           </p>
         </div>
+        <MeetingPipeline stage={pipelineStage} />
         <div className="meeting-analysis-state__progress" aria-hidden="true">
           <span />
         </div>
@@ -1125,39 +1296,12 @@ function MeetingReview({
       </section>
 
       {(detail.transcriptSegments.length > 0 || detail.recording?.notes) && (
-        <details className="meeting-transcript-timeline">
-          <summary>
-            <span>
-              <FileAudio aria-hidden="true" />
-              {copy.meetings.transcriptTimeline}
-            </span>
-            <small>
-              {copy.meetings.segmentCount(detail.transcriptSegments.length)}
-            </small>
-          </summary>
-          {detail.recording?.notes && (
-            <section className="meeting-transcript-timeline__notes">
-              <strong>{copy.meetings.recordedNotes}</strong>
-              <p>{detail.recording.notes}</p>
-            </section>
-          )}
-          {detail.transcriptSegments.length > 0 && (
-            <ol>
-              {detail.transcriptSegments.map((segment) => (
-                <li key={segment.id}>
-                  <time>{segmentTimestamp(segment.startsAtMilliseconds)}</time>
-                  <div>
-                    <strong>
-                      {segment.speakerName ??
-                        copy.meetings.unknownSpeaker(segment.speakerKey)}
-                    </strong>
-                    <p>{segment.text}</p>
-                  </div>
-                </li>
-              ))}
-            </ol>
-          )}
-        </details>
+        <MeetingTranscriptPanel
+          meetingId={detail.id}
+          notes={detail.recording?.notes}
+          speakers={detail.speakers}
+          segments={detail.transcriptSegments}
+        />
       )}
 
       <div className="meeting-review__columns">
@@ -1252,6 +1396,182 @@ function MeetingReview({
         </section>
       )}
     </article>
+  );
+}
+
+export type MeetingTranscriptGroup = {
+  id: string;
+  speakerId: string;
+  speakerKey: string;
+  speakerName: string | null;
+  startsAtMilliseconds: number;
+  endsAtMilliseconds: number;
+  text: string;
+  segmentCount: number;
+};
+
+export function groupTranscriptSegments(
+  segments: MeetingTranscriptSegment[],
+): MeetingTranscriptGroup[] {
+  return segments.reduce<MeetingTranscriptGroup[]>((groups, segment) => {
+    const previous = groups.at(-1);
+    const closeToPrevious =
+      previous &&
+      segment.startsAtMilliseconds - previous.endsAtMilliseconds <= 5_000;
+    if (
+      previous &&
+      previous.speakerId === segment.speakerId &&
+      previous.segmentCount < 3 &&
+      closeToPrevious
+    ) {
+      previous.text = `${previous.text} ${segment.text}`.trim();
+      previous.endsAtMilliseconds = segment.endsAtMilliseconds;
+      previous.segmentCount += 1;
+      return groups;
+    }
+    groups.push({
+      id: segment.id,
+      speakerId: segment.speakerId,
+      speakerKey: segment.speakerKey,
+      speakerName: segment.speakerName,
+      startsAtMilliseconds: segment.startsAtMilliseconds,
+      endsAtMilliseconds: segment.endsAtMilliseconds,
+      text: segment.text,
+      segmentCount: 1,
+    });
+    return groups;
+  }, []);
+}
+
+function MeetingTranscriptPanel({
+  meetingId,
+  notes,
+  speakers,
+  segments,
+}: {
+  meetingId: string;
+  notes: string | undefined;
+  speakers: MeetingSpeaker[];
+  segments: MeetingTranscriptSegment[];
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const groups = groupTranscriptSegments(segments);
+  const previewLimit = 6;
+  const visibleGroups = expanded ? groups : groups.slice(0, previewLimit);
+  const remainingCount = Math.max(0, groups.length - previewLimit);
+  const speakerById = new Map(speakers.map((speaker) => [speaker.id, speaker]));
+
+  useEffect(() => setExpanded(false), [meetingId]);
+
+  function speakerLabel(
+    speaker: MeetingSpeaker | undefined,
+    group?: MeetingTranscriptGroup,
+  ) {
+    if (speaker?.displayName) return speaker.displayName;
+    if (group?.speakerName) return group.speakerName;
+    const ordinal =
+      speaker?.ordinal ??
+      Math.max(
+        0,
+        speakers.findIndex((candidate) => candidate.id === group?.speakerId),
+      );
+    return copy.meetings.unnamedSpeaker(ordinal + 1);
+  }
+
+  return (
+    <section
+      className="meeting-transcript-panel"
+      aria-labelledby={`meeting-transcript-${meetingId}`}
+    >
+      <header className="meeting-transcript-panel__header">
+        <div className="meeting-transcript-panel__title">
+          <span aria-hidden="true">
+            <FileAudio />
+          </span>
+          <div>
+            <h3 id={`meeting-transcript-${meetingId}`}>
+              {copy.meetings.transcriptTimeline}
+            </h3>
+            <p>
+              {copy.meetings.speakerAndSegmentCount(
+                speakers.length,
+                segments.length,
+              )}
+            </p>
+          </div>
+        </div>
+        {speakers.length > 0 && (
+          <ul
+            className="meeting-transcript-panel__speakers"
+            aria-label={copy.meetings.speakerLegend}
+          >
+            {speakers.map((speaker) => (
+              <li key={speaker.id} data-speaker-tone={speaker.ordinal % 4}>
+                <span aria-hidden="true">
+                  {speakerInitial(speakerLabel(speaker), speaker.ordinal)}
+                </span>
+                {speakerLabel(speaker)}
+              </li>
+            ))}
+          </ul>
+        )}
+      </header>
+
+      {notes && (
+        <section className="meeting-transcript-panel__notes">
+          <strong>{copy.meetings.recordedNotes}</strong>
+          <p>{notes}</p>
+        </section>
+      )}
+
+      {visibleGroups.length > 0 && (
+        <ol className="meeting-transcript-panel__segments">
+          {visibleGroups.map((group) => {
+            const speaker = speakerById.get(group.speakerId);
+            const speakerOrdinal =
+              speaker?.ordinal ??
+              Math.max(
+                0,
+                speakers.findIndex(
+                  (candidate) => candidate.id === group.speakerId,
+                ),
+              );
+            const label = speakerLabel(speaker, group);
+            return (
+              <li key={group.id} data-speaker-tone={speakerOrdinal % 4}>
+                <span
+                  className="meeting-transcript-panel__avatar"
+                  aria-hidden="true"
+                >
+                  {speakerInitial(label, speakerOrdinal)}
+                </span>
+                <div>
+                  <header>
+                    <strong>{label}</strong>
+                    <time>{segmentTimestamp(group.startsAtMilliseconds)}</time>
+                  </header>
+                  <p>{group.text}</p>
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+
+      {remainingCount > 0 && (
+        <button
+          className="meeting-transcript-panel__toggle focus-visible-control"
+          type="button"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          {expanded
+            ? copy.meetings.collapseTranscript
+            : copy.meetings.moreTranscript(remainingCount)}
+          <ChevronDown aria-hidden="true" />
+        </button>
+      )}
+    </section>
   );
 }
 
@@ -1535,6 +1855,11 @@ function segmentTimestamp(milliseconds: number): string {
   const minutes = Math.floor(seconds / 60);
   const remainder = seconds % 60;
   return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+}
+
+function speakerInitial(label: string, ordinal: number): string {
+  if (label.startsWith("발언자 ")) return String(ordinal + 1);
+  return Array.from(label.trim())[0]?.toUpperCase() ?? String(ordinal + 1);
 }
 
 function notesSaveLabel(state: "idle" | "saving" | "saved" | "failed"): string {

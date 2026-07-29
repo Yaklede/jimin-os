@@ -155,7 +155,18 @@ export async function fetchMeeting(
   );
   const body = await readJson(response);
   if (!response.ok || !isRecord(body)) throw errorFrom(response.status);
-  return body as unknown as MeetingDetail;
+  return {
+    ...(body as unknown as MeetingDetail),
+    participants: arrayOrEmpty<Meeting["participants"]>(body.participants),
+    topics: arrayOrEmpty<Meeting["topics"]>(body.topics),
+    risks: arrayOrEmpty<Meeting["risks"]>(body.risks),
+    speakers: arrayOrEmpty<MeetingSpeaker[]>(body.speakers),
+    transcriptSegments: arrayOrEmpty<MeetingTranscriptSegment[]>(
+      body.transcriptSegments,
+    ),
+    decisions: arrayOrEmpty<MeetingDecision[]>(body.decisions),
+    actionItems: arrayOrEmpty<MeetingActionItem[]>(body.actionItems),
+  };
 }
 
 export async function createMeeting(
@@ -371,6 +382,10 @@ function isMeetingList(value: unknown): value is { items: MeetingSummary[] } {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function arrayOrEmpty<T extends unknown[]>(value: unknown): T {
+  return (Array.isArray(value) ? value : []) as T;
 }
 
 async function blobAsBase64(blob: Blob): Promise<string> {

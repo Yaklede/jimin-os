@@ -351,7 +351,7 @@ export const copy = {
     rejectFailed: "이 항목을 제외하지 못했어요. 잠시 후 다시 시도해 주세요.",
     emptyTitle: "아직 정리한 회의가 없어요",
     emptyDescription:
-      "회의를 받아쓰거나 기존 회의록을 붙여 넣어 시작해 보세요.",
+      "회의를 녹음하거나 기존 회의록을 붙여 넣어 시작해 보세요.",
     selectTitle: "회의를 선택해 주세요",
     selectDescription:
       "요약과 결정사항, 실행할 일을 한곳에서 확인할 수 있어요.",
@@ -359,7 +359,7 @@ export const copy = {
     composerEyebrow: "새 회의",
     composerTitle: "회의 내용을 남겨 주세요",
     composerDescription:
-      "받아쓰거나 기존 회의록을 붙여 넣으면 지민이 결정과 할 일을 분리해 드려요.",
+      "회의를 녹음하거나 기존 회의록을 붙여 넣으면 결정과 할 일을 나눠 정리해요.",
     nameLabel: "회의 이름",
     namePlaceholder: "예: 비스킷링크 주간 회의",
     purposeLabel: "이번 회의에서 정할 것",
@@ -368,9 +368,9 @@ export const copy = {
     participantsPlaceholder: "이름을 쉼표로 나눠 적어 주세요",
     workspaceLabel: "업무 영역",
     projectLabel: "연결할 프로젝트",
-    transcriptLabel: "회의 내용",
+    transcriptLabel: "기존 회의록 직접 입력",
     transcriptPlaceholder:
-      "회의 중 받아쓰기를 시작하거나, 이미 작성한 회의록을 붙여 넣어 주세요.",
+      "이미 작성한 회의록이 있다면 여기에 붙여 넣어 주세요.",
     recordingReadyTitle: "녹음하면서 메모할 수 있어요",
     recordingReadyDescription:
       "원음은 안전하게 나눠 저장하고, 끝난 뒤 발언자별 회의록으로 정리해요.",
@@ -379,6 +379,21 @@ export const copy = {
     recordingTitle: "회의를 녹음하고 있어요",
     recordingDescription:
       "음성은 나눠서 저장하고 있어요. 중요한 내용은 아래 메모장에 바로 적어 두세요.",
+    recordingSignalActive: "말소리가 들어오고 있어요",
+    recordingSignalWaiting: "말소리를 기다리고 있어요",
+    recordingSignalDescription:
+      "녹음을 마치면 발언자를 구분하고 회의록을 정리해요.",
+    recordingElapsed: (time: string) => `녹음 시간 ${time}`,
+    recordingInterrupted:
+      "마이크 연결이 끊겼어요. 현재 녹음을 저장하거나 버린 뒤 다시 시작해 주세요.",
+    openRecordingExit: "녹음 종료 방법 보기",
+    pipelineLabel: "회의 정리 단계",
+    pipelineRecording: "녹음",
+    pipelineRecordingDescription: "음성과 메모 저장",
+    pipelineTranscribing: "발언자 구분",
+    pipelineTranscribingDescription: "목소리와 발언 시간 분석",
+    pipelineAnalyzing: "회의록 정리",
+    pipelineAnalyzingDescription: "요약과 후속 일 추출",
     recordingNameRequired: "먼저 회의 이름을 적어 주세요.",
     recordingUnsupported:
       "이 기기에서는 회의 녹음을 시작할 수 없어요. 기존 회의록을 붙여 넣어 주세요.",
@@ -421,6 +436,9 @@ export const copy = {
     transcribingTitle: "발언자를 나눠 회의록을 만들고 있어요",
     transcribingDescription:
       "저장한 음성을 시간순으로 맞추고 발언자별 문장으로 정리하고 있어요.",
+    recordingQueuedTitle: "녹음 내용을 안전하게 저장하고 있어요",
+    recordingQueuedDescription:
+      "저장이 끝나면 발언자 구분과 회의록 정리를 자동으로 시작해요.",
     analyzingTitle: "회의 내용을 정리하고 있어요",
     analyzingDescription:
       "원문을 바탕으로 요약, 결정사항, 실행 후보를 나누고 있어요. 잠시 후 자동으로 보여드릴게요.",
@@ -431,7 +449,13 @@ export const copy = {
     retryFailed: "회의를 다시 정리하지 못했어요. 연결 상태를 확인해 주세요.",
     summaryLabel: "한눈에 보기",
     transcriptTimeline: "발언자별 회의 내용",
+    speakerLegend: "확인된 발언자",
     segmentCount: (count: number) => `발언 ${count}개`,
+    speakerAndSegmentCount: (speakers: number, segments: number) =>
+      `발언자 ${speakers}명 · 발언 ${segments}개`,
+    moreTranscript: (count: number) => `나머지 발언 ${count}개 보기`,
+    collapseTranscript: "발언 간단히 보기",
+    unnamedSpeaker: (number: number) => `발언자 ${number}`,
     recordedNotes: "회의 중 메모",
     unknownSpeaker: (speakerKey: string) =>
       `발언자 ${speakerKey.replace("SPEAKER_", "")}`,

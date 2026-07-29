@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createMeeting,
   decideMeetingAction,
+  fetchMeeting,
   fetchMeetings,
   finalizeMeetingRecording,
   reanalyzeMeeting,
@@ -110,6 +111,36 @@ describe("meeting API", () => {
     expect(fetchMock.mock.calls[1][0]).toContain("/decisions");
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({
       decision: "approve",
+    });
+  });
+
+  it("opens meetings created before speaker transcripts were added", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "meeting-legacy",
+          title: "기존 회의",
+          status: "review_ready",
+          participants: ["조지민"],
+          topics: [],
+          risks: [],
+          decisions: [],
+          actionItems: [],
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchMeeting("https://os.example", "access", "meeting-legacy"),
+    ).resolves.toMatchObject({
+      id: "meeting-legacy",
+      speakers: [],
+      transcriptSegments: [],
     });
   });
 
