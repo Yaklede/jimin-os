@@ -8,11 +8,14 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use jimin_observability::RequestId;
 use jimin_storage::{
+    StorageError,
     meetings::{
-        Meeting, MeetingActionItem, MeetingActionItemUpdate, MeetingActionKind,
-        MeetingActionStatus, MeetingDecision, MeetingDetail, MeetingRecording,
-        MeetingRecordingState, MeetingSpeaker, MeetingStatus, MeetingTranscriptSegment, NewMeeting,
-        NewRecordedMeeting, RecordingChunk, RecordingFinalize, RecordingNoteUpdate,
+        EditedMeetingSpeaker, EditedMeetingTranscriptSegment, Meeting, MeetingActionItem,
+        MeetingActionItemUpdate, MeetingActionKind, MeetingActionStatus,
+        MeetingAnalysisRetryOutcome, MeetingDecision, MeetingDetail, MeetingRecording,
+        MeetingRecordingState, MeetingSpeaker, MeetingStatus, MeetingTranscriptEdit,
+        MeetingTranscriptSegment, MeetingTranscriptUpdateOutcome, NewMeeting, NewRecordedMeeting,
+        RecordingChunk, RecordingFinalize, RecordingNoteUpdate,
     },
     planning::{NewScheduleEntry, NewTask},
 };
@@ -69,6 +72,45 @@ pub(crate) struct UploadMeetingRecordingChunkRequest {
 pub(crate) struct FinalizeMeetingRecordingRequest {
     mime_type: String,
     duration_milliseconds: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReanalyzeMeetingRequest {
+    expected_version: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateMeetingTranscriptRequest {
+    expected_version: i64,
+    speakers: Vec<UpdateMeetingSpeakerRequest>,
+    segments: Vec<UpdateMeetingTranscriptSegmentRequest>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateMeetingSpeakerRequest {
+    speaker_key: String,
+    display_name: Option<String>,
+    ordinal: i16,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateMeetingTranscriptSegmentRequest {
+    id: Uuid,
+    speaker_key: String,
+    ordinal: i32,
+    starts_at_milliseconds: i64,
+    ends_at_milliseconds: i64,
+    text: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateMeetingTranscriptResponse {
+    version: i64,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -310,6 +352,10 @@ pub(crate) fn routes() -> Router<ApiState> {
         .route(
             "/v1/meetings/{meeting_id}/reanalyze",
             post(reanalyze_meeting),
+        )
+        .route(
+            "/v1/meetings/{meeting_id}/transcript",
+            put(update_meeting_transcript).layer(DefaultBodyLimit::max(12 * 1024 * 1024)),
         )
         .route(
             "/v1/meetings/{meeting_id}/action-items/{item_id}",
@@ -563,13 +609,15 @@ pub(crate) async fn list_meetings(
     path = "/v1/meetings/{meeting_id}/reanalyze",
     tag = "meetings",
     params(("meeting_id" = Uuid, Path)),
-    responses((status = 200, body = MeetingResponse), (status = 401), (status = 404), (status = 409), (status = 503))
+    request_body = ReanalyzeMeetingRequest,
+    responses((status = 200, body = MeetingResponse), (status = 400), (status = 401), (status = 404), (status = 409), (status = 503))
 )]
 pub(crate) async fn reanalyze_meeting(
     State(state): State<ApiState>,
     Extension(request_id): Extension<RequestId>,
     headers: HeaderMap,
     Path(meeting_id): Path<Uuid>,
+    Json(body): Json<ReanalyzeMeetingRequest>,
 ) -> Response {
     let principal = match auth::authenticate(&state, &headers).await {
         Ok(principal) => principal,
@@ -579,13 +627,21 @@ pub(crate) async fn reanalyze_meeting(
         return unavailable_response(request_id);
     };
     match database
-        .retry_meeting_analysis(principal.identity().user_id(), meeting_id)
+        .retry_meeting_analysis(
+            principal.identity().user_id(),
+            meeting_id,
+            body.expected_version,
+        )
         .await
     {
-        Ok(meeting) => meeting_response(meeting).map(Json).map_or_else(
-            |()| unavailable_response(request_id),
-            IntoResponse::into_response,
-        ),
+        Ok(MeetingAnalysisRetryOutcome::Requeued(meeting)) => {
+            meeting_response(*meeting).map(Json).map_or_else(
+                |()| unavailable_response(request_id),
+                IntoResponse::into_response,
+            )
+        }
+        Ok(MeetingAnalysisRetryOutcome::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Ok(MeetingAnalysisRetryOutcome::Conflict) => StatusCode::CONFLICT.into_response(),
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -741,6 +797,67 @@ pub(crate) async fn get_meeting(
 }
 
 #[utoipa::path(
+    put,
+    path = "/v1/meetings/{meeting_id}/transcript",
+    tag = "meetings",
+    params(("meeting_id" = Uuid, Path)),
+    request_body = UpdateMeetingTranscriptRequest,
+    responses((status = 200, body = UpdateMeetingTranscriptResponse), (status = 400), (status = 401), (status = 404), (status = 409), (status = 503))
+)]
+pub(crate) async fn update_meeting_transcript(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(meeting_id): Path<Uuid>,
+    Json(body): Json<UpdateMeetingTranscriptRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(database) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let user_id = principal.identity().user_id();
+    let outcome = database
+        .replace_meeting_transcript_for_user(&MeetingTranscriptEdit {
+            meeting_id,
+            user_id,
+            expected_version: body.expected_version,
+            speakers: body
+                .speakers
+                .into_iter()
+                .map(|speaker| EditedMeetingSpeaker {
+                    speaker_key: speaker.speaker_key,
+                    display_name: speaker.display_name,
+                    ordinal: speaker.ordinal,
+                })
+                .collect(),
+            segments: body
+                .segments
+                .into_iter()
+                .map(|segment| EditedMeetingTranscriptSegment {
+                    id: segment.id,
+                    speaker_key: segment.speaker_key,
+                    ordinal: segment.ordinal,
+                    starts_at_milliseconds: segment.starts_at_milliseconds,
+                    ends_at_milliseconds: segment.ends_at_milliseconds,
+                    text: segment.text,
+                })
+                .collect(),
+        })
+        .await;
+    match outcome {
+        Ok(MeetingTranscriptUpdateOutcome::Updated(version)) => {
+            Json(UpdateMeetingTranscriptResponse { version }).into_response()
+        }
+        Ok(MeetingTranscriptUpdateOutcome::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Ok(MeetingTranscriptUpdateOutcome::Conflict) => StatusCode::CONFLICT.into_response(),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
     post,
     path = "/v1/meetings/{meeting_id}/action-items/{item_id}/decisions",
     tag = "meetings",
@@ -771,6 +888,16 @@ pub(crate) async fn decide_meeting_action(
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
         Err(error) => return storage_error_response(&error, request_id),
     };
+    if item.status == MeetingActionStatus::Suggested {
+        match database.meeting_detail_for_user(user_id, meeting_id).await {
+            Ok(Some(detail)) if detail.meeting.analyzed_at.is_none() => {
+                return StatusCode::CONFLICT.into_response();
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Err(error) => return storage_error_response(&error, request_id),
+        }
+    }
     if matches!(body.decision, MeetingActionDecision::Approve)
         && item.status == MeetingActionStatus::Suggested
         && let Err(response) = apply_action(database, user_id, &item, request_id).await
@@ -789,6 +916,7 @@ pub(crate) async fn decide_meeting_action(
             |()| unavailable_response(request_id),
             IntoResponse::into_response,
         ),
+        Err(StorageError::IdentityConflict) => StatusCode::CONFLICT.into_response(),
         Err(error) => storage_error_response(&error, request_id),
     }
 }

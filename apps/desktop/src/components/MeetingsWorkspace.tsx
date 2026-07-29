@@ -29,15 +29,16 @@ import {
   fetchMeetings,
   reanalyzeMeeting,
   startMeetingRecording,
+  updateMeetingTranscript,
   updateMeetingAction,
   updateMeetingRecordingNotes,
   uploadMeetingRecordingChunk,
   type Meeting,
   type MeetingActionItem,
   type MeetingDetail,
-  type MeetingSpeaker,
   type MeetingSummary,
-  type MeetingTranscriptSegment,
+  type MeetingTranscriptUpdateInput,
+  type MeetingTranscriptUpdateResult,
 } from "../api/meetings";
 import { type Project, type Workspace } from "../api/projects";
 import { copy } from "../copy";
@@ -47,6 +48,13 @@ import {
   SkeletonGroup,
   useDelayedSkeleton,
 } from "./ContentSkeleton";
+import { MeetingTranscriptPanel } from "./MeetingTranscriptPanel";
+import { applyMeetingTranscriptUpdateToDetail } from "./meetingTranscriptDraft";
+
+export {
+  groupTranscriptSegments,
+  type MeetingTranscriptGroup,
+} from "./MeetingTranscriptPanel";
 
 const RECORDER_METER_WEIGHTS = [
   0.42, 0.68, 0.9, 0.58, 1, 0.76, 0.48, 0.82, 0.62, 0.94, 0.7, 0.46,
@@ -82,6 +90,7 @@ export function MeetingsWorkspace({
   const [bulkApplying, setBulkApplying] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [mobileListOpen, setMobileListOpen] = useState(false);
+  const [transcriptDirty, setTranscriptDirty] = useState(false);
   const meetingListRef = useRef<HTMLDivElement>(null);
   const skeletonVisible = useDelayedSkeleton(loading || detailLoading);
 
@@ -111,7 +120,7 @@ export function MeetingsWorkspace({
         );
         setError(undefined);
       } catch {
-        setError(copy.meetings.detailFailed);
+        if (!quiet) setError(copy.meetings.detailFailed);
       } finally {
         if (!quiet) setDetailLoading(false);
       }
@@ -213,13 +222,111 @@ export function MeetingsWorkspace({
     setRetrying(true);
     setError(undefined);
     try {
-      await reanalyzeMeeting(apiBaseUrl, accessToken, detail.id);
-      await loadDetail(detail.id, true);
+      const queued = await reanalyzeMeeting(
+        apiBaseUrl,
+        accessToken,
+        detail.id,
+        detail.version,
+      );
+      setDetail((current) =>
+        current?.id === queued.id ? { ...current, ...queued } : current,
+      );
+      setMeetings((current) =>
+        current.map((meeting) =>
+          meeting.id === queued.id ? { ...meeting, ...queued } : meeting,
+        ),
+      );
+      setTranscriptDirty(false);
+      void loadDetail(detail.id, true);
     } catch {
       setError(copy.meetings.retryFailed);
     } finally {
       setRetrying(false);
     }
+  }
+
+  async function saveTranscript(
+    input: MeetingTranscriptUpdateInput,
+  ): Promise<MeetingTranscriptUpdateResult> {
+    if (!detail) throw new Error("meeting_not_selected");
+    const saved = await updateMeetingTranscript(
+      apiBaseUrl,
+      accessToken,
+      detail.id,
+      input,
+    );
+    const savedDetail = applyMeetingTranscriptUpdateToDetail(
+      detail,
+      input,
+      saved.version,
+    );
+    setDetail(savedDetail);
+    setMeetings((current) =>
+      current.map((meeting) =>
+        meeting.id === detail.id
+          ? {
+              ...meeting,
+              version: saved.version,
+              analyzedAt: null,
+              updatedAt: savedDetail.updatedAt,
+            }
+          : meeting,
+      ),
+    );
+    return saved;
+  }
+
+  async function reloadTranscript(): Promise<MeetingDetail> {
+    if (!detail) throw new Error("meeting_not_selected");
+    const latest = await fetchMeeting(apiBaseUrl, accessToken, detail.id);
+    setDetail(latest);
+    setMeetings((current) =>
+      current.map((meeting) =>
+        meeting.id === latest.id ? { ...meeting, ...latest } : meeting,
+      ),
+    );
+    return latest;
+  }
+
+  async function reanalyzeTranscript(expectedVersion: number): Promise<void> {
+    if (!detail) return;
+    setRetrying(true);
+    try {
+      const queued = await reanalyzeMeeting(
+        apiBaseUrl,
+        accessToken,
+        detail.id,
+        expectedVersion,
+      );
+      setDetail((current) =>
+        current?.id === queued.id ? { ...current, ...queued } : current,
+      );
+      setMeetings((current) =>
+        current.map((meeting) =>
+          meeting.id === queued.id ? { ...meeting, ...queued } : meeting,
+        ),
+      );
+      setTranscriptDirty(false);
+      void loadDetail(detail.id, true);
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  function selectMeeting(meetingId: string) {
+    if (meetingId === selectedMeetingId) {
+      setMobileListOpen(false);
+      return;
+    }
+    if (
+      transcriptDirty &&
+      !window.confirm(copy.meetings.transcriptDiscardConfirm)
+    ) {
+      return;
+    }
+    setTranscriptDirty(false);
+    setSelectedMeetingId(meetingId);
+    setMobileListOpen(false);
   }
 
   async function updateAction(
@@ -344,10 +451,7 @@ export function MeetingsWorkspace({
                   data-active={meeting.id === selectedMeetingId}
                   type="button"
                   key={meeting.id}
-                  onClick={() => {
-                    setSelectedMeetingId(meeting.id);
-                    setMobileListOpen(false);
-                  }}
+                  onClick={() => selectMeeting(meeting.id)}
                 >
                   <span className="meeting-list-item__icon" aria-hidden="true">
                     <FileAudio />
@@ -381,6 +485,10 @@ export function MeetingsWorkspace({
               onUpdate={updateAction}
               onApplyRemaining={applyRemaining}
               onRetry={retryAnalysis}
+              onSaveTranscript={saveTranscript}
+              onReloadTranscript={reloadTranscript}
+              onReanalyzeTranscript={reanalyzeTranscript}
+              onTranscriptDirtyChange={setTranscriptDirty}
             />
           ) : (
             <div className="meeting-detail__empty">
@@ -1177,6 +1285,10 @@ function MeetingReview({
   onUpdate,
   onApplyRemaining,
   onRetry,
+  onSaveTranscript,
+  onReloadTranscript,
+  onReanalyzeTranscript,
+  onTranscriptDirtyChange,
 }: {
   detail: MeetingDetail;
   busyItemId: string | undefined;
@@ -1190,6 +1302,12 @@ function MeetingReview({
   ): Promise<boolean>;
   onApplyRemaining(): void;
   onRetry(): void;
+  onSaveTranscript(
+    input: MeetingTranscriptUpdateInput,
+  ): Promise<MeetingTranscriptUpdateResult>;
+  onReloadTranscript(): Promise<MeetingDetail>;
+  onReanalyzeTranscript(expectedVersion: number): Promise<void>;
+  onTranscriptDirtyChange(dirty: boolean): void;
 }) {
   if (
     ["recording", "transcribing", "queued", "analyzing"].includes(detail.status)
@@ -1230,34 +1348,49 @@ function MeetingReview({
       </div>
     );
   }
-  if (detail.status === "failed") {
-    return (
-      <div className="meeting-detail__empty" role="alert">
-        <CircleAlert aria-hidden="true" />
-        <h2>{copy.meetings.analysisFailedTitle}</h2>
-        <p>{copy.meetings.analysisFailedDescription}</p>
-        <button
-          className="primary-button"
-          type="button"
-          disabled={retrying}
-          onClick={onRetry}
-        >
-          {retrying && <LoaderCircle className="spin" aria-hidden="true" />}
-          {retrying ? copy.meetings.retrying : copy.meetings.retryAnalysis}
-        </button>
-      </div>
-    );
-  }
-
-  const pendingActionCount = detail.actionItems.filter(
+  const analysisOutdated =
+    detail.analyzedAt === null && detail.transcriptSegments.length > 0;
+  const visibleActionItems = analysisOutdated
+    ? detail.actionItems.filter((item) => item.status === "applied")
+    : detail.actionItems;
+  const pendingActionCount = visibleActionItems.filter(
     (item) => item.status === "suggested",
   ).length;
 
   return (
     <article className="meeting-review">
+      {(detail.status === "failed" || analysisOutdated) && (
+        <section className="meeting-review__analysis-notice" role="alert">
+          <CircleAlert aria-hidden="true" />
+          <div>
+            <h2>
+              {detail.status === "failed"
+                ? copy.meetings.analysisFailedTitle
+                : copy.meetings.transcriptAnalysisOutdatedTitle}
+            </h2>
+            <p>
+              {detail.status === "failed"
+                ? copy.meetings.analysisFailedDescription
+                : copy.meetings.transcriptAnalysisOutdatedDescription}
+            </p>
+          </div>
+          <button
+            className="primary-button"
+            type="button"
+            disabled={retrying}
+            onClick={onRetry}
+          >
+            {retrying && <LoaderCircle className="spin" aria-hidden="true" />}
+            {retrying ? copy.meetings.retrying : copy.meetings.retryAnalysis}
+          </button>
+        </section>
+      )}
+
       <header className="meeting-review__header">
         <div>
-          <MeetingStatusLabel status={detail.status} />
+          <MeetingStatusLabel
+            status={analysisOutdated ? "failed" : detail.status}
+          />
           <h2>{detail.title}</h2>
           <p>
             {detail.projectTitle ?? copy.meetings.noProject} ·{" "}
@@ -1283,24 +1416,31 @@ function MeetingReview({
         )}
       </header>
 
-      <section className="meeting-review__summary">
-        <span>{copy.meetings.summaryLabel}</span>
-        <p>{detail.summary}</p>
-        {detail.topics.length > 0 && (
-          <div className="meeting-review__topics">
-            {detail.topics.map((topic) => (
-              <span key={topic}>{topic}</span>
-            ))}
-          </div>
-        )}
-      </section>
+      {detail.summary && (
+        <section className="meeting-review__summary">
+          <span>{copy.meetings.summaryLabel}</span>
+          <p>{detail.summary}</p>
+          {detail.topics.length > 0 && (
+            <div className="meeting-review__topics">
+              {detail.topics.map((topic) => (
+                <span key={topic}>{topic}</span>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       {(detail.transcriptSegments.length > 0 || detail.recording?.notes) && (
         <MeetingTranscriptPanel
           meetingId={detail.id}
+          meetingVersion={detail.version}
           notes={detail.recording?.notes}
           speakers={detail.speakers}
           segments={detail.transcriptSegments}
+          onSave={onSaveTranscript}
+          onReload={onReloadTranscript}
+          onReanalyze={onReanalyzeTranscript}
+          onDirtyChange={onTranscriptDirtyChange}
         />
       )}
 
@@ -1340,7 +1480,7 @@ function MeetingReview({
               {copy.meetings.actionsTitle}
             </h3>
             <div className="meetings-section-heading__actions">
-              <span>{copy.meetings.count(detail.actionItems.length)}</span>
+              <span>{copy.meetings.count(visibleActionItems.length)}</span>
               {pendingActionCount > 1 && (
                 <button
                   className="secondary-button"
@@ -1358,13 +1498,13 @@ function MeetingReview({
               )}
             </div>
           </div>
-          {detail.actionItems.length === 0 ? (
+          {visibleActionItems.length === 0 ? (
             <p className="meeting-review__empty-copy">
               {copy.meetings.noActions}
             </p>
           ) : (
             <div className="meeting-action-list">
-              {detail.actionItems.map((item) => (
+              {visibleActionItems.map((item) => (
                 <MeetingActionCard
                   item={item}
                   busy={busyItemId === item.id}
@@ -1396,182 +1536,6 @@ function MeetingReview({
         </section>
       )}
     </article>
-  );
-}
-
-export type MeetingTranscriptGroup = {
-  id: string;
-  speakerId: string;
-  speakerKey: string;
-  speakerName: string | null;
-  startsAtMilliseconds: number;
-  endsAtMilliseconds: number;
-  text: string;
-  segmentCount: number;
-};
-
-export function groupTranscriptSegments(
-  segments: MeetingTranscriptSegment[],
-): MeetingTranscriptGroup[] {
-  return segments.reduce<MeetingTranscriptGroup[]>((groups, segment) => {
-    const previous = groups.at(-1);
-    const closeToPrevious =
-      previous &&
-      segment.startsAtMilliseconds - previous.endsAtMilliseconds <= 5_000;
-    if (
-      previous &&
-      previous.speakerId === segment.speakerId &&
-      previous.segmentCount < 3 &&
-      closeToPrevious
-    ) {
-      previous.text = `${previous.text} ${segment.text}`.trim();
-      previous.endsAtMilliseconds = segment.endsAtMilliseconds;
-      previous.segmentCount += 1;
-      return groups;
-    }
-    groups.push({
-      id: segment.id,
-      speakerId: segment.speakerId,
-      speakerKey: segment.speakerKey,
-      speakerName: segment.speakerName,
-      startsAtMilliseconds: segment.startsAtMilliseconds,
-      endsAtMilliseconds: segment.endsAtMilliseconds,
-      text: segment.text,
-      segmentCount: 1,
-    });
-    return groups;
-  }, []);
-}
-
-function MeetingTranscriptPanel({
-  meetingId,
-  notes,
-  speakers,
-  segments,
-}: {
-  meetingId: string;
-  notes: string | undefined;
-  speakers: MeetingSpeaker[];
-  segments: MeetingTranscriptSegment[];
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const groups = groupTranscriptSegments(segments);
-  const previewLimit = 6;
-  const visibleGroups = expanded ? groups : groups.slice(0, previewLimit);
-  const remainingCount = Math.max(0, groups.length - previewLimit);
-  const speakerById = new Map(speakers.map((speaker) => [speaker.id, speaker]));
-
-  useEffect(() => setExpanded(false), [meetingId]);
-
-  function speakerLabel(
-    speaker: MeetingSpeaker | undefined,
-    group?: MeetingTranscriptGroup,
-  ) {
-    if (speaker?.displayName) return speaker.displayName;
-    if (group?.speakerName) return group.speakerName;
-    const ordinal =
-      speaker?.ordinal ??
-      Math.max(
-        0,
-        speakers.findIndex((candidate) => candidate.id === group?.speakerId),
-      );
-    return copy.meetings.unnamedSpeaker(ordinal + 1);
-  }
-
-  return (
-    <section
-      className="meeting-transcript-panel"
-      aria-labelledby={`meeting-transcript-${meetingId}`}
-    >
-      <header className="meeting-transcript-panel__header">
-        <div className="meeting-transcript-panel__title">
-          <span aria-hidden="true">
-            <FileAudio />
-          </span>
-          <div>
-            <h3 id={`meeting-transcript-${meetingId}`}>
-              {copy.meetings.transcriptTimeline}
-            </h3>
-            <p>
-              {copy.meetings.speakerAndSegmentCount(
-                speakers.length,
-                segments.length,
-              )}
-            </p>
-          </div>
-        </div>
-        {speakers.length > 0 && (
-          <ul
-            className="meeting-transcript-panel__speakers"
-            aria-label={copy.meetings.speakerLegend}
-          >
-            {speakers.map((speaker) => (
-              <li key={speaker.id} data-speaker-tone={speaker.ordinal % 4}>
-                <span aria-hidden="true">
-                  {speakerInitial(speakerLabel(speaker), speaker.ordinal)}
-                </span>
-                {speakerLabel(speaker)}
-              </li>
-            ))}
-          </ul>
-        )}
-      </header>
-
-      {notes && (
-        <section className="meeting-transcript-panel__notes">
-          <strong>{copy.meetings.recordedNotes}</strong>
-          <p>{notes}</p>
-        </section>
-      )}
-
-      {visibleGroups.length > 0 && (
-        <ol className="meeting-transcript-panel__segments">
-          {visibleGroups.map((group) => {
-            const speaker = speakerById.get(group.speakerId);
-            const speakerOrdinal =
-              speaker?.ordinal ??
-              Math.max(
-                0,
-                speakers.findIndex(
-                  (candidate) => candidate.id === group.speakerId,
-                ),
-              );
-            const label = speakerLabel(speaker, group);
-            return (
-              <li key={group.id} data-speaker-tone={speakerOrdinal % 4}>
-                <span
-                  className="meeting-transcript-panel__avatar"
-                  aria-hidden="true"
-                >
-                  {speakerInitial(label, speakerOrdinal)}
-                </span>
-                <div>
-                  <header>
-                    <strong>{label}</strong>
-                    <time>{segmentTimestamp(group.startsAtMilliseconds)}</time>
-                  </header>
-                  <p>{group.text}</p>
-                </div>
-              </li>
-            );
-          })}
-        </ol>
-      )}
-
-      {remainingCount > 0 && (
-        <button
-          className="meeting-transcript-panel__toggle focus-visible-control"
-          type="button"
-          aria-expanded={expanded}
-          onClick={() => setExpanded((current) => !current)}
-        >
-          {expanded
-            ? copy.meetings.collapseTranscript
-            : copy.meetings.moreTranscript(remainingCount)}
-          <ChevronDown aria-hidden="true" />
-        </button>
-      )}
-    </section>
   );
 }
 
@@ -1848,18 +1812,6 @@ function recordingTime(seconds: number): string {
   return [hours, minutes, remainder]
     .map((value) => String(value).padStart(2, "0"))
     .join(":");
-}
-
-function segmentTimestamp(milliseconds: number): string {
-  const seconds = Math.max(0, Math.floor(milliseconds / 1_000));
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
-}
-
-function speakerInitial(label: string, ordinal: number): string {
-  if (label.startsWith("발언자 ")) return String(ordinal + 1);
-  return Array.from(label.trim())[0]?.toUpperCase() ?? String(ordinal + 1);
 }
 
 function notesSaveLabel(state: "idle" | "saving" | "saved" | "failed"): string {

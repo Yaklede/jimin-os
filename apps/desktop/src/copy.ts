@@ -444,6 +444,9 @@ export const copy = {
       "원문을 바탕으로 요약, 결정사항, 실행 후보를 나누고 있어요. 잠시 후 자동으로 보여드릴게요.",
     analysisFailedTitle: "회의를 정리하지 못했어요. 다시 시도해 주세요",
     analysisFailedDescription: "원문은 보관했어요. 다시 정리해 주세요.",
+    transcriptAnalysisOutdatedTitle: "수정한 회의록을 다시 정리해 주세요",
+    transcriptAnalysisOutdatedDescription:
+      "지금 보이는 요약과 결정은 수정 전 내용이에요. 다시 정리할 때까지 새 후속 일은 반영하지 않아요.",
     retryAnalysis: "다시 정리하기",
     retrying: "다시 정리하는 중",
     retryFailed: "회의를 다시 정리하지 못했어요. 연결 상태를 확인해 주세요.",
@@ -455,6 +458,53 @@ export const copy = {
       `발언자 ${speakers}명 · 발언 ${segments}개`,
     moreTranscript: (count: number) => `나머지 발언 ${count}개 보기`,
     collapseTranscript: "발언 간단히 보기",
+    editTranscript: "발언 다듬기",
+    transcriptEditorEyebrow: "회의록 다듬기",
+    transcriptEditorTitle: "발언자와 내용을 바로잡아 주세요",
+    transcriptEditorDescription:
+      "이름과 발언을 고치면 자동으로 저장해요. 원본 녹음은 바뀌지 않아요.",
+    closeTranscriptEditor: "회의록 다듬기 닫기",
+    transcriptDiscardConfirm:
+      "저장되지 않은 수정 내용이 있어요. 나가면 변경 내용이 사라집니다. 나갈까요?",
+    transcriptReanalyzeConfirm:
+      "다듬은 회의록으로 요약과 후속 일을 다시 정리할까요? 아직 반영하지 않은 기존 결과는 새 결과로 바뀌고, 이미 반영한 일은 유지돼요.",
+    speakerNamesTitle: "발언자 이름",
+    speakerNamesDescription: "같은 이름은 모든 발언에 함께 반영돼요.",
+    speakerNamePlaceholder: "발언자 이름",
+    segmentEditorTitle: "발언 내용",
+    segmentEditorDescription: "발언자를 바꾸거나 문장을 나누고 합칠 수 있어요.",
+    segmentSpeakerLabel: "이 발언을 한 사람",
+    segmentTextLabel: "발언 내용",
+    segmentSpeakerAt: (number: number, range: string) =>
+      `${number}번째 발언의 발언자, ${range}`,
+    segmentTextAt: (number: number, range: string) =>
+      `${number}번째 발언 내용, ${range}`,
+    mergePrevious: "앞 발언과 합치기",
+    mergePreviousAt: (number: number) =>
+      `${number}번째 발언을 앞 발언과 합치기`,
+    splitAtCursor: "커서에서 나누기",
+    splitAtCursorAt: (number: number) => `${number}번째 발언을 커서에서 나누기`,
+    mergeNext: "뒤 발언과 합치기",
+    mergeNextAt: (number: number) => `${number}번째 발언을 뒤 발언과 합치기`,
+    undoTranscriptEdit: "되돌리기",
+    saveTranscriptNow: "지금 저장",
+    reanalyzeTranscript: "다듬은 내용으로 다시 정리",
+    reanalyzingTranscript: "다듬은 내용을 정리하는 중",
+    transcriptSavePending: "곧 자동으로 저장해요.",
+    transcriptSaving: "수정 내용을 저장하는 중이에요.",
+    transcriptSaved: "수정 내용을 저장했어요.",
+    transcriptInvalid: "빈 발언이나 너무 긴 내용을 확인해 주세요.",
+    transcriptConflict:
+      "다른 기기에서 회의록이 바뀌었어요. 최신 내용을 불러온 뒤 다시 수정해 주세요.",
+    reloadTranscript: "최신 내용 불러오기",
+    transcriptReloadConfirm:
+      "현재 수정 내용 대신 최신 회의록을 불러올까요? 아직 저장하지 못한 내용은 사라져요.",
+    transcriptReloading: "최신 회의록을 불러오는 중이에요.",
+    transcriptSaveRetryCopy:
+      "수정 내용을 저장하지 못했어요. 연결을 확인한 뒤 다시 저장해 주세요.",
+    transcriptReanalyzeRetryCopy:
+      "회의 내용을 다시 정리하지 못했어요. 연결을 확인한 뒤 다시 시도해 주세요.",
+    transcriptAutosaveReady: "수정하면 자동으로 저장해요.",
     unnamedSpeaker: (number: number) => `발언자 ${number}`,
     recordedNotes: "회의 중 메모",
     unknownSpeaker: (speakerKey: string) =>

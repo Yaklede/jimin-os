@@ -8610,6 +8610,40 @@ svg {
   gap: 24px;
 }
 
+.meeting-review__analysis-notice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  border: 1px solid color-mix(in srgb, var(--warning) 38%, var(--border));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--warning-tint) 72%, var(--surface));
+}
+
+.meeting-review__analysis-notice > svg {
+  width: 20px;
+  height: 20px;
+  color: var(--warning);
+}
+
+.meeting-review__analysis-notice h2,
+.meeting-review__analysis-notice p {
+  margin: 0;
+}
+
+.meeting-review__analysis-notice h2 {
+  color: var(--text-strong);
+  font-size: 15px;
+}
+
+.meeting-review__analysis-notice p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .meeting-review__header {
   display: flex;
   align-items: flex-start;
@@ -8718,6 +8752,25 @@ svg {
   gap: 18px;
   padding: 18px 20px;
   border-bottom: 1px solid var(--border);
+}
+
+.meeting-transcript-panel__header-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.meeting-transcript-panel__edit {
+  min-height: 36px;
+  flex: 0 0 auto;
+  padding: 0 12px;
+}
+
+.meeting-transcript-panel__edit svg {
+  width: 15px;
+  height: 15px;
 }
 
 .meeting-transcript-panel__title {
@@ -8918,6 +8971,276 @@ svg {
 
 .meeting-transcript-panel__toggle[aria-expanded="true"] svg {
   transform: rotate(180deg);
+}
+
+.meeting-transcript-editor {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  max-height: min(76vh, 840px);
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border));
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: var(--shadow-panel);
+}
+
+.meeting-transcript-editor__header {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  border-bottom: 1px solid var(--border);
+  padding: 20px 22px 18px;
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+}
+
+.meeting-transcript-editor__header > div {
+  min-width: 0;
+}
+
+.meeting-transcript-editor__header span {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.meeting-transcript-editor__header h3 {
+  margin: 5px 0 0;
+  color: var(--text-strong);
+  font-size: 20px;
+}
+
+.meeting-transcript-editor__header p {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.meeting-transcript-editor__header .icon-button {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+}
+
+.meeting-transcript-editor__body {
+  display: grid;
+  gap: 24px;
+  min-height: 0;
+  padding: 22px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.meeting-transcript-editor__section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.meeting-transcript-editor__section-heading h4 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 15px;
+}
+
+.meeting-transcript-editor__section-heading p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.meeting-transcript-editor__section-heading > span {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.meeting-transcript-editor__speaker-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.meeting-transcript-editor__speaker-grid label,
+.meeting-transcript-editor__segment-meta label {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.meeting-transcript-editor input,
+.meeting-transcript-editor select,
+.meeting-transcript-editor textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface-subtle);
+  color: var(--text-strong);
+  font: inherit;
+  outline: none;
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    background-color 150ms ease;
+}
+
+.meeting-transcript-editor input,
+.meeting-transcript-editor select {
+  min-height: 42px;
+  padding: 0 12px;
+}
+
+.meeting-transcript-editor textarea {
+  min-height: 92px;
+  resize: vertical;
+  padding: 11px 12px;
+  line-height: 1.62;
+}
+
+.meeting-transcript-editor input:focus,
+.meeting-transcript-editor select:focus,
+.meeting-transcript-editor textarea:focus {
+  border-color: var(--accent);
+  background: var(--surface);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 17%, transparent);
+}
+
+.meeting-transcript-editor__segments > ol {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.meeting-transcript-editor__segments > ol > li {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  background: var(--surface-subtle);
+}
+
+.meeting-transcript-editor__segment-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.meeting-transcript-editor__segment-meta label {
+  width: min(260px, 55%);
+}
+
+.meeting-transcript-editor__segment-meta time {
+  color: var(--faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.meeting-transcript-editor__segment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.meeting-transcript-editor__segment-actions button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 0 10px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.meeting-transcript-editor__segment-actions button:not(:disabled):hover {
+  border-color: color-mix(in srgb, var(--accent) 44%, var(--border));
+  color: var(--accent);
+}
+
+.meeting-transcript-editor__segment-actions button:disabled {
+  opacity: 0.42;
+}
+
+.meeting-transcript-editor__segment-actions svg {
+  width: 14px;
+  height: 14px;
+}
+
+.meeting-transcript-editor__footer {
+  position: sticky;
+  z-index: 2;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-top: 1px solid var(--border);
+  padding: 14px 18px;
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+}
+
+.meeting-transcript-editor__save-state {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.meeting-transcript-editor__save-state[data-state="failed"],
+.meeting-transcript-editor__save-state[data-state="invalid"],
+.meeting-transcript-editor__save-state[data-state="conflict"] {
+  color: var(--danger);
+}
+
+.meeting-transcript-editor__save-state .text-button {
+  min-height: 32px;
+  margin-left: 4px;
+  color: inherit;
+}
+
+.meeting-transcript-editor__save-state[data-state="saved"] {
+  color: var(--success);
+}
+
+.meeting-transcript-editor__save-state svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+}
+
+.meeting-transcript-editor__footer-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.meeting-transcript-editor__footer-actions button {
+  min-height: 40px;
+}
+
+.meeting-transcript-editor__footer-actions svg {
+  width: 15px;
+  height: 15px;
 }
 
 .meeting-review__columns {
@@ -11883,6 +12206,16 @@ svg {
     gap: 18px;
   }
 
+  .meeting-review__analysis-notice {
+    grid-template-columns: auto minmax(0, 1fr);
+    padding: 14px;
+  }
+
+  .meeting-review__analysis-notice .primary-button {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
   .meeting-action-card {
     grid-template-columns: 32px minmax(0, 1fr);
     padding: 13px;
@@ -11974,6 +12307,16 @@ svg {
     padding: 16px;
   }
 
+  .meeting-transcript-panel__header-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .meeting-transcript-panel__edit {
+    width: 100%;
+    justify-content: center;
+  }
+
   .meeting-transcript-panel__speakers {
     flex-wrap: nowrap;
     justify-content: flex-start;
@@ -12019,6 +12362,101 @@ svg {
   .meeting-transcript-panel__toggle {
     width: calc(100% - 28px);
     margin: 0 14px 14px;
+  }
+
+  .meeting-transcript-editor {
+    position: fixed;
+    z-index: 70;
+    inset: var(--mobile-top-clearance) 0 0;
+    width: 100%;
+    height: calc(100dvh - var(--mobile-top-clearance));
+    max-height: none;
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 24px 24px 0 0;
+    box-shadow: 0 -16px 40px rgb(20 20 35 / 24%);
+    animation: mobile-sheet-in 240ms cubic-bezier(0.2, 0.8, 0.25, 1) both;
+  }
+
+  .meeting-transcript-editor__header {
+    padding: 18px 16px 14px;
+  }
+
+  .meeting-transcript-editor__header h3 {
+    font-size: 19px;
+  }
+
+  .meeting-transcript-editor__body {
+    gap: 22px;
+    padding: 18px 16px 24px;
+  }
+
+  .meeting-transcript-editor__speaker-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .meeting-transcript-editor input,
+  .meeting-transcript-editor select,
+  .meeting-transcript-editor textarea {
+    font-size: 16px;
+  }
+
+  .meeting-transcript-editor__segments > ol > li {
+    padding: 12px;
+  }
+
+  .meeting-transcript-editor__segment-meta {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .meeting-transcript-editor__segment-meta label {
+    width: 100%;
+  }
+
+  .meeting-transcript-editor__segment-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .meeting-transcript-editor__segment-actions button {
+    min-width: 0;
+    min-height: 42px;
+    justify-content: center;
+    padding: 4px 6px;
+    text-align: center;
+  }
+
+  .meeting-transcript-editor__footer {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 16px calc(12px + var(--safe-area-bottom));
+  }
+
+  .meeting-transcript-editor__footer-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 0.7fr) minmax(0, 1.3fr);
+  }
+
+  .meeting-transcript-editor__footer-actions .text-button {
+    grid-column: 1;
+  }
+
+  .meeting-transcript-editor__footer-actions .secondary-button {
+    grid-column: 2;
+  }
+
+  .meeting-transcript-editor__footer-actions .primary-button {
+    grid-column: 1 / -1;
+  }
+
+  .meeting-transcript-editor__footer-actions button {
+    width: 100%;
+    min-height: 46px;
+    justify-content: center;
   }
 
   .meeting-recorder__status {

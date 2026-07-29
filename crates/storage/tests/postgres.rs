@@ -36,8 +36,10 @@ use jimin_storage::{
         SuggestedActionKind,
     },
     meetings::{
-        MeetingActionItemUpdate, MeetingActionKind, MeetingActionStatus, MeetingAnalysisResult,
-        MeetingStatus, NewMeeting, NewMeetingActionItem, NewMeetingDecision,
+        EditedMeetingSpeaker, EditedMeetingTranscriptSegment, MeetingActionItemUpdate,
+        MeetingActionKind, MeetingActionStatus, MeetingAnalysisResult, MeetingAnalysisRetryOutcome,
+        MeetingStatus, MeetingTranscriptEdit, MeetingTranscriptUpdateOutcome, NewMeeting,
+        NewMeetingActionItem, NewMeetingDecision,
     },
     planning::{
         DeleteTaskOutcome, NewScheduleEntry, NewTask, ScheduleEntryUpdate, TaskStatus, TaskUpdate,
@@ -6582,6 +6584,9 @@ async fn meeting_analysis_moves_from_transcript_to_owner_review() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;
     };
+    let setup_pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("test setup pool should connect");
     let database =
         Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
             .expect("test database URL should be valid");
@@ -6621,6 +6626,8 @@ async fn meeting_analysis_moves_from_transcript_to_owner_review() {
             .expect("analysis should start")
     );
     let target_entity_id = Uuid::now_v7();
+    let rejected_target_entity_id = Uuid::now_v7();
+    let stale_target_entity_id = Uuid::now_v7();
     database
         .complete_meeting_analysis(
             &claimed,
@@ -6637,22 +6644,56 @@ async fn meeting_analysis_moves_from_transcript_to_owner_review() {
                     source_excerpt: "내일까지 계약 흐름을 검토해요.".to_owned(),
                     source_timestamp_seconds: None,
                 }],
-                action_items: vec![NewMeetingActionItem {
-                    id: Uuid::now_v7(),
-                    target_entity_id,
-                    kind: MeetingActionKind::Task,
-                    project_id: None,
-                    title: "계약 등록 흐름 검토".to_owned(),
-                    notes: Some("출시 전 주요 경로를 확인해요.".to_owned()),
-                    assignee_name: None,
-                    priority: 2,
-                    due_at: Some(OffsetDateTime::now_utc() + TimeDuration::days(1)),
-                    starts_at: None,
-                    ends_at: None,
-                    time_zone: None,
-                    source_excerpt: "내일까지 계약 흐름을 검토해요.".to_owned(),
-                    confidence: 95,
-                }],
+                action_items: vec![
+                    NewMeetingActionItem {
+                        id: Uuid::now_v7(),
+                        target_entity_id,
+                        kind: MeetingActionKind::Task,
+                        project_id: None,
+                        title: "계약 등록 흐름 검토".to_owned(),
+                        notes: Some("출시 전 주요 경로를 확인해요.".to_owned()),
+                        assignee_name: None,
+                        priority: 2,
+                        due_at: Some(OffsetDateTime::now_utc() + TimeDuration::days(1)),
+                        starts_at: None,
+                        ends_at: None,
+                        time_zone: None,
+                        source_excerpt: "내일까지 계약 흐름을 검토해요.".to_owned(),
+                        confidence: 95,
+                    },
+                    NewMeetingActionItem {
+                        id: Uuid::now_v7(),
+                        target_entity_id: rejected_target_entity_id,
+                        kind: MeetingActionKind::Task,
+                        project_id: None,
+                        title: "불필요한 검토 후보".to_owned(),
+                        notes: None,
+                        assignee_name: None,
+                        priority: 0,
+                        due_at: None,
+                        starts_at: None,
+                        ends_at: None,
+                        time_zone: None,
+                        source_excerpt: "추가 검토가 필요할 수도 있어요.".to_owned(),
+                        confidence: 60,
+                    },
+                    NewMeetingActionItem {
+                        id: Uuid::now_v7(),
+                        target_entity_id: stale_target_entity_id,
+                        kind: MeetingActionKind::Task,
+                        project_id: None,
+                        title: "교정 전 제안".to_owned(),
+                        notes: None,
+                        assignee_name: None,
+                        priority: 1,
+                        due_at: None,
+                        starts_at: None,
+                        ends_at: None,
+                        time_zone: None,
+                        source_excerpt: "교정 전에 생성된 제안이에요.".to_owned(),
+                        confidence: 70,
+                    },
+                ],
             },
         )
         .await
@@ -6665,12 +6706,19 @@ async fn meeting_analysis_moves_from_transcript_to_owner_review() {
         .expect("meeting should remain visible");
     assert_eq!(detail.meeting.status, MeetingStatus::ReviewReady);
     assert_eq!(detail.decisions.len(), 1);
-    assert_eq!(detail.action_items.len(), 1);
-    assert_eq!(detail.action_items[0].target_entity_id, target_entity_id);
-    assert_eq!(
-        detail.action_items[0].status,
-        MeetingActionStatus::Suggested
-    );
+    assert_eq!(detail.action_items.len(), 3);
+    let suggested = detail
+        .action_items
+        .iter()
+        .find(|item| item.target_entity_id == target_entity_id)
+        .expect("primary suggestion should exist");
+    assert_eq!(suggested.status, MeetingActionStatus::Suggested);
+    let stale_suggestion = detail
+        .action_items
+        .iter()
+        .find(|item| item.target_entity_id == stale_target_entity_id)
+        .expect("stale candidate should exist")
+        .clone();
     assert_eq!(
         detail.meeting.purpose.as_deref(),
         Some("출시 전 계약 검토 범위와 담당자를 확정한다.")
@@ -6679,10 +6727,10 @@ async fn meeting_analysis_moves_from_transcript_to_owner_review() {
 
     let reviewed = database
         .update_meeting_action_item(&MeetingActionItemUpdate {
-            id: detail.action_items[0].id,
+            id: suggested.id,
             meeting_id,
             user_id: owner.profile.id,
-            expected_version: detail.action_items[0].version,
+            expected_version: suggested.version,
             kind: MeetingActionKind::Task,
             title: "계약 등록 흐름 최종 검토".to_owned(),
             notes: Some("출시 전에 누락 조항까지 확인해요.".to_owned()),
@@ -6699,7 +6747,342 @@ async fn meeting_analysis_moves_from_transcript_to_owner_review() {
     assert_eq!(reviewed.assignee_name.as_deref(), Some("김경주"));
     assert_eq!(reviewed.priority, 3);
 
+    database
+        .decide_meeting_action_item(
+            owner.profile.id,
+            meeting_id,
+            reviewed.id,
+            MeetingActionStatus::Applied,
+        )
+        .await
+        .expect("reviewed suggestion should be applied");
+    let rejected_item_id = detail
+        .action_items
+        .iter()
+        .find(|item| item.target_entity_id == rejected_target_entity_id)
+        .expect("rejectable suggestion should exist")
+        .id;
+    database
+        .decide_meeting_action_item(
+            owner.profile.id,
+            meeting_id,
+            rejected_item_id,
+            MeetingActionStatus::Rejected,
+        )
+        .await
+        .expect("unused suggestion should be rejected");
+
+    let first_speaker_id = Uuid::now_v7();
+    let second_speaker_id = Uuid::now_v7();
+    let preserved_segment_id = Uuid::now_v7();
+    let removed_segment_id = Uuid::now_v7();
+    let replacement_segment_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO meeting_speakers (
+            id, meeting_id, speaker_key, display_name, ordinal
+         ) VALUES
+            ($1, $2, 'SPEAKER_00', '조지민', 0),
+            ($3, $2, 'SPEAKER_01', '김경주', 1)",
+    )
+    .bind(first_speaker_id)
+    .bind(meeting_id)
+    .bind(second_speaker_id)
+    .execute(&setup_pool)
+    .await
+    .expect("normalized speaker fixture should persist");
+    sqlx::query(
+        "INSERT INTO meeting_transcript_segments (
+            id, meeting_id, speaker_id, ordinal,
+            starts_at_milliseconds, ends_at_milliseconds,
+            text, confidence, is_final
+         ) VALUES
+            ($1, $2, $3, 0, 0, 1500, '계약 초안을 검토해요.', 92, FALSE),
+            ($4, $2, $5, 1, 2000, 3500, '내일까지 확인할게요.', 85, TRUE)",
+    )
+    .bind(preserved_segment_id)
+    .bind(meeting_id)
+    .bind(first_speaker_id)
+    .bind(removed_segment_id)
+    .bind(second_speaker_id)
+    .execute(&setup_pool)
+    .await
+    .expect("normalized segment fixture should persist");
+
+    let before_edit = database
+        .meeting_detail_for_user(owner.profile.id, meeting_id)
+        .await
+        .expect("meeting should reload before transcript edit")
+        .expect("meeting should exist before transcript edit");
+    let edit = MeetingTranscriptEdit {
+        meeting_id,
+        user_id: owner.profile.id,
+        expected_version: before_edit.meeting.version,
+        speakers: vec![
+            EditedMeetingSpeaker {
+                speaker_key: "SPEAKER_00".to_owned(),
+                display_name: Some("조지민".to_owned()),
+                ordinal: 0,
+            },
+            EditedMeetingSpeaker {
+                speaker_key: "SPEAKER_01".to_owned(),
+                display_name: Some("김경주".to_owned()),
+                ordinal: 1,
+            },
+        ],
+        segments: vec![
+            EditedMeetingTranscriptSegment {
+                id: preserved_segment_id,
+                speaker_key: "SPEAKER_00".to_owned(),
+                ordinal: 0,
+                starts_at_milliseconds: 0,
+                ends_at_milliseconds: 1_500,
+                text: "계약 범위를 정해요.".to_owned(),
+            },
+            EditedMeetingTranscriptSegment {
+                id: replacement_segment_id,
+                speaker_key: "SPEAKER_01".to_owned(),
+                ordinal: 1,
+                starts_at_milliseconds: 2_000,
+                ends_at_milliseconds: 3_500,
+                text: "내일까지 확인할게요.".to_owned(),
+            },
+        ],
+    };
+    let committed_version = match database
+        .replace_meeting_transcript_for_user(&edit)
+        .await
+        .expect("transcript edit should persist")
+    {
+        MeetingTranscriptUpdateOutcome::Updated(version) => version,
+        outcome => panic!("unexpected transcript update outcome: {outcome:?}"),
+    };
+    assert!(committed_version > edit.expected_version);
+    assert_eq!(
+        database
+            .replace_meeting_transcript_for_user(&edit)
+            .await
+            .expect("stale transcript edit should be classified"),
+        MeetingTranscriptUpdateOutcome::Conflict
+    );
+    let mut foreign_edit = edit.clone();
+    foreign_edit.user_id = Uuid::now_v7();
+    assert_eq!(
+        database
+            .replace_meeting_transcript_for_user(&foreign_edit)
+            .await
+            .expect("foreign transcript edit should be hidden"),
+        MeetingTranscriptUpdateOutcome::NotFound
+    );
+    let edited = database
+        .meeting_detail_for_user(owner.profile.id, meeting_id)
+        .await
+        .expect("edited meeting should reload")
+        .expect("edited meeting should exist");
+    assert_eq!(edited.meeting.version, committed_version);
+    assert!(edited.meeting.analyzed_at.is_none());
+    assert_eq!(
+        edited.meeting.summary.as_deref(),
+        Some("계약 등록 흐름을 출시 전에 다시 확인하기로 했어요.")
+    );
+    assert_eq!(
+        edited.meeting.transcript,
+        "[00:00] 조지민: 계약 범위를 정해요.\n[00:02] 김경주: 내일까지 확인할게요."
+    );
+    assert_eq!(edited.speakers.len(), 2);
+    assert_eq!(edited.transcript_segments.len(), 2);
+    let preserved_segment = edited
+        .transcript_segments
+        .iter()
+        .find(|segment| segment.id == preserved_segment_id)
+        .expect("existing segment should retain its identity");
+    assert_eq!(preserved_segment.confidence, Some(92));
+    assert!(!preserved_segment.is_final);
+    let replacement_segment = edited
+        .transcript_segments
+        .iter()
+        .find(|segment| segment.id == replacement_segment_id)
+        .expect("newly split segment should persist");
+    assert_eq!(replacement_segment.confidence, None);
+    assert!(replacement_segment.is_final);
+    assert!(
+        edited
+            .transcript_segments
+            .iter()
+            .all(|segment| segment.id != removed_segment_id)
+    );
+    assert!(
+        database
+            .update_meeting_action_item(&MeetingActionItemUpdate {
+                id: stale_suggestion.id,
+                meeting_id,
+                user_id: owner.profile.id,
+                expected_version: stale_suggestion.version,
+                kind: stale_suggestion.kind,
+                title: "교정 전 제안을 수정하면 안 돼요.".to_owned(),
+                notes: stale_suggestion.notes.clone(),
+                assignee_name: stale_suggestion.assignee_name.clone(),
+                priority: stale_suggestion.priority,
+                due_at: stale_suggestion.due_at,
+                starts_at: stale_suggestion.starts_at,
+                ends_at: stale_suggestion.ends_at,
+                time_zone: stale_suggestion.time_zone.clone(),
+            })
+            .await
+            .expect("stale suggestion update should be classified")
+            .is_none()
+    );
+    assert!(matches!(
+        database
+            .decide_meeting_action_item(
+                owner.profile.id,
+                meeting_id,
+                stale_suggestion.id,
+                MeetingActionStatus::Applied,
+            )
+            .await
+            .expect_err("stale suggestion must not be applied"),
+        StorageError::IdentityConflict
+    ));
+
+    assert!(matches!(
+        database
+            .retry_meeting_analysis(owner.profile.id, meeting_id, edited.meeting.version + 1,)
+            .await
+            .expect("stale reanalysis should be classified"),
+        MeetingAnalysisRetryOutcome::Conflict
+    ));
+    assert!(matches!(
+        database
+            .retry_meeting_analysis(Uuid::now_v7(), meeting_id, edited.meeting.version)
+            .await
+            .expect("foreign reanalysis should be hidden"),
+        MeetingAnalysisRetryOutcome::NotFound
+    ));
+    let requeued = database
+        .retry_meeting_analysis(owner.profile.id, meeting_id, edited.meeting.version)
+        .await
+        .expect("reviewed meeting should be requeued");
+    let MeetingAnalysisRetryOutcome::Requeued(requeued) = requeued else {
+        panic!("reviewed meeting should be requeued");
+    };
+    assert_eq!(requeued.status, MeetingStatus::Queued);
+    assert_eq!(
+        requeued.summary.as_deref(),
+        Some("계약 등록 흐름을 출시 전에 다시 확인하기로 했어요.")
+    );
+    let preserved = database
+        .meeting_detail_for_user(owner.profile.id, meeting_id)
+        .await
+        .expect("requeued meeting should load")
+        .expect("requeued meeting should exist");
+    assert_eq!(preserved.decisions.len(), 1);
+    assert_eq!(preserved.action_items.len(), 3);
+
+    let reanalysis = database
+        .claim_next_meeting_analysis(runner, Duration::from_secs(30))
+        .await
+        .expect("reanalysis queue should load")
+        .expect("edited meeting should be claimable");
+    assert_eq!(reanalysis.meeting_id, meeting_id);
+    assert!(
+        database
+            .start_meeting_analysis(reanalysis.id, runner, Duration::from_secs(30))
+            .await
+            .expect("reanalysis should start")
+    );
+    let new_target_entity_id = Uuid::now_v7();
+    let duplicate_applied_target_entity_id = Uuid::now_v7();
+    database
+        .complete_meeting_analysis(
+            &reanalysis,
+            runner,
+            &MeetingAnalysisResult {
+                summary: "교정된 회의록을 기준으로 다시 분석했어요.".to_owned(),
+                topics: vec!["계약 범위".to_owned()],
+                risks: Vec::new(),
+                follow_up: None,
+                decisions: vec![NewMeetingDecision {
+                    id: Uuid::now_v7(),
+                    content: "계약 범위를 확정한다.".to_owned(),
+                    rationale: None,
+                    source_excerpt: "계약 범위를 정해요.".to_owned(),
+                    source_timestamp_seconds: Some(0),
+                }],
+                action_items: vec![
+                    NewMeetingActionItem {
+                        id: Uuid::now_v7(),
+                        target_entity_id: new_target_entity_id,
+                        kind: MeetingActionKind::Task,
+                        project_id: None,
+                        title: "교정된 계약 범위 확인".to_owned(),
+                        notes: None,
+                        assignee_name: Some("김경주".to_owned()),
+                        priority: 2,
+                        due_at: Some(OffsetDateTime::now_utc() + TimeDuration::days(1)),
+                        starts_at: None,
+                        ends_at: None,
+                        time_zone: None,
+                        source_excerpt: "내일까지 확인할게요.".to_owned(),
+                        confidence: 93,
+                    },
+                    NewMeetingActionItem {
+                        id: Uuid::now_v7(),
+                        target_entity_id: duplicate_applied_target_entity_id,
+                        kind: MeetingActionKind::Task,
+                        project_id: None,
+                        title: "  계약   등록 흐름 최종 검토  ".to_owned(),
+                        notes: None,
+                        assignee_name: Some("김경주".to_owned()),
+                        priority: 3,
+                        due_at: None,
+                        starts_at: None,
+                        ends_at: None,
+                        time_zone: None,
+                        source_excerpt: "이미 적용한 일과 같은 제안이에요.".to_owned(),
+                        confidence: 90,
+                    },
+                ],
+            },
+        )
+        .await
+        .expect("replacement analysis should persist");
+    let analyzed = database
+        .meeting_detail_for_user(owner.profile.id, meeting_id)
+        .await
+        .expect("reanalyzed meeting should load")
+        .expect("reanalyzed meeting should exist");
+    assert_eq!(analyzed.meeting.status, MeetingStatus::ReviewReady);
+    assert_eq!(analyzed.decisions.len(), 1);
+    assert_eq!(analyzed.decisions[0].content, "계약 범위를 확정한다.");
+    assert_eq!(analyzed.action_items.len(), 2);
+    assert!(analyzed.action_items.iter().any(|item| {
+        item.target_entity_id == target_entity_id && item.status == MeetingActionStatus::Applied
+    }));
+    assert!(analyzed.action_items.iter().any(|item| {
+        item.target_entity_id == new_target_entity_id
+            && item.status == MeetingActionStatus::Suggested
+    }));
+    assert!(
+        analyzed
+            .action_items
+            .iter()
+            .all(|item| item.target_entity_id != rejected_target_entity_id)
+    );
+    assert!(
+        analyzed
+            .action_items
+            .iter()
+            .all(|item| item.target_entity_id != stale_target_entity_id)
+    );
+    assert!(
+        analyzed
+            .action_items
+            .iter()
+            .all(|item| item.target_entity_id != duplicate_applied_target_entity_id)
+    );
+
     database.close().await;
+    setup_pool.close().await;
 }
 
 fn provision_login_command(user_id: Uuid, installation_id: Uuid) -> ProvisionLogin {

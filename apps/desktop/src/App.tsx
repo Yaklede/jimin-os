@@ -3540,6 +3540,13 @@ export default function App() {
     nextDestination: OsDestination,
     options: { projectDataReady?: boolean } = {},
   ): void {
+    if (
+      nextDestination !== destination &&
+      document.querySelector('.meeting-transcript-editor[data-dirty="true"]') &&
+      !window.confirm(copy.meetings.transcriptDiscardConfirm)
+    ) {
+      return;
+    }
     if (nextDestination !== destination) {
       navigationHistoryRef.current = [
         ...navigationHistoryRef.current.slice(-31),

@@ -10,6 +10,7 @@ import {
   startMeetingRecording,
   updateMeetingAction,
   updateMeetingRecordingNotes,
+  updateMeetingTranscript,
   uploadMeetingRecordingChunk,
   type MeetingActionItem,
 } from "./meetings";
@@ -153,12 +154,90 @@ describe("meeting API", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await reanalyzeMeeting("https://os.example", "access", "meeting-1");
+    await reanalyzeMeeting("https://os.example", "access", "meeting-1", 7);
 
     expect(fetchMock).toHaveBeenCalledWith(
       "https://os.example/v1/meetings/meeting-1/reanalyze",
       expect.objectContaining({ method: "POST" }),
     );
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      expectedVersion: 7,
+    });
+  });
+
+  it("saves a corrected transcript with an optimistic version", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ version: 8 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await updateMeetingTranscript("https://os.example", "access", "meeting-1", {
+      expectedVersion: 7,
+      speakers: [{ speakerKey: "SPEAKER_00", displayName: "지민", ordinal: 0 }],
+      segments: [
+        {
+          id: "019f5ce8-b832-7ab0-8fe8-4dd8958d676a",
+          speakerKey: "SPEAKER_00",
+          ordinal: 0,
+          startsAtMilliseconds: 0,
+          endsAtMilliseconds: 1_000,
+          text: "회의를 시작할게요.",
+        },
+      ],
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://os.example/v1/meetings/meeting-1/transcript",
+      expect.objectContaining({ method: "PUT" }),
+    );
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+      expectedVersion: 7,
+      speakers: [{ displayName: "지민" }],
+      segments: [
+        {
+          id: "019f5ce8-b832-7ab0-8fe8-4dd8958d676a",
+          text: "회의를 시작할게요.",
+        },
+      ],
+    });
+  });
+
+  it("rejects a malformed transcript update version", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+
+    await expect(
+      updateMeetingTranscript("https://os.example", "access", "meeting-1", {
+        expectedVersion: 7,
+        speakers: [
+          {
+            speakerKey: "SPEAKER_00",
+            displayName: "지민",
+            ordinal: 0,
+          },
+        ],
+        segments: [
+          {
+            id: "019f5ce8-b832-7ab0-8fe8-4dd8958d676a",
+            speakerKey: "SPEAKER_00",
+            ordinal: 0,
+            startsAtMilliseconds: 0,
+            endsAtMilliseconds: 1_000,
+            text: "회의를 시작할게요.",
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: "unavailable" });
   });
 
   it("uploads resumable audio and autosaved notes before finalizing", async () => {

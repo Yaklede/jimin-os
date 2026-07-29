@@ -119,6 +119,27 @@ export interface MeetingTranscriptSegment {
   isFinal: boolean;
 }
 
+export interface MeetingTranscriptUpdateInput {
+  expectedVersion: number;
+  speakers: Array<{
+    speakerKey: string;
+    displayName: string | null;
+    ordinal: number;
+  }>;
+  segments: Array<{
+    id: string;
+    speakerKey: string;
+    ordinal: number;
+    startsAtMilliseconds: number;
+    endsAtMilliseconds: number;
+    text: string;
+  }>;
+}
+
+export interface MeetingTranscriptUpdateResult {
+  version: number;
+}
+
 export async function fetchMeetings(
   baseUrl: string,
   access: string,
@@ -135,12 +156,13 @@ export async function reanalyzeMeeting(
   baseUrl: string,
   access: string,
   meetingId: string,
+  expectedVersion: number,
 ): Promise<Meeting> {
   return request<Meeting>(
     baseUrl,
     access,
     `/v1/meetings/${encodeURIComponent(meetingId)}/reanalyze`,
-    {},
+    { expectedVersion },
   );
 }
 
@@ -155,18 +177,26 @@ export async function fetchMeeting(
   );
   const body = await readJson(response);
   if (!response.ok || !isRecord(body)) throw errorFrom(response.status);
-  return {
-    ...(body as unknown as MeetingDetail),
-    participants: arrayOrEmpty<Meeting["participants"]>(body.participants),
-    topics: arrayOrEmpty<Meeting["topics"]>(body.topics),
-    risks: arrayOrEmpty<Meeting["risks"]>(body.risks),
-    speakers: arrayOrEmpty<MeetingSpeaker[]>(body.speakers),
-    transcriptSegments: arrayOrEmpty<MeetingTranscriptSegment[]>(
-      body.transcriptSegments,
-    ),
-    decisions: arrayOrEmpty<MeetingDecision[]>(body.decisions),
-    actionItems: arrayOrEmpty<MeetingActionItem[]>(body.actionItems),
-  };
+  return normalizeMeetingDetail(body);
+}
+
+export async function updateMeetingTranscript(
+  baseUrl: string,
+  access: string,
+  meetingId: string,
+  input: MeetingTranscriptUpdateInput,
+): Promise<MeetingTranscriptUpdateResult> {
+  const result = await request<Record<string, unknown>>(
+    baseUrl,
+    access,
+    `/v1/meetings/${encodeURIComponent(meetingId)}/transcript`,
+    input,
+    "PUT",
+  );
+  if (!isMeetingTranscriptUpdateResult(result)) {
+    throw new PlanningRequestError("unavailable");
+  }
+  return result;
 }
 
 export async function createMeeting(
@@ -380,8 +410,33 @@ function isMeetingList(value: unknown): value is { items: MeetingSummary[] } {
   return isRecord(value) && Array.isArray(value.items);
 }
 
+function normalizeMeetingDetail(body: Record<string, unknown>): MeetingDetail {
+  return {
+    ...(body as unknown as MeetingDetail),
+    participants: arrayOrEmpty<Meeting["participants"]>(body.participants),
+    topics: arrayOrEmpty<Meeting["topics"]>(body.topics),
+    risks: arrayOrEmpty<Meeting["risks"]>(body.risks),
+    speakers: arrayOrEmpty<MeetingSpeaker[]>(body.speakers),
+    transcriptSegments: arrayOrEmpty<MeetingTranscriptSegment[]>(
+      body.transcriptSegments,
+    ),
+    decisions: arrayOrEmpty<MeetingDecision[]>(body.decisions),
+    actionItems: arrayOrEmpty<MeetingActionItem[]>(body.actionItems),
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function isMeetingTranscriptUpdateResult(
+  value: Record<string, unknown>,
+): value is Record<string, unknown> & MeetingTranscriptUpdateResult {
+  return (
+    typeof value.version === "number" &&
+    Number.isSafeInteger(value.version) &&
+    value.version > 0
+  );
 }
 
 function arrayOrEmpty<T extends unknown[]>(value: unknown): T {

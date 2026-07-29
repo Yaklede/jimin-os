@@ -1,6 +1,9 @@
 //! Owner-scoped meeting transcripts, AI analysis, and approval-gated actions.
 
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -230,6 +233,45 @@ pub struct MeetingTranscriptionResult {
     pub transcript: String,
     pub speakers: Vec<NewMeetingSpeaker>,
     pub segments: Vec<NewMeetingTranscriptSegment>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MeetingTranscriptEdit {
+    pub meeting_id: Uuid,
+    pub user_id: Uuid,
+    pub expected_version: i64,
+    pub speakers: Vec<EditedMeetingSpeaker>,
+    pub segments: Vec<EditedMeetingTranscriptSegment>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditedMeetingSpeaker {
+    pub speaker_key: String,
+    pub display_name: Option<String>,
+    pub ordinal: i16,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditedMeetingTranscriptSegment {
+    pub id: Uuid,
+    pub speaker_key: String,
+    pub ordinal: i32,
+    pub starts_at_milliseconds: i64,
+    pub ends_at_milliseconds: i64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeetingTranscriptUpdateOutcome {
+    Updated(i64),
+    NotFound,
+    Conflict,
+}
+
+pub enum MeetingAnalysisRetryOutcome {
+    Requeued(Box<Meeting>),
+    NotFound,
+    Conflict,
 }
 
 pub struct NewMeeting {
@@ -594,6 +636,68 @@ impl MeetingTranscriptionResult {
         if valid_body_text(&self.transcript, MAX_TRANSCRIPT_CHARS)
             && valid_speakers
             && valid_segments
+        {
+            Ok(())
+        } else {
+            Err(StorageError::InvalidConfiguration)
+        }
+    }
+}
+
+impl MeetingTranscriptEdit {
+    /// Validates a complete owner-edited transcript snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] when the snapshot is
+    /// incomplete, out of order, or references an unknown speaker.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        let speaker_keys = self
+            .speakers
+            .iter()
+            .map(|speaker| speaker.speaker_key.trim())
+            .collect::<HashSet<_>>();
+        let speakers_valid = !self.speakers.is_empty()
+            && self.speakers.len() <= 100
+            && speaker_keys.len() == self.speakers.len()
+            && self.speakers.iter().enumerate().all(|(index, speaker)| {
+                i16::try_from(index) == Ok(speaker.ordinal)
+                    && valid_text(&speaker.speaker_key, 80)
+                    && valid_optional_body_text(
+                        speaker.display_name.as_deref(),
+                        MAX_PARTICIPANT_CHARS,
+                    )
+            });
+        let segments_valid = !self.segments.is_empty()
+            && self.segments.len() <= MAX_TRANSCRIPT_SEGMENTS
+            && self
+                .segments
+                .iter()
+                .map(|segment| segment.id)
+                .collect::<HashSet<_>>()
+                .len()
+                == self.segments.len()
+            && self.segments.iter().enumerate().all(|(index, segment)| {
+                is_v7(segment.id)
+                    && i32::try_from(index) == Ok(segment.ordinal)
+                    && speaker_keys.contains(segment.speaker_key.trim())
+                    && (0..43_200_000).contains(&segment.starts_at_milliseconds)
+                    && segment.ends_at_milliseconds > segment.starts_at_milliseconds
+                    && segment.ends_at_milliseconds <= 43_200_000
+                    && valid_body_text(&segment.text, MAX_SEGMENT_CHARS)
+            })
+            && self
+                .segments
+                .windows(2)
+                .all(|pair| pair[0].starts_at_milliseconds <= pair[1].starts_at_milliseconds);
+        let transcript_valid = speakers_valid
+            && segments_valid
+            && reconstructed_transcript(&self.speakers, &self.segments)
+                .is_some_and(|value| valid_body_text(&value, MAX_TRANSCRIPT_CHARS));
+        if is_v7(self.meeting_id)
+            && is_v7(self.user_id)
+            && self.expected_version > 0
+            && transcript_valid
         {
             Ok(())
         } else {
@@ -1372,6 +1476,7 @@ impl Database {
     /// # Errors
     ///
     /// Returns a validation, lease, ownership, or persistence error.
+    #[allow(clippy::too_many_lines)] // One transaction stores the normalized transcript atomically.
     pub async fn complete_meeting_transcription(
         &self,
         job: &ClaimedMeetingTranscription,
@@ -1606,6 +1711,7 @@ impl Database {
     /// # Errors
     ///
     /// Returns a validation or persistence error.
+    #[allow(clippy::too_many_lines)] // The detail aggregate is assembled from its normalized children.
     pub async fn meeting_detail_for_user(
         &self,
         user_id: Uuid,
@@ -1713,6 +1819,143 @@ impl Database {
             decisions,
             action_items,
         }))
+    }
+
+    /// Atomically replaces one owner's normalized transcript snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation or persistence error. A stale version or a meeting
+    /// that is currently recording, transcribing, queued, or analyzing is
+    /// reported as [`MeetingTranscriptUpdateOutcome::Conflict`].
+    #[allow(clippy::too_many_lines)] // One transaction keeps the aggregate snapshot consistent.
+    pub async fn replace_meeting_transcript_for_user(
+        &self,
+        edit: &MeetingTranscriptEdit,
+    ) -> Result<MeetingTranscriptUpdateOutcome, StorageError> {
+        edit.validate()?;
+        let transcript = reconstructed_transcript(&edit.speakers, &edit.segments)
+            .ok_or(StorageError::InvalidConfiguration)?;
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let current = sqlx::query_as::<_, (String, i64)>(
+            "SELECT status, version
+             FROM meetings
+             WHERE id = $1 AND user_id = $2
+             FOR UPDATE",
+        )
+        .bind(edit.meeting_id)
+        .bind(edit.user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some((status, version)) = current else {
+            transaction.rollback().await.map_err(classify)?;
+            return Ok(MeetingTranscriptUpdateOutcome::NotFound);
+        };
+        if version != edit.expected_version
+            || !matches!(status.as_str(), "review_ready" | "applied" | "failed")
+        {
+            transaction.rollback().await.map_err(classify)?;
+            return Ok(MeetingTranscriptUpdateOutcome::Conflict);
+        }
+        let existing_segment_metadata = sqlx::query_as::<_, (Uuid, Option<i16>, bool)>(
+            "SELECT id, confidence, is_final
+                 FROM meeting_transcript_segments
+                 WHERE meeting_id = $1",
+        )
+        .bind(edit.meeting_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(classify)?
+        .into_iter()
+        .map(|(id, confidence, is_final)| (id, (confidence, is_final)))
+        .collect::<HashMap<_, _>>();
+
+        sqlx::query("DELETE FROM meeting_transcript_segments WHERE meeting_id = $1")
+            .bind(edit.meeting_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(classify)?;
+        sqlx::query("DELETE FROM meeting_speakers WHERE meeting_id = $1")
+            .bind(edit.meeting_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(classify)?;
+
+        let mut speaker_ids = HashMap::with_capacity(edit.speakers.len());
+        for speaker in &edit.speakers {
+            let speaker_id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO meeting_speakers (
+                    id, meeting_id, speaker_key, display_name, ordinal
+                 ) VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(speaker_id)
+            .bind(edit.meeting_id)
+            .bind(speaker.speaker_key.trim())
+            .bind(trimmed_optional(speaker.display_name.as_deref()))
+            .bind(speaker.ordinal)
+            .execute(&mut *transaction)
+            .await
+            .map_err(classify)?;
+            speaker_ids.insert(speaker.speaker_key.trim(), speaker_id);
+        }
+        for segment in &edit.segments {
+            let (confidence, is_final) = existing_segment_metadata
+                .get(&segment.id)
+                .copied()
+                .unwrap_or((None, true));
+            let speaker_id = speaker_ids
+                .get(segment.speaker_key.trim())
+                .copied()
+                .ok_or(StorageError::InvalidConfiguration)?;
+            sqlx::query(
+                "INSERT INTO meeting_transcript_segments (
+                    id, meeting_id, speaker_id, ordinal,
+                    starts_at_milliseconds, ends_at_milliseconds,
+                    text, confidence, is_final
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            )
+            .bind(segment.id)
+            .bind(edit.meeting_id)
+            .bind(speaker_id)
+            .bind(segment.ordinal)
+            .bind(segment.starts_at_milliseconds)
+            .bind(segment.ends_at_milliseconds)
+            .bind(segment.text.trim())
+            .bind(confidence)
+            .bind(is_final)
+            .execute(&mut *transaction)
+            .await
+            .map_err(classify)?;
+        }
+        let meeting_version = sqlx::query_scalar::<_, i64>(
+            "UPDATE meetings
+             SET transcript = $3, analyzed_at = NULL
+             WHERE id = $1 AND user_id = $2 AND version = $4
+             RETURNING version",
+        )
+        .bind(edit.meeting_id)
+        .bind(edit.user_id)
+        .bind(transcript)
+        .bind(edit.expected_version)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some(meeting_version) = meeting_version else {
+            transaction.rollback().await.map_err(classify)?;
+            return Ok(MeetingTranscriptUpdateOutcome::Conflict);
+        };
+        append_change(
+            &mut transaction,
+            edit.user_id,
+            "meeting",
+            edit.meeting_id,
+            meeting_version,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        Ok(MeetingTranscriptUpdateOutcome::Updated(meeting_version))
     }
 
     /// Claims the oldest queued meeting analysis for this worker.
@@ -1879,6 +2122,31 @@ impl Database {
             transaction.rollback().await.map_err(classify)?;
             return Ok(false);
         }
+        let applied_action_keys = sqlx::query_as::<_, (String, Option<Uuid>, String)>(
+            "SELECT kind, project_id, title
+             FROM meeting_action_items
+             WHERE meeting_id = $1 AND status = 'applied'",
+        )
+        .bind(job.meeting_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(classify)?
+        .into_iter()
+        .map(|(kind, project_id, title)| (kind, project_id, normalized_action_title(&title)))
+        .collect::<HashSet<_>>();
+        sqlx::query("DELETE FROM meeting_decisions WHERE meeting_id = $1")
+            .bind(job.meeting_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(classify)?;
+        sqlx::query(
+            "DELETE FROM meeting_action_items
+             WHERE meeting_id = $1 AND status IN ('suggested', 'rejected')",
+        )
+        .bind(job.meeting_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(classify)?;
         for decision in &result.decisions {
             sqlx::query(
                 "INSERT INTO meeting_decisions (
@@ -1897,6 +2165,14 @@ impl Database {
             .map_err(classify)?;
         }
         for item in &result.action_items {
+            let action_key = (
+                action_kind_value(item.kind).to_owned(),
+                item.project_id,
+                normalized_action_title(&item.title),
+            );
+            if applied_action_keys.contains(&action_key) {
+                continue;
+            }
             sqlx::query(
                 "INSERT INTO meeting_action_items (
                     id, meeting_id, kind, project_id, title, notes,
@@ -2035,7 +2311,7 @@ impl Database {
         Ok(true)
     }
 
-    /// Queues a failed meeting analysis again for an explicit owner retry.
+    /// Queues a completed or failed meeting analysis again for an explicit owner retry.
     ///
     /// # Errors
     ///
@@ -2044,21 +2320,41 @@ impl Database {
         &self,
         user_id: Uuid,
         meeting_id: Uuid,
-    ) -> Result<Meeting, StorageError> {
-        if !is_v7(user_id) || !is_v7(meeting_id) {
+        expected_version: i64,
+    ) -> Result<MeetingAnalysisRetryOutcome, StorageError> {
+        if !is_v7(user_id) || !is_v7(meeting_id) || expected_version <= 0 {
             return Err(StorageError::InvalidConfiguration);
         }
         let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let current = sqlx::query_as::<_, (String, i64)>(
+            "SELECT status, version
+             FROM meetings
+             WHERE id = $1 AND user_id = $2
+             FOR UPDATE",
+        )
+        .bind(meeting_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some((status, version)) = current else {
+            transaction.rollback().await.map_err(classify)?;
+            return Ok(MeetingAnalysisRetryOutcome::NotFound);
+        };
+        if version != expected_version
+            || !matches!(status.as_str(), "review_ready" | "applied" | "failed")
+        {
+            transaction.rollback().await.map_err(classify)?;
+            return Ok(MeetingAnalysisRetryOutcome::Conflict);
+        }
         let job_row = sqlx::query_as::<_, (Uuid, i64)>(
-            "UPDATE meeting_analysis_jobs AS job
+            "UPDATE meeting_analysis_jobs
              SET state = 'queued', claim_owner = NULL, claim_expires_at = NULL,
-                 error_code = NULL, started_at = NULL, finished_at = NULL
-             FROM meetings AS meeting
-             WHERE job.meeting_id = $2 AND job.user_id = $1
-               AND meeting.id = job.meeting_id AND meeting.user_id = $1
-               AND job.state = 'failed' AND meeting.status = 'failed'
-               AND job.attempt_count < 8
-             RETURNING job.id, job.version",
+                 attempt_count = 0, error_code = NULL,
+                 started_at = NULL, finished_at = NULL
+             WHERE meeting_id = $2 AND user_id = $1
+               AND state IN ('completed', 'failed')
+             RETURNING id, version",
         )
         .bind(user_id)
         .bind(meeting_id)
@@ -2067,13 +2363,14 @@ impl Database {
         .map_err(classify)?;
         let Some((job_id, job_version)) = job_row else {
             transaction.rollback().await.map_err(classify)?;
-            return Err(StorageError::IdentityConflict);
+            return Ok(MeetingAnalysisRetryOutcome::Conflict);
         };
         let row = sqlx::query_as::<_, MeetingRow>(
             "UPDATE meetings AS meeting
-             SET status = 'queued', summary = NULL, topics = '{}', risks = '{}',
-                 follow_up = NULL, analyzed_at = NULL
+             SET status = 'queued'
              WHERE meeting.id = $2 AND meeting.user_id = $1
+               AND meeting.version = $3
+               AND meeting.status IN ('review_ready', 'applied', 'failed')
              RETURNING meeting.id, meeting.workspace_id, meeting.project_id,
                 NULL::text AS project_title, meeting.title, meeting.purpose,
                 meeting.participants, meeting.transcript, meeting.started_at,
@@ -2084,9 +2381,14 @@ impl Database {
         )
         .bind(user_id)
         .bind(meeting_id)
-        .fetch_one(&mut *transaction)
+        .bind(expected_version)
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(classify)?;
+        let Some(row) = row else {
+            transaction.rollback().await.map_err(classify)?;
+            return Ok(MeetingAnalysisRetryOutcome::Conflict);
+        };
         append_change(
             &mut transaction,
             user_id,
@@ -2105,6 +2407,8 @@ impl Database {
         .await?;
         transaction.commit().await.map_err(classify)?;
         Meeting::try_from(row)
+            .map(Box::new)
+            .map(MeetingAnalysisRetryOutcome::Requeued)
     }
 
     /// Fails provider-started analyses whose lease expired after a restart.
@@ -2215,6 +2519,7 @@ impl Database {
              FROM meetings AS meeting
              WHERE item.id = $3 AND item.meeting_id = $2
                AND meeting.id = item.meeting_id AND meeting.user_id = $1
+               AND meeting.analyzed_at IS NOT NULL
                AND item.status = 'suggested' AND item.version = $4
                AND item.kind = $13
              RETURNING item.id, item.meeting_id, item.kind, item.project_id,
@@ -2283,7 +2588,10 @@ impl Database {
              FROM meetings AS meeting
              WHERE item.id = $3 AND item.meeting_id = $2
                AND meeting.id = item.meeting_id AND meeting.user_id = $1
-               AND item.status IN ('suggested', $4)
+               AND (
+                    item.status = $4
+                    OR (item.status = 'suggested' AND meeting.analyzed_at IS NOT NULL)
+               )
              RETURNING item.id, item.meeting_id, item.kind, item.project_id,
                 item.title, item.notes, item.assignee_name, item.priority, item.due_at,
                 item.starts_at, item.ends_at, item.time_zone,
@@ -2442,6 +2750,48 @@ fn parse_action_status(value: &str) -> Result<MeetingActionStatus, StorageError>
     }
 }
 
+fn reconstructed_transcript(
+    speakers: &[EditedMeetingSpeaker],
+    segments: &[EditedMeetingTranscriptSegment],
+) -> Option<String> {
+    let names = speakers
+        .iter()
+        .map(|speaker| {
+            (
+                speaker.speaker_key.trim(),
+                speaker
+                    .display_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| speaker.speaker_key.trim()),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    segments
+        .iter()
+        .map(|segment| {
+            let name = names.get(segment.speaker_key.trim())?;
+            let seconds = segment.starts_at_milliseconds.max(0) / 1_000;
+            Some(format!(
+                "[{:02}:{:02}] {name}: {}",
+                seconds / 60,
+                seconds % 60,
+                segment.text.trim()
+            ))
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(|lines| lines.join("\n"))
+}
+
+fn normalized_action_title(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 fn claim_lease_millis(runner_id: &str, lease: Duration) -> Result<i64, StorageError> {
     if !valid_runner_id(runner_id) || lease.is_zero() {
         return Err(StorageError::InvalidConfiguration);
@@ -2501,9 +2851,10 @@ fn classify(_: sqlx::Error) -> StorageError {
 #[cfg(test)]
 mod tests {
     use super::{
-        MeetingActionKind, MeetingAnalysisResult, MeetingTranscriptionResult, NewMeeting,
+        EditedMeetingSpeaker, EditedMeetingTranscriptSegment, MeetingActionKind,
+        MeetingAnalysisResult, MeetingTranscriptEdit, MeetingTranscriptionResult, NewMeeting,
         NewMeetingActionItem, NewMeetingDecision, NewMeetingSpeaker, NewMeetingTranscriptSegment,
-        RecordingChunk, RecordingFinalize, RecordingNoteUpdate,
+        RecordingChunk, RecordingFinalize, RecordingNoteUpdate, reconstructed_transcript,
     };
     use uuid::Uuid;
 
@@ -2615,5 +2966,65 @@ mod tests {
             }],
         };
         assert!(result.validate().is_err());
+    }
+
+    #[test]
+    fn edited_transcript_requires_a_complete_ordered_snapshot() {
+        let edit = MeetingTranscriptEdit {
+            meeting_id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            expected_version: 3,
+            speakers: vec![
+                EditedMeetingSpeaker {
+                    speaker_key: "SPEAKER_00".to_owned(),
+                    display_name: Some("조지민".to_owned()),
+                    ordinal: 0,
+                },
+                EditedMeetingSpeaker {
+                    speaker_key: "SPEAKER_01".to_owned(),
+                    display_name: Some("김경주".to_owned()),
+                    ordinal: 1,
+                },
+            ],
+            segments: vec![
+                EditedMeetingTranscriptSegment {
+                    id: Uuid::now_v7(),
+                    speaker_key: "SPEAKER_00".to_owned(),
+                    ordinal: 0,
+                    starts_at_milliseconds: 0,
+                    ends_at_milliseconds: 1_500,
+                    text: "출시 범위를 정해요.".to_owned(),
+                },
+                EditedMeetingTranscriptSegment {
+                    id: Uuid::now_v7(),
+                    speaker_key: "SPEAKER_01".to_owned(),
+                    ordinal: 1,
+                    starts_at_milliseconds: 2_000,
+                    ends_at_milliseconds: 3_500,
+                    text: "내일까지 확인할게요.".to_owned(),
+                },
+            ],
+        };
+        assert!(edit.validate().is_ok());
+        assert_eq!(
+            reconstructed_transcript(&edit.speakers, &edit.segments).as_deref(),
+            Some("[00:00] 조지민: 출시 범위를 정해요.\n[00:02] 김경주: 내일까지 확인할게요.")
+        );
+
+        let mut invalid = edit.clone();
+        invalid.segments[1].ordinal = 3;
+        assert!(invalid.validate().is_err());
+        let mut invalid = edit.clone();
+        invalid.segments[1].speaker_key = "SPEAKER_99".to_owned();
+        assert!(invalid.validate().is_err());
+        let mut invalid = edit.clone();
+        invalid.segments[1].id = invalid.segments[0].id;
+        assert!(invalid.validate().is_err());
+        let mut invalid = edit.clone();
+        invalid.speakers[1].speaker_key = " SPEAKER_00 ".to_owned();
+        assert!(invalid.validate().is_err());
+        let mut invalid = edit;
+        invalid.segments.swap(0, 1);
+        assert!(invalid.validate().is_err());
     }
 }
