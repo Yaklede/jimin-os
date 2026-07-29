@@ -2,7 +2,10 @@ use std::time::Duration;
 
 use jimin_storage::{
     Database,
-    meetings::{MeetingTranscriptionResult, NewMeetingSpeaker, NewMeetingTranscriptSegment},
+    meetings::{
+        ClaimedMeetingTranscription, MeetingTranscriptionResult, NewMeetingSpeaker,
+        NewMeetingTranscriptSegment,
+    },
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -58,19 +61,44 @@ pub(crate) async fn process_next(
         return Err(WorkerError::LostLease);
     }
 
-    let client = reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build();
-    let client = match client {
-        Ok(client) => client,
-        Err(_) => {
+    let Some(result) = transcribe(database, &job, runner_id, endpoint).await? else {
+        return Ok(true);
+    };
+    match database
+        .complete_meeting_transcription(&job, runner_id, &result)
+        .await
+    {
+        Ok(true) => Ok(true),
+        Ok(false) => Err(WorkerError::LostLease),
+        Err(jimin_storage::StorageError::InvalidConfiguration) => {
             fail(
                 database,
                 job.recording_id,
                 runner_id,
-                "meeting.transcriber_client",
+                "meeting.transcriber_invalid_response",
             )
             .await?;
-            return Ok(true);
+            Ok(true)
         }
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn transcribe(
+    database: &Database,
+    job: &ClaimedMeetingTranscription,
+    runner_id: &str,
+    endpoint: &str,
+) -> Result<Option<MeetingTranscriptionResult>, WorkerError> {
+    let Ok(client) = reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build() else {
+        fail(
+            database,
+            job.recording_id,
+            runner_id,
+            "meeting.transcriber_client",
+        )
+        .await?;
+        return Ok(None);
     };
     let response = client
         .post(format!("{}/v1/transcribe", endpoint.trim_end_matches('/')))
@@ -91,7 +119,7 @@ pub(crate) async fn process_next(
                 "meeting.transcriber_rejected"
             };
             fail(database, job.recording_id, runner_id, code).await?;
-            return Ok(true);
+            return Ok(None);
         }
         Err(_) => {
             fail(
@@ -101,24 +129,24 @@ pub(crate) async fn process_next(
                 "meeting.transcriber_unavailable",
             )
             .await?;
-            return Ok(true);
+            return Ok(None);
         }
     };
-    let parsed = response.json::<TranscriptionResponse>().await;
-    let parsed = match parsed {
-        Ok(parsed) => parsed,
-        Err(_) => {
-            fail(
-                database,
-                job.recording_id,
-                runner_id,
-                "meeting.transcriber_invalid_response",
-            )
-            .await?;
-            return Ok(true);
-        }
+    let Ok(parsed) = response.json::<TranscriptionResponse>().await else {
+        fail(
+            database,
+            job.recording_id,
+            runner_id,
+            "meeting.transcriber_invalid_response",
+        )
+        .await?;
+        return Ok(None);
     };
-    let result = MeetingTranscriptionResult {
+    Ok(Some(transcription_result(parsed)))
+}
+
+fn transcription_result(parsed: TranscriptionResponse) -> MeetingTranscriptionResult {
+    MeetingTranscriptionResult {
         transcript: parsed.transcript,
         speakers: parsed
             .speakers
@@ -145,24 +173,6 @@ pub(crate) async fn process_next(
                 confidence: segment.confidence,
             })
             .collect(),
-    };
-    match database
-        .complete_meeting_transcription(&job, runner_id, &result)
-        .await
-    {
-        Ok(true) => Ok(true),
-        Ok(false) => Err(WorkerError::LostLease),
-        Err(jimin_storage::StorageError::InvalidConfiguration) => {
-            fail(
-                database,
-                job.recording_id,
-                runner_id,
-                "meeting.transcriber_invalid_response",
-            )
-            .await?;
-            Ok(true)
-        }
-        Err(error) => Err(error.into()),
     }
 }
 
