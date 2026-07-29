@@ -22,7 +22,10 @@ use jimin_storage::{
     },
     calendar_mutation::{ScheduleCalendarMutationOperation, provider_event_id_for_schedule},
     device_signals::{CallLogPermission, MissedCallSyncRequest, NewMissedCallSignal},
-    gmail::ProviderGmailMessage,
+    gmail::{
+        CompleteGmailOAuthAuthorization, CreateGmailOAuthAuthorization, DeleteGmailAccountOutcome,
+        EncryptedGmailSecret, ProviderGmailMessage,
+    },
     goals::{GoalHealth, GoalNextActionKind, GoalStatus, GoalUpdate, NewGoal},
     google_chat::{
         CompleteGoogleChatOAuthAuthorization, CreateGoogleChatOAuthAuthorization,
@@ -81,6 +84,37 @@ fn encrypted_test_destination(marker: u8) -> EncryptedWebhookSecret {
         ciphertext: vec![marker; 48],
         nonce: vec![marker.saturating_add(1); 24],
     }
+}
+
+async fn insert_test_gmail_account(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    marker: &str,
+) -> Uuid {
+    let account_id = Uuid::now_v7();
+    let marker_byte = marker.bytes().next().unwrap_or(1);
+    sqlx::query(
+        "INSERT INTO gmail_accounts (
+            id, user_id, workspace_id, provider_subject, email, status,
+            granted_scopes, refresh_token_ciphertext, refresh_token_nonce,
+            encryption_key_version
+        ) VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8, 1)",
+    )
+    .bind(account_id)
+    .bind(user_id)
+    .bind(workspace_id)
+    .bind(format!("{marker}-subject-{user_id}"))
+    .bind(format!("{marker}-{user_id}@example.test"))
+    .bind(vec![
+        "https://www.googleapis.com/auth/gmail.readonly".to_owned(),
+    ])
+    .bind(vec![marker_byte; 32])
+    .bind(vec![marker_byte.wrapping_add(1); 24])
+    .execute(pool)
+    .await
+    .expect("test Gmail account should persist");
+    account_id
 }
 
 #[tokio::test]
@@ -5794,6 +5828,14 @@ async fn calendar_disconnect_is_versioned_idempotent_and_preserves_manual_schedu
         .await
         .expect("fixture owner should exist");
     let user_id = provisioned.profile.id;
+    let personal_workspace_id = database
+        .workspaces_for_user(user_id)
+        .await
+        .expect("owner workspaces should load")
+        .into_iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Personal)
+        .expect("personal workspace should exist")
+        .id;
     let now = OffsetDateTime::now_utc()
         .replace_nanosecond(0)
         .expect("whole-second fixture time");
@@ -5929,18 +5971,49 @@ async fn calendar_disconnect_is_versioned_idempotent_and_preserves_manual_schedu
     .execute(&pool)
     .await
     .expect("pending authorization should persist");
-    sqlx::query("INSERT INTO gmail_sync_states (user_id, status) VALUES ($1, 'idle')")
-        .bind(user_id)
-        .execute(&pool)
-        .await
-        .expect("Gmail sync state should persist");
+    let gmail_account_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO gmail_accounts (
+            id, user_id, workspace_id, provider_subject, email, status,
+            granted_scopes, refresh_token_ciphertext, refresh_token_nonce,
+            encryption_key_version
+        ) VALUES (
+            $1, $2, $3, $4, $5, 'active', $6, $7, $8, 1
+        )",
+    )
+    .bind(gmail_account_id)
+    .bind(user_id)
+    .bind(personal_workspace_id)
+    .bind(format!("gmail-subject-{user_id}"))
+    .bind(format!("gmail-{user_id}@example.test"))
+    .bind(vec![
+        "https://www.googleapis.com/auth/gmail.readonly".to_owned(),
+    ])
+    .bind(vec![12_u8; 32])
+    .bind(vec![13_u8; 24])
+    .execute(&pool)
+    .await
+    .expect("Gmail account should persist");
+    sqlx::query(
+        "INSERT INTO gmail_sync_states (account_id, workspace_id, status)
+         VALUES ($1, $2, 'idle')",
+    )
+    .bind(gmail_account_id)
+    .bind(personal_workspace_id)
+    .execute(&pool)
+    .await
+    .expect("Gmail sync state should persist");
     sqlx::query(
         "INSERT INTO gmail_messages (
-            id, user_id, provider_message_id, provider_thread_id, subject
-        ) VALUES ($1, $2, 'provider-message', 'provider-thread', '연결 메일')",
+            id, account_id, workspace_id, provider_message_id,
+            provider_thread_id, subject
+        ) VALUES (
+            $1, $2, $3, 'provider-message', 'provider-thread', '연결 메일'
+        )",
     )
     .bind(Uuid::now_v7())
-    .bind(user_id)
+    .bind(gmail_account_id)
+    .bind(personal_workspace_id)
     .execute(&pool)
     .await
     .expect("Gmail metadata should persist");
@@ -6003,14 +6076,14 @@ async fn calendar_disconnect_is_versioned_idempotent_and_preserves_manual_schedu
             .await
             .expect("calendar mutation count should load");
     let gmail_state_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM gmail_sync_states WHERE user_id = $1")
-            .bind(user_id)
+        sqlx::query_scalar("SELECT COUNT(*) FROM gmail_sync_states WHERE account_id = $1")
+            .bind(gmail_account_id)
             .fetch_one(&pool)
             .await
             .expect("Gmail sync state count should load");
     let gmail_message_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM gmail_messages WHERE user_id = $1")
-            .bind(user_id)
+        sqlx::query_scalar("SELECT COUNT(*) FROM gmail_messages WHERE account_id = $1")
+            .bind(gmail_account_id)
             .fetch_one(&pool)
             .await
             .expect("Gmail message count should load");
@@ -6036,8 +6109,8 @@ async fn calendar_disconnect_is_versioned_idempotent_and_preserves_manual_schedu
         .expect("schedule links should be purged"),
         0
     );
-    assert_eq!(gmail_state_count, 0);
-    assert_eq!(gmail_message_count, 0);
+    assert_eq!(gmail_state_count, 1);
+    assert_eq!(gmail_message_count, 1);
     let authorization_status: String =
         sqlx::query_scalar("SELECT status FROM calendar_oauth_authorizations WHERE id = $1")
             .bind(authorization_id)
@@ -6088,6 +6161,436 @@ async fn calendar_disconnect_is_versioned_idempotent_and_preserves_manual_schedu
         2
     );
 
+    pool.close().await;
+    database.close().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "This regression keeps multi-account ownership, workspace context, idempotency, and provider isolation in one transaction-backed scenario."
+)]
+async fn gmail_accounts_are_workspace_scoped_and_delete_only_the_selected_mailbox() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        2,
+        Duration::from_secs(2),
+    )
+    .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let other_owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("other fixture owner should exist");
+    let workspaces = database
+        .workspaces_for_user(owner.profile.id)
+        .await
+        .expect("owner workspaces should load");
+    let personal = workspaces
+        .iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Personal)
+        .expect("personal workspace should exist");
+    let company = workspaces
+        .iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Company)
+        .expect("company workspace should exist");
+    let other_personal = database
+        .workspaces_for_user(other_owner.profile.id)
+        .await
+        .expect("other owner workspaces should load")
+        .into_iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Personal)
+        .expect("other personal workspace should exist");
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("test database should be reachable");
+    let personal_account =
+        insert_test_gmail_account(&pool, owner.profile.id, personal.id, "personal").await;
+    let company_account =
+        insert_test_gmail_account(&pool, owner.profile.id, company.id, "company").await;
+    let shared_provider_id = format!("shared-provider-message-{}", owner.profile.id);
+    let now = OffsetDateTime::now_utc();
+    database
+        .apply_gmail_inbox_sync(
+            personal_account,
+            owner.profile.id,
+            personal.id,
+            &[ProviderGmailMessage {
+                provider_message_id: shared_provider_id.clone(),
+                provider_thread_id: "personal-thread".to_owned(),
+                received_at: Some(now),
+                sender: Some("개인 발신자 <personal@example.test>".to_owned()),
+                subject: Some("개인 메일".to_owned()),
+                snippet: Some("개인 업무 공간 전용".to_owned()),
+                is_unread: true,
+            }],
+        )
+        .await
+        .expect("personal inbox should sync");
+    database
+        .apply_gmail_inbox_sync(
+            company_account,
+            owner.profile.id,
+            company.id,
+            &[ProviderGmailMessage {
+                provider_message_id: shared_provider_id.clone(),
+                provider_thread_id: "company-thread".to_owned(),
+                received_at: Some(now),
+                sender: Some("회사 발신자 <company@example.test>".to_owned()),
+                subject: Some("회사 메일".to_owned()),
+                snippet: Some("회사 업무 공간 전용".to_owned()),
+                is_unread: true,
+            }],
+        )
+        .await
+        .expect("company inbox should sync");
+    database
+        .apply_gmail_inbox_sync(
+            personal_account,
+            owner.profile.id,
+            personal.id,
+            &[ProviderGmailMessage {
+                provider_message_id: shared_provider_id.clone(),
+                provider_thread_id: "personal-thread".to_owned(),
+                received_at: Some(now),
+                sender: Some("개인 발신자 <personal@example.test>".to_owned()),
+                subject: Some("수정된 개인 메일".to_owned()),
+                snippet: Some("중복 동기화는 갱신돼요.".to_owned()),
+                is_unread: false,
+            }],
+        )
+        .await
+        .expect("repeated personal sync should be idempotent");
+
+    let accounts = database
+        .gmail_accounts_for_user(owner.profile.id)
+        .await
+        .expect("Gmail accounts should load");
+    assert_eq!(accounts.len(), 2);
+    assert!(accounts.iter().any(|account| {
+        account.workspace_id == personal.id
+            && account.workspace_scope == "personal"
+            && account.workspace_name == personal.name
+    }));
+    assert!(accounts.iter().any(|account| {
+        account.workspace_id == company.id
+            && account.workspace_scope == "company"
+            && account.workspace_name == company.name
+    }));
+    let personal_messages = database
+        .recent_gmail_messages_for_workspace(owner.profile.id, personal.id)
+        .await
+        .expect("personal messages should load");
+    let company_messages = database
+        .recent_gmail_messages_for_workspace(owner.profile.id, company.id)
+        .await
+        .expect("company messages should load");
+    assert_eq!(personal_messages.len(), 1);
+    assert_eq!(
+        personal_messages[0].subject.as_deref(),
+        Some("수정된 개인 메일")
+    );
+    assert_eq!(company_messages.len(), 1);
+    assert_eq!(company_messages[0].subject.as_deref(), Some("회사 메일"));
+    assert!(
+        database
+            .recent_gmail_messages_for_user(owner.profile.id)
+            .await
+            .expect("global context should remain conservative")
+            .is_empty()
+    );
+    assert!(matches!(
+        database
+            .recent_gmail_messages_for_workspace(owner.profile.id, other_personal.id)
+            .await,
+        Err(StorageError::InvalidConfiguration)
+    ));
+    assert!(matches!(
+        database
+            .apply_gmail_inbox_sync(personal_account, owner.profile.id, company.id, &[])
+            .await,
+        Err(StorageError::InvalidConfiguration)
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM gmail_messages WHERE provider_message_id = $1",
+        )
+        .bind(&shared_provider_id)
+        .fetch_one(&pool)
+        .await
+        .expect("message count should load"),
+        2
+    );
+
+    let calendar_account_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO calendar_accounts (
+            id, user_id, provider, provider_subject, email, status, granted_scopes
+        ) VALUES ($1, $2, 'google', $3, $4, 'active', '{}')",
+    )
+    .bind(calendar_account_id)
+    .bind(owner.profile.id)
+    .bind(format!("calendar-preserved-{}", owner.profile.id))
+    .bind(format!(
+        "calendar-preserved-{}@example.test",
+        owner.profile.id
+    ))
+    .execute(&pool)
+    .await
+    .expect("Calendar account should persist");
+    let chat_account_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO google_chat_accounts (
+            id, user_id, provider_subject, email, status, granted_scopes
+        ) VALUES ($1, $2, $3, $4, 'active', '{}')",
+    )
+    .bind(chat_account_id)
+    .bind(owner.profile.id)
+    .bind(format!("chat-preserved-{}", owner.profile.id))
+    .bind(format!("chat-preserved-{}@example.test", owner.profile.id))
+    .execute(&pool)
+    .await
+    .expect("Chat account should persist");
+    let personal_version = accounts
+        .iter()
+        .find(|account| account.id == personal_account)
+        .expect("personal account should be listed")
+        .version;
+    assert!(matches!(
+        database
+            .delete_gmail_account(owner.profile.id, personal_account, personal_version)
+            .await
+            .expect("selected Gmail account should delete"),
+        DeleteGmailAccountOutcome::Deleted
+    ));
+    let remaining_accounts = database
+        .gmail_accounts_for_user(owner.profile.id)
+        .await
+        .expect("remaining account should load");
+    assert_eq!(remaining_accounts.len(), 1);
+    assert_eq!(remaining_accounts[0].id, company_account);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM calendar_accounts WHERE id = $1")
+            .bind(calendar_account_id)
+            .fetch_one(&pool)
+            .await
+            .expect("Calendar account count should load"),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM google_chat_accounts WHERE id = $1")
+            .bind(chat_account_id)
+            .fetch_one(&pool)
+            .await
+            .expect("Chat account count should load"),
+        1
+    );
+    assert_eq!(
+        database
+            .recent_gmail_messages_for_workspace(owner.profile.id, company.id)
+            .await
+            .expect("company message should remain")
+            .len(),
+        1
+    );
+    pool.close().await;
+    database.close().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The reconnect regression verifies identity pinning, token preservation, and expired-PKCE cleanup together."
+)]
+async fn gmail_reconnect_rejects_a_different_identity_and_preserves_the_refresh_token() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        1,
+        Duration::from_secs(2),
+    )
+    .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let personal = database
+        .workspaces_for_user(owner.profile.id)
+        .await
+        .expect("owner workspaces should load")
+        .into_iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Personal)
+        .expect("personal workspace should exist");
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("test database should be reachable");
+    let account_id =
+        insert_test_gmail_account(&pool, owner.profile.id, personal.id, "reconnect").await;
+    let provider_subject = GoogleSubject::parse(format!("reconnect-subject-{}", owner.profile.id))
+        .expect("provider subject should be valid");
+
+    let mismatch_authorization_id = Uuid::now_v7();
+    let mut mismatch_state = mismatch_authorization_id.as_bytes().to_vec();
+    mismatch_state.extend_from_slice(mismatch_authorization_id.as_bytes());
+    database
+        .create_gmail_oauth_authorization(&CreateGmailOAuthAuthorization {
+            id: mismatch_authorization_id,
+            user_id: owner.profile.id,
+            workspace_id: personal.id,
+            reconnect_account_id: Some(account_id),
+            session_id: owner.session_id,
+            device_id: owner.device.id,
+            state_verifier: mismatch_state.clone(),
+            pkce_verifier: EncryptedGmailSecret {
+                ciphertext: vec![32_u8; 48],
+                nonce: vec![33_u8; 24],
+                key_version: 1,
+            },
+            client_kind: ClientPlatform::Macos,
+            expires_at: OffsetDateTime::now_utc() + TimeDuration::minutes(10),
+        })
+        .await
+        .expect("reconnect authorization should persist");
+    let claimed = database
+        .claim_gmail_oauth_authorization(&mismatch_state)
+        .await
+        .expect("authorization claim should load")
+        .expect("authorization should be claimable");
+    assert_eq!(
+        claimed
+            .expected_provider_subject
+            .as_ref()
+            .map(GoogleSubject::as_str),
+        Some(provider_subject.as_str())
+    );
+    assert!(matches!(
+        database
+            .complete_gmail_oauth_authorization(&CompleteGmailOAuthAuthorization {
+                authorization_id: mismatch_authorization_id,
+                account_id: Uuid::now_v7(),
+                user_id: owner.profile.id,
+                workspace_id: personal.id,
+                provider_subject: GoogleSubject::parse("different-google-identity")
+                    .expect("different provider subject should be valid"),
+                email: EmailAddress::parse("different@example.test")
+                    .expect("different email should be valid"),
+                granted_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_owned()],
+                refresh_token: None,
+            })
+            .await,
+        Err(StorageError::IdentityConflict)
+    ));
+
+    let reconnect_authorization_id = Uuid::now_v7();
+    let mut reconnect_state = reconnect_authorization_id.as_bytes().to_vec();
+    reconnect_state.extend_from_slice(reconnect_authorization_id.as_bytes());
+    database
+        .create_gmail_oauth_authorization(&CreateGmailOAuthAuthorization {
+            id: reconnect_authorization_id,
+            user_id: owner.profile.id,
+            workspace_id: personal.id,
+            reconnect_account_id: Some(account_id),
+            session_id: owner.session_id,
+            device_id: owner.device.id,
+            state_verifier: reconnect_state.clone(),
+            pkce_verifier: EncryptedGmailSecret {
+                ciphertext: vec![42_u8; 48],
+                nonce: vec![43_u8; 24],
+                key_version: 1,
+            },
+            client_kind: ClientPlatform::Android,
+            expires_at: OffsetDateTime::now_utc() + TimeDuration::minutes(10),
+        })
+        .await
+        .expect("second reconnect authorization should persist");
+    database
+        .claim_gmail_oauth_authorization(&reconnect_state)
+        .await
+        .expect("second authorization claim should load")
+        .expect("second authorization should be claimable");
+    let reconnected = database
+        .complete_gmail_oauth_authorization(&CompleteGmailOAuthAuthorization {
+            authorization_id: reconnect_authorization_id,
+            account_id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            workspace_id: personal.id,
+            provider_subject,
+            email: EmailAddress::parse(format!(
+                "reconnect-updated-{}@example.test",
+                owner.profile.id
+            ))
+            .expect("updated email should be valid"),
+            granted_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_owned()],
+            refresh_token: None,
+        })
+        .await
+        .expect("matching reconnect should complete");
+    assert_eq!(reconnected.id, account_id);
+    let connection = database
+        .gmail_sync_connection(account_id, owner.profile.id)
+        .await
+        .expect("sync connection should load")
+        .expect("sync connection should remain active");
+    assert_eq!(connection.refresh_token.ciphertext, vec![b'r'; 32]);
+    assert_eq!(
+        connection.refresh_token.nonce,
+        vec![b'r'.wrapping_add(1); 24]
+    );
+    let expired_authorization_id = Uuid::now_v7();
+    let mut expired_state = expired_authorization_id.as_bytes().to_vec();
+    expired_state.extend_from_slice(expired_authorization_id.as_bytes());
+    sqlx::query(
+        "INSERT INTO gmail_oauth_authorizations (
+            id, user_id, workspace_id, session_id, device_id, state_verifier,
+            pkce_verifier_ciphertext, pkce_nonce, encryption_key_version,
+            client_kind, status, expires_at
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, 1, 'macos', 'pending', $9
+        )",
+    )
+    .bind(expired_authorization_id)
+    .bind(owner.profile.id)
+    .bind(personal.id)
+    .bind(owner.session_id)
+    .bind(owner.device.id)
+    .bind(expired_state)
+    .bind(vec![52_u8; 48])
+    .bind(vec![53_u8; 24])
+    .bind(OffsetDateTime::now_utc() - TimeDuration::minutes(1))
+    .execute(&pool)
+    .await
+    .expect("expired authorization fixture should persist");
+    assert!(
+        database
+            .expire_gmail_oauth_authorizations()
+            .await
+            .expect("expired authorization cleanup should succeed")
+            >= 1
+    );
+    let (expired_status, has_pkce): (String, bool) = sqlx::query_as(
+        "SELECT status,
+            pkce_verifier_ciphertext IS NOT NULL
+              OR pkce_nonce IS NOT NULL
+              OR encryption_key_version IS NOT NULL
+         FROM gmail_oauth_authorizations
+         WHERE id = $1",
+    )
+    .bind(expired_authorization_id)
+    .fetch_one(&pool)
+    .await
+    .expect("expired authorization should load");
+    assert_eq!(expired_status, "expired");
+    assert!(!has_pkce);
     pool.close().await;
     database.close().await;
 }
@@ -6499,18 +7002,55 @@ async fn work_brief_refresh_generates_one_actionable_recommendation_per_active_s
 }
 
 #[tokio::test]
-async fn work_brief_connects_schedule_goal_and_inbox_context() {
+#[allow(
+    clippy::too_many_lines,
+    reason = "The context regression keeps schedule, goal, and workspace-scoped Gmail fixtures visible together."
+)]
+async fn work_brief_keeps_workspace_gmail_out_of_the_user_global_context() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;
     };
-    let database =
-        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
-            .expect("test database URL should be valid");
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        1,
+        Duration::from_secs(2),
+    )
+    .expect("test database URL should be valid");
     database.migrate().await.expect("migration should succeed");
     let owner = database
         .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
         .await
         .expect("fixture owner should exist");
+    let personal_workspace_id = database
+        .workspaces_for_user(owner.profile.id)
+        .await
+        .expect("owner workspaces should load")
+        .into_iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Personal)
+        .expect("personal workspace should exist")
+        .id;
+    let gmail_account_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO gmail_accounts (
+            id, user_id, workspace_id, provider_subject, email, status,
+            granted_scopes
+        ) VALUES ($1, $2, $3, $4, $5, 'active', $6)",
+    )
+    .bind(gmail_account_id)
+    .bind(owner.profile.id)
+    .bind(personal_workspace_id)
+    .bind(format!("brief-gmail-subject-{}", owner.profile.id))
+    .bind(format!("brief-gmail-{}@example.test", owner.profile.id))
+    .bind(vec![
+        "https://www.googleapis.com/auth/gmail.readonly".to_owned(),
+    ])
+    .execute(
+        &sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("test database should be reachable"),
+    )
+    .await
+    .expect("Gmail account should persist");
     let now = OffsetDateTime::now_utc()
         .replace_nanosecond(0)
         .expect("whole-second fixture time");
@@ -6540,7 +7080,9 @@ async fn work_brief_connects_schedule_goal_and_inbox_context() {
         .expect("goal should persist");
     database
         .apply_gmail_inbox_sync(
+            gmail_account_id,
             owner.profile.id,
+            personal_workspace_id,
             &[ProviderGmailMessage {
                 provider_message_id: format!("brief-message-{}", owner.profile.id),
                 provider_thread_id: format!("brief-thread-{}", owner.profile.id),
@@ -6559,7 +7101,7 @@ async fn work_brief_connects_schedule_goal_and_inbox_context() {
         .await
         .expect("context-aware work brief should refresh");
 
-    assert_eq!(generated.len(), 3);
+    assert_eq!(generated.len(), 2);
     assert!(generated.iter().any(|item| item.goal_id == Some(goal.id)));
     assert!(
         generated
@@ -6569,7 +7111,7 @@ async fn work_brief_connects_schedule_goal_and_inbox_context() {
     assert!(
         generated
             .iter()
-            .any(|item| item.title == "읽지 않은 메일을 확인하세요")
+            .all(|item| item.title != "읽지 않은 메일을 확인하세요")
     );
 
     database.close().await;

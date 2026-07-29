@@ -776,7 +776,7 @@ export const copy = {
     calendarDisconnectingAction: "연결 해제 중",
     calendarDisconnectTitle: "Google Calendar 연결을 해제할까요?",
     calendarDisconnectDescription:
-      "가져온 일정과 메일 요약은 지워지고, 직접 만든 일정은 남아 있어요.",
+      "가져온 Google Calendar 일정만 정리되고, 직접 만든 일정과 Gmail 계정은 그대로 남아 있어요.",
     calendarKeepConnected: "계속 연결하기",
     calendarConfirmDisconnect: "연결 해제",
     calendarLoadFailed: "연결 상태를 못 불러왔어요. 다시 확인해 주세요.",
@@ -786,6 +786,56 @@ export const copy = {
       "연결을 해제하지 못했어요. 다시 확인한 뒤 시도해 주세요.",
     calendarAuthorizationExpired:
       "연결 시간이 지났어요. Google Calendar 연결을 다시 시작해 주세요.",
+    gmailTitle: "Gmail 계정",
+    gmailDescription:
+      "개인 메일과 회사 메일을 워크스페이스별로 나눠서 확인해요.",
+    gmailPersonalWorkspace: "개인",
+    gmailCompanyWorkspace: "회사",
+    gmailAddAccount: "계정 추가하기",
+    gmailOpening: "연결 화면 여는 중",
+    gmailAwaitingTitle: "Google에서 연결을 마쳐 주세요",
+    gmailAwaitingDescription:
+      "연결을 마치면 이 워크스페이스에 계정이 자동으로 표시돼요.",
+    gmailCheckConnection: "연결 상태 확인하기",
+    gmailCancelConnection: "연결 취소",
+    gmailEmpty: "아직 연결한 Gmail 계정이 없어요.",
+    gmailChecking: "Gmail 계정을 확인하고 있어요.",
+    gmailRetry: "계정 다시 확인하기",
+    gmailSync: "메일 가져오기",
+    gmailSyncing: "메일 가져오는 중",
+    gmailReconnect: "다시 연결하기",
+    gmailDisconnect: "연결 해제하기",
+    gmailDisconnecting: "연결 해제 중",
+    gmailDisconnectTitle: (email: string) => `${email} 연결을 해제할까요?`,
+    gmailDisconnectDescription:
+      "이 계정에서 가져온 메일은 비서가 더 이상 확인하지 않아요. 다른 Gmail 계정은 그대로 유지돼요.",
+    gmailKeepConnected: "계속 연결하기",
+    gmailConfirmDisconnect: "연결 해제",
+    gmailConfigurationMissing: "개인 서버에 Gmail 연결 정보가 없어요.",
+    gmailConfigurationRequired: "서버 연결 설정 필요",
+    gmailWorkspaceMissing: "연결할 워크스페이스가 없어요",
+    gmailWorkspaceMissingDescription:
+      "개인 또는 회사 워크스페이스를 만든 뒤 Gmail 계정을 연결해 주세요.",
+    gmailLastSynced: (value: string) => `마지막으로 ${value}에 확인했어요.`,
+    gmailNotSynced:
+      "아직 메일을 가져오지 않았어요. 메일 가져오기를 눌러 주세요.",
+    gmailNeedsReconnect:
+      "Google 권한을 다시 확인해야 해요. 다시 연결해 주세요.",
+    gmailSyncProblem:
+      "최근 메일을 가져오지 못했어요. 메일 가져오기를 다시 눌러 주세요.",
+    gmailConnecting: "Google에서 계정 연결을 마쳐 주세요.",
+    gmailDisconnectingDetail: "계정 연결을 정리하고 있어요.",
+    gmailRevoked: "연결이 해제됐어요. 다시 연결하거나 목록에서 정리해 주세요.",
+    gmailLoadRecovery:
+      "Gmail 계정을 불러오지 못했어요. 서버 연결을 확인한 뒤 다시 시도해 주세요.",
+    gmailConnectRecovery:
+      "Gmail 연결 화면을 열지 못했어요. 잠시 후 다시 시도해 주세요.",
+    gmailSyncRecovery:
+      "메일을 가져오지 못했어요. 계정 권한을 확인한 뒤 다시 시도해 주세요.",
+    gmailDisconnectRecovery:
+      "Gmail 연결을 해제하지 못했어요. 최신 상태를 확인한 뒤 다시 시도해 주세요.",
+    gmailAuthorizationExpired:
+      "연결 시간이 지났어요. Gmail 계정 연결을 다시 시작해 주세요.",
     deviceSignalsTitle: "휴대폰 정보",
     deviceSignalsChecking: "휴대폰 연결 상태를 확인하고 있어요.",
     deviceSignalsNeedsPermission:

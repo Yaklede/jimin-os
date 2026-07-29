@@ -8,6 +8,8 @@ import {
   ExternalLink,
   Link2,
   LoaderCircle,
+  Mail,
+  Plus,
   RefreshCw,
   Smartphone,
   Unlink,
@@ -22,6 +24,8 @@ import {
 } from "../api/agent";
 import { type GoogleCalendarConnection } from "../api/calendar";
 import { type DeviceSignalState } from "../api/deviceSignals";
+import { type GmailAccount } from "../api/gmail";
+import { type Workspace } from "../api/projects";
 import { copy } from "../copy";
 import {
   deviceSignalsSupported,
@@ -38,6 +42,10 @@ import {
   requestNotificationPermission,
 } from "../local-notifications";
 
+export type GmailSettingsAction =
+  | { kind: "authorizing"; workspaceId: string; accountId?: string }
+  | { kind: "syncing" | "disconnecting"; accountId: string };
+
 type SettingsWorkspaceProps = {
   authentication: AgentAuthentication | undefined;
   requesting: boolean;
@@ -50,6 +58,13 @@ type SettingsWorkspaceProps = {
   calendarAction: "authorizing" | "syncing" | "disconnecting" | undefined;
   calendarAuthorizationPending: boolean;
   calendarError: string | undefined;
+  workspaces: Workspace[];
+  gmailAvailable: boolean;
+  gmailAccounts: GmailAccount[];
+  gmailLoading: boolean;
+  gmailActions: GmailSettingsAction[];
+  gmailAuthorizationPendingWorkspaceId: string | undefined;
+  gmailError: string | undefined;
   reminderSyncStatus: ReminderSyncStatus;
   reminderSyncError: string | undefined;
   remoteReminderStatus: RemoteReminderStatus;
@@ -67,6 +82,17 @@ type SettingsWorkspaceProps = {
   onReloadCalendarConnection(): Promise<GoogleCalendarConnection | undefined>;
   onSyncCalendar(): Promise<void>;
   onDisconnectCalendar(): Promise<boolean>;
+  onReloadGmailAccounts(): Promise<GmailAccount[] | undefined>;
+  onStartGmailConnection(
+    workspaceId: string,
+    accountId?: string,
+  ): Promise<void>;
+  onCancelGmailAuthorization(): void;
+  onSyncGmailAccount(accountId: string): Promise<void>;
+  onDisconnectGmailAccount(
+    accountId: string,
+    expectedVersion: number,
+  ): Promise<boolean>;
   onRetryReminderSync(): Promise<boolean>;
   onEnableDeviceSignals(): Promise<boolean>;
   onRefreshDeviceSignals(): Promise<boolean>;
@@ -84,6 +110,13 @@ export function SettingsWorkspace({
   calendarAction,
   calendarAuthorizationPending,
   calendarError,
+  workspaces,
+  gmailAvailable,
+  gmailAccounts,
+  gmailLoading,
+  gmailActions,
+  gmailAuthorizationPendingWorkspaceId,
+  gmailError,
   reminderSyncStatus,
   reminderSyncError,
   remoteReminderStatus,
@@ -98,6 +131,11 @@ export function SettingsWorkspace({
   onReloadCalendarConnection,
   onSyncCalendar,
   onDisconnectCalendar,
+  onReloadGmailAccounts,
+  onStartGmailConnection,
+  onCancelGmailAuthorization,
+  onSyncGmailAccount,
+  onDisconnectGmailAccount,
   onRetryReminderSync,
   onEnableDeviceSignals,
   onRefreshDeviceSignals,
@@ -114,6 +152,8 @@ export function SettingsWorkspace({
     useState(false);
   const [calendarDisconnectConfirmation, setCalendarDisconnectConfirmation] =
     useState(false);
+  const [gmailDisconnectConfirmation, setGmailDisconnectConfirmation] =
+    useState<string>();
   const [notificationPermission, setNotificationPermission] =
     useState<NotificationPermissionStatus>();
   const [notificationPermissionLoading, setNotificationPermissionLoading] =
@@ -133,6 +173,10 @@ export function SettingsWorkspace({
   const calendarDisconnectTrigger = useRef<HTMLButtonElement>(null);
   const calendarDisconnectSafeAction = useRef<HTMLButtonElement>(null);
   const calendarConnectionRow = useRef<HTMLDivElement>(null);
+  const gmailSection = useRef<HTMLDivElement>(null);
+  const gmailDisconnectSafeAction = useRef<HTMLButtonElement>(null);
+  const gmailDisconnectTriggers = useRef(new Map<string, HTMLButtonElement>());
+  const gmailDisconnectFocusTarget = useRef<string | undefined>(undefined);
   const calendarDisconnectFocusTarget = useRef<"trigger" | "row" | undefined>(
     undefined,
   );
@@ -182,6 +226,8 @@ export function SettingsWorkspace({
     calendarLoading,
     calendarAuthorizationPending,
   );
+  const gmailWorkspaceGroups = groupGmailAccounts(workspaces, gmailAccounts);
+  const gmailBusy = gmailLoading || gmailActions.length > 0;
   const localDeviceSignals = deviceSignalsSupported();
   const connectedDeviceSignal = deviceSignalStates.find(
     (state) =>
@@ -198,6 +244,27 @@ export function SettingsWorkspace({
   useEffect(() => {
     if (!calendarReady) setCalendarDisconnectConfirmation(false);
   }, [calendarReady]);
+
+  useEffect(() => {
+    const target = gmailDisconnectConfirmation
+      ? gmailDisconnectSafeAction.current
+      : gmailDisconnectFocusTarget.current === "section"
+        ? gmailSection.current
+        : gmailDisconnectFocusTarget.current
+          ? gmailDisconnectTriggers.current.get(
+              gmailDisconnectFocusTarget.current,
+            )
+          : undefined;
+    if (!target) return;
+    const frame = window.requestAnimationFrame(() => {
+      target.focus();
+      if (!gmailDisconnectConfirmation) {
+        gmailDisconnectFocusTarget.current = undefined;
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [gmailDisconnectConfirmation]);
+
 
   useEffect(() => {
     if (!localNotificationsSupported()) return;
@@ -324,6 +391,20 @@ export function SettingsWorkspace({
     const disconnected = await onDisconnectCalendar();
     calendarDisconnectFocusTarget.current = disconnected ? "row" : "trigger";
     setCalendarDisconnectConfirmation(false);
+  }
+
+  function closeGmailDisconnectConfirmation(accountId: string) {
+    gmailDisconnectFocusTarget.current = accountId;
+    setGmailDisconnectConfirmation(undefined);
+  }
+
+  async function confirmGmailDisconnect(account: GmailAccount) {
+    const disconnected = await onDisconnectGmailAccount(
+      account.id,
+      account.version,
+    );
+    gmailDisconnectFocusTarget.current = disconnected ? "section" : account.id;
+    setGmailDisconnectConfirmation(undefined);
   }
 
   async function saveModel() {
@@ -739,6 +820,341 @@ export function SettingsWorkspace({
           </div>
         </div>
         <div
+          ref={gmailSection}
+          className="settings-gmail focus-visible-control"
+          tabIndex={-1}
+          aria-busy={gmailBusy}
+          data-state={
+            !gmailAvailable ? "unavailable" : gmailError ? "error" : undefined
+          }
+        >
+          <div className="settings-gmail__heading">
+            <span className="settings-row__icon" aria-hidden="true">
+              {gmailBusy ? (
+                <LoaderCircle className="spin" />
+              ) : gmailError || !gmailAvailable ? (
+                <CircleAlert />
+              ) : (
+                <Mail />
+              )}
+            </span>
+            <div>
+              <strong>{copy.settings.gmailTitle}</strong>
+              <p>{copy.settings.gmailDescription}</p>
+            </div>
+            {gmailLoading ? (
+              <span className="settings-row__state" role="status">
+                <LoaderCircle className="spin" aria-hidden="true" />
+                {copy.settings.gmailChecking}
+              </span>
+            ) : !gmailAvailable ? (
+              <span className="settings-row__state settings-row__state--warning">
+                {copy.settings.gmailConfigurationRequired}
+              </span>
+            ) : gmailError ? (
+              <button
+                className="text-button focus-visible-control"
+                type="button"
+                disabled={gmailLoading}
+                onClick={() => void onReloadGmailAccounts()}
+              >
+                <RefreshCw aria-hidden="true" />
+                {copy.settings.gmailRetry}
+              </button>
+            ) : null}
+          </div>
+          {gmailError ? (
+            <p className="settings-row__error" role="alert">
+              {gmailError}
+            </p>
+          ) : null}
+          {gmailWorkspaceGroups.length === 0 ? (
+            <div className="settings-gmail__empty">
+              <CircleAlert aria-hidden="true" />
+              <div>
+                <strong>{copy.settings.gmailWorkspaceMissing}</strong>
+                <p>{copy.settings.gmailWorkspaceMissingDescription}</p>
+              </div>
+            </div>
+          ) : (
+            <div className="settings-gmail__workspace-grid">
+              {gmailWorkspaceGroups.map(({ workspace, accounts }) => {
+                const authorizing = gmailActions.some(
+                  (action) =>
+                    action.kind === "authorizing" &&
+                    action.workspaceId === workspace.id,
+                );
+                const anotherWorkspaceAuthorizing = gmailActions.some(
+                  (action) =>
+                    action.kind === "authorizing" &&
+                    action.workspaceId !== workspace.id,
+                );
+                const authorizationPending =
+                  gmailAuthorizationPendingWorkspaceId === workspace.id;
+                return (
+                  <section
+                    className="settings-gmail__workspace"
+                    key={workspace.id}
+                    aria-labelledby={`gmail-workspace-${workspace.id}`}
+                  >
+                    <header>
+                      <div>
+                        <span>
+                          {workspace.scope === "company"
+                            ? copy.settings.gmailCompanyWorkspace
+                            : copy.settings.gmailPersonalWorkspace}
+                        </span>
+                        <strong id={`gmail-workspace-${workspace.id}`}>
+                          {workspace.name}
+                        </strong>
+                      </div>
+                      <button
+                        className="text-button focus-visible-control"
+                        type="button"
+                        disabled={
+                          !gmailAvailable ||
+                          gmailLoading ||
+                          authorizing ||
+                          anotherWorkspaceAuthorizing ||
+                          authorizationPending
+                        }
+                        onClick={() =>
+                          void onStartGmailConnection(workspace.id)
+                        }
+                      >
+                        {authorizing ? (
+                          <LoaderCircle className="spin" aria-hidden="true" />
+                        ) : (
+                          <Plus aria-hidden="true" />
+                        )}
+                        {authorizing
+                          ? copy.settings.gmailOpening
+                          : copy.settings.gmailAddAccount}
+                      </button>
+                    </header>
+                    {authorizationPending ? (
+                      <div className="settings-gmail__pending" role="status">
+                        <LoaderCircle className="spin" aria-hidden="true" />
+                        <div>
+                          <strong>{copy.settings.gmailAwaitingTitle}</strong>
+                          <p>{copy.settings.gmailAwaitingDescription}</p>
+                        </div>
+                        <div className="settings-gmail__pending-actions">
+                          <button
+                            className="text-button focus-visible-control"
+                            type="button"
+                            disabled={gmailLoading}
+                            onClick={() => void onReloadGmailAccounts()}
+                          >
+                            {copy.settings.gmailCheckConnection}
+                          </button>
+                          <button
+                            className="text-button focus-visible-control"
+                            type="button"
+                            onClick={onCancelGmailAuthorization}
+                          >
+                            {copy.settings.gmailCancelConnection}
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                    {accounts.length === 0 ? (
+                      <p className="settings-gmail__workspace-empty">
+                        {copy.settings.gmailEmpty}
+                      </p>
+                    ) : (
+                      <div className="settings-gmail__accounts">
+                        {accounts.map((account) => {
+                          const syncing = gmailAccountActionActive(
+                            gmailActions,
+                            account.id,
+                            "syncing",
+                          );
+                          const disconnecting = gmailAccountActionActive(
+                            gmailActions,
+                            account.id,
+                            "disconnecting",
+                          );
+                          const accountAuthorizing = gmailActions.some(
+                            (action) =>
+                              action.kind === "authorizing" &&
+                              action.accountId === account.id,
+                          );
+                          const accountBusy =
+                            syncing ||
+                            disconnecting ||
+                            accountAuthorizing ||
+                            authorizationPending;
+                          const needsReconnect =
+                            account.reauthRequired ||
+                            account.status === "reauth_required" ||
+                            account.status === "revoked";
+                          const hasProblem =
+                            Boolean(account.lastErrorCode) ||
+                            account.status === "error";
+                          const confirming =
+                            gmailDisconnectConfirmation === account.id;
+                          return (
+                            <article
+                              className="settings-gmail__account"
+                              data-state={
+                                hasProblem || needsReconnect
+                                  ? "warning"
+                                  : account.status
+                              }
+                              key={account.id}
+                            >
+                              <div className="settings-gmail__account-copy">
+                                {account.status === "active" && !hasProblem ? (
+                                  <CheckCircle2 aria-hidden="true" />
+                                ) : (
+                                  <CircleAlert aria-hidden="true" />
+                                )}
+                                <div>
+                                  <strong>{account.email}</strong>
+                                  <p>{gmailAccountDetail(account)}</p>
+                                </div>
+                              </div>
+                              {confirming ? (
+                                <div
+                                  className="settings-row__disconnect-confirmation"
+                                  role="group"
+                                  aria-label={copy.settings.gmailDisconnectTitle(
+                                    account.email,
+                                  )}
+                                >
+                                  <p>
+                                    {copy.settings.gmailDisconnectDescription}
+                                  </p>
+                                  <div>
+                                    <button
+                                      ref={gmailDisconnectSafeAction}
+                                      className="text-button focus-visible-control"
+                                      type="button"
+                                      disabled={disconnecting}
+                                      onClick={() =>
+                                        closeGmailDisconnectConfirmation(
+                                          account.id,
+                                        )
+                                      }
+                                    >
+                                      {copy.settings.gmailKeepConnected}
+                                    </button>
+                                    <button
+                                      className="text-button text-button--danger focus-visible-control"
+                                      type="button"
+                                      disabled={disconnecting}
+                                      onClick={() =>
+                                        void confirmGmailDisconnect(account)
+                                      }
+                                    >
+                                      {disconnecting ? (
+                                        <LoaderCircle
+                                          className="spin"
+                                          aria-hidden="true"
+                                        />
+                                      ) : (
+                                        <Unlink aria-hidden="true" />
+                                      )}
+                                      {disconnecting
+                                        ? copy.settings.gmailDisconnecting
+                                        : copy.settings.gmailConfirmDisconnect}
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="settings-gmail__account-actions">
+                                  {needsReconnect ? (
+                                    <button
+                                      className="text-button focus-visible-control"
+                                      type="button"
+                                      disabled={
+                                        !gmailAvailable ||
+                                        gmailLoading ||
+                                        accountBusy
+                                      }
+                                      onClick={() =>
+                                        void onStartGmailConnection(
+                                          workspace.id,
+                                          account.id,
+                                        )
+                                      }
+                                    >
+                                      {accountAuthorizing ? (
+                                        <LoaderCircle
+                                          className="spin"
+                                          aria-hidden="true"
+                                        />
+                                      ) : (
+                                        <RefreshCw aria-hidden="true" />
+                                      )}
+                                      {accountAuthorizing
+                                        ? copy.settings.gmailOpening
+                                        : copy.settings.gmailReconnect}
+                                    </button>
+                                  ) : (
+                                    <button
+                                      className="text-button focus-visible-control"
+                                      type="button"
+                                      disabled={
+                                        !gmailAvailable ||
+                                        gmailLoading ||
+                                        accountBusy
+                                      }
+                                      onClick={() =>
+                                        void onSyncGmailAccount(account.id)
+                                      }
+                                    >
+                                      {syncing ? (
+                                        <LoaderCircle
+                                          className="spin"
+                                          aria-hidden="true"
+                                        />
+                                      ) : (
+                                        <RefreshCw aria-hidden="true" />
+                                      )}
+                                      {syncing
+                                        ? copy.settings.gmailSyncing
+                                        : copy.settings.gmailSync}
+                                    </button>
+                                  )}
+                                  <button
+                                    ref={(element) => {
+                                      if (element) {
+                                        gmailDisconnectTriggers.current.set(
+                                          account.id,
+                                          element,
+                                        );
+                                      } else {
+                                        gmailDisconnectTriggers.current.delete(
+                                          account.id,
+                                        );
+                                      }
+                                    }}
+                                    className="text-button text-button--danger focus-visible-control"
+                                    type="button"
+                                    disabled={gmailLoading || accountBusy}
+                                    onClick={() =>
+                                      setGmailDisconnectConfirmation(account.id)
+                                    }
+                                  >
+                                    <Unlink aria-hidden="true" />
+                                    {copy.settings.gmailDisconnect}
+                                  </button>
+                                </div>
+                              )}
+                            </article>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </section>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <div
           className="settings-row"
           aria-busy={deviceSignalsLoading || deviceSignalSettingsOpening}
           data-state={
@@ -1039,4 +1455,101 @@ function calendarConnectionDetail(
     return copy.settings.calendarNeedsReconnect;
   }
   return copy.settings.calendarNotConnected;
+}
+
+type GmailWorkspaceGroup = {
+  workspace: Pick<Workspace, "id" | "scope" | "name">;
+  accounts: GmailAccount[];
+};
+
+export function groupGmailAccounts(
+  workspaces: Workspace[],
+  accounts: GmailAccount[],
+): GmailWorkspaceGroup[] {
+  const workspaceById = new Map<
+    string,
+    Pick<Workspace, "id" | "scope" | "name">
+  >(
+    workspaces.map((workspace) => [
+      workspace.id,
+      {
+        id: workspace.id,
+        scope: workspace.scope,
+        name: workspace.name,
+      },
+    ]),
+  );
+  for (const account of accounts) {
+    if (!workspaceById.has(account.workspaceId)) {
+      workspaceById.set(account.workspaceId, {
+        id: account.workspaceId,
+        scope: account.workspaceScope,
+        name: account.workspaceName,
+      });
+    }
+  }
+  return [...workspaceById.values()]
+    .sort(
+      (left, right) =>
+        workspaceScopeOrder(left.scope) - workspaceScopeOrder(right.scope) ||
+        left.name.localeCompare(right.name, "ko"),
+    )
+    .map((workspace) => ({
+      workspace,
+      accounts: accounts
+        .filter((account) => account.workspaceId === workspace.id)
+        .sort((left, right) => left.email.localeCompare(right.email)),
+    }));
+}
+
+export function gmailAccountDetail(account: GmailAccount): string {
+  if (account.reauthRequired || account.status === "reauth_required") {
+    return copy.settings.gmailNeedsReconnect;
+  }
+  if (account.status === "connecting") {
+    return copy.settings.gmailConnecting;
+  }
+  if (account.status === "revoking") {
+    return copy.settings.gmailDisconnectingDetail;
+  }
+  if (account.status === "revoked") {
+    return copy.settings.gmailRevoked;
+  }
+  if (account.status === "error" || account.lastErrorCode) {
+    return copy.settings.gmailSyncProblem;
+  }
+  if (!account.lastSuccessfulSyncAt) {
+    return copy.settings.gmailNotSynced;
+  }
+  return copy.settings.gmailLastSynced(
+    formatGmailSyncTime(account.lastSuccessfulSyncAt),
+  );
+}
+
+export function gmailAccountActionActive(
+  actions: GmailSettingsAction[],
+  accountId: string,
+  kind?: "syncing" | "disconnecting",
+): boolean {
+  return actions.some(
+    (action) =>
+      action.kind !== "authorizing" &&
+      action.accountId === accountId &&
+      (!kind || action.kind === kind),
+  );
+}
+
+function workspaceScopeOrder(scope: Workspace["scope"]): number {
+  return scope === "personal" ? 0 : 1;
+}
+
+function formatGmailSyncTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
 }

@@ -221,6 +221,13 @@ pub struct GoogleCalendarGrant {
     granted_scopes: Vec<String>,
 }
 
+/// The server-only result of an independently authorized Gmail identity.
+pub struct GoogleGmailGrant {
+    identity: VerifiedGoogleIdentity,
+    refresh_token: Option<SecretString>,
+    granted_scopes: Vec<String>,
+}
+
 /// The server-only result of company Google Chat consent.
 pub struct GoogleChatGrant {
     identity: VerifiedGoogleIdentity,
@@ -262,6 +269,23 @@ impl GoogleCalendarGrant {
     }
 }
 
+impl GoogleGmailGrant {
+    #[must_use]
+    pub const fn identity(&self) -> &VerifiedGoogleIdentity {
+        &self.identity
+    }
+
+    #[must_use]
+    pub const fn refresh_token(&self) -> Option<&SecretString> {
+        self.refresh_token.as_ref()
+    }
+
+    #[must_use]
+    pub fn granted_scopes(&self) -> &[String] {
+        &self.granted_scopes
+    }
+}
+
 struct CachedJwks {
     keys: JwkSet,
     expires_at: OffsetDateTime,
@@ -272,6 +296,13 @@ pub struct GoogleIdentityAdapter {
     client: Client,
     profiles: BTreeMap<String, GoogleOAuthProfile>,
     jwks: Mutex<Option<CachedJwks>>,
+}
+
+#[derive(Clone, Copy)]
+struct AuthorizationOptions {
+    force_consent: bool,
+    select_account: bool,
+    include_granted_scopes: bool,
 }
 
 /// Fixed Google Calendar provider adapter. It owns no persisted credentials:
@@ -1477,10 +1508,54 @@ impl GoogleIdentityAdapter {
             platform,
             state,
             code_challenge,
-            force_consent,
             "openid email https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly",
-            false,
+            AuthorizationOptions {
+                force_consent,
+                select_account: false,
+                include_granted_scopes: false,
+            },
         )
+    }
+
+    /// Builds consent for one independently selected Gmail identity. Account
+    /// selection is mandatory so a personal Calendar login is never silently
+    /// reused for a company workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for malformed state, PKCE, or profile input.
+    pub fn gmail_authorization_url(
+        &self,
+        platform: ClientPlatform,
+        state: &str,
+        code_challenge: &str,
+        force_consent: bool,
+        login_hint: Option<&str>,
+    ) -> Result<String, GoogleAuthError> {
+        let authorization_url = self.authorization_url(
+            platform,
+            state,
+            code_challenge,
+            "openid email https://www.googleapis.com/auth/gmail.readonly",
+            AuthorizationOptions {
+                force_consent,
+                select_account: true,
+                include_granted_scopes: false,
+            },
+        )?;
+        let Some(login_hint) = login_hint else {
+            return Ok(authorization_url);
+        };
+        if login_hint.is_empty()
+            || login_hint.len() > 320
+            || login_hint.chars().any(char::is_control)
+        {
+            return Err(GoogleAuthError::InvalidRequest);
+        }
+        let mut url = reqwest::Url::parse(&authorization_url)
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        url.query_pairs_mut().append_pair("login_hint", login_hint);
+        Ok(url.into())
     }
 
     /// Builds consent for a distinct company Chat identity. `select_account`
@@ -1501,9 +1576,12 @@ impl GoogleIdentityAdapter {
             platform,
             state,
             code_challenge,
-            force_consent,
             "openid email https://www.googleapis.com/auth/chat.spaces.readonly https://www.googleapis.com/auth/chat.messages.readonly https://www.googleapis.com/auth/chat.messages.reactions.create https://www.googleapis.com/auth/chat.messages.create",
-            true,
+            AuthorizationOptions {
+                force_consent,
+                select_account: true,
+                include_granted_scopes: false,
+            },
         )
     }
 
@@ -1525,6 +1603,28 @@ impl GoogleIdentityAdapter {
             .verify_identity_token(&token_response.id_token, profile)
             .await?;
         Ok(GoogleCalendarGrant {
+            identity,
+            refresh_token: token_response.refresh_token.map(SecretString::from),
+            granted_scopes: parse_scopes(token_response.scope),
+        })
+    }
+
+    /// Exchanges Gmail-only consent and verifies its Google identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized request, provider, or identity verification error.
+    pub async fn exchange_gmail(
+        &self,
+        request: GoogleAuthorizationCode,
+    ) -> Result<GoogleGmailGrant, GoogleAuthError> {
+        let profile = self.profile_for(request.platform)?;
+        validate_exchange_request(&request, profile)?;
+        let token_response = self.exchange_token(&request, profile).await?;
+        let identity = self
+            .verify_identity_token(&token_response.id_token, profile)
+            .await?;
+        Ok(GoogleGmailGrant {
             identity,
             refresh_token: token_response.refresh_token.map(SecretString::from),
             granted_scopes: parse_scopes(token_response.scope),
@@ -1558,9 +1658,8 @@ impl GoogleIdentityAdapter {
         platform: ClientPlatform,
         state: &str,
         code_challenge: &str,
-        force_consent: bool,
         scopes: &str,
-        select_account: bool,
+        options: AuthorizationOptions,
     ) -> Result<String, GoogleAuthError> {
         if !valid_url_safe_value(state, 128) || !valid_url_safe_value(code_challenge, 128) {
             return Err(GoogleAuthError::InvalidRequest);
@@ -1582,8 +1681,15 @@ impl GoogleIdentityAdapter {
             query.append_pair("code_challenge", code_challenge);
             query.append_pair("code_challenge_method", "S256");
             query.append_pair("access_type", "offline");
-            query.append_pair("include_granted_scopes", "true");
-            let prompt = match (force_consent, select_account) {
+            query.append_pair(
+                "include_granted_scopes",
+                if options.include_granted_scopes {
+                    "true"
+                } else {
+                    "false"
+                },
+            );
+            let prompt = match (options.force_consent, options.select_account) {
                 (true, true) => Some("consent select_account"),
                 (true, false) => Some("consent"),
                 (false, true) => Some("select_account"),
@@ -2693,14 +2799,65 @@ mod tests {
             )
             .expect("authorization URL should be generated");
         let url = reqwest::Url::parse(&authorization_url).expect("authorization URL should parse");
-        let scope = url
-            .query_pairs()
-            .find_map(|(key, value)| (key == "scope").then(|| value.into_owned()))
+        let query = url.query_pairs().collect::<BTreeMap<_, _>>();
+        let scope = query
+            .get("scope")
             .expect("scope query parameter should exist");
 
         assert!(scope.contains("https://www.googleapis.com/auth/calendar.events"));
         assert!(scope.contains("https://www.googleapis.com/auth/calendar.calendarlist.readonly"));
         assert!(!scope.contains("https://www.googleapis.com/auth/gmail.readonly"));
+        assert_eq!(
+            query.get("include_granted_scopes").map(AsRef::as_ref),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn gmail_authorization_is_minimal_offline_and_selects_an_account() {
+        let profile = GoogleOAuthProfile::new_with_client_secret(
+            ClientPlatform::Android,
+            "gmail-client-id",
+            SecretString::from("gmail-client-secret"),
+            ["https://os.jimin.ai.kr/oauth/google/calendar/callback".to_owned()],
+            true,
+        )
+        .expect("test OAuth profile should be valid");
+        let adapter = GoogleIdentityAdapter::new([profile])
+            .expect("test Google identity adapter should build");
+
+        let authorization_url = adapter
+            .gmail_authorization_url(
+                ClientPlatform::Android,
+                "state-value",
+                "challenge-value",
+                true,
+                Some("company@example.com"),
+            )
+            .expect("Gmail authorization URL should be generated");
+        let url = reqwest::Url::parse(&authorization_url).expect("authorization URL should parse");
+        let query = url.query_pairs().collect::<BTreeMap<_, _>>();
+        let scope = query
+            .get("scope")
+            .expect("scope query parameter should exist");
+
+        assert!(scope.contains("openid"));
+        assert!(scope.contains("email"));
+        assert!(scope.contains("https://www.googleapis.com/auth/gmail.readonly"));
+        assert!(!scope.contains("https://www.googleapis.com/auth/calendar.events"));
+        assert_eq!(query.get("access_type").map(AsRef::as_ref), Some("offline"));
+        assert_eq!(
+            query.get("include_granted_scopes").map(AsRef::as_ref),
+            Some("false")
+        );
+        assert_eq!(
+            query.get("prompt").map(AsRef::as_ref),
+            Some("consent select_account")
+        );
+        assert_eq!(
+            query.get("login_hint").map(AsRef::as_ref),
+            Some("company@example.com")
+        );
     }
 
     #[test]
@@ -2734,6 +2891,10 @@ mod tests {
         assert!(scope.contains("https://www.googleapis.com/auth/chat.messages.readonly"));
         assert!(scope.contains("https://www.googleapis.com/auth/chat.messages.reactions.create"));
         assert!(scope.contains("https://www.googleapis.com/auth/chat.messages.create"));
+        assert_eq!(
+            query.get("include_granted_scopes").map(AsRef::as_ref),
+            Some("false")
+        );
         assert_eq!(
             query.get("prompt").map(AsRef::as_ref),
             Some("consent select_account")

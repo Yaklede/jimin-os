@@ -158,4 +158,18 @@ caller names or phone numbers. Rollback after call data is uploaded requires
 the verified pre-migration backup so private device history is not silently
 discarded.
 
+Migration `0044_gmail_multi_account_workspaces.sql` separates Gmail credentials
+from the single Calendar connection and assigns every Gmail account, sync
+cursor, and message metadata row to an owner-scoped personal or company
+workspace. Apply it to an empty database and a restored version-43 backup.
+Before release, compare Gmail account, sync-state, and message counts before and
+after the migration; confirm legacy Calendar-backed Gmail metadata is retained
+under the personal workspace with reauthorization required; and verify Calendar
+and Google Chat credentials are unchanged. Then connect one personal and one
+company Gmail account, confirm cross-workspace reads are rejected, and verify
+`jimin_schema_metadata.schema_version = 44`. The migration is forward-only.
+After a Gmail account is authorized or synchronized, rollback requires the
+verified pre-migration backup because the previous image cannot interpret the
+workspace-scoped encrypted credentials or cache rows.
+
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.

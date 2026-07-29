@@ -17,6 +17,16 @@ import {
   type GoogleCalendarConnection,
 } from "./api/calendar";
 import {
+  disconnectGmailAccount,
+  fetchGmailAccounts,
+  gmailAuthorizationBaseline,
+  gmailAuthorizationChanged,
+  startGmailAuthorization,
+  synchronizeGmailAccount,
+  type GmailAccount,
+  type GmailAuthorizationBaseline,
+} from "./api/gmail";
+import {
   bootstrapTrustedNetworkSession,
   completeTask,
   createScheduleEntry,
@@ -203,6 +213,9 @@ type AssistantDraft = {
   text: string;
   autoSend: boolean;
 };
+type GmailAction =
+  | { kind: "authorizing"; workspaceId: string; accountId?: string }
+  | { kind: "syncing" | "disconnecting"; accountId: string };
 
 export default function App() {
   const apiBaseUrl = personalServerBaseUrl ?? "";
@@ -320,6 +333,14 @@ export default function App() {
   const [calendarAuthorizationExpiresAt, setCalendarAuthorizationExpiresAt] =
     useState<string>();
   const [calendarError, setCalendarError] = useState<string>();
+  const [gmailAccountsAvailable, setGmailAccountsAvailable] = useState(true);
+  const [gmailAccounts, setGmailAccounts] = useState<GmailAccount[]>([]);
+  const [gmailLoading, setGmailLoading] = useState(false);
+  const [gmailActions, setGmailActions] = useState<GmailAction[]>([]);
+  const [gmailAuthorizationPending, setGmailAuthorizationPending] = useState<
+    { expiresAt: string } & GmailAuthorizationBaseline
+  >();
+  const [gmailError, setGmailError] = useState<string>();
   const [reminderSyncStatus, setReminderSyncStatus] =
     useState<ReminderSyncStatus>("idle");
   const [reminderSyncError, setReminderSyncError] = useState<string>();
@@ -831,6 +852,166 @@ export default function App() {
       withAuthenticatedSession,
     ]);
 
+  const loadGmailAccounts = useCallback(async (): Promise<
+    GmailAccount[] | undefined
+  > => {
+    if (!tokens) return undefined;
+    setGmailLoading(true);
+    setGmailError(undefined);
+    try {
+      const response = await withAuthenticatedSession((accessToken) =>
+        fetchGmailAccounts(apiBaseUrl, accessToken),
+      );
+      setGmailAccountsAvailable(response.available);
+      setGmailAccounts(response.items);
+      setGmailError(undefined);
+      setGmailAuthorizationPending((pending) => {
+        if (pending && gmailAuthorizationChanged(pending, response.items)) {
+          return undefined;
+        }
+        return pending;
+      });
+      return response.items;
+    } catch {
+      setGmailError(copy.settings.gmailLoadRecovery);
+      return undefined;
+    } finally {
+      setGmailLoading(false);
+    }
+  }, [apiBaseUrl, tokens, withAuthenticatedSession]);
+
+  const beginGmailConnection = useCallback(
+    async (workspaceId: string, accountId?: string): Promise<void> => {
+      if (
+        !tokens ||
+        gmailActions.some((action) => action.kind === "authorizing")
+      ) {
+        return;
+      }
+      const action: GmailAction = {
+        kind: "authorizing",
+        workspaceId,
+        accountId,
+      };
+      setGmailActions((current) => [...current, action]);
+      setGmailError(undefined);
+      try {
+        const authorization = await withAuthenticatedSession((accessToken) =>
+          startGmailAuthorization(apiBaseUrl, accessToken, workspaceId, {
+            accountId,
+          }),
+        );
+        await openExternalUrl(authorization.authorizationUrl);
+        setGmailAuthorizationPending({
+          expiresAt: authorization.expiresAt,
+          ...gmailAuthorizationBaseline(workspaceId, gmailAccounts, accountId),
+        });
+      } catch {
+        setGmailError(
+          gmailAccountsAvailable
+            ? copy.settings.gmailConnectRecovery
+            : copy.settings.gmailConfigurationMissing,
+        );
+      } finally {
+        setGmailActions((current) =>
+          current.filter((candidate) => candidate !== action),
+        );
+      }
+    },
+    [
+      apiBaseUrl,
+      gmailAccountsAvailable,
+      gmailAccounts,
+      gmailActions,
+      tokens,
+      withAuthenticatedSession,
+    ],
+  );
+
+  const cancelGmailAuthorization = useCallback((): void => {
+    setGmailAuthorizationPending(undefined);
+    setGmailError(undefined);
+  }, []);
+
+  const syncGmailAccount = useCallback(
+    async (accountId: string): Promise<void> => {
+      if (
+        !tokens ||
+        gmailActions.some(
+          (action) =>
+            action.kind !== "authorizing" && action.accountId === accountId,
+        )
+      ) {
+        return;
+      }
+      const action: GmailAction = { kind: "syncing", accountId };
+      setGmailActions((current) => [...current, action]);
+      setGmailError(undefined);
+      try {
+        await withAuthenticatedSession((accessToken) =>
+          synchronizeGmailAccount(apiBaseUrl, accessToken, accountId),
+        );
+        await loadGmailAccounts();
+      } catch {
+        setGmailError(copy.settings.gmailSyncRecovery);
+      } finally {
+        setGmailActions((current) =>
+          current.filter((candidate) => candidate !== action),
+        );
+      }
+    },
+    [
+      apiBaseUrl,
+      gmailActions,
+      loadGmailAccounts,
+      tokens,
+      withAuthenticatedSession,
+    ],
+  );
+
+  const disconnectGmailConnection = useCallback(
+    async (accountId: string, expectedVersion: number): Promise<boolean> => {
+      if (
+        !tokens ||
+        gmailActions.some(
+          (action) =>
+            action.kind !== "authorizing" && action.accountId === accountId,
+        )
+      ) {
+        return false;
+      }
+      const action: GmailAction = { kind: "disconnecting", accountId };
+      setGmailActions((current) => [...current, action]);
+      setGmailError(undefined);
+      try {
+        await withAuthenticatedSession((accessToken) =>
+          disconnectGmailAccount(
+            apiBaseUrl,
+            accessToken,
+            accountId,
+            expectedVersion,
+          ),
+        );
+        await loadGmailAccounts();
+        return true;
+      } catch {
+        setGmailError(copy.settings.gmailDisconnectRecovery);
+        return false;
+      } finally {
+        setGmailActions((current) =>
+          current.filter((candidate) => candidate !== action),
+        );
+      }
+    },
+    [
+      apiBaseUrl,
+      gmailActions,
+      loadGmailAccounts,
+      tokens,
+      withAuthenticatedSession,
+    ],
+  );
+
   const loadGoogleChatAccounts = useCallback(async (): Promise<
     GoogleChatAccount[] | undefined
   > => {
@@ -1154,6 +1335,7 @@ export default function App() {
         ),
         loadHomeSnapshot(),
         loadGoogleCalendarConnection(),
+        loadGmailAccounts(),
       ]);
       if (
         conversationListRequestGateRef.current.isCurrent(
@@ -1174,6 +1356,7 @@ export default function App() {
     }
   }, [
     loadGoogleCalendarConnection,
+    loadGmailAccounts,
     loadHomeSnapshot,
     sessionLoaded,
     tokens,
@@ -1222,6 +1405,10 @@ export default function App() {
         entityTypes.has("project_google_chat_source") ||
         entityTypes.has("project_inflow_item") ||
         entityTypes.has("project_inflow_analysis");
+      const affectsGmail =
+        forceFull ||
+        entityTypes.has("gmail_account") ||
+        entityTypes.has("gmail_message");
 
       if (affectsWork) {
         const [from, to] = currentLocalDayRange();
@@ -1321,6 +1508,9 @@ export default function App() {
         await loadGoogleChatAccounts();
         if (selectedProjectId) await loadProjectInflow(selectedProjectId);
       }
+      if (affectsGmail) {
+        await loadGmailAccounts();
+      }
     },
     [
       apiBaseUrl,
@@ -1330,6 +1520,7 @@ export default function App() {
       selectedProjectId,
       selectedWorkspaceId,
       loadGoogleChatAccounts,
+      loadGmailAccounts,
       loadProjectInflow,
       loadConversationMessages,
       withAuthenticatedSession,
@@ -1405,6 +1596,11 @@ export default function App() {
       setCalendarError(undefined);
       setCalendarAuthorizationExpiresAt(undefined);
       setCalendarAction(undefined);
+      setGmailAccountsAvailable(true);
+      setGmailAccounts([]);
+      setGmailError(undefined);
+      setGmailAuthorizationPending(undefined);
+      setGmailActions([]);
       setReminderSyncStatus("idle");
       setReminderSyncError(undefined);
       setRemoteReminderStatus("idle");
@@ -1722,6 +1918,50 @@ export default function App() {
     tokens,
     withAuthenticatedSession,
   ]);
+
+  useEffect(() => {
+    if (!tokens || !gmailAuthorizationPending) return;
+    let current = true;
+    let pollInFlight = false;
+    const expiresAt = new Date(gmailAuthorizationPending.expiresAt).getTime();
+    const poll = async () => {
+      if (pollInFlight) return;
+      if (!Number.isFinite(expiresAt) || Date.now() >= expiresAt) {
+        if (current) {
+          setGmailAuthorizationPending(undefined);
+          setGmailError(copy.settings.gmailAuthorizationExpired);
+        }
+        return;
+      }
+      pollInFlight = true;
+      try {
+        const response = await withAuthenticatedSession((accessToken) =>
+          fetchGmailAccounts(apiBaseUrl, accessToken),
+        );
+        if (!current) return;
+        setGmailAccountsAvailable(response.available);
+        setGmailAccounts(response.items);
+        setGmailError(undefined);
+        const authorizationChanged = gmailAuthorizationChanged(
+          gmailAuthorizationPending,
+          response.items,
+        );
+        if (!response.available || authorizationChanged) {
+          setGmailAuthorizationPending(undefined);
+        }
+      } catch {
+        if (current) setGmailError(copy.settings.gmailLoadRecovery);
+      } finally {
+        pollInFlight = false;
+      }
+    };
+    void poll();
+    const interval = window.setInterval(() => void poll(), 2_000);
+    return () => {
+      current = false;
+      window.clearInterval(interval);
+    };
+  }, [apiBaseUrl, gmailAuthorizationPending, tokens, withAuthenticatedSession]);
 
   useEffect(() => {
     void loadWorkspaces();
@@ -3852,6 +4092,15 @@ export default function App() {
                 calendarAuthorizationExpiresAt,
               )}
               calendarError={calendarError}
+              workspaces={workspaces}
+              gmailAvailable={gmailAccountsAvailable}
+              gmailAccounts={gmailAccounts}
+              gmailLoading={gmailLoading}
+              gmailActions={gmailActions}
+              gmailAuthorizationPendingWorkspaceId={
+                gmailAuthorizationPending?.workspaceId
+              }
+              gmailError={gmailError}
               reminderSyncStatus={reminderSyncStatus}
               reminderSyncError={reminderSyncError}
               remoteReminderStatus={remoteReminderStatus}
@@ -3866,6 +4115,11 @@ export default function App() {
               onReloadCalendarConnection={loadGoogleCalendarConnection}
               onSyncCalendar={syncGoogleCalendar}
               onDisconnectCalendar={disconnectGoogleCalendarConnection}
+              onReloadGmailAccounts={loadGmailAccounts}
+              onStartGmailConnection={beginGmailConnection}
+              onCancelGmailAuthorization={cancelGmailAuthorization}
+              onSyncGmailAccount={syncGmailAccount}
+              onDisconnectGmailAccount={disconnectGmailConnection}
               onRetryReminderSync={synchronizePlanningReminders}
               onEnableDeviceSignals={() => synchronizeDeviceSignals(true)}
               onRefreshDeviceSignals={() => synchronizeDeviceSignals(false)}

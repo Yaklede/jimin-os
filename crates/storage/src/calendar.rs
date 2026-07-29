@@ -176,7 +176,7 @@ impl Database {
         let connection = detached.connection().ok();
         let cached_events =
             purge_calendar_provider_rows(&mut transaction, user_id, detached.id).await?;
-        purge_linked_google_cache(&mut transaction, user_id).await?;
+        cancel_pending_calendar_authorizations(&mut transaction, user_id).await?;
         append_calendar_disconnect_changes(&mut transaction, user_id, &detached, &cached_events)
             .await?;
         transaction
@@ -1516,7 +1516,7 @@ async fn purge_calendar_provider_rows(
     Ok(cached_events)
 }
 
-async fn purge_linked_google_cache(
+async fn cancel_pending_calendar_authorizations(
     transaction: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
 ) -> Result<(), StorageError> {
@@ -1534,16 +1534,6 @@ async fn purge_linked_google_cache(
     .execute(&mut **transaction)
     .await
     .map_err(|_| StorageError::PersistenceUnavailable)?;
-    sqlx::query("DELETE FROM gmail_messages WHERE user_id = $1")
-        .bind(user_id)
-        .execute(&mut **transaction)
-        .await
-        .map_err(|_| StorageError::PersistenceUnavailable)?;
-    sqlx::query("DELETE FROM gmail_sync_states WHERE user_id = $1")
-        .bind(user_id)
-        .execute(&mut **transaction)
-        .await
-        .map_err(|_| StorageError::PersistenceUnavailable)?;
     Ok(())
 }
 

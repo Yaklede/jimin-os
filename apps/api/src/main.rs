@@ -8,12 +8,13 @@ use jimin_api::{
         AppConfig, AuthenticationSetting, AuthenticationSettings, CalendarOAuthSetting,
         SecretSetting,
     },
+    gmail_oauth::GmailOAuthRuntime,
     google_chat_oauth::GoogleChatOAuthRuntime,
     probe::{ProbeTarget, run_probe},
     push::PushRuntime,
     router, serve_with_shutdown, spawn_calendar_mutation_worker, spawn_calendar_sync_worker,
-    spawn_google_chat_sync_worker, spawn_push_delivery_worker, spawn_webhook_delivery_worker,
-    spawn_work_brief_worker,
+    spawn_gmail_sync_worker, spawn_google_chat_sync_worker, spawn_push_delivery_worker,
+    spawn_webhook_delivery_worker, spawn_work_brief_worker,
     webhook::WebhookRuntime,
 };
 use jimin_application::{PairingLifetime, SessionLifetime, SessionService};
@@ -183,6 +184,14 @@ async fn run_server() -> Result<(), &'static str> {
                     error_code = "google_chat.configuration_invalid"
                 );
             }
+            if let Ok(gmail_oauth) = GmailOAuthRuntime::new(settings) {
+                state = state.with_gmail_oauth(gmail_oauth);
+            } else {
+                warn!(
+                    event = "gmail.configuration_invalid",
+                    error_code = "gmail.configuration_invalid"
+                );
+            }
         }
         CalendarOAuthSetting::Missing => info!(
             event = "calendar.configuration_missing",
@@ -212,6 +221,7 @@ async fn run_server() -> Result<(), &'static str> {
         .as_ref()
         .map(|database| tokio::spawn(reconcile_migrations(database.clone())));
     let calendar_sync_task = spawn_calendar_sync_worker(&state);
+    let gmail_sync_task = spawn_gmail_sync_worker(&state);
     let calendar_mutation_task = spawn_calendar_mutation_worker(&state);
     let webhook_delivery_task = spawn_webhook_delivery_worker(&state);
     let google_chat_sync_task = spawn_google_chat_sync_worker(&state);
@@ -228,6 +238,10 @@ async fn run_server() -> Result<(), &'static str> {
     if let Some(calendar_sync_task) = calendar_sync_task {
         calendar_sync_task.abort();
         let _ = calendar_sync_task.await;
+    }
+    if let Some(gmail_sync_task) = gmail_sync_task {
+        gmail_sync_task.abort();
+        let _ = gmail_sync_task.await;
     }
     if let Some(calendar_mutation_task) = calendar_mutation_task {
         calendar_mutation_task.abort();

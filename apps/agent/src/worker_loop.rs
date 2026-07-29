@@ -3776,6 +3776,9 @@ mod tests {
 
         let inbox = GmailMessage {
             id: Uuid::now_v7(),
+            account_id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            account_email: "jimin@example.com".to_owned(),
             received_at: Some(now),
             sender: Some("Jimin <jimin@example.com>".to_owned()),
             subject: Some("회의 확인".to_owned()),

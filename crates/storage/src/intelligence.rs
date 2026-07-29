@@ -14,7 +14,6 @@ use uuid::Uuid;
 use crate::{
     Database, StorageError,
     auth::append_change,
-    gmail::GmailMessage,
     goals::{GoalHealth, GoalOverview, GoalStatus},
     planning::{ScheduleEntry, Task},
     work::{Project, ProjectManagementMode, ProjectStatus},
@@ -813,8 +812,9 @@ impl Database {
             .schedule_entries_in_range(user_id, now, horizon)
             .await?;
         let goals = self.goal_overviews_for_user(user_id, now).await?;
-        let inbox = self.recent_gmail_messages_for_user(user_id).await?;
-        let observations = work_observations(&tasks, &projects, &schedules, &goals, &inbox, now);
+        // Gmail metadata is workspace-scoped. A user-global work brief must
+        // never merge personal and company mailboxes implicitly.
+        let observations = work_observations(&tasks, &projects, &schedules, &goals, now);
         let fingerprints = observations
             .iter()
             .map(|observation| observation.fingerprint.clone())
@@ -1037,7 +1037,6 @@ fn work_observations(
     projects: &[Project],
     schedules: &[ScheduleEntry],
     goals: &[GoalOverview],
-    inbox: &[GmailMessage],
     now: OffsetDateTime,
 ) -> Vec<WorkObservation> {
     let mut observations = Vec::new();
@@ -1065,9 +1064,6 @@ fn work_observations(
             .filter(|overview| overview.goal.status == GoalStatus::Active)
             .filter_map(|goal| goal_observation(goal, now)),
     );
-    if let Some(observation) = inbox_observation(inbox, now) {
-        observations.push(observation);
-    }
     observations
 }
 
@@ -1628,36 +1624,6 @@ fn truncate_chars(value: &str, maximum: usize) -> String {
         .collect::<String>();
     truncated.push('…');
     truncated
-}
-
-fn inbox_observation(inbox: &[GmailMessage], now: OffsetDateTime) -> Option<WorkObservation> {
-    let unread_count = inbox.iter().filter(|message| message.is_unread).count();
-    if unread_count == 0 {
-        return None;
-    }
-    let severity = if unread_count >= 5 { 2 } else { 1 };
-    Some(WorkObservation {
-        fingerprint: "work:inbox:unread".to_owned(),
-        workspace_id: None,
-        project_id: None,
-        goal_id: None,
-        severity,
-        kind: "opportunity",
-        source_type: "inbox",
-        source_entity_id: None,
-        suggested_action_kind: SuggestedActionKind::Review,
-        suggested_entity_id: None,
-        title: "읽지 않은 메일을 확인하세요".to_owned(),
-        summary: format!("최근 받은 메일 중 읽지 않은 메일이 {unread_count}개 있어요."),
-        expected_effect: "일정이나 프로젝트에 영향을 주는 요청을 놓치지 않을 수 있어요.".to_owned(),
-        risk_summary: None,
-        confidence: 90,
-        urgency: severity,
-        impact: 1,
-        risk_level: 0,
-        effort_minutes: Some(10),
-        valid_until: now + time::Duration::days(1),
-    })
 }
 
 async fn recommendation_scope_is_owned(

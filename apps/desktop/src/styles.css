@@ -7295,6 +7295,235 @@ svg {
   font-weight: 500;
 }
 
+.settings-gmail {
+  display: grid;
+  gap: 14px;
+  padding: 18px 20px 20px;
+  border-top: 1px solid var(--border);
+}
+
+.settings-gmail__heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.settings-gmail__heading > div {
+  min-width: 0;
+}
+
+.settings-gmail__heading strong,
+.settings-gmail__heading p {
+  margin: 0;
+}
+
+.settings-gmail__heading strong {
+  color: var(--text-strong);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.settings-gmail__heading p {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.settings-gmail__heading > .text-button,
+.settings-gmail__heading > .settings-row__state {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.settings-gmail > .settings-row__error {
+  margin: 0 0 0 52px;
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.settings-gmail[data-state="unavailable"] .settings-row__icon,
+.settings-gmail[data-state="error"] .settings-row__icon {
+  background: var(--warning-tint);
+  color: var(--warning);
+}
+
+.settings-gmail__workspace-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 12px;
+}
+
+.settings-gmail__workspace {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+}
+
+.settings-gmail__workspace > header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 62px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-subtle);
+}
+
+.settings-gmail__workspace > header > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.settings-gmail__workspace > header span {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.settings-gmail__workspace > header strong {
+  overflow: hidden;
+  color: var(--text-strong);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-gmail__workspace > header .text-button {
+  flex: 0 0 auto;
+  min-height: 40px;
+  margin-left: auto;
+}
+
+.settings-gmail__accounts {
+  display: grid;
+}
+
+.settings-gmail__account {
+  display: grid;
+  gap: 10px;
+  padding: 13px 14px;
+}
+
+.settings-gmail__account + .settings-gmail__account {
+  border-top: 1px solid var(--border);
+}
+
+.settings-gmail__account-copy {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.settings-gmail__account-copy > svg {
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  color: var(--success);
+}
+
+.settings-gmail__account[data-state="warning"]
+  .settings-gmail__account-copy
+  > svg {
+  color: var(--warning);
+}
+
+.settings-gmail__account-copy strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text-strong);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-gmail__account-copy p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settings-gmail__account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.settings-gmail__account-actions .text-button,
+.settings-gmail__account .settings-row__disconnect-confirmation .text-button {
+  min-height: 40px;
+  margin: 0;
+}
+
+.settings-gmail__account .settings-row__disconnect-confirmation {
+  max-width: none;
+  padding-left: 30px;
+}
+
+.settings-gmail__pending,
+.settings-gmail__empty {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+}
+
+.settings-gmail__pending {
+  border-bottom: 1px solid var(--border);
+  background: var(--accent-tint);
+}
+
+.settings-gmail__pending > svg,
+.settings-gmail__empty > svg {
+  width: 18px;
+  height: 18px;
+  color: var(--accent);
+}
+
+.settings-gmail__pending strong,
+.settings-gmail__empty strong {
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.settings-gmail__pending p,
+.settings-gmail__empty p,
+.settings-gmail__workspace-empty {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-gmail__pending .text-button {
+  min-height: 40px;
+}
+
+.settings-gmail__pending-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.settings-gmail__workspace-empty {
+  padding: 16px 14px;
+}
+
+.settings-gmail__empty {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-card);
+}
+
 .assistant-page {
   width: min(100%, 1024px);
   min-height: calc(100dvh - 108px);
@@ -11457,6 +11686,46 @@ svg {
     margin-left: 0;
   }
 
+  .settings-gmail {
+    padding: 16px;
+  }
+
+  .settings-gmail__heading {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .settings-gmail__heading > .text-button,
+  .settings-gmail__heading > .settings-row__state {
+    grid-column: 2;
+    justify-self: start;
+    margin: 2px 0 0;
+  }
+
+  .settings-gmail > .settings-row__error {
+    margin-left: 52px;
+  }
+
+  .settings-gmail__workspace-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-gmail__account-actions {
+    justify-content: flex-start;
+    padding-left: 30px;
+  }
+
+  .settings-gmail__pending {
+    grid-template-columns: 20px minmax(0, 1fr);
+  }
+
+  .settings-gmail__pending-actions {
+    grid-column: 2;
+    justify-content: flex-start;
+    justify-self: start;
+  }
+
   .assistant-page {
     min-height: calc(100dvh - 124px);
   }
@@ -12555,6 +12824,29 @@ svg {
   .settings-row__actions {
     width: 100%;
     flex-wrap: wrap;
+  }
+
+  .settings-gmail > .settings-row__error {
+    margin-left: 0;
+  }
+
+  .settings-gmail__workspace > header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-gmail__workspace > header .text-button {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .settings-gmail__account-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-gmail__account-actions .text-button {
+    width: 100%;
   }
 
   .settings-row .settings-row__actions .text-button,

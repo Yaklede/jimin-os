@@ -2,6 +2,7 @@ pub mod auth;
 pub mod calendar_oauth;
 pub mod config;
 mod device_signals;
+pub mod gmail_oauth;
 pub mod google_chat_oauth;
 mod meetings;
 pub mod probe;
@@ -49,6 +50,9 @@ use jimin_storage::{
         CalendarAccount, CalendarAccountStatus, CreateCalendarOAuthAuthorization,
         DisconnectCalendarAccountOutcome,
     },
+    gmail::{
+        CreateGmailOAuthAuthorization, DeleteGmailAccountOutcome, GmailAccount, GmailAccountStatus,
+    },
     goals::{GoalHealth, GoalNextActionKind, GoalOverview, GoalStatus, GoalUpdate, NewGoal},
     google_chat::{
         CreateGoogleChatOAuthAuthorization, GoogleChatAccount, GoogleChatAccountStatus,
@@ -88,10 +92,11 @@ use time::{
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tracing::warn;
-use utoipa::{OpenApi, ToSchema};
+use utoipa::{IntoParams, OpenApi, ToSchema};
 
 use crate::{
     calendar_oauth::{CalendarOAuthError, CalendarOAuthRuntime, storage_failure_code},
+    gmail_oauth::{GmailOAuthError, GmailOAuthRuntime},
     google_chat_oauth::{GoogleChatOAuthError, GoogleChatOAuthRuntime},
     voice_command::{VoiceCommand, VoiceCommandError, VoiceTaskScope},
 };
@@ -119,6 +124,7 @@ pub struct ApiState {
     pairing: Option<Arc<PairingRuntime>>,
     planning: Option<Database>,
     calendar_oauth: Option<Arc<CalendarOAuthRuntime>>,
+    gmail_oauth: Option<Arc<GmailOAuthRuntime>>,
     google_chat_oauth: Option<Arc<GoogleChatOAuthRuntime>>,
     webhook: Option<Arc<webhook::WebhookRuntime>>,
     push: Option<Arc<push::PushRuntime>>,
@@ -142,6 +148,7 @@ impl ApiState {
             pairing: None,
             planning: None,
             calendar_oauth: None,
+            gmail_oauth: None,
             google_chat_oauth: None,
             webhook: None,
             push: None,
@@ -202,6 +209,12 @@ impl ApiState {
     }
 
     #[must_use]
+    pub fn with_gmail_oauth(mut self, gmail_oauth: GmailOAuthRuntime) -> Self {
+        self.gmail_oauth = Some(Arc::new(gmail_oauth));
+        self
+    }
+
+    #[must_use]
     pub fn with_google_chat_oauth(mut self, runtime: GoogleChatOAuthRuntime) -> Self {
         self.google_chat_oauth = Some(Arc::new(runtime));
         self
@@ -231,6 +244,10 @@ impl ApiState {
     #[must_use]
     fn calendar_oauth(&self) -> Option<&Arc<CalendarOAuthRuntime>> {
         self.calendar_oauth.as_ref()
+    }
+
+    fn gmail_oauth(&self) -> Option<&Arc<GmailOAuthRuntime>> {
+        self.gmail_oauth.as_ref()
     }
 
     fn google_chat_oauth(&self) -> Option<&Arc<GoogleChatOAuthRuntime>> {
@@ -680,6 +697,45 @@ pub struct StartGoogleCalendarAuthorizationResponse {
     authorization_id: uuid::Uuid,
     authorization_url: String,
     expires_at: String,
+}
+
+/// One workspace-scoped Gmail identity. Provider subjects and credentials are
+/// never returned to a client.
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GmailAccountResponse {
+    id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+    workspace_scope: String,
+    workspace_name: String,
+    email: String,
+    status: String,
+    granted_scopes: Vec<String>,
+    last_successful_sync_at: Option<String>,
+    last_error_code: Option<String>,
+    reauth_required: bool,
+    version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GmailAccountListResponse {
+    available: bool,
+    items: Vec<GmailAccountResponse>,
+}
+
+#[derive(Debug, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct StartGmailAuthorizationRequest {
+    client_kind: String,
+    workspace_id: uuid::Uuid,
+    account_id: Option<uuid::Uuid>,
+}
+
+#[derive(Debug, Deserialize, IntoParams, ToSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DeleteGmailAccountQuery {
+    expected_version: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1438,6 +1494,10 @@ pub(crate) fn error_response(
         start_google_calendar_authorization,
         complete_google_calendar_authorization,
         sync_google_calendar,
+        list_gmail_accounts,
+        start_gmail_authorization,
+        sync_gmail_account,
+        delete_gmail_account,
         list_google_chat_connections,
         start_google_chat_authorization,
         delete_google_chat_connection,
@@ -1545,6 +1605,10 @@ pub(crate) fn error_response(
         GoogleCalendarConnectionResponse,
         StartGoogleCalendarAuthorizationRequest,
         StartGoogleCalendarAuthorizationResponse,
+        GmailAccountResponse,
+        GmailAccountListResponse,
+        StartGmailAuthorizationRequest,
+        DeleteGmailAccountQuery,
         GoogleChatAccountResponse,
         GoogleChatAccountListResponse,
         GoogleChatSpaceResponse,
@@ -1666,6 +1730,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/health/ready", get(ready))
         .merge(
             calendar_router()
+                .merge(gmail_router())
                 .merge(google_chat_router())
                 .merge(push_router())
                 .merge(sync_router()),
@@ -1852,6 +1917,23 @@ fn calendar_router() -> Router<ApiState> {
         )
 }
 
+fn gmail_router() -> Router<ApiState> {
+    Router::new()
+        .route("/v1/gmail/accounts", get(list_gmail_accounts))
+        .route(
+            "/v1/gmail/accounts/authorizations",
+            post(start_gmail_authorization),
+        )
+        .route(
+            "/v1/gmail/accounts/{account_id}/sync",
+            post(sync_gmail_account),
+        )
+        .route(
+            "/v1/gmail/accounts/{account_id}",
+            axum::routing::delete(delete_gmail_account),
+        )
+}
+
 fn google_chat_router() -> Router<ApiState> {
     Router::new()
         .route(
@@ -1927,6 +2009,8 @@ where
 
 const CALENDAR_SYNC_INITIAL_DELAY: Duration = Duration::from_secs(30);
 const CALENDAR_SYNC_INTERVAL: Duration = Duration::from_mins(5);
+const GMAIL_SYNC_INITIAL_DELAY: Duration = Duration::from_secs(45);
+const GMAIL_SYNC_INTERVAL: Duration = Duration::from_mins(5);
 const CALENDAR_MUTATION_INTERVAL: Duration = Duration::from_secs(2);
 const GOOGLE_CHAT_SYNC_INITIAL_DELAY: Duration = Duration::from_secs(20);
 const GOOGLE_CHAT_SYNC_INTERVAL: Duration = Duration::from_mins(1);
@@ -2014,6 +2098,59 @@ pub fn spawn_calendar_sync_worker(state: &ApiState) -> Option<tokio::task::JoinH
                 );
             }
             tokio::time::sleep(CALENDAR_SYNC_INTERVAL).await;
+        }
+    }))
+}
+
+/// Reconciles each active Gmail identity inside its assigned workspace. The
+/// worker processes accounts sequentially and never merges mailbox context.
+#[must_use]
+pub fn spawn_gmail_sync_worker(state: &ApiState) -> Option<tokio::task::JoinHandle<()>> {
+    let planning = state.planning()?.clone();
+    let runtime = Arc::clone(state.gmail_oauth()?);
+    Some(tokio::spawn(async move {
+        tokio::time::sleep(GMAIL_SYNC_INITIAL_DELAY).await;
+        loop {
+            if planning.expire_gmail_oauth_authorizations().await.is_err() {
+                warn!(
+                    event = "gmail.authorization_cleanup_deferred",
+                    error_code = "storage.persistence_unavailable"
+                );
+            }
+            if let Ok(identities) = planning.active_gmail_sync_identities().await {
+                for identity in identities {
+                    if let Err(error) = synchronize_gmail_account(
+                        &planning,
+                        &runtime,
+                        identity.account_id,
+                        identity.user_id,
+                        identity.workspace_id,
+                    )
+                    .await
+                    {
+                        let _ = planning
+                            .mark_gmail_sync_failure(
+                                identity.account_id,
+                                identity.user_id,
+                                identity.workspace_id,
+                                error.failure_code(),
+                                error.reauth_required(),
+                            )
+                            .await;
+                        warn!(
+                            event = "gmail.periodic_sync_failed",
+                            error_code = error.failure_code(),
+                            retryable = error.retryable()
+                        );
+                    }
+                }
+            } else {
+                warn!(
+                    event = "gmail.periodic_sync_deferred",
+                    error_code = "storage.persistence_unavailable"
+                );
+            }
+            tokio::time::sleep(GMAIL_SYNC_INTERVAL).await;
         }
     }))
 }
@@ -5380,6 +5517,265 @@ async fn disconnect_google_calendar(
 }
 
 #[utoipa::path(
+    get,
+    path = "/v1/gmail/accounts",
+    tag = "gmail",
+    responses(
+        (status = 200, body = GmailAccountListResponse),
+        (status = 401),
+        (status = 503)
+    )
+)]
+async fn list_gmail_accounts(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .gmail_accounts_for_user(principal.identity().user_id())
+        .await
+    {
+        Ok(accounts) => Json(GmailAccountListResponse {
+            available: state.gmail_oauth().is_some(),
+            items: accounts.into_iter().map(gmail_account_response).collect(),
+        })
+        .into_response(),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/gmail/accounts/authorizations",
+    tag = "gmail",
+    request_body = StartGmailAuthorizationRequest,
+    responses(
+        (status = 201, body = StartGoogleCalendarAuthorizationResponse),
+        (status = 400),
+        (status = 401),
+        (status = 503)
+    )
+)]
+async fn start_gmail_authorization(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Json(request): Json<StartGmailAuthorizationRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(client_kind) = parse_client_platform(&request.client_kind) else {
+        return invalid_request_response(request_id);
+    };
+    if request.workspace_id.get_version_num() != 7
+        || request
+            .account_id
+            .is_some_and(|account_id| account_id.get_version_num() != 7)
+    {
+        return invalid_request_response(request_id);
+    }
+    let Some(runtime) = state.gmail_oauth() else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gmail.configuration_missing",
+            "Gmail 연결을 아직 준비하고 있어요.",
+            request_id,
+            false,
+        );
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let reconnect_account = if let Some(account_id) = request.account_id {
+        match planning
+            .gmail_account_for_user(principal.identity().user_id(), account_id)
+            .await
+        {
+            Ok(Some(account)) if account.workspace_id == request.workspace_id => Some(account),
+            Ok(Some(_) | None) => return invalid_request_response(request_id),
+            Err(error) => return storage_error_response(&error, request_id),
+        }
+    } else {
+        None
+    };
+    let authorization_id = uuid::Uuid::now_v7();
+    let authorization = match runtime.begin_authorization(
+        authorization_id,
+        client_kind,
+        reconnect_account
+            .as_ref()
+            .map(|account| account.email.as_str()),
+    ) {
+        Ok(authorization) => authorization,
+        Err(error) => return gmail_oauth_error_response(error, request_id),
+    };
+    let command = CreateGmailOAuthAuthorization {
+        id: authorization_id,
+        user_id: principal.identity().user_id(),
+        workspace_id: request.workspace_id,
+        reconnect_account_id: reconnect_account.as_ref().map(|account| account.id),
+        session_id: principal.identity().session_id(),
+        device_id: principal.identity().device_id(),
+        state_verifier: authorization.state_verifier,
+        pkce_verifier: authorization.pkce_verifier,
+        client_kind,
+        expires_at: authorization.expires_at,
+    };
+    if let Err(error) = planning.create_gmail_oauth_authorization(&command).await {
+        return storage_error_response(&error, request_id);
+    }
+    let Ok(expires_at) = authorization.expires_at.format(&Rfc3339) else {
+        return unavailable_response(request_id);
+    };
+    (
+        StatusCode::CREATED,
+        Json(StartGoogleCalendarAuthorizationResponse {
+            authorization_id,
+            authorization_url: authorization.authorization_url,
+            expires_at,
+        }),
+    )
+        .into_response()
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/gmail/accounts/{account_id}/sync",
+    tag = "gmail",
+    params(("account_id" = uuid::Uuid, Path)),
+    responses(
+        (status = 200, body = GmailAccountResponse),
+        (status = 400),
+        (status = 401),
+        (status = 404),
+        (status = 503)
+    )
+)]
+async fn sync_gmail_account(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(account_id): Path<uuid::Uuid>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    if account_id.get_version_num() != 7 {
+        return invalid_request_response(request_id);
+    }
+    let Some(runtime) = state.gmail_oauth() else {
+        return gmail_oauth_error_response(GmailOAuthError::Configuration, request_id);
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let account = match planning
+        .gmail_account_for_user(principal.identity().user_id(), account_id)
+        .await
+    {
+        Ok(Some(account)) => account,
+        Ok(None) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "gmail.account_not_found",
+                "연결된 Gmail 계정을 찾을 수 없어요.",
+                request_id,
+                false,
+            );
+        }
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    match synchronize_gmail_account(
+        planning,
+        runtime,
+        account.id,
+        principal.identity().user_id(),
+        account.workspace_id,
+    )
+    .await
+    {
+        Ok(account) => Json(gmail_account_response(account)).into_response(),
+        Err(error) => {
+            let _ = planning
+                .mark_gmail_sync_failure(
+                    account.id,
+                    principal.identity().user_id(),
+                    account.workspace_id,
+                    error.failure_code(),
+                    error.reauth_required(),
+                )
+                .await;
+            gmail_oauth_error_response(error, request_id)
+        }
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/gmail/accounts/{account_id}",
+    tag = "gmail",
+    params(
+        ("account_id" = uuid::Uuid, Path),
+        DeleteGmailAccountQuery
+    ),
+    responses(
+        (status = 204),
+        (status = 400),
+        (status = 401),
+        (status = 409),
+        (status = 503)
+    )
+)]
+async fn delete_gmail_account(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(account_id): Path<uuid::Uuid>,
+    Query(query): Query<DeleteGmailAccountQuery>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    if account_id.get_version_num() != 7 || query.expected_version <= 0 {
+        return invalid_request_response(request_id);
+    }
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .delete_gmail_account(
+            principal.identity().user_id(),
+            account_id,
+            query.expected_version,
+        )
+        .await
+    {
+        Ok(DeleteGmailAccountOutcome::Deleted | DeleteGmailAccountOutcome::AlreadyAbsent) => {
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(DeleteGmailAccountOutcome::VersionConflict) => error_response(
+            StatusCode::CONFLICT,
+            "gmail.version_conflict",
+            "Gmail 연결 상태가 먼저 변경됐어요. 새로고침한 뒤 다시 시도해 주세요.",
+            request_id,
+            true,
+        ),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
     post,
     path = "/v1/calendar/connections/google/authorizations",
     tag = "calendar",
@@ -5507,6 +5903,24 @@ async fn complete_google_calendar_authorization(
             }
         }
     }
+    if let Some(gmail_oauth) = state.gmail_oauth() {
+        match planning
+            .claim_gmail_oauth_authorization(&gmail_oauth.state_verifier(&query.state))
+            .await
+        {
+            Ok(Some(claimed)) => {
+                return finish_gmail_authorization(planning, gmail_oauth, claimed, query).await;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return calendar_callback_page(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Gmail 연결을 완료하지 못했어요",
+                    "잠시 후 앱에서 다시 시도해 주세요.",
+                );
+            }
+        }
+    }
     if let Some(google_chat_oauth) = state.google_chat_oauth() {
         match planning
             .claim_google_chat_oauth_authorization(&google_chat_oauth.state_verifier(&query.state))
@@ -5536,6 +5950,82 @@ async fn complete_google_calendar_authorization(
         "연결을 완료하지 못했어요",
         "연결 시간이 지났거나 이미 처리된 요청이에요. 앱에서 다시 연결해 주세요.",
     )
+}
+
+async fn finish_gmail_authorization(
+    planning: &Database,
+    runtime: &GmailOAuthRuntime,
+    claimed: jimin_storage::gmail::ClaimedGmailOAuthAuthorization,
+    query: GoogleCalendarCallbackQuery,
+) -> Response {
+    if query.error.is_some() || query.code.is_none() {
+        let _ = planning
+            .fail_gmail_oauth_authorization(claimed.id, "gmail.authorization_rejected")
+            .await;
+        return calendar_callback_page(
+            StatusCode::BAD_REQUEST,
+            "Gmail을 연결하지 못했어요",
+            "권한을 허용한 뒤 앱에서 다시 연결해 주세요.",
+        );
+    }
+    let authorization_id = claimed.id;
+    let completion = runtime
+        .complete_authorization(claimed, SecretString::from(query.code.unwrap_or_default()))
+        .await;
+    let command = match completion {
+        Ok(command) => command,
+        Err(error) => {
+            let _ = planning
+                .fail_gmail_oauth_authorization(authorization_id, error.failure_code())
+                .await;
+            return gmail_callback_error_page(error);
+        }
+    };
+    let user_id = command.user_id;
+    let workspace_id = command.workspace_id;
+    let account = match planning.complete_gmail_oauth_authorization(&command).await {
+        Ok(account) => account,
+        Err(error) => {
+            let _ = planning
+                .fail_gmail_oauth_authorization(
+                    authorization_id,
+                    gmail_storage_failure_code(&error),
+                )
+                .await;
+            return calendar_callback_page(
+                if matches!(error, StorageError::PersistenceUnavailable) {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::BAD_REQUEST
+                },
+                "Gmail을 연결하지 못했어요",
+                "앱에서 계정과 업무 공간을 확인한 뒤 다시 연결해 주세요.",
+            );
+        }
+    };
+    match synchronize_gmail_account(planning, runtime, account.id, user_id, workspace_id).await {
+        Ok(_) => calendar_callback_page(
+            StatusCode::OK,
+            "Gmail을 연결했어요",
+            "메일을 불러왔어요. 이제 앱으로 돌아가도 됩니다.",
+        ),
+        Err(error) => {
+            let _ = planning
+                .mark_gmail_sync_failure(
+                    account.id,
+                    user_id,
+                    workspace_id,
+                    error.failure_code(),
+                    error.reauth_required(),
+                )
+                .await;
+            calendar_callback_page(
+                StatusCode::OK,
+                "Gmail을 연결했어요",
+                "연결은 마쳤지만 메일을 아직 불러오지 못했어요. 앱에서 다시 가져와 주세요.",
+            )
+        }
+    }
 }
 
 async fn finish_google_calendar_authorization(
@@ -6508,6 +6998,28 @@ fn format_google_chat_due_at(value: OffsetDateTime) -> String {
     )
 }
 
+async fn synchronize_gmail_account(
+    planning: &Database,
+    runtime: &GmailOAuthRuntime,
+    account_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+) -> Result<GmailAccount, GmailOAuthError> {
+    let connection = planning
+        .gmail_sync_connection(account_id, user_id)
+        .await
+        .map_err(|_| GmailOAuthError::ProviderUnavailable)?
+        .ok_or(GmailOAuthError::ProviderRejected)?;
+    if connection.workspace_id != workspace_id {
+        return Err(GmailOAuthError::ProviderRejected);
+    }
+    let messages = runtime.inbox_sync(&connection).await?;
+    planning
+        .apply_gmail_inbox_sync(account_id, user_id, workspace_id, &messages)
+        .await
+        .map_err(|_| GmailOAuthError::ProviderUnavailable)
+}
+
 async fn synchronize_google_calendar(
     planning: &Database,
     calendar_oauth: &CalendarOAuthRuntime,
@@ -6558,26 +7070,83 @@ async fn synchronize_google_calendar(
                 .map_err(|_| CalendarOAuthError::ProviderUnavailable)?;
         }
     }
-    match calendar_oauth.initial_gmail_inbox_sync(&connection).await {
-        Ok(Some(messages)) => {
-            if planning
-                .apply_gmail_inbox_sync(user_id, &messages)
-                .await
-                .is_err()
-            {
-                let _ = planning
-                    .mark_gmail_sync_failure(user_id, "gmail.provider_unavailable")
-                    .await;
-            }
+    Ok(())
+}
+
+fn gmail_oauth_error_response(error: GmailOAuthError, request_id: RequestId) -> Response {
+    let (status, message) = match error {
+        GmailOAuthError::Configuration => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Gmail 연결을 아직 준비하고 있어요.",
+        ),
+        GmailOAuthError::ProviderUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Gmail에 연결할 수 없어요. 잠시 후 다시 시도해 주세요.",
+        ),
+        GmailOAuthError::IdentityMismatch => (
+            StatusCode::CONFLICT,
+            "다시 연결하려던 Google 계정과 달라요. 계정을 확인해 주세요.",
+        ),
+        GmailOAuthError::ScopeBoundaryViolation => (
+            StatusCode::BAD_REQUEST,
+            "Gmail에 필요한 권한만 허용되도록 다시 연결해 주세요.",
+        ),
+        GmailOAuthError::InvalidCallback
+        | GmailOAuthError::ProviderRejected
+        | GmailOAuthError::RequiredScopeMissing
+        | GmailOAuthError::Encryption => {
+            (StatusCode::BAD_REQUEST, "Gmail 연결을 다시 진행해 주세요.")
         }
-        Ok(None) => {}
-        Err(error) => {
-            let _ = planning
-                .mark_gmail_sync_failure(user_id, error.failure_code())
-                .await;
+    };
+    error_response(
+        status,
+        error.failure_code(),
+        message,
+        request_id,
+        error.retryable(),
+    )
+}
+
+fn gmail_callback_error_page(error: GmailOAuthError) -> Response {
+    let message = match error {
+        GmailOAuthError::ProviderUnavailable => {
+            "Gmail에 연결할 수 없어요. 잠시 후 앱에서 다시 시도해 주세요."
+        }
+        GmailOAuthError::IdentityMismatch => {
+            "다시 연결하려던 Google 계정으로 로그인한 뒤 다시 시도해 주세요."
+        }
+        GmailOAuthError::RequiredScopeMissing => {
+            "메일 읽기 권한이 허용되지 않았어요. 앱에서 다시 연결해 주세요."
+        }
+        GmailOAuthError::ScopeBoundaryViolation => {
+            "다른 Google 서비스 권한이 함께 전달됐어요. 앱에서 Gmail을 다시 연결해 주세요."
+        }
+        GmailOAuthError::Configuration => "Gmail 연결 설정을 아직 준비하고 있어요.",
+        GmailOAuthError::InvalidCallback
+        | GmailOAuthError::ProviderRejected
+        | GmailOAuthError::Encryption => {
+            "Gmail 연결을 완료하지 못했어요. 앱에서 다시 연결해 주세요."
+        }
+    };
+    calendar_callback_page(
+        if error.retryable() {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::BAD_REQUEST
+        },
+        "Gmail을 연결하지 못했어요",
+        message,
+    )
+}
+
+const fn gmail_storage_failure_code(error: &StorageError) -> &'static str {
+    match error {
+        StorageError::IdentityConflict => "gmail.account_mismatch",
+        StorageError::InvalidConfiguration => "gmail.authorization_failed",
+        StorageError::MigrationUnavailable | StorageError::PersistenceUnavailable => {
+            "gmail.persistence_failed"
         }
     }
-    Ok(())
 }
 
 fn calendar_oauth_error_response(error: CalendarOAuthError, request_id: RequestId) -> Response {
@@ -7617,6 +8186,32 @@ fn workspace_response(workspace: Workspace) -> WorkspaceResponse {
     }
 }
 
+fn gmail_account_response(account: GmailAccount) -> GmailAccountResponse {
+    GmailAccountResponse {
+        id: account.id,
+        workspace_id: account.workspace_id,
+        workspace_scope: account.workspace_scope,
+        workspace_name: account.workspace_name,
+        email: account.email,
+        status: match account.status {
+            GmailAccountStatus::Connecting => "connecting",
+            GmailAccountStatus::Active => "active",
+            GmailAccountStatus::ReauthRequired => "reauth_required",
+            GmailAccountStatus::Revoking => "revoking",
+            GmailAccountStatus::Revoked => "revoked",
+            GmailAccountStatus::Error => "error",
+        }
+        .to_owned(),
+        granted_scopes: account.granted_scopes,
+        last_successful_sync_at: account
+            .last_successful_sync_at
+            .and_then(|value| value.format(&Rfc3339).ok()),
+        last_error_code: account.last_error_code,
+        reauth_required: matches!(account.status, GmailAccountStatus::ReauthRequired),
+        version: account.version,
+    }
+}
+
 fn goal_response(overview: GoalOverview) -> Result<GoalResponse, ()> {
     let goal = overview.goal;
     Ok(GoalResponse {
@@ -8652,6 +9247,10 @@ mod tests {
                 "/v1/device-signals/missed-calls",
                 "/v1/device-signals/status",
                 "/v1/devices",
+                "/v1/gmail/accounts",
+                "/v1/gmail/accounts/authorizations",
+                "/v1/gmail/accounts/{account_id}",
+                "/v1/gmail/accounts/{account_id}/sync",
                 "/v1/goals",
                 "/v1/goals/{goal_id}",
                 "/v1/google-chat/connections",
@@ -8729,6 +9328,7 @@ mod tests {
             "/v1/tasks",
             "/v1/tasks/{task_id}/complete",
             "/v1/recommendations/{recommendation_id}/decisions",
+            "/v1/gmail/accounts/authorizations",
             "/v1/google-chat/connections/authorizations",
             "/v1/projects/{project_id}/google-chat-sources",
             "/v1/projects/{project_id}/inflow/{item_id}/decision",
@@ -9251,6 +9851,43 @@ mod tests {
             Request::builder()
                 .method("DELETE")
                 .uri("/v1/calendar/connections/google?expectedVersion=1")
+                .body(Body::empty())
+                .expect("request should be valid"),
+        ] {
+            let response = router(state.clone())
+                .oneshot(request)
+                .await
+                .expect("handler should respond");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn gmail_account_endpoints_require_a_live_signed_session() {
+        let (state, _, _) = signed_auth_state(true);
+        let workspace_id = "019f68cb-9400-7000-8000-000000000001";
+        let account_id = "019f68cb-9400-7000-8000-000000000002";
+        for request in [
+            Request::builder()
+                .uri("/v1/gmail/accounts")
+                .body(Body::empty())
+                .expect("request should be valid"),
+            Request::builder()
+                .method("POST")
+                .uri("/v1/gmail/accounts/authorizations")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"clientKind":"android","workspaceId":"{workspace_id}"}}"#
+                )))
+                .expect("request should be valid"),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/gmail/accounts/{account_id}/sync"))
+                .body(Body::empty())
+                .expect("request should be valid"),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/v1/gmail/accounts/{account_id}?expectedVersion=1"))
                 .body(Body::empty())
                 .expect("request should be valid"),
         ] {
