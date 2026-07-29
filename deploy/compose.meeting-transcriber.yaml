@@ -23,14 +23,17 @@ services:
     security_opt:
       - no-new-privileges:true
     environment:
-      HF_TOKEN_FILE: /run/secrets/hugging_face_token
+      HF_TOKEN_FILE: /run/secrets/hf_model_access
+      JIMIN_DIARIZATION_MODEL_REVISION: ${JIMIN_DIARIZATION_MODEL_REVISION:?set JIMIN_DIARIZATION_MODEL_REVISION}
       JIMIN_TRANSCRIBER_DEVICE: ${JIMIN_TRANSCRIBER_DEVICE:-cpu}
       JIMIN_TRANSCRIBER_LANGUAGE: ${JIMIN_TRANSCRIBER_LANGUAGE:-ko}
       JIMIN_TRANSCRIBER_MODE: ${JIMIN_TRANSCRIBER_MODE:-production}
       JIMIN_WHISPER_COMPUTE_TYPE: ${JIMIN_WHISPER_COMPUTE_TYPE:-int8}
       JIMIN_WHISPER_MODEL: ${JIMIN_WHISPER_MODEL:-medium}
+      MPLCONFIGDIR: /var/lib/jimin-transcriber/tmp/matplotlib
+      TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD: "1"
     secrets:
-      - hugging_face_token
+      - hf_model_access
     volumes:
       - type: volume
         source: meeting_transcriber_cache
@@ -57,5 +60,5 @@ volumes:
   meeting_transcriber_tmp: {}
 
 secrets:
-  hugging_face_token:
+  hf_model_access:
     file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/hugging_face_token

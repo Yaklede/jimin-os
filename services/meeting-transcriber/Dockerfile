@@ -16,12 +16,14 @@ RUN pip install --no-cache-dir --requirement /app/requirements.txt
 COPY services/meeting-transcriber/app.py /app/app.py
 
 RUN useradd --create-home --uid 10002 transcriber \
-    && mkdir -p /home/transcriber/.cache/huggingface /var/lib/jimin-transcriber/tmp \
+    && mkdir -p /home/transcriber/.cache/huggingface /var/lib/jimin-transcriber/tmp/matplotlib \
     && chown -R 10002:10002 /home/transcriber /var/lib/jimin-transcriber
 USER 10002:10002
 
 ENV HF_HOME=/home/transcriber/.cache/huggingface \
-    TMPDIR=/var/lib/jimin-transcriber/tmp
+    MPLCONFIGDIR=/var/lib/jimin-transcriber/tmp/matplotlib \
+    TMPDIR=/var/lib/jimin-transcriber/tmp \
+    TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 EXPOSE 8090
 HEALTHCHECK --interval=15s --timeout=5s --start-period=15s --retries=8 \

@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 from threading import Lock
@@ -13,6 +14,8 @@ from pydantic import BaseModel, Field
 
 MAX_AUDIO_BYTES = 512 * 1024 * 1024
 MAX_SECRET_FILE_BYTES = 16 * 1024
+DEFAULT_DIARIZATION_MODEL_REVISION = "3533c8cf8e369892e6b79ff1bf80f7b0286a54ee"
+FFMPEG_TIMEOUT_SECONDS = 15 * 60
 MODEL_LOCK = Lock()
 WHISPER_MODEL = None
 DIARIZATION_PIPELINE = None
@@ -65,7 +68,8 @@ async def transcribe(
         source = Path(directory) / f"recording{suffix}"
         source.write_bytes(audio)
         try:
-            return _transcribe_file(source, participants)
+            normalized = _normalize_audio(source)
+            return _transcribe_file(normalized, participants)
         except HTTPException:
             raise
         except Exception as error:
@@ -149,8 +153,49 @@ def _models():
             DIARIZATION_PIPELINE = Pipeline.from_pretrained(
                 "pyannote/speaker-diarization-community-1",
                 token=token,
+                revision=os.getenv(
+                    "JIMIN_DIARIZATION_MODEL_REVISION",
+                    DEFAULT_DIARIZATION_MODEL_REVISION,
+                ),
             )
         return WHISPER_MODEL, DIARIZATION_PIPELINE
+
+
+def _normalize_audio(source: Path) -> Path:
+    normalized = source.with_name("recording.normalized.wav")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(source),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "pcm_s16le",
+                str(normalized),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=FFMPEG_TIMEOUT_SECONDS,
+        )
+    except (
+        FileNotFoundError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ) as error:
+        raise HTTPException(status_code=422, detail="invalid_audio_data") from error
+    if not normalized.is_file() or normalized.stat().st_size <= 44:
+        raise HTTPException(status_code=422, detail="invalid_audio_data")
+    return normalized
 
 
 def _hugging_face_token() -> str:
