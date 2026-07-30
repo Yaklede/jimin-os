@@ -38,8 +38,13 @@ Android 패키지를 만들기 전에는 [클라이언트 빌드 설정](CLIENT_
 따라 개인 서버 origin을 고정한다. 앱은 기기 등록 화면에서 이 주소를 입력받지 않는다.
 
 ```bash
-pnpm --filter @jimin-os/desktop tauri android build --debug --apk --target aarch64 --ci
+./scripts/build-private-client.sh android
 ```
+
+The private physical-device build uses the optimized Android release profile,
+strips Rust symbols, shrinks unused resources, and emits only the arm64 APK.
+The local emulator workflow remains a debug build so development inspection
+continues to work.
 
 생성된 APK 경로와 SHA-256은 검증 기록에 남긴다. release signing, Play 배포, production Android client ID는 운영 검증이 끝날 때까지 수행하지 않는다.
 

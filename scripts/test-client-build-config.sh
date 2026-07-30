@@ -37,16 +37,57 @@ mock_apk="${temporary_dir}/client.apk"
 touch "${mock_apk}"
 cat >"${mock_apkanalyzer}" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "${MOCK_ANDROID_APPLICATION_ID:?}"
+case "${1:-} ${2:-}" in
+  "manifest application-id")
+    printf '%s\n' "${MOCK_ANDROID_APPLICATION_ID:?}"
+    ;;
+  "manifest debuggable")
+    printf '%s\n' "${MOCK_ANDROID_DEBUGGABLE:-false}"
+    ;;
+  "files list")
+    printf '%s\n' "${MOCK_ANDROID_NATIVE_FILES:-/lib/arm64-v8a/libjimin_desktop_lib.so}"
+    ;;
+  *)
+    printf 'Unexpected apkanalyzer invocation: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
 EOF
 chmod +x "${mock_apkanalyzer}"
 JIMIN_ANDROID_APKANALYZER="${mock_apkanalyzer}" \
   MOCK_ANDROID_APPLICATION_ID='io.jimin.os.dev' \
-  verify_android_apk_application_id "${mock_apk}" 'io.jimin.os.dev'
+verify_android_apk_application_id "${mock_apk}" 'io.jimin.os.dev'
 if JIMIN_ANDROID_APKANALYZER="${mock_apkanalyzer}" \
   MOCK_ANDROID_APPLICATION_ID='io.jimin.os.dev' \
   verify_android_apk_application_id "${mock_apk}" 'io.jimin.os' >/dev/null 2>&1; then
   printf 'Expected a development APK to be rejected by the production verifier.\n' >&2
+  exit 1
+fi
+
+release_output="${temporary_dir}/android-output/arm64/release"
+mkdir -p "${release_output}"
+release_apk="${release_output}/app-arm64-release.apk"
+touch "${release_apk}"
+[[ "$(private_android_release_apk "${temporary_dir}/android-output")" == "${release_apk}" ]]
+
+touch "${release_output}/duplicate-release.apk"
+if private_android_release_apk "${temporary_dir}/android-output" >/dev/null 2>&1; then
+  printf 'Expected ambiguous private Android release APK lookup to fail.\n' >&2
+  exit 1
+fi
+rm -f "${release_output}/duplicate-release.apk"
+JIMIN_ANDROID_APKANALYZER="${mock_apkanalyzer}" \
+  verify_private_android_release_apk "${release_apk}"
+if JIMIN_ANDROID_APKANALYZER="${mock_apkanalyzer}" \
+  MOCK_ANDROID_DEBUGGABLE=true \
+  verify_private_android_release_apk "${release_apk}" >/dev/null 2>&1; then
+  printf 'Expected a debuggable private release APK to be rejected.\n' >&2
+  exit 1
+fi
+if JIMIN_ANDROID_APKANALYZER="${mock_apkanalyzer}" \
+  MOCK_ANDROID_NATIVE_FILES=$'/lib/arm64-v8a/libjimin_desktop_lib.so\n/lib/x86_64/libjimin_desktop_lib.so' \
+  verify_private_android_release_apk "${release_apk}" >/dev/null 2>&1; then
+  printf 'Expected a multi-ABI private release APK to be rejected.\n' >&2
   exit 1
 fi
 expect_rejected 'http://os.jimin.ai.kr'

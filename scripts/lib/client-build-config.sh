@@ -108,6 +108,85 @@ verify_android_apk_application_id() {
   fi
 }
 
+private_android_release_apk() {
+  local output_root="${1:?Android APK output directory is required}"
+  local -a candidates=()
+  local candidate
+
+  [[ -d "${output_root}" ]] || {
+    printf 'Android APK output directory does not exist: %s\n' "${output_root}" >&2
+    return 1
+  }
+
+  while IFS= read -r candidate; do
+    candidates+=("${candidate}")
+  done < <(
+    find "${output_root}" \
+      -type f \
+      -path '*/release/*.apk' \
+      ! -name '*-unsigned.apk' \
+      -print \
+      | sort
+  )
+
+  if [[ ${#candidates[@]} -ne 1 ]]; then
+    printf 'Expected one signed private Android release APK; found %s under %s.\n' \
+      "${#candidates[@]}" "${output_root}" >&2
+    return 1
+  fi
+
+  printf '%s\n' "${candidates[0]}"
+}
+
+verify_private_android_release_apk() {
+  local apk_path="${1:?Android APK path is required}"
+  local max_bytes="${2:-12582912}"
+  local analyzer debuggable byte_size
+  local -a native_abis=()
+  local abi
+
+  [[ -f "${apk_path}" ]] || {
+    printf 'Android APK does not exist: %s\n' "${apk_path}" >&2
+    return 1
+  }
+  [[ "${max_bytes}" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'Android APK size limit must be a positive byte count.\n' >&2
+    return 1
+  }
+
+  byte_size="$(wc -c <"${apk_path}" | tr -d '[:space:]')"
+  if ((byte_size > max_bytes)); then
+    printf 'Private Android release APK is too large: %s bytes (limit %s).\n' \
+      "${byte_size}" "${max_bytes}" >&2
+    return 1
+  fi
+
+  analyzer="$(android_apkanalyzer)"
+  debuggable="$("${analyzer}" manifest debuggable "${apk_path}")"
+  if [[ "${debuggable}" != "false" ]]; then
+    printf 'Private Android release APK must not be debuggable.\n' >&2
+    return 1
+  fi
+
+  while IFS= read -r abi; do
+    [[ -n "${abi}" ]] && native_abis+=("${abi}")
+  done < <(
+    "${analyzer}" files list "${apk_path}" \
+      | awk -F/ '$0 ~ "^/lib/[^/]+/[^/]+$" { print $3 }' \
+      | sort -u
+  )
+  if [[ ${#native_abis[@]} -ne 1 ]]; then
+    printf 'Private Android release APK must contain only arm64-v8a native libraries; found: %s.\n' \
+      "${native_abis[*]:-none}" >&2
+    return 1
+  fi
+  if [[ "${native_abis[0]}" != "arm64-v8a" ]]; then
+    printf 'Private Android release APK must contain only arm64-v8a native libraries; found: %s.\n' \
+      "${native_abis[*]}" >&2
+    return 1
+  fi
+}
+
 production_server_url() {
   local configured="${1:-${VITE_API_BASE_URL:-${JIMIN_OS_DEFAULT_SERVER_URL}}}"
   local normalized="${configured%/}"

@@ -6,7 +6,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 requested_server_url="${1:-}"
 device_serial="${2:-${ANDROID_SERIAL:-}}"
-apk_path="${REPO_ROOT}/apps/desktop/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk"
 
 source "${SCRIPT_DIR}/lib/client-build-config.sh"
 
@@ -30,7 +29,12 @@ require_android_physical_device "${device_serial}"
 
 adb_device=(adb -s "${device_serial}")
 "${SCRIPT_DIR}/build-private-client.sh" android "${server_url}"
+apk_path="$(
+  private_android_release_apk \
+    "${REPO_ROOT}/apps/desktop/src-tauri/gen/android/app/build/outputs/apk"
+)"
 verify_android_apk_application_id "${apk_path}" "io.jimin.os"
+verify_private_android_release_apk "${apk_path}"
 
 "${adb_device[@]}" wait-for-device
 "${adb_device[@]}" install -r "${apk_path}"

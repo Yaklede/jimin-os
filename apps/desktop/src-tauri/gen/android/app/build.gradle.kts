@@ -13,6 +13,8 @@ val tauriProperties = Properties().apply {
     }
 }
 val jiminDevPackage = providers.gradleProperty("jiminDevPackage").orNull == "true"
+val jiminPrivateReleaseDebugSigning =
+    providers.gradleProperty("jiminPrivateReleaseDebugSigning").orNull == "true"
 
 android {
     compileSdk = 36
@@ -40,6 +42,13 @@ android {
         }
         getByName("release") {
             isMinifyEnabled = true
+            isShrinkResources = true
+            // Existing personal-device installs use Android's debug certificate.
+            // Keep that certificate only for the private release migration so a
+            // size-optimized APK can update them without deleting local app data.
+            if (jiminPrivateReleaseDebugSigning) {
+                signingConfig = signingConfigs.getByName("debug")
+            }
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))
