@@ -45,6 +45,8 @@ const MAX_PRESENTATION_SECTIONS: usize = 3;
 const MAX_PRESENTATION_DETAIL_CHARS: usize = 500;
 const MAX_AGENT_ACTIONS: usize = 32;
 const MINIMUM_MUTATION_INTENT_CONFIDENCE: u8 = 80;
+const MAX_FOREGROUND_BURST: usize = 3;
+const BACKGROUND_QUEUE_COUNT: usize = 4;
 
 struct TurnContext {
     prompt: String,
@@ -238,6 +240,9 @@ where
     tokio::pin!(shutdown);
     let recovery_interval = lease / 2;
     let mut next_recovery_at = Instant::now();
+    let mut foreground_burst = 0usize;
+    let mut background_cursor = 0usize;
+    let mut consecutive_background_misses = 0usize;
 
     loop {
         if Instant::now() >= next_recovery_at {
@@ -254,40 +259,52 @@ where
             database
                 .fail_expired_running_inflow_analyses("inflow.recovery_required")
                 .await?;
+            database
+                .fail_expired_running_gmail_inflow_analyses("gmail_inflow.recovery_required")
+                .await?;
             next_recovery_at = Instant::now() + recovery_interval;
         }
 
-        let claimed = tokio::select! {
-            signal = &mut shutdown => {
-                signal.map_err(WorkerError::Signal)?;
-                return Ok(WorkerExit::ShutdownRequested);
+        if foreground_burst < MAX_FOREGROUND_BURST {
+            let claimed = tokio::select! {
+                signal = &mut shutdown => {
+                    signal.map_err(WorkerError::Signal)?;
+                    return Ok(WorkerExit::ShutdownRequested);
+                }
+                result = database.claim_next_agent_job(runner_id, lease) => result?,
+            };
+            if let Some(job) = claimed {
+                execute_job(client, database, runner_id, lease, workspace, job).await?;
+                foreground_burst += 1;
+                consecutive_background_misses = 0;
+                continue;
             }
-            result = database.claim_next_agent_job(runner_id, lease) => result?,
-        };
-        if let Some(job) = claimed {
-            execute_job(client, database, runner_id, lease, workspace, job).await?;
-            continue;
         }
-        if crate::inflow_analysis::process_next(client, database, runner_id, lease, workspace)
-            .await?
-        {
-            continue;
-        }
-        if crate::meeting_transcription::process_next(
+
+        // Rotate one background queue at a time, then immediately poll the
+        // foreground again. This bounds conversation latency while ensuring a
+        // continuous conversation backlog cannot starve background work.
+        let processed_background = process_background_queue(
+            background_cursor,
+            client,
             database,
             runner_id,
             lease,
+            workspace,
             meeting_transcriber_url,
         )
-        .await?
-        {
+        .await?;
+        background_cursor = (background_cursor + 1) % BACKGROUND_QUEUE_COUNT;
+        foreground_burst = 0;
+        if processed_background {
+            consecutive_background_misses = 0;
             continue;
         }
-        if crate::meeting_analysis::process_next(client, database, runner_id, lease, workspace)
-            .await?
-        {
+        consecutive_background_misses += 1;
+        if consecutive_background_misses < BACKGROUND_QUEUE_COUNT {
             continue;
         }
+        consecutive_background_misses = 0;
 
         tokio::select! {
             signal = &mut shutdown => {
@@ -295,6 +312,46 @@ where
                 return Ok(WorkerExit::ShutdownRequested);
             }
             () = tokio::time::sleep(poll_interval) => {}
+        }
+    }
+}
+
+async fn process_background_queue<R, W>(
+    cursor: usize,
+    client: &mut AppServerClient<R, W>,
+    database: &Database,
+    runner_id: &str,
+    lease: Duration,
+    workspace: &Path,
+    meeting_transcriber_url: Option<&str>,
+) -> Result<bool, WorkerError>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    match cursor % BACKGROUND_QUEUE_COUNT {
+        0 => {
+            crate::inflow_analysis::process_next(client, database, runner_id, lease, workspace)
+                .await
+        }
+        1 => {
+            crate::gmail_inflow_analysis::process_next(
+                client, database, runner_id, lease, workspace,
+            )
+            .await
+        }
+        2 => {
+            crate::meeting_transcription::process_next(
+                database,
+                runner_id,
+                lease,
+                meeting_transcriber_url,
+            )
+            .await
+        }
+        _ => {
+            crate::meeting_analysis::process_next(client, database, runner_id, lease, workspace)
+                .await
         }
     }
 }

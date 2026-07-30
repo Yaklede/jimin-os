@@ -26,6 +26,10 @@ use jimin_storage::{
         CompleteGmailOAuthAuthorization, CreateGmailOAuthAuthorization, DeleteGmailAccountOutcome,
         EncryptedGmailSecret, ProviderGmailMessage,
     },
+    gmail_inflow::{
+        GmailInflowAnalysisResult, GmailInflowClassification, GmailInflowStatus,
+        PromoteGmailInflowCandidate,
+    },
     goals::{GoalHealth, GoalNextActionKind, GoalStatus, GoalUpdate, NewGoal},
     google_chat::{
         CompleteGoogleChatOAuthAuthorization, CreateGoogleChatOAuthAuthorization,
@@ -6229,6 +6233,12 @@ async fn gmail_accounts_are_workspace_scoped_and_delete_only_the_selected_mailbo
                 sender: Some("개인 발신자 <personal@example.test>".to_owned()),
                 subject: Some("개인 메일".to_owned()),
                 snippet: Some("개인 업무 공간 전용".to_owned()),
+                body_text: Some("개인 업무 공간 전용 본문".to_owned()),
+                reference_links: Vec::new(),
+                list_id: None,
+                list_unsubscribe: false,
+                precedence: None,
+                auto_submitted: None,
                 is_unread: true,
             }],
         )
@@ -6246,6 +6256,12 @@ async fn gmail_accounts_are_workspace_scoped_and_delete_only_the_selected_mailbo
                 sender: Some("회사 발신자 <company@example.test>".to_owned()),
                 subject: Some("회사 메일".to_owned()),
                 snippet: Some("회사 업무 공간 전용".to_owned()),
+                body_text: Some("회사 업무 공간 전용 본문".to_owned()),
+                reference_links: Vec::new(),
+                list_id: None,
+                list_unsubscribe: false,
+                precedence: None,
+                auto_submitted: None,
                 is_unread: true,
             }],
         )
@@ -6263,6 +6279,12 @@ async fn gmail_accounts_are_workspace_scoped_and_delete_only_the_selected_mailbo
                 sender: Some("개인 발신자 <personal@example.test>".to_owned()),
                 subject: Some("수정된 개인 메일".to_owned()),
                 snippet: Some("중복 동기화는 갱신돼요.".to_owned()),
+                body_text: Some("중복 동기화는 갱신되는 본문입니다.".to_owned()),
+                reference_links: Vec::new(),
+                list_id: None,
+                list_unsubscribe: false,
+                precedence: None,
+                auto_submitted: None,
                 is_unread: false,
             }],
         )
@@ -7090,6 +7112,12 @@ async fn work_brief_keeps_workspace_gmail_out_of_the_user_global_context() {
                 sender: Some("업무 담당자 <owner@example.test>".to_owned()),
                 subject: Some("확인이 필요한 요청".to_owned()),
                 snippet: Some("오늘 안에 확인해 주세요.".to_owned()),
+                body_text: Some("오늘 안에 확인해 주세요.".to_owned()),
+                reference_links: Vec::new(),
+                list_id: None,
+                list_unsubscribe: false,
+                precedence: None,
+                auto_submitted: None,
                 is_unread: true,
             }],
         )
@@ -7625,6 +7653,672 @@ async fn meeting_analysis_moves_from_transcript_to_owner_review() {
 
     database.close().await;
     setup_pool.close().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "This integration test intentionally exercises the full revision, decision, promotion, deletion, and workspace lifecycle in one fixture."
+)]
+async fn gmail_inflow_preserves_workspace_revision_decisions_and_promotion_lifecycle() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        2,
+        Duration::from_secs(2),
+    )
+    .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let workspaces = database
+        .workspaces_for_user(owner.profile.id)
+        .await
+        .expect("workspaces should load");
+    let personal = workspaces
+        .iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Personal)
+        .expect("personal workspace should exist");
+    let company = workspaces
+        .iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Company)
+        .expect("company workspace should exist");
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("test database should be reachable");
+    let account =
+        insert_test_gmail_account(&pool, owner.profile.id, personal.id, "inflow-primary").await;
+    let duplicate_account =
+        insert_test_gmail_account(&pool, owner.profile.id, personal.id, "inflow-duplicate").await;
+    let now = OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .expect("whole second fixture");
+    let thread_id = format!("inflow-thread-{}", owner.profile.id);
+    let partial_account = database
+        .apply_gmail_inbox_sync_with_skipped_count(
+            account,
+            owner.profile.id,
+            personal.id,
+            &[
+                gmail_provider_message("newest", &thread_id, now, "업무 요청", "동일 본문"),
+                gmail_provider_message(
+                    "oldest",
+                    &thread_id,
+                    now - TimeDuration::minutes(1),
+                    "과거 요청",
+                    "과거 본문",
+                ),
+            ],
+            11,
+        )
+        .await
+        .expect("good messages should commit despite more than ten malformed provider entries");
+    assert_eq!(
+        partial_account.last_error_code.as_deref(),
+        Some("gmail.partial_message_failures")
+    );
+    let initial =
+        gmail_candidate_for_thread(&database, owner.profile.id, personal.id, &thread_id).await;
+    assert!(
+        initial.provider_message_id.contains("newest"),
+        "newest-first ingestion must not leave the oldest representative"
+    );
+    let runner = format!("gmail-test-{}", owner.profile.id);
+    let job = prepare_gmail_inflow_analysis(
+        &pool,
+        owner.profile.id,
+        personal.id,
+        account,
+        &thread_id,
+        &runner,
+    )
+    .await;
+    database
+        .complete_gmail_inflow_analysis(&job, &runner, &new_task_gmail_analysis("업무 요청 정리"))
+        .await
+        .expect("analysis should complete");
+    let ready =
+        gmail_candidate_for_thread(&database, owner.profile.id, personal.id, &thread_id).await;
+    assert!(
+        database
+            .decide_gmail_inflow_candidate(
+                owner.profile.id,
+                personal.id,
+                ready.id,
+                ready.version,
+                "defer",
+                Some(now + TimeDuration::days(1)),
+            )
+            .await
+            .expect("defer should persist")
+    );
+    assert!(
+        database
+            .gmail_inflow_candidate_page(
+                owner.profile.id,
+                personal.id,
+                GmailInflowStatus::Attention,
+                100,
+                None,
+            )
+            .await
+            .expect("attention should load")
+            .items
+            .iter()
+            .all(|candidate| candidate.id != ready.id)
+    );
+    sqlx::query(
+        "UPDATE gmail_inflow_candidates SET deferred_until = NOW() - INTERVAL '1 second'
+         WHERE id = $1",
+    )
+    .bind(ready.id)
+    .execute(&pool)
+    .await
+    .expect("fixture deferral should expire");
+    let released =
+        gmail_candidate_for_thread(&database, owner.profile.id, personal.id, &thread_id).await;
+    assert_eq!(released.status, "pending");
+    assert!(
+        database
+            .decide_gmail_inflow_candidate(
+                owner.profile.id,
+                personal.id,
+                released.id,
+                released.version,
+                "dismiss",
+                None,
+            )
+            .await
+            .expect("dismiss should persist")
+    );
+    database
+        .apply_gmail_inbox_sync(
+            account,
+            owner.profile.id,
+            personal.id,
+            &[gmail_provider_message(
+                "reply",
+                &thread_id,
+                now + TimeDuration::minutes(1),
+                "업무 요청",
+                "동일 본문",
+            )],
+        )
+        .await
+        .expect("new thread revision should persist");
+    let reopened =
+        gmail_candidate_for_thread(&database, owner.profile.id, personal.id, &thread_id).await;
+    assert_eq!(reopened.status, "pending");
+    assert_eq!(
+        reopened.analysis_state,
+        jimin_storage::gmail_inflow::GmailInflowAnalysisState::Queued
+    );
+    let second_job = prepare_gmail_inflow_analysis(
+        &pool,
+        owner.profile.id,
+        personal.id,
+        account,
+        &thread_id,
+        &runner,
+    )
+    .await;
+    database
+        .complete_gmail_inflow_analysis(
+            &second_job,
+            &runner,
+            &new_task_gmail_analysis("업무 요청 처리"),
+        )
+        .await
+        .expect("new revision analysis should complete");
+    let project = database
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            workspace_id: personal.id,
+            title: "Gmail 업무".to_owned(),
+            objective: None,
+            management_mode: ProjectManagementMode::Operation,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
+            risk_level: 0,
+            next_action: None,
+            due_at: None,
+        })
+        .await
+        .expect("personal project should persist");
+    let foreign_project = database
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            workspace_id: company.id,
+            title: "회사 전용".to_owned(),
+            objective: None,
+            management_mode: ProjectManagementMode::Operation,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
+            risk_level: 0,
+            next_action: None,
+            due_at: None,
+        })
+        .await
+        .expect("company project should persist");
+    let promotable =
+        gmail_candidate_for_thread(&database, owner.profile.id, personal.id, &thread_id).await;
+    let command = |project_id, expected_version| PromoteGmailInflowCandidate {
+        user_id: owner.profile.id,
+        workspace_id: personal.id,
+        candidate_id: promotable.id,
+        expected_version,
+        project_id,
+        title: "업무 요청 처리".to_owned(),
+        notes: Some("메일에서 정리한 업무".to_owned()),
+        assignee_name: Some("조지민".to_owned()),
+        priority: 2,
+        due_at: Some(now + TimeDuration::days(2)),
+    };
+    assert!(
+        !database
+            .promote_gmail_inflow_candidate(&command(foreign_project.id, promotable.version))
+            .await
+            .expect("cross-workspace project must not promote")
+    );
+    assert!(
+        !database
+            .promote_gmail_inflow_candidate(&command(project.id, promotable.version - 1))
+            .await
+            .expect("stale version must not promote")
+    );
+    assert!(
+        database
+            .promote_gmail_inflow_candidate(&command(project.id, promotable.version))
+            .await
+            .expect("owned project should promote")
+    );
+    database
+        .apply_gmail_inbox_sync(
+            account,
+            owner.profile.id,
+            personal.id,
+            &[gmail_provider_message(
+                "promoted-reply",
+                &thread_id,
+                now + TimeDuration::minutes(2),
+                "업무 요청 후속",
+                "추가 확인 내용",
+            )],
+        )
+        .await
+        .expect("a reply on a promoted thread must not violate revision checks");
+    let queued_promoted_revision: (String, String, i32, Option<i32>, Option<Uuid>) =
+        sqlx::query_as(
+            "SELECT decision_status, analysis_state, source_revision, analyzed_revision,
+                promoted_task_id
+         FROM gmail_inflow_candidates WHERE id = $1",
+        )
+        .bind(promotable.id)
+        .fetch_one(&pool)
+        .await
+        .expect("promoted candidate should remain queryable");
+    assert_eq!(queued_promoted_revision.0, "promoted");
+    assert_eq!(queued_promoted_revision.1, "queued");
+    assert!(
+        queued_promoted_revision
+            .3
+            .is_some_and(|analyzed| analyzed < queued_promoted_revision.2),
+        "a promoted reply must remain visibly unanalyzed until the worker processes it"
+    );
+    let promoted_reply_job = prepare_gmail_inflow_analysis(
+        &pool,
+        owner.profile.id,
+        personal.id,
+        account,
+        &thread_id,
+        &runner,
+    )
+    .await;
+    database
+        .complete_gmail_inflow_analysis(
+            &promoted_reply_job,
+            &runner,
+            &GmailInflowAnalysisResult {
+                classification: GmailInflowClassification::FollowUp,
+                confidence: 96,
+                summary: "등록된 업무의 후속 확인이에요.".to_owned(),
+                suggested_task_title: None,
+                suggested_action_items: Vec::new(),
+                suggested_completion_criteria: None,
+                suggested_assignee_name: None,
+                suggested_due_at: None,
+                suggested_priority: None,
+            },
+        )
+        .await
+        .expect("promoted reply analysis should complete");
+    let analyzed_promoted_revision: (String, String, i32, i32, Option<Uuid>) = sqlx::query_as(
+        "SELECT decision_status, analysis_state, source_revision, analyzed_revision,
+                promoted_task_id
+         FROM gmail_inflow_candidates WHERE id = $1",
+    )
+    .bind(promotable.id)
+    .fetch_one(&pool)
+    .await
+    .expect("reanalyzed promoted candidate should remain queryable");
+    assert_eq!(analyzed_promoted_revision.0, "promoted");
+    assert_eq!(analyzed_promoted_revision.1, "ready");
+    assert_eq!(analyzed_promoted_revision.2, analyzed_promoted_revision.3);
+    assert_eq!(analyzed_promoted_revision.4, Some(promotable.id));
+    let duplicate_thread = format!("duplicate-thread-{}", owner.profile.id);
+    database
+        .apply_gmail_inbox_sync(
+            duplicate_account,
+            owner.profile.id,
+            personal.id,
+            &[gmail_provider_message(
+                "duplicate",
+                &duplicate_thread,
+                now + TimeDuration::minutes(2),
+                "업무 요청",
+                "동일 본문",
+            )],
+        )
+        .await
+        .expect("duplicate account message should persist");
+    let duplicate_candidate =
+        gmail_candidate_for_thread(&database, owner.profile.id, personal.id, &duplicate_thread)
+            .await;
+    assert_eq!(duplicate_candidate.status, "pending");
+    assert_eq!(
+        duplicate_candidate.analysis_state,
+        jimin_storage::gmail_inflow::GmailInflowAnalysisState::Queued
+    );
+    let duplicate_job = prepare_gmail_inflow_analysis(
+        &pool,
+        owner.profile.id,
+        personal.id,
+        duplicate_account,
+        &duplicate_thread,
+        &runner,
+    )
+    .await;
+    database
+        .complete_gmail_inflow_analysis(
+            &duplicate_job,
+            &runner,
+            &GmailInflowAnalysisResult {
+                classification: GmailInflowClassification::Duplicate,
+                confidence: 80,
+                summary: "기존 요청과 비슷해 보여 검토가 필요해요.".to_owned(),
+                suggested_task_title: None,
+                suggested_action_items: Vec::new(),
+                suggested_completion_criteria: None,
+                suggested_assignee_name: None,
+                suggested_due_at: None,
+                suggested_priority: None,
+            },
+        )
+        .await
+        .expect("similar content analysis should complete");
+    let reviewable_duplicate =
+        gmail_candidate_for_thread(&database, owner.profile.id, personal.id, &duplicate_thread)
+            .await;
+    assert_eq!(reviewable_duplicate.status, "pending");
+    assert!(
+        database
+            .gmail_inflow_candidate_page(
+                owner.profile.id,
+                personal.id,
+                GmailInflowStatus::Attention,
+                100,
+                None,
+            )
+            .await
+            .expect("review candidates should load")
+            .items
+            .iter()
+            .any(|candidate| candidate.id == reviewable_duplicate.id),
+        "similar subject/body content must remain visible for owner review"
+    );
+    sqlx::query("DELETE FROM tasks WHERE id = $1")
+        .bind(promotable.id)
+        .execute(&pool)
+        .await
+        .expect("promoted task deletion should preserve source history");
+    sqlx::query("DELETE FROM projects WHERE id = $1")
+        .bind(project.id)
+        .execute(&pool)
+        .await
+        .expect("promoted project deletion should preserve source history");
+    let lifecycle: (String, Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+        "SELECT decision_status, promoted_project_id, promoted_task_id
+         FROM gmail_inflow_candidates WHERE id = $1",
+    )
+    .bind(promotable.id)
+    .fetch_one(&pool)
+    .await
+    .expect("source history should remain");
+    assert_eq!(lifecycle, ("promoted".to_owned(), None, None));
+    assert!(
+        database
+            .gmail_inflow_candidate_page(
+                owner.profile.id,
+                company.id,
+                GmailInflowStatus::All,
+                100,
+                None,
+            )
+            .await
+            .expect("company candidates should load")
+            .items
+            .iter()
+            .all(|candidate| candidate.id != promotable.id)
+    );
+    database.close().await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The pagination regression keeps the representative-message mutation between page reads in one isolated database fixture."
+)]
+async fn gmail_inflow_attention_uses_stable_cursor_pagination_without_hiding_items() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        2,
+        Duration::from_secs(2),
+    )
+    .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let workspace = database
+        .workspaces_for_user(owner.profile.id)
+        .await
+        .expect("workspaces should load")
+        .into_iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Personal)
+        .expect("personal workspace should exist");
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("test database should be reachable");
+    let account =
+        insert_test_gmail_account(&pool, owner.profile.id, workspace.id, "pagination").await;
+    let now = OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .expect("whole second fixture");
+    let messages = (0..105)
+        .map(|index| {
+            gmail_provider_message(
+                &format!("page-{index:03}"),
+                &format!("page-thread-{index:03}-{}", owner.profile.id),
+                now + TimeDuration::seconds(index),
+                &format!("업무 {index}"),
+                &format!("본문 {index}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    database
+        .apply_gmail_inbox_sync(account, owner.profile.id, workspace.id, &messages)
+        .await
+        .expect("candidate batch should persist");
+    sqlx::query(
+        "UPDATE gmail_inflow_candidates
+         SET analysis_state = 'ready', classification = 'new_task',
+             confidence = 90, summary = '업무 요청',
+             suggested_task_title = '업무', suggested_action_items = ARRAY['확인'],
+             suggested_completion_criteria = '확인 완료', suggested_priority = 1,
+             analyzed_revision = source_revision, analyzed_at = NOW()
+         WHERE account_id = $1",
+    )
+    .bind(account)
+    .execute(&pool)
+    .await
+    .expect("fixture candidates should become attention-ready");
+    let first = database
+        .gmail_inflow_candidate_page(
+            owner.profile.id,
+            workspace.id,
+            GmailInflowStatus::Attention,
+            100,
+            None,
+        )
+        .await
+        .expect("first page should load");
+    assert_eq!(first.items.len(), 100);
+    let oldest_thread: String = sqlx::query_scalar(
+        "SELECT provider_thread_id FROM gmail_inflow_candidates
+         WHERE account_id = $1
+         ORDER BY created_at ASC, id ASC
+         LIMIT 1",
+    )
+    .bind(account)
+    .fetch_one(&pool)
+    .await
+    .expect("oldest candidate should exist");
+    database
+        .apply_gmail_inbox_sync(
+            account,
+            owner.profile.id,
+            workspace.id,
+            &[gmail_provider_message(
+                "late-reply",
+                &oldest_thread,
+                now + TimeDuration::days(1),
+                "늦게 온 후속 요청",
+                "대표 메일이 바뀌어도 페이지 위치는 유지한다.",
+            )],
+        )
+        .await
+        .expect("representative reply should update");
+    sqlx::query(
+        "UPDATE gmail_inflow_candidates
+         SET analysis_state = 'ready', classification = 'new_task',
+             confidence = 90, summary = '후속 업무 요청',
+             suggested_task_title = '후속 업무',
+             suggested_action_items = ARRAY['확인'],
+             suggested_completion_criteria = '확인 완료', suggested_priority = 1,
+             analyzed_revision = source_revision, analyzed_at = NOW()
+         WHERE account_id = $1 AND provider_thread_id = $2",
+    )
+    .bind(account)
+    .bind(&oldest_thread)
+    .execute(&pool)
+    .await
+    .expect("updated representative should remain attention-ready");
+    let second = database
+        .gmail_inflow_candidate_page(
+            owner.profile.id,
+            workspace.id,
+            GmailInflowStatus::Attention,
+            100,
+            first.next_cursor,
+        )
+        .await
+        .expect("second page should load");
+    assert_eq!(second.items.len(), 5);
+    assert!(second.next_cursor.is_none());
+    let ids = first
+        .items
+        .iter()
+        .chain(&second.items)
+        .map(|item| item.id)
+        .collect::<HashSet<_>>();
+    assert_eq!(ids.len(), 105);
+    database.close().await;
+    pool.close().await;
+}
+
+fn gmail_provider_message(
+    marker: &str,
+    thread_id: &str,
+    received_at: OffsetDateTime,
+    subject: &str,
+    body: &str,
+) -> ProviderGmailMessage {
+    ProviderGmailMessage {
+        provider_message_id: format!("{marker}-{}", Uuid::now_v7()),
+        provider_thread_id: thread_id.to_owned(),
+        received_at: Some(received_at),
+        sender: Some("요청자 <requester@example.test>".to_owned()),
+        subject: Some(subject.to_owned()),
+        snippet: Some(body.to_owned()),
+        body_text: Some(body.to_owned()),
+        reference_links: vec!["https://example.test/spec".to_owned()],
+        list_id: None,
+        list_unsubscribe: false,
+        precedence: None,
+        auto_submitted: None,
+        is_unread: true,
+    }
+}
+
+fn new_task_gmail_analysis(title: &str) -> GmailInflowAnalysisResult {
+    GmailInflowAnalysisResult {
+        classification: GmailInflowClassification::NewTask,
+        confidence: 95,
+        summary: "실제 업무 요청이에요.".to_owned(),
+        suggested_task_title: Some(title.to_owned()),
+        suggested_action_items: vec!["요청 내용을 확인한다.".to_owned()],
+        suggested_completion_criteria: Some("처리 결과를 공유한다.".to_owned()),
+        suggested_assignee_name: Some("조지민".to_owned()),
+        suggested_due_at: None,
+        suggested_priority: Some(2),
+    }
+}
+
+async fn prepare_gmail_inflow_analysis(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    account_id: Uuid,
+    thread_id: &str,
+    runner: &str,
+) -> jimin_storage::gmail_inflow::ClaimedGmailInflowAnalysis {
+    let (id, source_revision): (Uuid, i32) = sqlx::query_as(
+        "UPDATE gmail_inflow_candidates
+         SET analysis_state = 'running', claim_owner = $2,
+             claim_expires_at = NOW() + INTERVAL '5 minutes'
+         WHERE account_id = $1 AND provider_thread_id = $3
+         RETURNING id, source_revision",
+    )
+    .bind(account_id)
+    .bind(runner)
+    .bind(thread_id)
+    .fetch_one(pool)
+    .await
+    .expect("fixture candidate should enter running state");
+    let messages = sqlx::query_as::<_, jimin_storage::gmail_inflow::GmailInflowMessage>(
+        "SELECT id, sender, subject, snippet, body_text, reference_links,
+            received_at, list_id, list_unsubscribe, precedence, auto_submitted
+         FROM gmail_messages
+         WHERE account_id = $1 AND workspace_id = $2 AND provider_thread_id = $3
+         ORDER BY received_at ASC NULLS FIRST, id ASC",
+    )
+    .bind(account_id)
+    .bind(workspace_id)
+    .bind(thread_id)
+    .fetch_all(pool)
+    .await
+    .expect("fixture messages should load");
+    jimin_storage::gmail_inflow::ClaimedGmailInflowAnalysis {
+        id,
+        user_id,
+        account_id,
+        account_email: "owner@example.test".to_owned(),
+        workspace_id,
+        workspace_name: "개인".to_owned(),
+        workspace_scope: "personal".to_owned(),
+        provider_thread_id: thread_id.to_owned(),
+        source_revision,
+        messages,
+        processing_model_id: None,
+        processing_reasoning_effort: None,
+    }
+}
+
+async fn gmail_candidate_for_thread(
+    database: &Database,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    thread_id: &str,
+) -> jimin_storage::gmail_inflow::GmailInflowCandidate {
+    database
+        .gmail_inflow_candidate_page(user_id, workspace_id, GmailInflowStatus::All, 100, None)
+        .await
+        .expect("candidates should load")
+        .items
+        .into_iter()
+        .find(|candidate| candidate.provider_thread_id == thread_id)
+        .expect("candidate should exist")
 }
 
 fn provision_login_command(user_id: Uuid, installation_id: Uuid) -> ProvisionLogin {

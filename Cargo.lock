@@ -2655,6 +2655,7 @@ dependencies = [
 name = "jimin-google"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "jimin-application",
  "jimin-domain",
  "jsonwebtoken",
@@ -2665,6 +2666,7 @@ dependencies = [
  "thiserror 2.0.18",
  "time",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

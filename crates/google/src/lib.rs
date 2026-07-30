@@ -7,6 +7,10 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
+use base64::{
+    Engine as _,
+    engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
+};
 use jimin_application::VerifiedGoogleIdentity;
 use jimin_domain::{ClientPlatform, EmailAddress, GoogleSubject, PkceVerifier};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
@@ -20,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::{Date, Duration as TimeDuration, Month, OffsetDateTime};
 use tokio::sync::Mutex;
+use tracing::warn;
 
 const GOOGLE_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_TOKEN_REVOCATION_ENDPOINT: &str = "https://oauth2.googleapis.com/revoke";
@@ -43,8 +48,13 @@ const MAX_CALENDAR_EVENT_PAGES: usize = 100;
 const MAX_CALENDAR_EVENT_ITEMS: usize = 100_000;
 const MAX_RECURRENCE_RULES: usize = 128;
 const MAX_GMAIL_INBOX_MESSAGES: usize = 50;
+const MAX_GMAIL_LIST_PAGES: usize = 100;
+const MAX_GMAIL_CATCH_UP_MESSAGES: usize = 5_000;
+const MAX_GMAIL_INITIAL_IMPORT_MESSAGES: usize = 100;
 const MAX_GMAIL_LIST_RESPONSE_BYTES: usize = 512 * 1024;
 const MAX_GMAIL_MESSAGE_RESPONSE_BYTES: usize = 512 * 1024;
+const MAX_GMAIL_BODY_CHARS: usize = 12_000;
+const MAX_GMAIL_REFERENCE_LINKS: usize = 16;
 const MAX_CHAT_LIST_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CHAT_LIST_PAGES: usize = 50;
 const MAX_CHAT_ITEMS: usize = 5_000;
@@ -422,8 +432,8 @@ pub enum GoogleCalendarEventStatus {
     Cancelled,
 }
 
-/// Bounded Gmail inbox metadata. Message bodies, attachments, and raw header
-/// collections are discarded by the adapter before this value is returned.
+/// Bounded Gmail inbox content used by server-side assistant classification.
+/// Attachments and raw provider payloads are discarded by the adapter.
 pub struct GoogleGmailMessageEntry {
     pub provider_message_id: String,
     pub provider_thread_id: String,
@@ -431,7 +441,28 @@ pub struct GoogleGmailMessageEntry {
     pub sender: Option<String>,
     pub subject: Option<String>,
     pub snippet: Option<String>,
+    pub body_text: Option<String>,
+    pub reference_links: Vec<String>,
+    pub list_id: Option<String>,
+    pub list_unsubscribe: bool,
+    pub precedence: Option<String>,
+    pub auto_submitted: Option<String>,
     pub is_unread: bool,
+}
+
+/// A bounded Gmail inbox snapshot plus sanitized partial-success accounting.
+pub struct GoogleGmailInboxBatch {
+    pub messages: Vec<GoogleGmailMessageEntry>,
+    pub skipped_message_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GmailMessageFetchError {
+    Credential,
+    Rejected,
+    NotFound,
+    Transient,
+    Malformed,
 }
 
 impl GoogleCalendarAdapter {
@@ -997,16 +1028,22 @@ impl GoogleCalendarAdapter {
 
     /// Lists a bounded, read-only view of the Gmail inbox. The adapter first
     /// receives message IDs, then requests only metadata headers for each
-    /// entry; it never requests body parts or attachments.
+    /// entry; bounded text parts are sanitized while attachments are ignored.
     ///
     /// # Errors
     ///
     /// Returns a sanitized provider error and retains no Gmail response body
     /// after the metadata has been normalized.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The fixed-endpoint Gmail import keeps page bounds and per-message isolation together so no unsafe partial-success path bypasses either policy."
+    )]
     pub async fn list_gmail_inbox_messages(
         &self,
         access_token: &SecretString,
-    ) -> Result<Vec<GoogleGmailMessageEntry>, GoogleAuthError> {
+        stop_at_message_id: Option<&str>,
+        received_after: Option<OffsetDateTime>,
+    ) -> Result<GoogleGmailInboxBatch, GoogleAuthError> {
         let token = access_token.expose_secret();
         if token.is_empty()
             || token.len() > MAX_TOKEN_RESPONSE_BYTES
@@ -1014,51 +1051,27 @@ impl GoogleCalendarAdapter {
         {
             return Err(GoogleAuthError::InvalidRequest);
         }
-        let mut list_url = reqwest::Url::parse(GOOGLE_GMAIL_MESSAGES_ENDPOINT)
-            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
-        {
-            let mut query = list_url.query_pairs_mut();
-            query.append_pair("labelIds", "INBOX");
-            query.append_pair("maxResults", "50");
-        }
-        let response = self
-            .client
-            .get(list_url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
-        if !response.status().is_success() {
-            return Err(classify_provider_status(response.status().as_u16()));
-        }
-        if !is_json_response(&response) {
-            return Err(GoogleAuthError::ProviderUnavailable);
-        }
-        let payload = bounded_body(response, MAX_GMAIL_LIST_RESPONSE_BYTES).await?;
-        let list: GoogleGmailMessageListResponse =
-            serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
-        if list.messages.len() > MAX_GMAIL_INBOX_MESSAGES {
-            return Err(GoogleAuthError::ProviderRejected);
-        }
-
-        let mut messages = Vec::with_capacity(list.messages.len());
-        for reference in list.messages {
-            let provider_message_id = validate_text(reference.id, 255)?;
-            let mut message_url = reqwest::Url::parse(GOOGLE_GMAIL_MESSAGES_ENDPOINT)
+        let mut references = Vec::new();
+        let mut page_token = None;
+        let mut reached_watermark = false;
+        for _ in 0..MAX_GMAIL_LIST_PAGES {
+            let mut list_url = reqwest::Url::parse(GOOGLE_GMAIL_MESSAGES_ENDPOINT)
                 .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
-            message_url
-                .path_segments_mut()
-                .map_err(|()| GoogleAuthError::ProviderUnavailable)?
-                .push(&provider_message_id);
             {
-                let mut query = message_url.query_pairs_mut();
-                query.append_pair("format", "metadata");
-                query.append_pair("metadataHeaders", "From");
-                query.append_pair("metadataHeaders", "Subject");
+                let mut query = list_url.query_pairs_mut();
+                query.append_pair("labelIds", "INBOX");
+                query.append_pair("maxResults", &MAX_GMAIL_INBOX_MESSAGES.to_string());
+                if let Some(received_after) = received_after {
+                    let inclusive_floor = received_after.unix_timestamp().saturating_sub(1);
+                    query.append_pair("q", &format!("after:{inclusive_floor}"));
+                }
+                if let Some(page_token) = page_token.as_deref() {
+                    query.append_pair("pageToken", page_token);
+                }
             }
             let response = self
                 .client
-                .get(message_url)
+                .get(list_url)
                 .bearer_auth(token)
                 .send()
                 .await
@@ -1069,12 +1082,110 @@ impl GoogleCalendarAdapter {
             if !is_json_response(&response) {
                 return Err(GoogleAuthError::ProviderUnavailable);
             }
-            let payload = bounded_body(response, MAX_GMAIL_MESSAGE_RESPONSE_BYTES).await?;
-            let message: GoogleGmailMessageResponse =
+            let payload = bounded_body(response, MAX_GMAIL_LIST_RESPONSE_BYTES).await?;
+            let list: GoogleGmailMessageListResponse =
                 serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
-            messages.push(normalize_gmail_message(message, &provider_message_id)?);
+            let next_page_token = list.next_page_token;
+            reached_watermark = collect_gmail_message_references(
+                &mut references,
+                list.messages,
+                stop_at_message_id,
+            )?;
+            if reached_watermark {
+                page_token = None;
+                break;
+            }
+            page_token = next_page_token;
+            if page_token.is_none() {
+                break;
+            }
         }
-        Ok(messages)
+        if page_token.is_some() && !reached_watermark {
+            // Never report a successful partial snapshot. The sync remains in
+            // error and can be retried after incremental History support.
+            return Err(GoogleAuthError::ProviderUnavailable);
+        }
+
+        let mut messages = Vec::with_capacity(references.len());
+        let mut skipped_messages = 0usize;
+        for reference in references {
+            let provider_message_id = validate_gmail_resource_id(reference.id)?;
+            let full = fetch_gmail_message(
+                &self.client,
+                token,
+                &provider_message_id,
+                "full",
+                "id,threadId,internalDate,labelIds,snippet,payload(headers,mimeType,filename,body(data,attachmentId),parts)",
+            )
+            .await;
+            match full {
+                Ok(message) => match normalize_gmail_message(message, &provider_message_id) {
+                    Ok(message) => messages.push(message),
+                    Err(_) => {
+                        if let Some(message) =
+                            fetch_gmail_metadata_fallback(&self.client, token, &provider_message_id)
+                                .await?
+                        {
+                            messages.push(message);
+                        } else {
+                            skipped_messages += 1;
+                        }
+                    }
+                },
+                Err(GmailMessageFetchError::Malformed) => {
+                    if let Some(message) =
+                        fetch_gmail_metadata_fallback(&self.client, token, &provider_message_id)
+                            .await?
+                    {
+                        messages.push(message);
+                    } else {
+                        skipped_messages += 1;
+                    }
+                }
+                Err(GmailMessageFetchError::NotFound) => {
+                    skipped_messages += 1;
+                }
+                Err(GmailMessageFetchError::Credential | GmailMessageFetchError::Rejected) => {
+                    return Err(GoogleAuthError::ProviderRejected);
+                }
+                Err(GmailMessageFetchError::Transient) => {
+                    return Err(GoogleAuthError::ProviderUnavailable);
+                }
+            }
+        }
+        if skipped_messages > 0 {
+            warn!(
+                skipped_messages,
+                "completed Gmail sync with malformed or concurrently deleted messages skipped"
+            );
+        }
+        Ok(GoogleGmailInboxBatch {
+            messages,
+            skipped_message_count: skipped_messages,
+        })
+    }
+}
+
+async fn fetch_gmail_metadata_fallback(
+    client: &Client,
+    token: &str,
+    provider_message_id: &str,
+) -> Result<Option<GoogleGmailMessageEntry>, GoogleAuthError> {
+    match fetch_gmail_message(
+        client,
+        token,
+        provider_message_id,
+        "metadata",
+        "id,threadId,internalDate,labelIds,snippet,payload(headers)",
+    )
+    .await
+    {
+        Ok(message) => Ok(normalize_gmail_message(message, provider_message_id).ok()),
+        Err(GmailMessageFetchError::Malformed | GmailMessageFetchError::NotFound) => Ok(None),
+        Err(GmailMessageFetchError::Credential | GmailMessageFetchError::Rejected) => {
+            Err(GoogleAuthError::ProviderRejected)
+        }
+        Err(GmailMessageFetchError::Transient) => Err(GoogleAuthError::ProviderUnavailable),
     }
 }
 
@@ -1928,6 +2039,7 @@ struct GoogleCalendarMutationDateTime {
 struct GoogleGmailMessageListResponse {
     #[serde(default)]
     messages: Vec<GoogleGmailMessageReference>,
+    next_page_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1948,11 +2060,24 @@ struct GoogleGmailMessageResponse {
 
 #[derive(Deserialize)]
 struct GoogleGmailMessagePayload {
+    #[serde(rename = "mimeType")]
+    mime_type: Option<String>,
+    filename: Option<String>,
+    body: Option<GoogleGmailMessageBody>,
+    #[serde(default)]
+    parts: Vec<GoogleGmailMessagePayload>,
     #[serde(default)]
     headers: Vec<GoogleGmailHeader>,
 }
 
 #[derive(Deserialize)]
+struct GoogleGmailMessageBody {
+    data: Option<String>,
+    #[serde(rename = "attachmentId")]
+    attachment_id: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
 struct GoogleGmailHeader {
     name: String,
     value: String,
@@ -2418,20 +2543,28 @@ fn normalize_gmail_message(
     message: GoogleGmailMessageResponse,
     expected_message_id: &str,
 ) -> Result<GoogleGmailMessageEntry, GoogleAuthError> {
-    let provider_message_id = validate_text(message.id, 255)?;
+    let provider_message_id = validate_gmail_resource_id(message.id)?;
     if provider_message_id != expected_message_id {
         return Err(GoogleAuthError::ProviderRejected);
     }
-    let provider_thread_id = validate_text(message.thread_id, 255)?;
-    let headers = message
-        .payload
-        .map_or_else(Vec::new, |payload| payload.headers);
+    let provider_thread_id = validate_gmail_resource_id(message.thread_id)?;
+    let payload = message.payload;
+    let headers = payload
+        .as_ref()
+        .map_or_else(Vec::new, |payload| payload.headers.clone());
     let sender = gmail_header_value(&headers, "from");
     let subject = gmail_header_value(&headers, "subject");
     let snippet = message
         .snippet
         .as_deref()
         .and_then(|value| normalize_gmail_text(value, 512));
+    let (body_text, reference_links) = payload.as_ref().map_or((None, Vec::new()), gmail_content);
+    let list_id = gmail_header_value(&headers, "list-id");
+    let list_unsubscribe = gmail_header_value(&headers, "list-unsubscribe").is_some();
+    let precedence = gmail_header_value(&headers, "precedence")
+        .and_then(|value| normalize_gmail_text(&value, 80));
+    let auto_submitted = gmail_header_value(&headers, "auto-submitted")
+        .and_then(|value| normalize_gmail_text(&value, 80));
     let received_at = message
         .internal_date
         .and_then(|value| parse_gmail_internal_date(&value));
@@ -2446,8 +2579,329 @@ fn normalize_gmail_message(
         sender,
         subject,
         snippet,
+        body_text,
+        reference_links,
+        list_id,
+        list_unsubscribe,
+        precedence,
+        auto_submitted,
         is_unread,
     })
+}
+
+async fn fetch_gmail_message(
+    client: &Client,
+    token: &str,
+    provider_message_id: &str,
+    format: &str,
+    fields: &str,
+) -> Result<GoogleGmailMessageResponse, GmailMessageFetchError> {
+    let mut message_url = reqwest::Url::parse(GOOGLE_GMAIL_MESSAGES_ENDPOINT)
+        .map_err(|_| GmailMessageFetchError::Transient)?;
+    message_url
+        .path_segments_mut()
+        .map_err(|()| GmailMessageFetchError::Transient)?
+        .push(provider_message_id);
+    message_url
+        .query_pairs_mut()
+        .append_pair("format", format)
+        .append_pair("fields", fields);
+    let response = client
+        .get(message_url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|_| GmailMessageFetchError::Transient)?;
+    classify_gmail_message_status(response.status().as_u16())?;
+    if !is_json_response(&response) {
+        return Err(GmailMessageFetchError::Malformed);
+    }
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_GMAIL_MESSAGE_RESPONSE_BYTES as u64)
+    {
+        return Err(GmailMessageFetchError::Malformed);
+    }
+    let payload = response
+        .bytes()
+        .await
+        .map_err(|_| GmailMessageFetchError::Transient)?;
+    if payload.len() > MAX_GMAIL_MESSAGE_RESPONSE_BYTES {
+        return Err(GmailMessageFetchError::Malformed);
+    }
+    serde_json::from_slice(&payload).map_err(|_| GmailMessageFetchError::Malformed)
+}
+
+const fn classify_gmail_message_status(status: u16) -> Result<(), GmailMessageFetchError> {
+    match status {
+        200..=299 => Ok(()),
+        401 | 403 => Err(GmailMessageFetchError::Credential),
+        404 => Err(GmailMessageFetchError::NotFound),
+        429 | 500..=599 => Err(GmailMessageFetchError::Transient),
+        _ => Err(GmailMessageFetchError::Rejected),
+    }
+}
+
+fn collect_gmail_message_references(
+    references: &mut Vec<GoogleGmailMessageReference>,
+    page: Vec<GoogleGmailMessageReference>,
+    stop_at_message_id: Option<&str>,
+) -> Result<bool, GoogleAuthError> {
+    if page.len() > MAX_GMAIL_INBOX_MESSAGES {
+        return Err(GoogleAuthError::ProviderRejected);
+    }
+    for reference in page {
+        if stop_at_message_id == Some(reference.id.as_str()) {
+            return Ok(true);
+        }
+        if references.len() == MAX_GMAIL_CATCH_UP_MESSAGES {
+            return Err(GoogleAuthError::ProviderUnavailable);
+        }
+        references.push(reference);
+        if stop_at_message_id.is_none() && references.len() == MAX_GMAIL_INITIAL_IMPORT_MESSAGES {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn gmail_content(payload: &GoogleGmailMessagePayload) -> (Option<String>, Vec<String>) {
+    let mut plain = String::new();
+    let mut html = String::new();
+    collect_gmail_parts(payload, &mut plain, &mut html);
+    let preferred = if plain.trim().is_empty() {
+        strip_html(&html)
+    } else {
+        plain
+    };
+    let bounded = clean_gmail_body(&preferred);
+    let mut links = http_links(&preferred);
+    for link in html_href_links(&html) {
+        if links.len() == MAX_GMAIL_REFERENCE_LINKS {
+            break;
+        }
+        if !links.contains(&link) {
+            links.push(link);
+        }
+    }
+    (bounded, links)
+}
+
+fn collect_gmail_parts(payload: &GoogleGmailMessagePayload, plain: &mut String, html: &mut String) {
+    let mime_type = payload.mime_type.as_deref().unwrap_or_default();
+    let is_attachment = payload
+        .filename
+        .as_deref()
+        .is_some_and(|filename| !filename.trim().is_empty())
+        || payload
+            .body
+            .as_ref()
+            .and_then(|body| body.attachment_id.as_deref())
+            .is_some()
+        || gmail_header_value(&payload.headers, "content-disposition")
+            .is_some_and(|value| value.to_ascii_lowercase().starts_with("attachment"));
+    if !is_attachment
+        && matches!(mime_type, "text/plain" | "text/html")
+        && let Some(data) = payload.body.as_ref().and_then(|body| body.data.as_deref())
+        && let Ok(bytes) = URL_SAFE_NO_PAD
+            .decode(data)
+            .or_else(|_| URL_SAFE.decode(data))
+        && let Ok(value) = String::from_utf8(bytes)
+    {
+        if mime_type == "text/plain" {
+            if !plain.is_empty() {
+                plain.push('\n');
+            }
+            plain.extend(value.chars().take(MAX_GMAIL_BODY_CHARS * 2));
+        } else {
+            if !html.is_empty() {
+                html.push('\n');
+            }
+            html.extend(value.chars().take(MAX_GMAIL_BODY_CHARS * 2));
+        }
+    }
+    for part in &payload.parts {
+        collect_gmail_parts(part, plain, html);
+    }
+}
+
+fn clean_gmail_body(value: &str) -> Option<String> {
+    let mut lines = Vec::new();
+    for line in value.lines() {
+        let trimmed = line.trim();
+        if trimmed == "--"
+            || trimmed == "-- "
+            || trimmed.starts_with("On ") && trimmed.ends_with(" wrote:")
+            || trimmed.starts_with('>')
+        {
+            break;
+        }
+        if !trimmed.is_empty() {
+            lines.push(trimmed);
+        }
+    }
+    let compact = lines.join("\n");
+    let compact = compact.trim();
+    if compact.is_empty() {
+        None
+    } else {
+        Some(compact.chars().take(MAX_GMAIL_BODY_CHARS).collect())
+    }
+}
+
+fn strip_html(value: &str) -> String {
+    let mut result = String::with_capacity(value.len().min(MAX_GMAIL_BODY_CHARS * 2));
+    let mut cursor = 0;
+    let lower = value.to_ascii_lowercase();
+    while cursor < value.len() && result.chars().count() < MAX_GMAIL_BODY_CHARS * 2 {
+        let Some(relative_tag_start) = value[cursor..].find('<') else {
+            result.push_str(&value[cursor..]);
+            break;
+        };
+        let tag_start = cursor + relative_tag_start;
+        result.push_str(&value[cursor..tag_start]);
+        let Some(relative_tag_end) = value[tag_start..].find('>') else {
+            break;
+        };
+        let tag_end = tag_start + relative_tag_end + 1;
+        let tag = lower[tag_start + 1..tag_end - 1]
+            .trim_start_matches('/')
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches('/');
+        if matches!(tag, "script" | "style" | "head") && !lower[tag_start + 1..].starts_with('/') {
+            let closing = format!("</{tag}");
+            let Some(relative_closing_start) = lower[tag_end..].find(&closing) else {
+                cursor = tag_end;
+                continue;
+            };
+            let closing_start = tag_end + relative_closing_start;
+            let Some(relative_closing_end) = lower[closing_start..].find('>') else {
+                break;
+            };
+            cursor = closing_start + relative_closing_end + 1;
+        } else {
+            if matches!(
+                tag,
+                "br" | "p" | "div" | "li" | "tr" | "td" | "th" | "h1" | "h2" | "h3"
+            ) {
+                result.push('\n');
+            } else {
+                result.push(' ');
+            }
+            cursor = tag_end;
+        }
+    }
+    let bounded: String = result.chars().take(MAX_GMAIL_BODY_CHARS * 2).collect();
+    decode_html_entities(&bounded)
+}
+
+fn decode_html_entities(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while let Some(relative) = value[cursor..].find('&') {
+        let start = cursor + relative;
+        output.push_str(&value[cursor..start]);
+        let Some(relative_end) = value[start..].find(';') else {
+            output.push_str(&value[start..]);
+            return output;
+        };
+        let end = start + relative_end;
+        let entity = &value[start + 1..end];
+        let decoded = match entity {
+            "nbsp" => Some(' '),
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" | "#39" => Some('\''),
+            _ if entity.starts_with("#x") || entity.starts_with("#X") => {
+                u32::from_str_radix(&entity[2..], 16)
+                    .ok()
+                    .and_then(char::from_u32)
+            }
+            _ if entity.starts_with('#') => {
+                entity[1..].parse::<u32>().ok().and_then(char::from_u32)
+            }
+            _ => None,
+        };
+        if let Some(decoded) = decoded {
+            output.push(decoded);
+        } else {
+            output.push_str(&value[start..=end]);
+        }
+        cursor = end + 1;
+    }
+    output.push_str(&value[cursor..]);
+    output
+}
+
+fn html_href_links(value: &str) -> Vec<String> {
+    let mut links = Vec::new();
+    let lower = value.to_ascii_lowercase();
+    let mut cursor = 0;
+    while links.len() < MAX_GMAIL_REFERENCE_LINKS {
+        let Some(relative) = lower[cursor..].find("href=") else {
+            break;
+        };
+        let start = cursor + relative + 5;
+        let bytes = value.as_bytes();
+        if start >= bytes.len() {
+            break;
+        }
+        let quote = bytes[start] as char;
+        let value_start = if matches!(quote, '"' | '\'') {
+            start + 1
+        } else {
+            start
+        };
+        let tail = &value[value_start..];
+        let end = if matches!(quote, '"' | '\'') {
+            tail.find(quote)
+        } else {
+            tail.find(|character: char| character.is_whitespace() || character == '>')
+        };
+        let Some(end) = end else {
+            break;
+        };
+        let candidate = tail[..end].trim();
+        if candidate.len() <= 2_048
+            && matches!(
+                reqwest::Url::parse(candidate).map(|url| url.scheme().to_owned()),
+                Ok(scheme) if matches!(scheme.as_str(), "http" | "https")
+            )
+            && !links.iter().any(|link| link == candidate)
+        {
+            links.push(candidate.to_owned());
+        }
+        cursor = value_start + end + usize::from(matches!(quote, '"' | '\''));
+    }
+    links
+}
+
+fn http_links(value: &str) -> Vec<String> {
+    let mut links = Vec::new();
+    for part in value.split_whitespace() {
+        let candidate = part
+            .trim_matches(|character: char| {
+                matches!(character, '<' | '>' | '"' | '\'' | '(' | ')' | '[' | ']')
+            })
+            .trim_end_matches(['.', ',', ';', ':', '!']);
+        if candidate.len() <= 2_048
+            && matches!(
+                reqwest::Url::parse(candidate).map(|url| url.scheme().to_owned()),
+                Ok(scheme) if matches!(scheme.as_str(), "http" | "https")
+            )
+            && !links.iter().any(|link| link == candidate)
+        {
+            links.push(candidate.to_owned());
+            if links.len() == MAX_GMAIL_REFERENCE_LINKS {
+                break;
+            }
+        }
+    }
+    links
 }
 
 fn gmail_header_value(headers: &[GoogleGmailHeader], expected_name: &str) -> Option<String> {
@@ -2455,6 +2909,18 @@ fn gmail_header_value(headers: &[GoogleGmailHeader], expected_name: &str) -> Opt
         .iter()
         .find(|header| header.name.eq_ignore_ascii_case(expected_name))
         .and_then(|header| normalize_gmail_text(&header.value, 1_024))
+}
+
+fn validate_gmail_resource_id(value: String) -> Result<String, GoogleAuthError> {
+    let value = validate_text(value, 255)?;
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        Ok(value)
+    } else {
+        Err(GoogleAuthError::ProviderRejected)
+    }
 }
 
 fn normalize_gmail_text(value: &str, maximum_bytes: usize) -> Option<String> {
@@ -3125,6 +3591,290 @@ mod tests {
         assert_eq!(entry.subject.as_deref(), Some("내일 회의"));
         assert!(entry.is_unread);
         assert!(entry.received_at.is_some());
+    }
+
+    #[test]
+    fn gmail_message_fetch_status_separates_credentials_races_and_transient_failures() {
+        assert_eq!(classify_gmail_message_status(200), Ok(()));
+        assert_eq!(
+            classify_gmail_message_status(401),
+            Err(GmailMessageFetchError::Credential)
+        );
+        assert_eq!(
+            classify_gmail_message_status(403),
+            Err(GmailMessageFetchError::Credential)
+        );
+        assert_eq!(
+            classify_gmail_message_status(404),
+            Err(GmailMessageFetchError::NotFound)
+        );
+        assert_eq!(
+            classify_gmail_message_status(429),
+            Err(GmailMessageFetchError::Transient)
+        );
+        assert_eq!(
+            classify_gmail_message_status(503),
+            Err(GmailMessageFetchError::Transient)
+        );
+        assert_eq!(
+            classify_gmail_message_status(422),
+            Err(GmailMessageFetchError::Rejected)
+        );
+    }
+
+    #[test]
+    fn gmail_prefers_plain_text_and_keeps_bounded_unique_links() {
+        let plain = format!(
+            "요청 본문 https://example.com/spec {}",
+            (0..20)
+                .map(|index| format!("https://example.com/{index}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let payload = GoogleGmailMessagePayload {
+            mime_type: Some("multipart/alternative".to_owned()),
+            filename: None,
+            body: None,
+            headers: Vec::new(),
+            parts: vec![
+                text_gmail_part(
+                    "text/html",
+                    "<p>HTML 대체문 <a href=\"https://example.com/spec\">문서</a></p>",
+                    false,
+                    false,
+                ),
+                text_gmail_part("text/plain", &plain, false, false),
+            ],
+        };
+
+        let (body, links) = gmail_content(&payload);
+
+        assert!(
+            body.as_deref()
+                .is_some_and(|value| value.starts_with("요청 본문"))
+        );
+        assert!(!body.as_deref().unwrap_or_default().contains("HTML 대체문"));
+        assert_eq!(links.len(), MAX_GMAIL_REFERENCE_LINKS);
+        assert_eq!(
+            links
+                .iter()
+                .filter(|value| value.as_str() == "https://example.com/spec")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn gmail_ignores_filename_attachment_id_and_disposition_attachments() {
+        let payload = GoogleGmailMessagePayload {
+            mime_type: Some("multipart/mixed".to_owned()),
+            filename: None,
+            body: None,
+            headers: Vec::new(),
+            parts: vec![
+                text_gmail_part("text/plain", "본문", false, false),
+                text_gmail_part("text/plain", "파일 이름 첨부", true, false),
+                text_gmail_part("text/plain", "attachment id 첨부", false, true),
+                GoogleGmailMessagePayload {
+                    mime_type: Some("text/plain".to_owned()),
+                    filename: None,
+                    body: Some(GoogleGmailMessageBody {
+                        data: Some(URL_SAFE_NO_PAD.encode("disposition 첨부")),
+                        attachment_id: None,
+                    }),
+                    parts: Vec::new(),
+                    headers: vec![GoogleGmailHeader {
+                        name: "Content-Disposition".to_owned(),
+                        value: "attachment; filename=secret.txt".to_owned(),
+                    }],
+                },
+            ],
+        };
+
+        let (body, _) = gmail_content(&payload);
+
+        assert_eq!(body.as_deref(), Some("본문"));
+    }
+
+    #[test]
+    fn gmail_accepts_padded_and_unpadded_base64url_parts() {
+        let payload = GoogleGmailMessagePayload {
+            mime_type: Some("multipart/mixed".to_owned()),
+            filename: None,
+            body: None,
+            headers: Vec::new(),
+            parts: vec![
+                GoogleGmailMessagePayload {
+                    mime_type: Some("text/plain".to_owned()),
+                    filename: None,
+                    body: Some(GoogleGmailMessageBody {
+                        data: Some(URL_SAFE_NO_PAD.encode("패딩 없음")),
+                        attachment_id: None,
+                    }),
+                    parts: Vec::new(),
+                    headers: Vec::new(),
+                },
+                GoogleGmailMessagePayload {
+                    mime_type: Some("text/plain".to_owned()),
+                    filename: None,
+                    body: Some(GoogleGmailMessageBody {
+                        data: Some(URL_SAFE.encode("패딩 있음")),
+                        attachment_id: None,
+                    }),
+                    parts: Vec::new(),
+                    headers: Vec::new(),
+                },
+            ],
+        };
+
+        let (body, _) = gmail_content(&payload);
+
+        assert_eq!(body.as_deref(), Some("패딩 없음\n패딩 있음"));
+    }
+
+    #[test]
+    fn gmail_truncates_oversized_korean_body_on_char_boundary() {
+        let oversized = "한".repeat(MAX_GMAIL_BODY_CHARS + 100);
+        let payload = text_gmail_part("text/plain", &oversized, false, false);
+
+        let (body, _) = gmail_content(&payload);
+        let body = body.expect("oversized text remains available");
+
+        assert_eq!(body.chars().count(), MAX_GMAIL_BODY_CHARS);
+        assert!(body.chars().all(|character| character == '한'));
+    }
+
+    #[test]
+    fn gmail_html_removes_non_visible_content_and_decodes_entities() {
+        let html = "<head><title>비밀 제목</title></head>\
+            <style>.secret{display:none}</style><script>alert('secret')</script>\
+            <p>확인&nbsp;&amp;&#32;&#xAC00;</p>";
+        let payload = text_gmail_part("text/html", html, false, false);
+
+        let (body, _) = gmail_content(&payload);
+        let body = body.expect("visible text should remain");
+
+        assert!(body.contains("확인 & 가"));
+        assert!(!body.contains("비밀 제목"));
+        assert!(!body.contains("display:none"));
+        assert!(!body.contains("alert"));
+    }
+
+    #[test]
+    fn gmail_normalizes_list_and_automation_headers() {
+        let message = GoogleGmailMessageResponse {
+            id: "message-headers".to_owned(),
+            thread_id: "thread-headers".to_owned(),
+            internal_date: None,
+            label_ids: Some(vec!["INBOX".to_owned()]),
+            snippet: None,
+            payload: Some(GoogleGmailMessagePayload {
+                mime_type: Some("text/plain".to_owned()),
+                filename: None,
+                body: Some(GoogleGmailMessageBody {
+                    data: Some(URL_SAFE_NO_PAD.encode("본문")),
+                    attachment_id: None,
+                }),
+                parts: Vec::new(),
+                headers: vec![
+                    GoogleGmailHeader {
+                        name: "List-Id".to_owned(),
+                        value: " product.example.com ".to_owned(),
+                    },
+                    GoogleGmailHeader {
+                        name: "List-Unsubscribe".to_owned(),
+                        value: "<https://example.com/unsubscribe>".to_owned(),
+                    },
+                    GoogleGmailHeader {
+                        name: "Precedence".to_owned(),
+                        value: "bulk".to_owned(),
+                    },
+                    GoogleGmailHeader {
+                        name: "Auto-Submitted".to_owned(),
+                        value: "auto-generated".to_owned(),
+                    },
+                ],
+            }),
+        };
+
+        let entry =
+            normalize_gmail_message(message, "message-headers").expect("headers should normalize");
+
+        assert_eq!(entry.list_id.as_deref(), Some("product.example.com"));
+        assert!(entry.list_unsubscribe);
+        assert_eq!(entry.precedence.as_deref(), Some("bulk"));
+        assert_eq!(entry.auto_submitted.as_deref(), Some("auto-generated"));
+    }
+
+    #[test]
+    fn gmail_reference_collection_stops_at_watermark_and_initial_boundary() {
+        let mut incremental = Vec::new();
+        assert!(
+            collect_gmail_message_references(
+                &mut incremental,
+                gmail_references(0, 10),
+                Some("message-5"),
+            )
+            .expect("page should be valid")
+        );
+        assert_eq!(incremental.len(), 5);
+
+        let mut initial = Vec::new();
+        assert!(
+            !collect_gmail_message_references(&mut initial, gmail_references(0, 50), None)
+                .expect("first initial page should continue")
+        );
+        assert!(
+            collect_gmail_message_references(&mut initial, gmail_references(50, 50), None)
+                .expect("second initial page should stop")
+        );
+        assert_eq!(initial.len(), MAX_GMAIL_INITIAL_IMPORT_MESSAGES);
+    }
+
+    #[test]
+    fn gmail_reference_collection_rejects_oversized_pages_and_catch_up() {
+        let oversized_page = collect_gmail_message_references(
+            &mut Vec::new(),
+            gmail_references(0, 51),
+            Some("none"),
+        );
+        assert_eq!(oversized_page, Err(GoogleAuthError::ProviderRejected));
+
+        let mut catch_up = gmail_references(0, MAX_GMAIL_CATCH_UP_MESSAGES);
+        let capped = collect_gmail_message_references(
+            &mut catch_up,
+            vec![GoogleGmailMessageReference {
+                id: "one-more".to_owned(),
+            }],
+            Some("missing-watermark"),
+        );
+        assert_eq!(capped, Err(GoogleAuthError::ProviderUnavailable));
+    }
+
+    fn text_gmail_part(
+        mime_type: &str,
+        text: &str,
+        filename: bool,
+        attachment_id: bool,
+    ) -> GoogleGmailMessagePayload {
+        GoogleGmailMessagePayload {
+            mime_type: Some(mime_type.to_owned()),
+            filename: filename.then(|| "attachment.txt".to_owned()),
+            body: Some(GoogleGmailMessageBody {
+                data: Some(URL_SAFE_NO_PAD.encode(text)),
+                attachment_id: attachment_id.then(|| "attachment-provider-id".to_owned()),
+            }),
+            parts: Vec::new(),
+            headers: Vec::new(),
+        }
+    }
+
+    fn gmail_references(start: usize, count: usize) -> Vec<GoogleGmailMessageReference> {
+        (start..start + count)
+            .map(|index| GoogleGmailMessageReference {
+                id: format!("message-{index}"),
+            })
+            .collect()
     }
 
     #[test]

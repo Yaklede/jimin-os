@@ -14,6 +14,7 @@ use serde_json::Value;
 use tokio::io::AsyncReadExt;
 
 mod config;
+mod gmail_inflow_analysis;
 mod health;
 mod inflow_analysis;
 mod meeting_analysis;

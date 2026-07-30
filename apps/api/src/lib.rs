@@ -30,6 +30,7 @@ use axum::{
     },
     routing::{get, post},
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use jimin_application::{ApplicationError, DeviceSession, SessionService};
 use jimin_domain::{ClientPlatform, DeviceRegistration};
 use jimin_observability::{RequestId, request_context};
@@ -52,6 +53,10 @@ use jimin_storage::{
     },
     gmail::{
         CreateGmailOAuthAuthorization, DeleteGmailAccountOutcome, GmailAccount, GmailAccountStatus,
+    },
+    gmail_inflow::{
+        GmailInflowAnalysisState, GmailInflowCandidate, GmailInflowClassification,
+        GmailInflowCursor, GmailInflowStatus, PromoteGmailInflowCandidate,
     },
     goals::{GoalHealth, GoalNextActionKind, GoalOverview, GoalStatus, GoalUpdate, NewGoal},
     google_chat::{
@@ -736,6 +741,81 @@ pub struct StartGmailAuthorizationRequest {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DeleteGmailAccountQuery {
     expected_version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GmailInflowCandidateResponse {
+    id: uuid::Uuid,
+    account_id: uuid::Uuid,
+    account_email: String,
+    workspace_id: uuid::Uuid,
+    workspace_name: String,
+    workspace_scope: String,
+    message_id: uuid::Uuid,
+    provider_message_id: String,
+    provider_thread_id: String,
+    original_thread_url: String,
+    sender_name: Option<String>,
+    sender_email: Option<String>,
+    subject: Option<String>,
+    snippet: Option<String>,
+    body_text: Option<String>,
+    reference_links: Vec<String>,
+    received_at: Option<String>,
+    analysis_status: String,
+    analysis_classification: Option<String>,
+    analysis_confidence: Option<i16>,
+    analysis_summary: Option<String>,
+    analysis_error_code: Option<String>,
+    suggested_task_title: String,
+    suggested_task_notes: String,
+    suggested_assignee_name: Option<String>,
+    suggested_priority: Option<i16>,
+    suggested_due_at: Option<String>,
+    status: String,
+    promoted_task_id: Option<uuid::Uuid>,
+    deferred_until: Option<String>,
+    version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GmailInflowCandidateListResponse {
+    items: Vec<GmailInflowCandidateResponse>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, IntoParams, ToSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct GmailInflowListQuery {
+    workspace_id: uuid::Uuid,
+    status: Option<String>,
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct GmailInflowCursorPayload {
+    created_at: String,
+    id: uuid::Uuid,
+}
+
+#[derive(Debug, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct GmailInflowDecisionRequest {
+    decision: String,
+    expected_version: i64,
+    project_id: Option<uuid::Uuid>,
+    title: Option<String>,
+    notes: Option<String>,
+    assignee_name: Option<String>,
+    priority: Option<i16>,
+    due_at: Option<String>,
+    #[serde(default)]
+    without_deadline: bool,
+    revisit_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1498,6 +1578,8 @@ pub(crate) fn error_response(
         start_gmail_authorization,
         sync_gmail_account,
         delete_gmail_account,
+        list_gmail_inflow_candidates,
+        decide_gmail_inflow_candidate,
         list_google_chat_connections,
         start_google_chat_authorization,
         delete_google_chat_connection,
@@ -1609,6 +1691,10 @@ pub(crate) fn error_response(
         GmailAccountListResponse,
         StartGmailAuthorizationRequest,
         DeleteGmailAccountQuery,
+        GmailInflowCandidateResponse,
+        GmailInflowCandidateListResponse,
+        GmailInflowListQuery,
+        GmailInflowDecisionRequest,
         GoogleChatAccountResponse,
         GoogleChatAccountListResponse,
         GoogleChatSpaceResponse,
@@ -1931,6 +2017,11 @@ fn gmail_router() -> Router<ApiState> {
         .route(
             "/v1/gmail/accounts/{account_id}",
             axum::routing::delete(delete_gmail_account),
+        )
+        .route("/v1/gmail/inflow", get(list_gmail_inflow_candidates))
+        .route(
+            "/v1/gmail/inflow/{candidate_id}/decision",
+            post(decide_gmail_inflow_candidate),
         )
 }
 
@@ -5776,6 +5867,174 @@ async fn delete_gmail_account(
 }
 
 #[utoipa::path(
+    get,
+    path = "/v1/gmail/inflow",
+    tag = "gmail",
+    params(GmailInflowListQuery),
+    responses(
+        (status = 200, body = GmailInflowCandidateListResponse),
+        (status = 400),
+        (status = 401),
+        (status = 503)
+    )
+)]
+async fn list_gmail_inflow_candidates(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Query(query): Query<GmailInflowListQuery>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let status = match query.status.as_deref() {
+        None | Some("attention") => GmailInflowStatus::Attention,
+        Some("pending") => GmailInflowStatus::Pending,
+        Some("promoted") => GmailInflowStatus::Promoted,
+        Some("dismissed") => GmailInflowStatus::Dismissed,
+        Some("deferred") => GmailInflowStatus::Deferred,
+        Some("all") => GmailInflowStatus::All,
+        Some(_) => return invalid_request_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let cursor = match query.cursor.as_deref().map(decode_gmail_inflow_cursor) {
+        Some(Ok(cursor)) => Some(cursor),
+        Some(Err(())) => return invalid_request_response(request_id),
+        None => None,
+    };
+    match planning
+        .gmail_inflow_candidate_page(
+            principal.identity().user_id(),
+            query.workspace_id,
+            status,
+            query.limit.unwrap_or(50),
+            cursor,
+        )
+        .await
+    {
+        Ok(page) => {
+            let items = page
+                .items
+                .into_iter()
+                .map(gmail_inflow_candidate_response)
+                .collect::<Result<Vec<_>, _>>();
+            let next_cursor = page.next_cursor.map(encode_gmail_inflow_cursor).transpose();
+            match (items, next_cursor) {
+                (Ok(items), Ok(next_cursor)) => {
+                    no_store_json(GmailInflowCandidateListResponse { items, next_cursor })
+                }
+                _ => unavailable_response(request_id),
+            }
+        }
+        Err(StorageError::InvalidConfiguration) => invalid_request_response(request_id),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/gmail/inflow/{candidate_id}/decision",
+    tag = "gmail",
+    params(("candidate_id" = String, Path)),
+    request_body = GmailInflowDecisionRequest,
+    responses(
+        (status = 200, body = GmailInflowCandidateResponse),
+        (status = 400),
+        (status = 401),
+        (status = 409),
+        (status = 503)
+    )
+)]
+async fn decide_gmail_inflow_candidate(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(candidate_id): Path<uuid::Uuid>,
+    Json(request): Json<GmailInflowDecisionRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let user_id = principal.identity().user_id();
+    let workspace_id = match planning
+        .gmail_inflow_workspace_for_candidate(user_id, candidate_id)
+        .await
+    {
+        Ok(Some(value)) => value,
+        Ok(None) => return invalid_request_response(request_id),
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    let outcome = match request.decision.as_str() {
+        "retry_analysis" => {
+            if request_has_gmail_promotion_fields(&request) || request.revisit_at.is_some() {
+                Err(StorageError::InvalidConfiguration)
+            } else {
+                planning
+                    .retry_gmail_inflow_analysis(
+                        user_id,
+                        workspace_id,
+                        candidate_id,
+                        request.expected_version,
+                    )
+                    .await
+            }
+        }
+        "dismiss" | "defer" => {
+            let revisit_at = request
+                .revisit_at
+                .as_deref()
+                .map(|value| OffsetDateTime::parse(value, &Rfc3339))
+                .transpose()
+                .map_err(|_| StorageError::InvalidConfiguration);
+            match revisit_at {
+                Ok(revisit_at) if !request_has_gmail_promotion_fields(&request) => {
+                    planning
+                        .decide_gmail_inflow_candidate(
+                            user_id,
+                            workspace_id,
+                            candidate_id,
+                            request.expected_version,
+                            &request.decision,
+                            revisit_at,
+                        )
+                        .await
+                }
+                _ => Err(StorageError::InvalidConfiguration),
+            }
+        }
+        "promote" => {
+            promote_gmail_inflow(planning, user_id, workspace_id, candidate_id, &request).await
+        }
+        _ => Err(StorageError::InvalidConfiguration),
+    };
+    match outcome {
+        Ok(true) => match planning.gmail_inflow_candidate(user_id, candidate_id).await {
+            Ok(candidate) => match candidate.map(gmail_inflow_candidate_response).transpose() {
+                Ok(Some(response)) => no_store_json(response),
+                _ => unavailable_response(request_id),
+            },
+            Err(error) => storage_error_response(&error, request_id),
+        },
+        Ok(false) => error_response(
+            StatusCode::CONFLICT,
+            "gmail.inflow_changed",
+            "메일 업무 상태가 먼저 변경됐어요. 새로고침한 뒤 다시 시도해 주세요.",
+            request_id,
+            false,
+        ),
+        Err(StorageError::InvalidConfiguration) => invalid_request_response(request_id),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
     post,
     path = "/v1/calendar/connections/google/authorizations",
     tag = "calendar",
@@ -7013,9 +7272,15 @@ async fn synchronize_gmail_account(
     if connection.workspace_id != workspace_id {
         return Err(GmailOAuthError::ProviderRejected);
     }
-    let messages = runtime.inbox_sync(&connection).await?;
+    let batch = runtime.inbox_sync(&connection).await?;
     planning
-        .apply_gmail_inbox_sync(account_id, user_id, workspace_id, &messages)
+        .apply_gmail_inbox_sync_with_skipped_count(
+            account_id,
+            user_id,
+            workspace_id,
+            &batch.messages,
+            batch.skipped_message_count,
+        )
         .await
         .map_err(|_| GmailOAuthError::ProviderUnavailable)
 }
@@ -8212,6 +8477,202 @@ fn gmail_account_response(account: GmailAccount) -> GmailAccountResponse {
     }
 }
 
+async fn promote_gmail_inflow(
+    planning: &Database,
+    user_id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+    candidate_id: uuid::Uuid,
+    request: &GmailInflowDecisionRequest,
+) -> Result<bool, StorageError> {
+    let (Some(project_id), Some(title)) = (request.project_id, request.title.as_deref()) else {
+        return Err(StorageError::InvalidConfiguration);
+    };
+    if request.revisit_at.is_some() {
+        return Err(StorageError::InvalidConfiguration);
+    }
+    let due_at = match (request.without_deadline, request.due_at.as_deref()) {
+        (true, None) => None,
+        (false, Some(value)) => Some(
+            OffsetDateTime::parse(value, &Rfc3339)
+                .map_err(|_| StorageError::InvalidConfiguration)?,
+        ),
+        _ => return Err(StorageError::InvalidConfiguration),
+    };
+    planning
+        .promote_gmail_inflow_candidate(&PromoteGmailInflowCandidate {
+            user_id,
+            workspace_id,
+            candidate_id,
+            expected_version: request.expected_version,
+            project_id,
+            title: title.to_owned(),
+            notes: request.notes.clone(),
+            assignee_name: request.assignee_name.clone(),
+            priority: request.priority.unwrap_or(1),
+            due_at,
+        })
+        .await
+}
+
+fn request_has_gmail_promotion_fields(request: &GmailInflowDecisionRequest) -> bool {
+    request.project_id.is_some()
+        || request.title.is_some()
+        || request.notes.is_some()
+        || request.assignee_name.is_some()
+        || request.priority.is_some()
+        || request.due_at.is_some()
+        || request.without_deadline
+}
+
+fn gmail_inflow_candidate_response(
+    candidate: GmailInflowCandidate,
+) -> Result<GmailInflowCandidateResponse, ()> {
+    let original_thread_url =
+        gmail_original_thread_url(&candidate.account_email, &candidate.provider_thread_id)?;
+    let suggested_task_notes = gmail_suggested_task_notes(&candidate);
+    Ok(GmailInflowCandidateResponse {
+        id: candidate.id,
+        account_id: candidate.account_id,
+        account_email: candidate.account_email,
+        workspace_id: candidate.workspace_id,
+        workspace_name: candidate.workspace_name,
+        workspace_scope: candidate.workspace_scope,
+        message_id: candidate.message_id,
+        provider_message_id: candidate.provider_message_id,
+        provider_thread_id: candidate.provider_thread_id,
+        original_thread_url,
+        sender_name: candidate.sender_name,
+        sender_email: candidate.sender_email,
+        subject: candidate.subject,
+        snippet: candidate.snippet,
+        body_text: candidate.body_text,
+        reference_links: candidate.reference_links,
+        received_at: candidate
+            .received_at
+            .map(|value| value.format(&Rfc3339).map_err(|_| ()))
+            .transpose()?,
+        analysis_status: gmail_analysis_state_name(candidate.analysis_state).to_owned(),
+        analysis_classification: candidate
+            .classification
+            .map(gmail_classification_name)
+            .map(str::to_owned),
+        analysis_confidence: candidate.confidence,
+        analysis_summary: candidate.summary,
+        analysis_error_code: candidate.error_code,
+        suggested_task_title: candidate.suggested_task_title.unwrap_or_default(),
+        suggested_task_notes,
+        suggested_assignee_name: candidate.suggested_assignee_name,
+        suggested_priority: candidate.suggested_priority,
+        suggested_due_at: candidate
+            .suggested_due_at
+            .map(|value| value.format(&Rfc3339).map_err(|_| ()))
+            .transpose()?,
+        status: candidate.status,
+        promoted_task_id: candidate.promoted_task_id,
+        deferred_until: candidate
+            .deferred_until
+            .map(|value| value.format(&Rfc3339).map_err(|_| ()))
+            .transpose()?,
+        version: candidate.version,
+    })
+}
+
+fn encode_gmail_inflow_cursor(cursor: GmailInflowCursor) -> Result<String, ()> {
+    let payload = GmailInflowCursorPayload {
+        created_at: cursor.created_at.format(&Rfc3339).map_err(|_| ())?,
+        id: cursor.id,
+    };
+    serde_json::to_vec(&payload)
+        .map(|value| URL_SAFE_NO_PAD.encode(value))
+        .map_err(|_| ())
+}
+
+fn decode_gmail_inflow_cursor(value: &str) -> Result<GmailInflowCursor, ()> {
+    if value.is_empty() || value.len() > 1_024 {
+        return Err(());
+    }
+    let decoded = URL_SAFE_NO_PAD.decode(value).map_err(|_| ())?;
+    let payload: GmailInflowCursorPayload = serde_json::from_slice(&decoded).map_err(|_| ())?;
+    let created_at = OffsetDateTime::parse(&payload.created_at, &Rfc3339).map_err(|_| ())?;
+    if payload.id.get_version_num() != 7 {
+        return Err(());
+    }
+    Ok(GmailInflowCursor {
+        created_at,
+        id: payload.id,
+    })
+}
+
+fn gmail_suggested_task_notes(candidate: &GmailInflowCandidate) -> String {
+    let mut sections = Vec::new();
+    if let Some(summary) = candidate.summary.as_deref() {
+        sections.push(format!("업무 목적\n{}", summary.trim()));
+    }
+    if !candidate.suggested_action_items.is_empty() {
+        sections.push(format!(
+            "처리할 내용\n{}",
+            candidate
+                .suggested_action_items
+                .iter()
+                .map(|value| format!("- {}", value.trim()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    if let Some(criteria) = candidate.suggested_completion_criteria.as_deref() {
+        sections.push(format!("완료 기준\n{}", criteria.trim()));
+    }
+    if !candidate.reference_links.is_empty() {
+        sections.push(format!(
+            "관련 링크\n{}",
+            candidate.reference_links.join("\n")
+        ));
+    }
+    sections.join("\n\n")
+}
+
+fn gmail_original_thread_url(account_email: &str, provider_thread_id: &str) -> Result<String, ()> {
+    if provider_thread_id.is_empty()
+        || provider_thread_id.len() > 255
+        || !provider_thread_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(());
+    }
+    let mut url = reqwest::Url::parse("https://mail.google.com/mail/u/").map_err(|_| ())?;
+    url.path_segments_mut()?.push(account_email);
+    url.set_fragment(Some(&format!("all/{provider_thread_id}")));
+    if url.host_str() != Some("mail.google.com") {
+        return Err(());
+    }
+    Ok(url.to_string())
+}
+
+const fn gmail_analysis_state_name(state: GmailInflowAnalysisState) -> &'static str {
+    match state {
+        GmailInflowAnalysisState::Queued => "queued",
+        GmailInflowAnalysisState::Claimed => "claimed",
+        GmailInflowAnalysisState::Running => "running",
+        GmailInflowAnalysisState::Ready => "ready",
+        GmailInflowAnalysisState::Failed => "failed",
+    }
+}
+
+const fn gmail_classification_name(classification: GmailInflowClassification) -> &'static str {
+    match classification {
+        GmailInflowClassification::NewTask => "new_task",
+        GmailInflowClassification::FollowUp => "follow_up",
+        GmailInflowClassification::Question => "question",
+        GmailInflowClassification::StatusUpdate => "status_update",
+        GmailInflowClassification::Automated => "automated",
+        GmailInflowClassification::Newsletter => "newsletter",
+        GmailInflowClassification::Marketing => "marketing",
+        GmailInflowClassification::Noise => "noise",
+        GmailInflowClassification::Duplicate => "duplicate",
+    }
+}
+
 fn goal_response(overview: GoalOverview) -> Result<GoalResponse, ()> {
     let goal = overview.goal;
     Ok(GoalResponse {
@@ -9251,6 +9712,8 @@ mod tests {
                 "/v1/gmail/accounts/authorizations",
                 "/v1/gmail/accounts/{account_id}",
                 "/v1/gmail/accounts/{account_id}/sync",
+                "/v1/gmail/inflow",
+                "/v1/gmail/inflow/{candidate_id}/decision",
                 "/v1/goals",
                 "/v1/goals/{goal_id}",
                 "/v1/google-chat/connections",
@@ -10208,6 +10671,50 @@ mod tests {
             project_inflow_deadline(&request),
             Err(StorageError::InvalidConfiguration)
         ));
+    }
+
+    #[test]
+    fn gmail_inflow_cursor_round_trips_and_rejects_malformed_values() {
+        let cursor = GmailInflowCursor {
+            created_at: OffsetDateTime::parse("2026-07-30T09:00:00Z", &Rfc3339)
+                .expect("fixture time should parse"),
+            id: Uuid::now_v7(),
+        };
+        let encoded = encode_gmail_inflow_cursor(cursor).expect("cursor should encode");
+
+        assert_eq!(
+            decode_gmail_inflow_cursor(&encoded).expect("cursor should decode"),
+            cursor
+        );
+        assert!(decode_gmail_inflow_cursor("not-base64!").is_err());
+        assert!(decode_gmail_inflow_cursor(&"x".repeat(1_025)).is_err());
+    }
+
+    #[tokio::test]
+    async fn gmail_inflow_endpoints_require_a_live_signed_session() {
+        let (state, _, _) = signed_auth_state(true);
+        let workspace_id = "019f68cb-9400-7000-8000-000000000010";
+        let candidate_id = "019f68cb-9400-7000-8000-000000000011";
+        for request in [
+            Request::builder()
+                .uri(format!(
+                    "/v1/gmail/inflow?workspaceId={workspace_id}&status=attention&limit=100"
+                ))
+                .body(Body::empty())
+                .expect("request should be valid"),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/gmail/inflow/{candidate_id}/decision"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"decision":"dismiss","expectedVersion":1}"#))
+                .expect("request should be valid"),
+        ] {
+            let response = router(state.clone())
+                .oneshot(request)
+                .await
+                .expect("handler should respond");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
     }
 
     #[tokio::test]

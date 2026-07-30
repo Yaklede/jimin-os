@@ -15,8 +15,8 @@ use chacha20poly1305::{
 use hmac::{Hmac, Mac, digest::KeyInit as HmacKeyInit};
 use jimin_domain::{ClientPlatform, PkceVerifier};
 use jimin_google::{
-    GoogleAuthError, GoogleAuthorizationCode, GoogleCalendarAdapter, GoogleGmailMessageEntry,
-    GoogleIdentityAdapter, GoogleOAuthProfile,
+    GoogleAuthError, GoogleAuthorizationCode, GoogleCalendarAdapter, GoogleGmailInboxBatch,
+    GoogleGmailMessageEntry, GoogleIdentityAdapter, GoogleOAuthProfile,
 };
 use jimin_storage::gmail::{
     ClaimedGmailOAuthAuthorization, CompleteGmailOAuthAuthorization, EncryptedGmailSecret,
@@ -49,6 +49,11 @@ pub struct GmailOAuthRuntime {
     crypto: GmailCrypto,
     redirect_uri: String,
     encryption_key_version: i32,
+}
+
+pub struct GmailInboxSyncBatch {
+    pub messages: Vec<ProviderGmailMessage>,
+    pub skipped_message_count: usize,
 }
 
 impl GmailOAuthRuntime {
@@ -196,7 +201,7 @@ impl GmailOAuthRuntime {
     pub async fn inbox_sync(
         &self,
         connection: &GmailSyncConnection,
-    ) -> Result<Vec<ProviderGmailMessage>, GmailOAuthError> {
+    ) -> Result<GmailInboxSyncBatch, GmailOAuthError> {
         let refresh_token = self.crypto.decrypt(
             &connection.refresh_token,
             &refresh_token_aad(connection.user_id, &connection.provider_subject),
@@ -206,11 +211,22 @@ impl GmailOAuthRuntime {
             .refresh_access_token(&refresh_token)
             .await
             .map_err(GmailOAuthError::from_google)?;
-        self.gmail
-            .list_gmail_inbox_messages(&access_token)
+        let GoogleGmailInboxBatch {
+            messages,
+            skipped_message_count,
+        } = self
+            .gmail
+            .list_gmail_inbox_messages(
+                &access_token,
+                connection.latest_provider_message_id.as_deref(),
+                connection.latest_received_at,
+            )
             .await
-            .map_err(GmailOAuthError::from_google)
-            .map(|messages| messages.into_iter().map(provider_message).collect())
+            .map_err(GmailOAuthError::from_google)?;
+        Ok(GmailInboxSyncBatch {
+            messages: messages.into_iter().map(provider_message).collect(),
+            skipped_message_count,
+        })
     }
 }
 
@@ -378,6 +394,12 @@ fn provider_message(entry: GoogleGmailMessageEntry) -> ProviderGmailMessage {
         sender: entry.sender,
         subject: entry.subject,
         snippet: entry.snippet,
+        body_text: entry.body_text,
+        reference_links: entry.reference_links,
+        list_id: entry.list_id,
+        list_unsubscribe: entry.list_unsubscribe,
+        precedence: entry.precedence,
+        auto_submitted: entry.auto_submitted,
         is_unread: entry.is_unread,
     }
 }

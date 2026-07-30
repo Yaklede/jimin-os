@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64.workspace = true
 jimin-application = { path = "../application" }
 jimin-domain = { path = "../domain" }
 jsonwebtoken.workspace = true
@@ -17,6 +18,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

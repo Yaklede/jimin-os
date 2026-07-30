@@ -16,6 +16,9 @@ use crate::{
 };
 
 const MAX_INBOX_MESSAGES: i64 = 100;
+const MAX_SYNC_MESSAGES: usize = 5_000;
+const MAX_BODY_CHARS: usize = 12_000;
+const MAX_REFERENCE_LINKS: usize = 16;
 const MAX_PROVIDER_ID_BYTES: usize = 255;
 const MAX_SENDER_BYTES: usize = 1_024;
 const MAX_SUBJECT_BYTES: usize = 998;
@@ -170,6 +173,8 @@ pub struct GmailSyncConnection {
     pub user_id: Uuid,
     pub workspace_id: Uuid,
     pub provider_subject: String,
+    pub latest_provider_message_id: Option<String>,
+    pub latest_received_at: Option<OffsetDateTime>,
     pub refresh_token: EncryptedGmailSecret,
 }
 
@@ -179,6 +184,8 @@ struct GmailSyncConnectionRow {
     user_id: Uuid,
     workspace_id: Uuid,
     provider_subject: String,
+    latest_provider_message_id: Option<String>,
+    latest_received_at: Option<OffsetDateTime>,
     refresh_token_ciphertext: Option<Vec<u8>>,
     refresh_token_nonce: Option<Vec<u8>>,
     encryption_key_version: Option<i32>,
@@ -208,6 +215,12 @@ pub struct ProviderGmailMessage {
     pub sender: Option<String>,
     pub subject: Option<String>,
     pub snippet: Option<String>,
+    pub body_text: Option<String>,
+    pub reference_links: Vec<String>,
+    pub list_id: Option<String>,
+    pub list_unsubscribe: bool,
+    pub precedence: Option<String>,
+    pub auto_submitted: Option<String>,
     pub is_unread: bool,
 }
 
@@ -237,6 +250,21 @@ struct GmailMessageRow {
     subject: Option<String>,
     snippet: Option<String>,
     is_unread: bool,
+}
+
+#[derive(sqlx::FromRow)]
+struct ExistingGmailContent {
+    provider_thread_id: String,
+    received_at: Option<OffsetDateTime>,
+    sender: Option<String>,
+    subject: Option<String>,
+    snippet: Option<String>,
+    body_text: Option<String>,
+    reference_links: Vec<String>,
+    list_id: Option<String>,
+    list_unsubscribe: bool,
+    precedence: Option<String>,
+    auto_submitted: Option<String>,
 }
 
 impl From<GmailMessageRow> for GmailMessage {
@@ -547,10 +575,30 @@ impl Database {
         }
         let row = sqlx::query_as::<_, GmailSyncConnectionRow>(
             "\
-            SELECT id AS account_id, user_id, workspace_id, provider_subject,
-                refresh_token_ciphertext, refresh_token_nonce, encryption_key_version
-            FROM gmail_accounts
-            WHERE id = $1 AND user_id = $2
+            SELECT account.id AS account_id, account.user_id,
+                account.workspace_id, account.provider_subject,
+                (
+                    SELECT message.provider_message_id
+                    FROM gmail_messages AS message
+                    WHERE message.account_id = account.id
+                      AND message.workspace_id = account.workspace_id
+                      AND message.provider_deleted_at IS NULL
+                    ORDER BY message.received_at DESC NULLS LAST, message.id DESC
+                    LIMIT 1
+                ) AS latest_provider_message_id,
+                (
+                    SELECT message.received_at
+                    FROM gmail_messages AS message
+                    WHERE message.account_id = account.id
+                      AND message.workspace_id = account.workspace_id
+                      AND message.provider_deleted_at IS NULL
+                    ORDER BY message.received_at DESC NULLS LAST, message.id DESC
+                    LIMIT 1
+                ) AS latest_received_at,
+                account.refresh_token_ciphertext, account.refresh_token_nonce,
+                account.encryption_key_version
+            FROM gmail_accounts AS account
+            WHERE account.id = $1 AND account.user_id = $2
               AND status IN ('active', 'error')",
         )
         .bind(account_id)
@@ -603,9 +651,38 @@ impl Database {
         workspace_id: Uuid,
         messages: &[ProviderGmailMessage],
     ) -> Result<GmailAccount, StorageError> {
-        if !all_v7(&[account_id, user_id, workspace_id]) || !valid_messages(messages) {
+        self.apply_gmail_inbox_sync_with_skipped_count(
+            account_id,
+            user_id,
+            workspace_id,
+            messages,
+            0,
+        )
+        .await
+    }
+
+    /// Applies one bounded account snapshot and records a sanitized warning
+    /// when malformed or concurrently deleted provider messages were skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid configuration for foreign ownership, unsafe metadata,
+    /// or a skipped count larger than the bounded provider import.
+    pub async fn apply_gmail_inbox_sync_with_skipped_count(
+        &self,
+        account_id: Uuid,
+        user_id: Uuid,
+        workspace_id: Uuid,
+        messages: &[ProviderGmailMessage],
+        skipped_message_count: usize,
+    ) -> Result<GmailAccount, StorageError> {
+        if !all_v7(&[account_id, user_id, workspace_id])
+            || !valid_messages(messages)
+            || skipped_message_count > 5_000
+        {
             return Err(StorageError::InvalidConfiguration);
         }
+        let warning_code = (skipped_message_count > 0).then_some("gmail.partial_message_failures");
         let mut transaction = self.pool().begin().await.map_err(classify)?;
         let owns_account = sqlx::query_scalar::<_, bool>(
             "\
@@ -624,19 +701,28 @@ impl Database {
         if !owns_account {
             return Err(StorageError::InvalidConfiguration);
         }
-        upsert_gmail_messages(&mut transaction, account_id, workspace_id, messages).await?;
+        upsert_gmail_messages(
+            &mut transaction,
+            account_id,
+            user_id,
+            workspace_id,
+            messages,
+        )
+        .await?;
         sqlx::query(
             "\
             INSERT INTO gmail_sync_states (
                 account_id, workspace_id, status, last_successful_sync_at,
                 last_error_code
-            ) VALUES ($1, $2, 'idle', NOW(), NULL)
+            ) VALUES ($1, $2, 'idle', NOW(), $3)
             ON CONFLICT (account_id) DO UPDATE
             SET workspace_id = EXCLUDED.workspace_id, status = 'idle',
-                last_successful_sync_at = NOW(), last_error_code = NULL",
+                last_successful_sync_at = NOW(),
+                last_error_code = EXCLUDED.last_error_code",
         )
         .bind(account_id)
         .bind(workspace_id)
+        .bind(warning_code)
         .execute(&mut *transaction)
         .await
         .map_err(classify)?;
@@ -644,7 +730,7 @@ impl Database {
             "\
             UPDATE gmail_accounts
             SET status = 'active', last_successful_sync_at = NOW(),
-                last_error_code = NULL
+                last_error_code = $4
             WHERE id = $1 AND user_id = $2 AND workspace_id = $3
             RETURNING id, workspace_id,
                 (SELECT scope FROM workspaces
@@ -659,6 +745,7 @@ impl Database {
         .bind(account_id)
         .bind(user_id)
         .bind(workspace_id)
+        .bind(warning_code)
         .fetch_one(&mut *transaction)
         .await
         .map_err(classify)?;
@@ -973,20 +1060,54 @@ async fn upsert_completed_gmail_account(
     GmailAccount::try_from(row)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "The Gmail message upsert keeps the revision-sensitive candidate transition in the same transaction as message persistence."
+)]
 async fn upsert_gmail_messages(
     transaction: &mut Transaction<'_, Postgres>,
     account_id: Uuid,
+    user_id: Uuid,
     workspace_id: Uuid,
     messages: &[ProviderGmailMessage],
 ) -> Result<(), StorageError> {
     for message in messages {
-        sqlx::query(
+        let existing = sqlx::query_as::<_, ExistingGmailContent>(
+            "SELECT provider_thread_id, received_at, sender, subject, snippet,
+                body_text, reference_links, list_id, list_unsubscribe,
+                precedence, auto_submitted
+             FROM gmail_messages
+             WHERE account_id = $1 AND provider_message_id = $2",
+        )
+        .bind(account_id)
+        .bind(&message.provider_message_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(classify)?;
+        let source_changed = existing.as_ref().is_none_or(|existing| {
+            existing.provider_thread_id != message.provider_thread_id
+                || existing.received_at != message.received_at
+                || existing.sender != message.sender
+                || existing.subject != message.subject
+                || existing.snippet != message.snippet
+                || existing.body_text != message.body_text
+                || existing.reference_links != message.reference_links
+                || existing.list_id != message.list_id
+                || existing.list_unsubscribe != message.list_unsubscribe
+                || existing.precedence != message.precedence
+                || existing.auto_submitted != message.auto_submitted
+        });
+        let changed_message_id = sqlx::query_scalar::<_, Uuid>(
             "\
             INSERT INTO gmail_messages (
                 id, account_id, workspace_id, provider_message_id,
                 provider_thread_id, received_at, sender, subject, snippet,
-                is_unread, provider_deleted_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL)
+                body_text, reference_links, list_id, list_unsubscribe,
+                precedence, auto_submitted, is_unread, provider_deleted_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                $13, $14, $15, $16, NULL
+            )
             ON CONFLICT (account_id, provider_message_id) DO UPDATE
             SET provider_thread_id = EXCLUDED.provider_thread_id,
                 workspace_id = EXCLUDED.workspace_id,
@@ -994,8 +1115,31 @@ async fn upsert_gmail_messages(
                 sender = EXCLUDED.sender,
                 subject = EXCLUDED.subject,
                 snippet = EXCLUDED.snippet,
+                body_text = EXCLUDED.body_text,
+                reference_links = EXCLUDED.reference_links,
+                list_id = EXCLUDED.list_id,
+                list_unsubscribe = EXCLUDED.list_unsubscribe,
+                precedence = EXCLUDED.precedence,
+                auto_submitted = EXCLUDED.auto_submitted,
                 is_unread = EXCLUDED.is_unread,
-                provider_deleted_at = NULL",
+                provider_deleted_at = NULL
+            WHERE ROW(
+                gmail_messages.provider_thread_id, gmail_messages.received_at,
+                gmail_messages.sender, gmail_messages.subject,
+                gmail_messages.snippet, gmail_messages.body_text,
+                gmail_messages.reference_links, gmail_messages.list_id,
+                gmail_messages.list_unsubscribe, gmail_messages.precedence,
+                gmail_messages.auto_submitted, gmail_messages.is_unread,
+                gmail_messages.provider_deleted_at
+            ) IS DISTINCT FROM ROW(
+                EXCLUDED.provider_thread_id, EXCLUDED.received_at,
+                EXCLUDED.sender, EXCLUDED.subject, EXCLUDED.snippet,
+                EXCLUDED.body_text, EXCLUDED.reference_links,
+                EXCLUDED.list_id, EXCLUDED.list_unsubscribe,
+                EXCLUDED.precedence, EXCLUDED.auto_submitted,
+                EXCLUDED.is_unread, NULL
+            )
+            RETURNING id",
         )
         .bind(Uuid::now_v7())
         .bind(account_id)
@@ -1006,10 +1150,30 @@ async fn upsert_gmail_messages(
         .bind(&message.sender)
         .bind(&message.subject)
         .bind(&message.snippet)
+        .bind(&message.body_text)
+        .bind(&message.reference_links)
+        .bind(&message.list_id)
+        .bind(message.list_unsubscribe)
+        .bind(&message.precedence)
+        .bind(&message.auto_submitted)
         .bind(message.is_unread)
-        .execute(&mut **transaction)
+        .fetch_optional(&mut **transaction)
         .await
         .map_err(classify)?;
+        if let Some(message_id) = changed_message_id
+            && source_changed
+        {
+            crate::gmail_inflow::upsert_gmail_inflow_candidate(
+                transaction,
+                user_id,
+                workspace_id,
+                account_id,
+                message_id,
+                &message.provider_thread_id,
+                true,
+            )
+            .await?;
+        }
     }
     Ok(())
 }
@@ -1107,6 +1271,8 @@ fn sync_connection(row: GmailSyncConnectionRow) -> Result<GmailSyncConnection, S
         user_id: row.user_id,
         workspace_id: row.workspace_id,
         provider_subject: row.provider_subject,
+        latest_provider_message_id: row.latest_provider_message_id,
+        latest_received_at: row.latest_received_at,
         refresh_token,
     })
 }
@@ -1158,10 +1324,12 @@ fn valid_scopes(scopes: &[String]) -> bool {
 }
 
 fn valid_messages(messages: &[ProviderGmailMessage]) -> bool {
-    messages.len() <= usize::try_from(MAX_INBOX_MESSAGES).expect("constant fits usize")
+    messages.len() <= MAX_SYNC_MESSAGES
         && messages.iter().all(|message| {
             valid_text(&message.provider_message_id, MAX_PROVIDER_ID_BYTES)
                 && valid_text(&message.provider_thread_id, MAX_PROVIDER_ID_BYTES)
+                && valid_provider_resource_id(&message.provider_message_id)
+                && valid_provider_resource_id(&message.provider_thread_id)
                 && message
                     .sender
                     .as_deref()
@@ -1174,7 +1342,35 @@ fn valid_messages(messages: &[ProviderGmailMessage]) -> bool {
                     .snippet
                     .as_deref()
                     .is_none_or(|value| valid_text(value, MAX_SNIPPET_BYTES))
+                && message
+                    .body_text
+                    .as_deref()
+                    .is_none_or(|value| value.chars().count() <= MAX_BODY_CHARS)
+                && message.reference_links.len() <= MAX_REFERENCE_LINKS
+                && message.reference_links.iter().all(|value| {
+                    value.len() <= 2_048
+                        && (value.starts_with("https://") || value.starts_with("http://"))
+                        && !value.chars().any(char::is_control)
+                })
+                && message
+                    .list_id
+                    .as_deref()
+                    .is_none_or(|value| valid_text(value, MAX_SENDER_BYTES))
+                && message
+                    .precedence
+                    .as_deref()
+                    .is_none_or(|value| valid_text(value, 80))
+                && message
+                    .auto_submitted
+                    .as_deref()
+                    .is_none_or(|value| valid_text(value, 80))
         })
+}
+
+fn valid_provider_resource_id(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn valid_text(value: &str, maximum_bytes: usize) -> bool {
@@ -1230,6 +1426,12 @@ mod tests {
             sender: Some("Jimin <jimin@example.com>".to_owned()),
             subject: Some("계약 검토".to_owned()),
             snippet: Some("오늘 오후에 확인해 주세요.".to_owned()),
+            body_text: Some("계약서를 검토해 주세요.".to_owned()),
+            reference_links: vec!["https://example.com/contract".to_owned()],
+            list_id: None,
+            list_unsubscribe: false,
+            precedence: None,
+            auto_submitted: None,
             is_unread: true,
         };
         assert!(valid_messages(&[valid]));
@@ -1241,6 +1443,12 @@ mod tests {
             sender: Some("unsafe\nheader".to_owned()),
             subject: None,
             snippet: None,
+            body_text: None,
+            reference_links: Vec::new(),
+            list_id: None,
+            list_unsubscribe: false,
+            precedence: None,
+            auto_submitted: None,
             is_unread: false,
         };
         assert!(!valid_messages(&[invalid]));
