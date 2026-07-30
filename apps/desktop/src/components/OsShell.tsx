@@ -10,18 +10,28 @@ import {
   Settings2,
   Sparkles,
 } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import {
+  lazy,
+  type ReactNode,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import { copy } from "../copy";
-import {
-  type VoiceCommandOutcome,
-  VoiceCommandSheet,
-} from "./VoiceCommandSheet";
+import { type VoiceCommandOutcome } from "./VoiceCommandSheet";
 import { registerMobileBackHandler } from "../mobileBack";
 import {
   mobileCapabilitySnapshot,
   type MobilePlatform,
 } from "../mobile-capabilities";
+
+const VoiceCommandSheet = lazy(() =>
+  import("./VoiceCommandSheet").then((module) => ({
+    default: module.VoiceCommandSheet,
+  })),
+);
 
 export type OsDestination =
   | "home"
@@ -253,13 +263,17 @@ export function OsShell({
         />
       </nav>
 
-      <VoiceCommandSheet
-        open={voiceSheetOpen}
-        onClose={() => setVoiceSheetOpen(false)}
-        onOpenTextInput={openTextInput}
-        onOpenDestination={openVoiceDestination}
-        onProcessTranscript={onVoiceCommand}
-      />
+      {voiceSheetOpen && (
+        <Suspense fallback={null}>
+          <VoiceCommandSheet
+            open
+            onClose={() => setVoiceSheetOpen(false)}
+            onOpenTextInput={openTextInput}
+            onOpenDestination={openVoiceDestination}
+            onProcessTranscript={onVoiceCommand}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

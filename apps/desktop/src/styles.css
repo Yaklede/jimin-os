@@ -429,6 +429,57 @@ svg {
   animation: workspace-route-enter 140ms ease-out both;
 }
 
+.workspace-route-fallback {
+  display: grid;
+  width: min(100%, 1280px);
+  margin: 0 auto;
+  gap: 12px;
+}
+
+.workspace-route-fallback__heading,
+.workspace-route-fallback__summary,
+.workspace-route-fallback__surface > span {
+  display: block;
+  border-radius: 8px;
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--surface-subtle) 88%, var(--border)) 25%,
+    color-mix(in srgb, var(--surface-subtle) 58%, var(--surface)) 50%,
+    color-mix(in srgb, var(--surface-subtle) 88%, var(--border)) 75%
+  );
+  background-position: 100% 0;
+  background-size: 240% 100%;
+  animation: skeleton-shimmer 1.5s ease-in-out infinite;
+}
+
+.workspace-route-fallback__heading {
+  width: min(36%, 280px);
+  height: 28px;
+}
+
+.workspace-route-fallback__summary {
+  width: min(54%, 440px);
+  height: 16px;
+}
+
+.workspace-route-fallback__surface {
+  display: grid;
+  margin-top: 16px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface);
+}
+
+.workspace-route-fallback__surface > span {
+  height: 72px;
+  margin: 14px 18px;
+}
+
+.workspace-route-fallback__surface > span + span {
+  margin-top: 0;
+}
+
 .os-page-load {
   position: relative;
   z-index: 2;

@@ -1,6 +1,8 @@
 import { Server, Sparkles } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -144,24 +146,12 @@ import {
   type Conversation,
   type ConversationMessage,
 } from "./api/agent";
-import {
-  assistantResponseAfterLatestRequest,
-  ConversationWorkspace,
-} from "./components/ConversationWorkspace";
-import { DecisionInboxWorkspace } from "./components/DecisionInboxWorkspace";
+import { assistantResponseAfterLatestRequest } from "./components/conversationResponse";
 import { HomeWorkspace } from "./components/HomeWorkspace";
 import { type PromoteGmailInflowInput } from "./components/GmailInflowReview";
-import { MemoryWorkspace } from "./components/MemoryWorkspace";
-import { MeetingsWorkspace } from "./components/MeetingsWorkspace";
 import { OsShell, type OsDestination } from "./components/OsShell";
-import { PlanningWorkspace } from "./components/PlanningWorkspace";
 import { type PromoteInflowInput } from "./components/ProjectInflowPanel";
-import {
-  PlanningItemEditor,
-  type PlanningEditTarget,
-} from "./components/PlanningItemEditor";
-import { ProjectsWorkspace } from "./components/ProjectsWorkspace";
-import { SettingsWorkspace } from "./components/SettingsWorkspace";
+import { type PlanningEditTarget } from "./components/PlanningItemEditor";
 import { type VoiceCommandOutcome } from "./components/VoiceCommandSheet";
 import { copy } from "./copy";
 import {
@@ -227,6 +217,47 @@ type AssistantDraft = {
 type GmailAction =
   | { kind: "authorizing"; workspaceId: string; accountId?: string }
   | { kind: "syncing" | "disconnecting"; accountId: string };
+
+const ConversationWorkspace = lazy(() =>
+  import("./components/ConversationWorkspace").then((module) => ({
+    default: module.ConversationWorkspace,
+  })),
+);
+const DecisionInboxWorkspace = lazy(() =>
+  import("./components/DecisionInboxWorkspace").then((module) => ({
+    default: module.DecisionInboxWorkspace,
+  })),
+);
+const MemoryWorkspace = lazy(() =>
+  import("./components/MemoryWorkspace").then((module) => ({
+    default: module.MemoryWorkspace,
+  })),
+);
+const MeetingsWorkspace = lazy(() =>
+  import("./components/MeetingsWorkspace").then((module) => ({
+    default: module.MeetingsWorkspace,
+  })),
+);
+const PlanningWorkspace = lazy(() =>
+  import("./components/PlanningWorkspace").then((module) => ({
+    default: module.PlanningWorkspace,
+  })),
+);
+const PlanningItemEditor = lazy(() =>
+  import("./components/PlanningItemEditor").then((module) => ({
+    default: module.PlanningItemEditor,
+  })),
+);
+const ProjectsWorkspace = lazy(() =>
+  import("./components/ProjectsWorkspace").then((module) => ({
+    default: module.ProjectsWorkspace,
+  })),
+);
+const SettingsWorkspace = lazy(() =>
+  import("./components/SettingsWorkspace").then((module) => ({
+    default: module.SettingsWorkspace,
+  })),
+);
 
 export default function App() {
   const apiBaseUrl = personalServerBaseUrl ?? "";
@@ -398,6 +429,7 @@ export default function App() {
     undefined,
   );
   const pendingReminderInFlightRef = useRef(false);
+  const projectDataReadyOnNavigationRef = useRef(false);
   const [message, setMessage] = useState<string | undefined>(undefined);
 
   const setCurrentConversationId = useCallback(
@@ -1537,9 +1569,6 @@ export default function App() {
           fetchAgentAuthentication(apiBaseUrl, accessToken),
         ),
         loadHomeSnapshot(),
-        loadGoogleCalendarConnection(),
-        loadGmailAccounts(),
-        loadGmailInflow(),
       ]);
       if (
         conversationListRequestGateRef.current.isCurrent(
@@ -1558,15 +1587,7 @@ export default function App() {
       setMode("error");
       setMessage(copy.messages.conversationLoadNotice);
     }
-  }, [
-    loadGoogleCalendarConnection,
-    loadGmailAccounts,
-    loadGmailInflow,
-    loadHomeSnapshot,
-    sessionLoaded,
-    tokens,
-    withAuthenticatedSession,
-  ]);
+  }, [loadHomeSnapshot, sessionLoaded, tokens, withAuthenticatedSession]);
 
   const refreshSynchronizedProjections = useCallback(
     async (changes: SyncChange[], forceFull = false): Promise<void> => {
@@ -1900,7 +1921,7 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    if (!tokens) return;
+    if (!tokens || mode !== "ready") return;
     let active = true;
     const controller = new AbortController();
     let reconnectDelay = 1_000;
@@ -1953,7 +1974,7 @@ export default function App() {
       document.removeEventListener("visibilitychange", pullVisibleChanges);
       window.removeEventListener("online", pullVisibleChanges);
     };
-  }, [apiBaseUrl, pullSyncChanges, tokens, withAuthenticatedSession]);
+  }, [apiBaseUrl, mode, pullSyncChanges, tokens, withAuthenticatedSession]);
 
   useLayoutEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -1967,24 +1988,30 @@ export default function App() {
   }, [destination]);
 
   useEffect(() => {
-    void synchronizePlanningReminders();
-  }, [planningSnapshot, synchronizePlanningReminders]);
+    if (!tokens || mode !== "ready") return;
+    return runWhenBrowserIsIdle(() => {
+      void synchronizePlanningReminders();
+    });
+  }, [mode, planningSnapshot, synchronizePlanningReminders, tokens]);
 
   useEffect(() => {
-    if (!tokens) return;
+    if (!tokens || mode !== "ready") return;
     const refreshWhenVisible = () => {
       if (document.visibilityState === "visible") {
         void synchronizeDeviceSignals(false);
       }
     };
-    void synchronizeDeviceSignals(false);
+    const cancelInitialSync = runWhenBrowserIsIdle(() => {
+      void synchronizeDeviceSignals(false);
+    });
     window.addEventListener("focus", refreshWhenVisible);
     document.addEventListener("visibilitychange", refreshWhenVisible);
     return () => {
+      cancelInitialSync();
       window.removeEventListener("focus", refreshWhenVisible);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
-  }, [synchronizeDeviceSignals, tokens]);
+  }, [mode, synchronizeDeviceSignals, tokens]);
 
   useEffect(() => {
     if (!tokens) return;
@@ -2088,8 +2115,31 @@ export default function App() {
   }, [loadHomeSnapshot, tokens]);
 
   useEffect(() => {
+    if (destination !== "settings") return;
     void loadAgentModelSettings();
-  }, [loadAgentModelSettings]);
+  }, [destination, loadAgentModelSettings]);
+
+  useEffect(() => {
+    if (destination === "calendar") {
+      void Promise.all([
+        loadPlanningSnapshot(),
+        loadGoogleCalendarConnection(),
+      ]);
+      return;
+    }
+    if (destination === "settings") {
+      void loadGoogleCalendarConnection();
+    }
+  }, [
+    destination,
+    loadGoogleCalendarConnection,
+    loadPlanningSnapshot,
+  ]);
+
+  useEffect(() => {
+    if (destination !== "settings") return;
+    void loadGmailAccounts();
+  }, [destination, loadGmailAccounts]);
 
   useEffect(() => {
     if (!tokens || !calendarAuthorizationExpiresAt) return;
@@ -2179,34 +2229,65 @@ export default function App() {
   }, [apiBaseUrl, gmailAuthorizationPending, tokens, withAuthenticatedSession]);
 
   useEffect(() => {
-    void loadWorkspaces();
-  }, [loadWorkspaces]);
+    if (
+      !tokens ||
+      mode !== "ready" ||
+      workspacesReady ||
+      projectsLoading ||
+      !["home", "projects", "meetings", "settings"].includes(destination)
+    ) {
+      return;
+    }
+    if (destination !== "home") {
+      void loadWorkspaces();
+      return;
+    }
+    return runWhenBrowserIsIdle(() => {
+      void loadWorkspaces();
+    });
+  }, [
+    destination,
+    loadWorkspaces,
+    mode,
+    projectsLoading,
+    tokens,
+    workspacesReady,
+  ]);
 
   useEffect(() => {
-    if (!tokens || !workspacesReady) return;
+    if (!tokens || !workspacesReady || destination !== "home") return;
     void loadGmailInflow();
-  }, [loadGmailInflow, tokens, workspacesReady]);
+  }, [destination, loadGmailInflow, tokens, workspacesReady]);
 
   useEffect(() => {
+    if (destination !== "projects") return;
     void loadGoals();
-  }, [loadGoals]);
+  }, [destination, loadGoals]);
 
   useEffect(() => {
+    if (destination !== "projects") return;
     void loadGoogleChatAccounts();
-  }, [loadGoogleChatAccounts]);
+  }, [destination, loadGoogleChatAccounts]);
 
   useEffect(() => {
-    if (selectedWorkspaceId) {
+    if (
+      selectedWorkspaceId &&
+      (destination === "projects" || destination === "meetings")
+    ) {
+      if (projectDataReadyOnNavigationRef.current) {
+        projectDataReadyOnNavigationRef.current = false;
+        return;
+      }
       void loadProjectsForWorkspace(selectedWorkspaceId);
     }
-  }, [loadProjectsForWorkspace, selectedWorkspaceId]);
+  }, [destination, loadProjectsForWorkspace, selectedWorkspaceId]);
 
   useEffect(() => {
-    if (selectedProjectId) {
+    if (selectedProjectId && destination === "projects") {
       void loadProjectTasks(selectedProjectId);
       void loadProjectWebhooks(selectedProjectId);
       void loadProjectInflow(selectedProjectId);
-    } else {
+    } else if (!selectedProjectId) {
       setProjectTasks([]);
       setProjectWebhooks([]);
       setWebhookDeliveries([]);
@@ -2218,6 +2299,7 @@ export default function App() {
     loadProjectInflow,
     loadProjectTasks,
     loadProjectWebhooks,
+    destination,
     selectedProjectId,
   ]);
 
@@ -4081,6 +4163,52 @@ export default function App() {
     .reverse()
     .find((message) => message.role === "user")?.content;
 
+  async function refreshCurrentDestination(): Promise<void> {
+    if (destination === "decisions") {
+      await loadDecisionInbox();
+      return;
+    }
+    if (destination === "calendar") {
+      await Promise.all([
+        loadPlanningSnapshot(),
+        loadGoogleCalendarConnection(),
+      ]);
+      return;
+    }
+    if (destination === "projects") {
+      await Promise.all([
+        loadGoals(),
+        loadGoogleChatAccounts(),
+        selectedWorkspaceId
+          ? loadProjectsForWorkspace(selectedWorkspaceId, selectedProjectId)
+          : loadWorkspaces(),
+        selectedProjectId
+          ? Promise.all([
+              loadProjectTasks(selectedProjectId),
+              loadProjectWebhooks(selectedProjectId),
+              loadProjectInflow(selectedProjectId),
+            ])
+          : Promise.resolve(),
+      ]);
+      return;
+    }
+    if (destination === "settings") {
+      await Promise.all([
+        loadAgentModelSettings(),
+        loadGoogleCalendarConnection(),
+        loadGmailAccounts(),
+        synchronizeDeviceSignals(false),
+      ]);
+      return;
+    }
+    await Promise.all([
+      refresh(),
+      destination === "home" && workspacesReady
+        ? loadGmailInflow()
+        : Promise.resolve(),
+    ]);
+  }
+
   function navigate(
     nextDestination: OsDestination,
     options: { projectDataReady?: boolean } = {},
@@ -4120,8 +4248,11 @@ export default function App() {
       return;
     }
     if (nextDestination === "projects") {
-      void loadGoals();
-      if (options.projectDataReady) return;
+      if (options.projectDataReady) {
+        projectDataReadyOnNavigationRef.current =
+          nextDestination !== destination;
+        return;
+      }
       const latestProject = [
         ...(latestAssistantMessage?.presentation?.items ?? []),
       ]
@@ -4129,12 +4260,7 @@ export default function App() {
         .find((item) => item.type === "project");
       if (latestProject) {
         setSelectedWorkspaceId(latestProject.workspaceId);
-        void loadProjectsForWorkspace(
-          latestProject.workspaceId,
-          latestProject.id,
-        );
-      } else if (selectedWorkspaceId) {
-        void loadProjectsForWorkspace(selectedWorkspaceId);
+        setSelectedProjectId(latestProject.id);
       }
     }
     if (nextDestination === "decisions") {
@@ -4200,9 +4326,7 @@ export default function App() {
           onNavigate={navigate}
           onVoiceTranscript={handleVoiceTranscript}
           onVoiceCommand={handleVoiceCommand}
-          onRefresh={() =>
-            void (destination === "decisions" ? loadDecisionInbox() : refresh())
-          }
+          onRefresh={() => void refreshCurrentDestination()}
           refreshing={
             mode === "loading" ||
             (destination === "home" && homeLoading) ||
@@ -4212,292 +4336,300 @@ export default function App() {
             (destination === "decisions" && decisionsLoading)
           }
         >
-          {destination === "home" && (
-            <HomeWorkspace
-              snapshot={homeSnapshot}
-              loading={homeLoading || mode === "loading"}
-              error={homeError ?? (mode === "error" ? message : undefined)}
-              assistantReady={agentAuthentication?.state === "ready"}
-              assistantJob={
-                homeConversationId
-                  ? conversationJobs[homeConversationId]
-                  : undefined
-              }
-              assistantConversationId={homeConversationId}
-              assistantRequest={
-                selectedConversationId === homeConversationId
-                  ? latestUserRequest
-                  : undefined
-              }
-              assistantMessage={
-                selectedConversationId === homeConversationId
-                  ? latestAssistantMessage
-                  : undefined
-              }
-              onOpenAssistant={openHomeAssistant}
-              onOpenPlanning={() => navigate("calendar")}
-              onStartNewAssistant={startHomeConversation}
-              onSendAssistant={(text, clientMessageId) =>
-                sendConversationRequest(text, clientMessageId, {
-                  startFresh: !homeConversationId,
-                  targetConversationId: homeConversationId,
-                  rememberForHome: true,
-                })
-              }
-              onCompleteTask={completeHomeTask}
-              onLoadAssistantTask={loadTaskFromAssistant}
-              onCompleteAssistantTask={completeTaskFromAssistant}
-              onRestoreAssistantTask={restoreTaskFromAssistant}
-              onEditAssistantTask={editTaskFromAssistant}
-              onEditAssistantSchedule={editScheduleFromAssistant}
-              onEditTask={(task) =>
-                setPlanningEditTarget({ kind: "task", item: task })
-              }
-              onEditSchedule={(entry) =>
-                setPlanningEditTarget({ kind: "schedule", item: entry })
-              }
-              onOpenPlanningTask={openPlanningTask}
-              onOpenTask={openTaskFromAssistant}
-              onOpenProject={openProjectFromAssistant}
-              onOpenSchedule={openScheduleFromAssistant}
-              onOpenDecisionInbox={() => navigate("decisions")}
-              onOpenMeetings={() => navigate("meetings")}
-              onOpenSettings={() => navigate("settings")}
-              onDecideRecommendation={decideHomeRecommendation}
-              inflowSaving={inflowSaving}
-              onPromoteInflow={promoteWorkspaceInflow}
-              onDismissInflow={dismissWorkspaceInflow}
-              onRetryInflowAnalysis={retryWorkspaceInflowAnalysis}
-              onRetryInflowCompletion={retryWorkspaceInflowCompletion}
-              gmailInflowItems={gmailInflowItems}
-              gmailInflowProjects={gmailInflowProjects}
-              gmailInflowLoading={gmailInflowLoading}
-              gmailInflowLoadingMore={gmailInflowLoadingMore}
-              gmailInflowLoadMoreError={
-                gmailInflowLoadHealth.initialFailedWorkspaces.length === 0 &&
-                gmailInflowLoadHealth.loadMoreFailedWorkspaces.length > 0
-              }
-              gmailInflowHasMore={Object.values(gmailInflowCursors).some(
-                Boolean,
-              )}
-              gmailInflowError={
-                gmailInflowError ??
-                (gmailInflowLoadHealth.initialFailedWorkspaces.length > 0
-                  ? copy.gmailInflow.initialPartialProblem(
-                      gmailInflowLoadHealth.initialFailedWorkspaces,
-                    )
-                  : gmailInflowLoadHealth.loadMoreFailedWorkspaces.length > 0
-                    ? copy.gmailInflow.moreLoadProblem
-                    : undefined)
-              }
-              gmailInflowSavingId={gmailInflowSavingId}
-              onReloadGmailInflow={loadGmailInflow}
-              onLoadMoreGmailInflow={loadMoreGmailInflow}
-              onPromoteGmailInflow={promoteGmailInflow}
-              onDismissGmailInflow={dismissGmailInflow}
-              onDeferGmailInflow={deferGmailInflow}
-              onRetryGmailInflowAnalysis={retryGmailInflowAnalysis}
-            />
+          <Suspense fallback={<WorkspaceRouteFallback />}>
+            {destination === "home" && (
+              <HomeWorkspace
+                snapshot={homeSnapshot}
+                loading={homeLoading || mode === "loading"}
+                error={homeError ?? (mode === "error" ? message : undefined)}
+                assistantReady={agentAuthentication?.state === "ready"}
+                assistantJob={
+                  homeConversationId
+                    ? conversationJobs[homeConversationId]
+                    : undefined
+                }
+                assistantConversationId={homeConversationId}
+                assistantRequest={
+                  selectedConversationId === homeConversationId
+                    ? latestUserRequest
+                    : undefined
+                }
+                assistantMessage={
+                  selectedConversationId === homeConversationId
+                    ? latestAssistantMessage
+                    : undefined
+                }
+                onOpenAssistant={openHomeAssistant}
+                onOpenPlanning={() => navigate("calendar")}
+                onStartNewAssistant={startHomeConversation}
+                onSendAssistant={(text, clientMessageId) =>
+                  sendConversationRequest(text, clientMessageId, {
+                    startFresh: !homeConversationId,
+                    targetConversationId: homeConversationId,
+                    rememberForHome: true,
+                  })
+                }
+                onCompleteTask={completeHomeTask}
+                onLoadAssistantTask={loadTaskFromAssistant}
+                onCompleteAssistantTask={completeTaskFromAssistant}
+                onRestoreAssistantTask={restoreTaskFromAssistant}
+                onEditAssistantTask={editTaskFromAssistant}
+                onEditAssistantSchedule={editScheduleFromAssistant}
+                onEditTask={(task) =>
+                  setPlanningEditTarget({ kind: "task", item: task })
+                }
+                onEditSchedule={(entry) =>
+                  setPlanningEditTarget({ kind: "schedule", item: entry })
+                }
+                onOpenPlanningTask={openPlanningTask}
+                onOpenTask={openTaskFromAssistant}
+                onOpenProject={openProjectFromAssistant}
+                onOpenSchedule={openScheduleFromAssistant}
+                onOpenDecisionInbox={() => navigate("decisions")}
+                onOpenMeetings={() => navigate("meetings")}
+                onOpenSettings={() => navigate("settings")}
+                onDecideRecommendation={decideHomeRecommendation}
+                inflowSaving={inflowSaving}
+                onPromoteInflow={promoteWorkspaceInflow}
+                onDismissInflow={dismissWorkspaceInflow}
+                onRetryInflowAnalysis={retryWorkspaceInflowAnalysis}
+                onRetryInflowCompletion={retryWorkspaceInflowCompletion}
+                gmailInflowItems={gmailInflowItems}
+                gmailInflowProjects={gmailInflowProjects}
+                gmailInflowLoading={gmailInflowLoading}
+                gmailInflowLoadingMore={gmailInflowLoadingMore}
+                gmailInflowLoadMoreError={
+                  gmailInflowLoadHealth.initialFailedWorkspaces.length === 0 &&
+                  gmailInflowLoadHealth.loadMoreFailedWorkspaces.length > 0
+                }
+                gmailInflowHasMore={Object.values(gmailInflowCursors).some(
+                  Boolean,
+                )}
+                gmailInflowError={
+                  gmailInflowError ??
+                  (gmailInflowLoadHealth.initialFailedWorkspaces.length > 0
+                    ? copy.gmailInflow.initialPartialProblem(
+                        gmailInflowLoadHealth.initialFailedWorkspaces,
+                      )
+                    : gmailInflowLoadHealth.loadMoreFailedWorkspaces.length > 0
+                      ? copy.gmailInflow.moreLoadProblem
+                      : undefined)
+                }
+                gmailInflowSavingId={gmailInflowSavingId}
+                onReloadGmailInflow={loadGmailInflow}
+                onLoadMoreGmailInflow={loadMoreGmailInflow}
+                onPromoteGmailInflow={promoteGmailInflow}
+                onDismissGmailInflow={dismissGmailInflow}
+                onDeferGmailInflow={deferGmailInflow}
+                onRetryGmailInflowAnalysis={retryGmailInflowAnalysis}
+              />
+            )}
+            {destination === "calendar" && (
+              <PlanningWorkspace
+                snapshot={planningSnapshot}
+                range={planningRange}
+                calendarConnection={calendarConnection}
+                loading={planningLoading || mode === "loading"}
+                error={
+                  planningError ?? (mode === "error" ? message : undefined)
+                }
+                highlightedScheduleId={highlightedScheduleId}
+                highlightedTaskId={highlightedPlanningTaskId}
+                onCompleteTask={completeHomeTask}
+                onRestoreTask={restorePlanningTask}
+                onCreateTask={createPlanningTask}
+                onCreateSchedule={createPlanningSchedule}
+                onEditTask={(task) =>
+                  setPlanningEditTarget({ kind: "task", item: task })
+                }
+                onEditSchedule={(entry) =>
+                  setPlanningEditTarget({ kind: "schedule", item: entry })
+                }
+                onRangeChange={changePlanningRange}
+                onSyncCalendar={syncGoogleCalendar}
+              />
+            )}
+            {destination === "projects" && (
+              <ProjectsWorkspace
+                workspaces={workspaces}
+                goals={goals}
+                projects={projects}
+                weeklyReport={weeklyReport}
+                weeklyReportHistory={weeklyReportHistory}
+                tasks={projectTasks}
+                webhooks={projectWebhooks}
+                webhookDeliveries={webhookDeliveries}
+                googleChatAccountsAvailable={googleChatAccountsAvailable}
+                googleChatAccounts={googleChatAccounts}
+                googleChatSpaces={googleChatSpaces}
+                googleChatSources={projectGoogleChatSources}
+                projectInflowItems={projectInflowItems}
+                selectedWorkspaceId={selectedWorkspaceId}
+                selectedProjectId={selectedProjectId}
+                highlightedTaskId={highlightedProjectTaskId}
+                loaded={workspacesReady}
+                loading={projectsLoading || goalsLoading || mode === "loading"}
+                webhookLoading={webhooksLoading}
+                inflowLoading={inflowLoading}
+                saving={projectsSaving || goalsSaving || inflowSaving}
+                error={goalsError ?? projectsError}
+                weeklyReportError={weeklyReportError}
+                inflowError={inflowError}
+                onSelectWorkspace={selectWorkspace}
+                onSelectProject={selectProject}
+                onOpenGoalTask={(taskId, projectId) =>
+                  void openTaskFromAssistant({ id: taskId, projectId })
+                }
+                onClearProject={() => {
+                  setHighlightedProjectTaskId(undefined);
+                  setSelectedProjectId(undefined);
+                  setProjectTasks([]);
+                  setProjectWebhooks([]);
+                  setWebhookDeliveries([]);
+                  setProjectGoogleChatSources([]);
+                  setProjectInflowItems([]);
+                  setGoogleChatSpaces([]);
+                }}
+                onCreateProject={createWorkspaceProject}
+                onCreateGoal={createWorkspaceGoal}
+                onUpdateGoal={updateWorkspaceGoal}
+                onUpdateProject={updateWorkspaceProject}
+                onDeleteProject={deleteWorkspaceProject}
+                onCreateTask={createProjectTask}
+                onCompleteTask={completeProjectTask}
+                onUpdateTask={updateProjectTask}
+                onDeleteTask={deleteProjectTask}
+                onCreateWebhook={createWorkspaceWebhook}
+                onUpdateWebhook={updateWorkspaceWebhook}
+                onTestWebhook={testWorkspaceWebhook}
+                onDeleteWebhook={deleteWorkspaceWebhook}
+                onRetryWebhookDelivery={retryWorkspaceWebhookDelivery}
+                onConnectGoogleChatAccount={beginGoogleChatConnection}
+                onLoadGoogleChatSpaces={loadGoogleChatSpaces}
+                onCreateGoogleChatSource={createWorkspaceGoogleChatSource}
+                onDeleteGoogleChatSource={deleteWorkspaceGoogleChatSource}
+                onSyncGoogleChatSource={syncWorkspaceGoogleChatSource}
+                onPromoteInflow={promoteWorkspaceInflow}
+                onDismissInflow={dismissWorkspaceInflow}
+                onRetryInflowAnalysis={retryWorkspaceInflowAnalysis}
+                onRetryInflowCompletion={retryWorkspaceInflowCompletion}
+              />
+            )}
+            {destination === "decisions" && (
+              <DecisionInboxWorkspace
+                recommendations={decisionRecommendations}
+                loading={decisionsLoading || mode === "loading"}
+                error={decisionsError}
+                onOpenConversation={selectConversation}
+                onDecide={decideHomeRecommendation}
+              />
+            )}
+            {destination === "meetings" && tokens && (
+              <MeetingsWorkspace
+                apiBaseUrl={apiBaseUrl}
+                accessToken={tokens.accessToken}
+                workspaces={workspaces}
+                projects={projects}
+                selectedWorkspaceId={selectedWorkspaceId}
+                onSelectWorkspace={selectWorkspace}
+              />
+            )}
+            {destination === "memory" && (
+              <MemoryWorkspace onOpenConversation={openNewAssistantRequest} />
+            )}
+            {destination === "settings" && (
+              <SettingsWorkspace
+                authentication={agentAuthentication}
+                requesting={authenticationRequesting}
+                modelSettings={agentModelSettings}
+                modelsLoading={agentModelsLoading}
+                modelsSaving={agentModelsSaving}
+                modelsError={agentModelsError}
+                calendarConnection={calendarConnection}
+                calendarLoading={calendarLoading}
+                calendarAction={calendarAction}
+                calendarAuthorizationPending={Boolean(
+                  calendarAuthorizationExpiresAt,
+                )}
+                calendarError={calendarError}
+                workspaces={workspaces}
+                gmailAvailable={gmailAccountsAvailable}
+                gmailAccounts={gmailAccounts}
+                gmailLoading={gmailLoading}
+                gmailActions={gmailActions}
+                gmailAuthorizationPendingWorkspaceId={
+                  gmailAuthorizationPending?.workspaceId
+                }
+                gmailError={gmailError}
+                reminderSyncStatus={reminderSyncStatus}
+                reminderSyncError={reminderSyncError}
+                remoteReminderStatus={remoteReminderStatus}
+                deviceSignalStates={deviceSignalStates}
+                nativeCallLogPermission={nativeCallLogPermission}
+                deviceSignalsLoading={deviceSignalsLoading}
+                deviceSignalsError={deviceSignalsError}
+                onStartAuthentication={beginAgentAuthentication}
+                onReloadModels={loadAgentModelSettings}
+                onSaveModel={saveAgentModelSettings}
+                onStartCalendarConnection={beginGoogleCalendarConnection}
+                onReloadCalendarConnection={loadGoogleCalendarConnection}
+                onSyncCalendar={syncGoogleCalendar}
+                onDisconnectCalendar={disconnectGoogleCalendarConnection}
+                onReloadGmailAccounts={loadGmailAccounts}
+                onStartGmailConnection={beginGmailConnection}
+                onCancelGmailAuthorization={cancelGmailAuthorization}
+                onSyncGmailAccount={syncGmailAccount}
+                onDisconnectGmailAccount={disconnectGmailConnection}
+                onRetryReminderSync={synchronizePlanningReminders}
+                onEnableDeviceSignals={() => synchronizeDeviceSignals(true)}
+                onRefreshDeviceSignals={() => synchronizeDeviceSignals(false)}
+              />
+            )}
+            {destination === "chat" && (
+              <ConversationWorkspace
+                conversations={conversations}
+                messages={conversationMessages}
+                selectedConversationId={selectedConversationId}
+                job={
+                  selectedConversationId
+                    ? conversationJobs[selectedConversationId]
+                    : undefined
+                }
+                hasActiveJob={Boolean(
+                  selectedConversationId &&
+                  conversationJobs[selectedConversationId] &&
+                  !isTerminalAgentJob(
+                    conversationJobs[selectedConversationId].state,
+                  ),
+                )}
+                authentication={agentAuthentication}
+                authenticationRequesting={authenticationRequesting}
+                loading={conversationLoading}
+                error={
+                  conversationError ?? (mode === "error" ? message : undefined)
+                }
+                initialDraft={assistantDraft}
+                onSelect={selectConversation}
+                onInitialDraftApplied={() => setAssistantDraft(undefined)}
+                onStartConversation={startHomeConversation}
+                onStartAuthentication={beginAgentAuthentication}
+                onSend={sendConversationRequest}
+                onResolveAction={resolveConversationAction}
+              />
+            )}
+          </Suspense>
+          {planningEditTarget && (
+            <Suspense fallback={null}>
+              <PlanningItemEditor
+                target={planningEditTarget}
+                onClose={() => setPlanningEditTarget(undefined)}
+                onSaveTask={savePlanningTask}
+                onSaveSchedule={savePlanningSchedule}
+                onDeleteTask={deletePlanningTask}
+                onDeleteSchedule={deletePlanningSchedule}
+              />
+            </Suspense>
           )}
-          {destination === "calendar" && (
-            <PlanningWorkspace
-              snapshot={planningSnapshot}
-              range={planningRange}
-              calendarConnection={calendarConnection}
-              loading={planningLoading || mode === "loading"}
-              error={planningError ?? (mode === "error" ? message : undefined)}
-              highlightedScheduleId={highlightedScheduleId}
-              highlightedTaskId={highlightedPlanningTaskId}
-              onCompleteTask={completeHomeTask}
-              onRestoreTask={restorePlanningTask}
-              onCreateTask={createPlanningTask}
-              onCreateSchedule={createPlanningSchedule}
-              onEditTask={(task) =>
-                setPlanningEditTarget({ kind: "task", item: task })
-              }
-              onEditSchedule={(entry) =>
-                setPlanningEditTarget({ kind: "schedule", item: entry })
-              }
-              onRangeChange={changePlanningRange}
-              onSyncCalendar={syncGoogleCalendar}
-            />
-          )}
-          {destination === "projects" && (
-            <ProjectsWorkspace
-              workspaces={workspaces}
-              goals={goals}
-              projects={projects}
-              weeklyReport={weeklyReport}
-              weeklyReportHistory={weeklyReportHistory}
-              tasks={projectTasks}
-              webhooks={projectWebhooks}
-              webhookDeliveries={webhookDeliveries}
-              googleChatAccountsAvailable={googleChatAccountsAvailable}
-              googleChatAccounts={googleChatAccounts}
-              googleChatSpaces={googleChatSpaces}
-              googleChatSources={projectGoogleChatSources}
-              projectInflowItems={projectInflowItems}
-              selectedWorkspaceId={selectedWorkspaceId}
-              selectedProjectId={selectedProjectId}
-              highlightedTaskId={highlightedProjectTaskId}
-              loaded={workspacesReady}
-              loading={projectsLoading || goalsLoading || mode === "loading"}
-              webhookLoading={webhooksLoading}
-              inflowLoading={inflowLoading}
-              saving={projectsSaving || goalsSaving || inflowSaving}
-              error={goalsError ?? projectsError}
-              weeklyReportError={weeklyReportError}
-              inflowError={inflowError}
-              onSelectWorkspace={selectWorkspace}
-              onSelectProject={selectProject}
-              onOpenGoalTask={(taskId, projectId) =>
-                void openTaskFromAssistant({ id: taskId, projectId })
-              }
-              onClearProject={() => {
-                setHighlightedProjectTaskId(undefined);
-                setSelectedProjectId(undefined);
-                setProjectTasks([]);
-                setProjectWebhooks([]);
-                setWebhookDeliveries([]);
-                setProjectGoogleChatSources([]);
-                setProjectInflowItems([]);
-                setGoogleChatSpaces([]);
-              }}
-              onCreateProject={createWorkspaceProject}
-              onCreateGoal={createWorkspaceGoal}
-              onUpdateGoal={updateWorkspaceGoal}
-              onUpdateProject={updateWorkspaceProject}
-              onDeleteProject={deleteWorkspaceProject}
-              onCreateTask={createProjectTask}
-              onCompleteTask={completeProjectTask}
-              onUpdateTask={updateProjectTask}
-              onDeleteTask={deleteProjectTask}
-              onCreateWebhook={createWorkspaceWebhook}
-              onUpdateWebhook={updateWorkspaceWebhook}
-              onTestWebhook={testWorkspaceWebhook}
-              onDeleteWebhook={deleteWorkspaceWebhook}
-              onRetryWebhookDelivery={retryWorkspaceWebhookDelivery}
-              onConnectGoogleChatAccount={beginGoogleChatConnection}
-              onLoadGoogleChatSpaces={loadGoogleChatSpaces}
-              onCreateGoogleChatSource={createWorkspaceGoogleChatSource}
-              onDeleteGoogleChatSource={deleteWorkspaceGoogleChatSource}
-              onSyncGoogleChatSource={syncWorkspaceGoogleChatSource}
-              onPromoteInflow={promoteWorkspaceInflow}
-              onDismissInflow={dismissWorkspaceInflow}
-              onRetryInflowAnalysis={retryWorkspaceInflowAnalysis}
-              onRetryInflowCompletion={retryWorkspaceInflowCompletion}
-            />
-          )}
-          {destination === "decisions" && (
-            <DecisionInboxWorkspace
-              recommendations={decisionRecommendations}
-              loading={decisionsLoading || mode === "loading"}
-              error={decisionsError}
-              onOpenConversation={selectConversation}
-              onDecide={decideHomeRecommendation}
-            />
-          )}
-          {destination === "meetings" && tokens && (
-            <MeetingsWorkspace
-              apiBaseUrl={apiBaseUrl}
-              accessToken={tokens.accessToken}
-              workspaces={workspaces}
-              projects={projects}
-              selectedWorkspaceId={selectedWorkspaceId}
-              onSelectWorkspace={selectWorkspace}
-            />
-          )}
-          {destination === "memory" && (
-            <MemoryWorkspace onOpenConversation={openNewAssistantRequest} />
-          )}
-          {destination === "settings" && (
-            <SettingsWorkspace
-              authentication={agentAuthentication}
-              requesting={authenticationRequesting}
-              modelSettings={agentModelSettings}
-              modelsLoading={agentModelsLoading}
-              modelsSaving={agentModelsSaving}
-              modelsError={agentModelsError}
-              calendarConnection={calendarConnection}
-              calendarLoading={calendarLoading}
-              calendarAction={calendarAction}
-              calendarAuthorizationPending={Boolean(
-                calendarAuthorizationExpiresAt,
-              )}
-              calendarError={calendarError}
-              workspaces={workspaces}
-              gmailAvailable={gmailAccountsAvailable}
-              gmailAccounts={gmailAccounts}
-              gmailLoading={gmailLoading}
-              gmailActions={gmailActions}
-              gmailAuthorizationPendingWorkspaceId={
-                gmailAuthorizationPending?.workspaceId
-              }
-              gmailError={gmailError}
-              reminderSyncStatus={reminderSyncStatus}
-              reminderSyncError={reminderSyncError}
-              remoteReminderStatus={remoteReminderStatus}
-              deviceSignalStates={deviceSignalStates}
-              nativeCallLogPermission={nativeCallLogPermission}
-              deviceSignalsLoading={deviceSignalsLoading}
-              deviceSignalsError={deviceSignalsError}
-              onStartAuthentication={beginAgentAuthentication}
-              onReloadModels={loadAgentModelSettings}
-              onSaveModel={saveAgentModelSettings}
-              onStartCalendarConnection={beginGoogleCalendarConnection}
-              onReloadCalendarConnection={loadGoogleCalendarConnection}
-              onSyncCalendar={syncGoogleCalendar}
-              onDisconnectCalendar={disconnectGoogleCalendarConnection}
-              onReloadGmailAccounts={loadGmailAccounts}
-              onStartGmailConnection={beginGmailConnection}
-              onCancelGmailAuthorization={cancelGmailAuthorization}
-              onSyncGmailAccount={syncGmailAccount}
-              onDisconnectGmailAccount={disconnectGmailConnection}
-              onRetryReminderSync={synchronizePlanningReminders}
-              onEnableDeviceSignals={() => synchronizeDeviceSignals(true)}
-              onRefreshDeviceSignals={() => synchronizeDeviceSignals(false)}
-            />
-          )}
-          {destination === "chat" && (
-            <ConversationWorkspace
-              conversations={conversations}
-              messages={conversationMessages}
-              selectedConversationId={selectedConversationId}
-              job={
-                selectedConversationId
-                  ? conversationJobs[selectedConversationId]
-                  : undefined
-              }
-              hasActiveJob={Boolean(
-                selectedConversationId &&
-                conversationJobs[selectedConversationId] &&
-                !isTerminalAgentJob(
-                  conversationJobs[selectedConversationId].state,
-                ),
-              )}
-              authentication={agentAuthentication}
-              authenticationRequesting={authenticationRequesting}
-              loading={conversationLoading}
-              error={
-                conversationError ?? (mode === "error" ? message : undefined)
-              }
-              initialDraft={assistantDraft}
-              onSelect={selectConversation}
-              onInitialDraftApplied={() => setAssistantDraft(undefined)}
-              onStartConversation={startHomeConversation}
-              onStartAuthentication={beginAgentAuthentication}
-              onSend={sendConversationRequest}
-              onResolveAction={resolveConversationAction}
-            />
-          )}
-          <PlanningItemEditor
-            target={planningEditTarget}
-            onClose={() => setPlanningEditTarget(undefined)}
-            onSaveTask={savePlanningTask}
-            onSaveSchedule={savePlanningSchedule}
-            onDeleteTask={deletePlanningTask}
-            onDeleteSchedule={deletePlanningSchedule}
-          />
         </OsShell>
       )}
     </div>
@@ -4522,6 +4654,23 @@ function LaunchSplash() {
         </div>
       </div>
     </main>
+  );
+}
+
+function WorkspaceRouteFallback() {
+  return (
+    <section className="workspace-route-fallback" aria-busy="true">
+      <span className="workspace-route-fallback__heading" aria-hidden="true" />
+      <span className="workspace-route-fallback__summary" aria-hidden="true" />
+      <div className="workspace-route-fallback__surface" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </div>
+      <span className="sr-only" role="status" aria-live="polite">
+        {copy.launch.loading}
+      </span>
+    </section>
   );
 }
 
@@ -4603,6 +4752,15 @@ function currentReminderRange(now = new Date()): [Date, Date] {
   const from = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const to = new Date(from.getFullYear(), from.getMonth(), from.getDate() + 91);
   return [from, to];
+}
+
+function runWhenBrowserIsIdle(work: () => void, timeout = 1_000): () => void {
+  if (typeof window.requestIdleCallback === "function") {
+    const idleCallback = window.requestIdleCallback(work, { timeout });
+    return () => window.cancelIdleCallback(idleCallback);
+  }
+  const timer = globalThis.setTimeout(work, 160);
+  return () => globalThis.clearTimeout(timer);
 }
 
 async function openExternalUrl(url: string): Promise<void> {

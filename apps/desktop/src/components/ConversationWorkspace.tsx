@@ -31,6 +31,9 @@ import {
   SkeletonGroup,
   useDelayedSkeleton,
 } from "./ContentSkeleton";
+import { assistantResponseAfterLatestRequest } from "./conversationResponse";
+
+export { assistantResponseAfterLatestRequest } from "./conversationResponse";
 
 type ConversationWorkspaceProps = {
   conversations: Conversation[];
@@ -838,24 +841,6 @@ function isTerminalJob(state: AgentJob["state"]) {
 
 function isFailedJob(state: AgentJob["state"]) {
   return ["failed", "cancelled"].includes(state);
-}
-
-export function assistantResponseAfterLatestRequest(
-  messages: ConversationMessage[],
-): ConversationMessage | undefined {
-  let latestUserIndex = -1;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index]?.role === "user") {
-      latestUserIndex = index;
-      break;
-    }
-  }
-  if (latestUserIndex < 0) return undefined;
-  for (let index = messages.length - 1; index > latestUserIndex; index -= 1) {
-    const message = messages[index];
-    if (message?.role === "assistant") return message;
-  }
-  return undefined;
 }
 
 export function hasDisplayableAssistantResponse(
