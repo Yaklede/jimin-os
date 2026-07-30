@@ -58,6 +58,7 @@ open class RustPlugin : Plugin<Project> {
                 }
 
                 tasks["mergeUniversal${profileCapitalized}JniLibFolders"].dependsOn(buildTask)
+                tasks["compileUniversal${profileCapitalized}Kotlin"].dependsOn(buildTask)
 
                 for (targetPair in targetsList.withIndex()) {
                     val targetName = targetPair.value
@@ -76,6 +77,9 @@ open class RustPlugin : Plugin<Project> {
 
                     buildTask.dependsOn(targetBuildTask)
                     tasks["merge$targetArchCapitalized${profileCapitalized}JniLibFolders"].dependsOn(
+                        targetBuildTask
+                    )
+                    tasks["compile$targetArchCapitalized${profileCapitalized}Kotlin"].dependsOn(
                         targetBuildTask
                     )
                 }

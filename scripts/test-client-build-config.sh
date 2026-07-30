@@ -32,6 +32,20 @@ if require_android_physical_device 'emulator-5554' >/dev/null 2>&1; then
   exit 1
 fi
 
+rust_plugin="${SCRIPT_DIR}/../apps/desktop/src-tauri/gen/android/buildSrc/src/main/java/io/jimin/os/kotlin/RustPlugin.kt"
+if ! grep -Fq \
+  'tasks["compileUniversal${profileCapitalized}Kotlin"].dependsOn(buildTask)' \
+  "${rust_plugin}"; then
+  printf 'Expected universal Kotlin compilation to depend on universal Rust generation.\n' >&2
+  exit 1
+fi
+if ! grep -Fq \
+  'tasks["compile$targetArchCapitalized${profileCapitalized}Kotlin"].dependsOn(' \
+  "${rust_plugin}"; then
+  printf 'Expected ABI Kotlin compilation to depend on matching Rust generation.\n' >&2
+  exit 1
+fi
+
 mock_apkanalyzer="${temporary_dir}/apkanalyzer"
 mock_apk="${temporary_dir}/client.apk"
 touch "${mock_apk}"
