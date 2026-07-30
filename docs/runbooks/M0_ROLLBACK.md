@@ -66,3 +66,35 @@ Target은 생략할 수 없다. `current`, `previous`, 절대 경로 중 하나�
 - rollback 중 새 migration이 필요함
 
 이 경우 반복 실행하지 않고 incident 기록과 현재 volume을 보존한다. `docker volume rm`, `down --volumes`, `git reset`, database drop은 이 runbook의 일부가 아니다.
+
+## 선택 기능: Meeting transcriber rollback
+
+Meeting transcriber는 core release와 분리된 상태 기록을 사용한다. 실패한
+candidate를 마지막 검증 성공 digest로 복구한다.
+
+```bash
+./scripts/rollback-staging-meeting-transcriber.sh \
+  "$HOME/.config/jimin-os/staging.env" \
+  current
+```
+
+이미 성공한 현재 worker를 그 이전 성공 digest로 되돌린다.
+
+```bash
+./scripts/rollback-staging-meeting-transcriber.sh \
+  "$HOME/.config/jimin-os/staging.env" \
+  previous
+```
+
+특정 worker release도 절대 경로로 지정할 수 있다.
+
+```bash
+./scripts/rollback-staging-meeting-transcriber.sh \
+  "$HOME/.config/jimin-os/staging.env" \
+  "$HOME/.local/state/jimin-os/jimin-os-staging/meeting-transcriber/releases/<release>.env"
+```
+
+이 script는 worker digest와 Hugging Face secret만 사전 검증하고
+`meeting-transcriber` service만 pull·recreate한다. 성공하면 결과를 별도
+`meeting-transcriber/current.env`, `previous.env`, `releases/`에 기록하며
+API, Agent, gateway와 core rollback state는 변경하지 않는다.

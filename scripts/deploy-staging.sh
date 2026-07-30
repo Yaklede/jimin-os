@@ -7,11 +7,11 @@ source "${SCRIPT_DIR}/lib/deploy-common.sh"
 
 reject_external_release_override
 config_file="${1:-${REPO_ROOT}/deploy/env/staging.env.example}"
-init_deployment staging "${config_file}"
-validate_runtime_secrets
-validate_staging_images
+init_deployment staging "${config_file}" core
+validate_runtime_secrets core
+validate_staging_images core
 
-"${SCRIPT_DIR}/validate-compose.sh" staging "${config_file}"
+"${SCRIPT_DIR}/validate-compose.sh" staging "${config_file}" core
 ensure_state_directory
 pending="${DEPLOY_STATE_ROOT}/desired.env"
 write_desired_release "${pending}"
@@ -22,7 +22,6 @@ compose pull "${services[@]}"
 info "Starting staging services without local builds"
 compose up \
   --detach \
-  --remove-orphans \
   --no-build \
   --wait \
   --wait-timeout 180 \

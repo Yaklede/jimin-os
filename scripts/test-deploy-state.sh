@@ -63,3 +63,86 @@ if grep -Fq 'JIMIN_MEETING_TRANSCRIBER_IMAGE=' "${core_release}"; then
 fi
 
 info "Core release state excludes the optional meeting transcriber image"
+
+unset JIMIN_RELEASE_ENV
+worker_digest_a="$(printf 'a%.0s' {1..64})"
+worker_digest_b="$(printf 'b%.0s' {1..64})"
+worker_release_a="${temporary_root}/meeting-transcriber-a.env"
+worker_release_b="${temporary_root}/meeting-transcriber-b.env"
+printf 'JIMIN_MEETING_TRANSCRIBER_IMAGE=registry.invalid/transcriber@sha256:%s\n' \
+  "${worker_digest_a}" > "${worker_release_a}"
+printf 'JIMIN_MEETING_TRANSCRIBER_IMAGE=registry.invalid/transcriber@sha256:%s\n' \
+  "${worker_digest_b}" > "${worker_release_b}"
+worker_state_root="$(meeting_transcriber_state_root)"
+
+record_successful_meeting_transcriber_release "${worker_release_a}"
+cmp -s "${worker_state_root}/current.env" "${worker_release_a}"
+[[ ! -f "${worker_state_root}/previous.env" ]]
+
+record_successful_meeting_transcriber_release "${worker_release_b}"
+cmp -s "${worker_state_root}/current.env" "${worker_release_b}"
+cmp -s "${worker_state_root}/previous.env" "${worker_release_a}"
+
+record_rollback_meeting_transcriber_release "${worker_release_a}"
+cmp -s "${worker_state_root}/current.env" "${worker_release_a}"
+cmp -s "${worker_state_root}/previous.env" "${worker_release_b}"
+
+info "Meeting transcriber state transition tests passed"
+
+scope_secrets="${temporary_root}/scope-secrets"
+mkdir -p "${scope_secrets}"
+for secret_name in \
+  postgres_password \
+  api_database_url \
+  auth_signing_key \
+  auth_verify_key \
+  auth_refresh_pepper \
+  auth_pairing_pepper; do
+  printf 'audit-secret-value\n' > "${scope_secrets}/${secret_name}"
+done
+chmod 600 "${scope_secrets}/"*
+
+scope_config="${temporary_root}/scope-config.env"
+core_digest="$(printf 'c%.0s' {1..64})"
+{
+  printf 'JIMIN_API_IMAGE=registry.invalid/api@sha256:%s\n' "${core_digest}"
+  printf 'JIMIN_AGENT_IMAGE=registry.invalid/agent@sha256:%s\n' "${core_digest}"
+  printf 'JIMIN_GATEWAY_IMAGE=registry.invalid/gateway@sha256:%s\n' "${core_digest}"
+  printf 'JIMIN_BUILD_SHA=%s\n' "$(printf 'd%.0s' {1..40})"
+  printf 'JIMIN_GOOGLE_CALENDAR_OAUTH_ENABLED=0\n'
+  printf 'JIMIN_FIREBASE_MESSAGING_ENABLED=0\n'
+  printf 'JIMIN_MEETING_TRANSCRIBER_ENABLED=1\n'
+  printf 'JIMIN_MEETING_TRANSCRIBER_IMAGE=invalid-worker-reference\n'
+} > "${scope_config}"
+DEPLOY_CONFIG_FILE="${scope_config}"
+JIMIN_SECRETS_DIR="${scope_secrets}"
+DEPLOY_TLS_MODE=internal
+export DEPLOY_CONFIG_FILE JIMIN_SECRETS_DIR DEPLOY_TLS_MODE
+
+validate_runtime_secrets core
+validate_staging_images core
+if (validate_runtime_secrets meeting-transcriber >/dev/null 2>&1); then
+  die "meeting transcriber secret scope accepted a missing Hugging Face token"
+fi
+if (validate_staging_images meeting-transcriber >/dev/null 2>&1); then
+  die "meeting transcriber image scope accepted an invalid worker digest"
+fi
+
+printf 'audit-hugging-face-token\n' > "${scope_secrets}/hugging_face_token"
+chmod 600 "${scope_secrets}/hugging_face_token"
+printf 'JIMIN_MEETING_TRANSCRIBER_IMAGE=registry.invalid/transcriber@sha256:%s\n' \
+  "${worker_digest_a}" >> "${scope_config}"
+validate_runtime_secrets meeting-transcriber
+validate_staging_images meeting-transcriber
+
+info "Core and meeting transcriber preflight scopes are isolated"
+
+for core_script in \
+  "${REPO_ROOT}/scripts/deploy-staging.sh" \
+  "${REPO_ROOT}/scripts/rollback-staging.sh"; do
+  if grep -Fq -- '--remove-orphans' "${core_script}"; then
+    die "core lifecycle must not remove the separately managed meeting transcriber: ${core_script}"
+  fi
+done
+
+info "Core lifecycle preserves separately managed optional services"

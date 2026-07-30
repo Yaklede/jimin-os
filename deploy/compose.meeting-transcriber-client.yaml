@@ -1,0 +1,4 @@
+services:
+  agent:
+    environment:
+      JIMIN_MEETING_TRANSCRIBER_URL: http://meeting-transcriber:8090

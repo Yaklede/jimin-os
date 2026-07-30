@@ -8,6 +8,7 @@ source "${SCRIPT_DIR}/lib/deploy-common.sh"
 reject_external_release_override
 environment="${1:-local}"
 config_file="${2:-${REPO_ROOT}/deploy/env/${environment}.env.example}"
+component_scope="${3:-all}"
 temporary_root="$(mktemp -d)"
 trap 'rm -rf "${temporary_root}"' EXIT
 
@@ -34,13 +35,14 @@ if [[ "${environment}" == "staging" ]]; then
   export JIMIN_RELEASE_ENV="${release_env}"
 fi
 
-init_deployment "${environment}" "${config_file}"
+init_deployment "${environment}" "${config_file}" "${component_scope}"
 rendered="${temporary_root}/compose.yaml"
 compose config --quiet
 compose config > "${rendered}"
 
 expected_services=$'agent\napi\ngateway\npostgres'
-if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
+if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]] \
+  && [[ "${DEPLOY_COMPONENT_SCOPE}" != "core" ]]; then
   expected_services=$'agent\napi\ngateway\nmeeting-transcriber\npostgres'
 fi
 actual_services="$(compose config --services | sort)"
@@ -136,7 +138,8 @@ assert_service_without_dependency() {
 }
 
 services=(gateway api agent postgres)
-if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
+if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]] \
+  && [[ "${DEPLOY_COMPONENT_SCOPE}" != "core" ]]; then
   services+=(meeting-transcriber)
 fi
 for service in "${services[@]}"; do
@@ -147,7 +150,10 @@ done
 
 for service in api agent postgres meeting-transcriber; do
   if [[ "${service}" == "meeting-transcriber" ]] \
-    && [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" != "1" ]]; then
+    && {
+      [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" != "1" ]] \
+        || [[ "${DEPLOY_COMPONENT_SCOPE}" == "core" ]]
+    }; then
     continue
   fi
   assert_service_without_ports "${service}"
@@ -157,6 +163,7 @@ assert_dependency_condition gateway api service_started
 assert_dependency_condition api postgres service_started
 assert_dependency_condition agent postgres service_started
 if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
+  assert_service_setting agent 'JIMIN_MEETING_TRANSCRIBER_URL: http://meeting-transcriber:8090'
   assert_service_without_dependency agent meeting-transcriber
 fi
 

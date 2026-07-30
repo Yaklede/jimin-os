@@ -7,7 +7,7 @@ source "${SCRIPT_DIR}/lib/deploy-common.sh"
 
 reject_external_release_override
 config_file="${1:-${REPO_ROOT}/deploy/env/staging.env.example}"
-init_deployment staging "${config_file}"
+init_deployment staging "${config_file}" core
 ensure_state_directory
 
 rollback_target="${2:-}"
@@ -31,9 +31,9 @@ esac
 [[ -f "${release_file}" ]] || die "rollback release file not found: ${release_file}"
 JIMIN_RELEASE_ENV="${release_file}"
 export JIMIN_RELEASE_ENV
-init_deployment staging "${config_file}"
-validate_runtime_secrets
-validate_staging_images
+init_deployment staging "${config_file}" core
+validate_runtime_secrets core
+validate_staging_images core
 
 info "Pulling rollback image digests"
 services=(gateway api agent)
@@ -41,7 +41,6 @@ compose pull "${services[@]}"
 info "Applying application-only rollback; database volumes are not replaced"
 compose up \
   --detach \
-  --remove-orphans \
   --no-build \
   --wait \
   --wait-timeout 180 \

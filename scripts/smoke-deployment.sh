@@ -15,7 +15,11 @@ if [[ -n "${release_file}" ]]; then
   JIMIN_RELEASE_ENV="${release_file}"
   export JIMIN_RELEASE_ENV
 fi
-init_deployment "${environment}" "${config_file}"
+component_scope=all
+if [[ "${JIMIN_SMOKE_INCLUDE_MEETING_TRANSCRIBER:-}" == "0" ]]; then
+  component_scope=core
+fi
+init_deployment "${environment}" "${config_file}" "${component_scope}"
 require_command curl
 
 hostname="$(effective_value JIMIN_OS_HOSTNAME)"

@@ -67,6 +67,20 @@ worker를 pull하거나 재기동하지 않는다. Agent는 worker와 생명주�
 분리되어 있으므로 worker 장애 중에도 일정·일감·대화 기능을 계속
 제공하며, 전사 요청만 기존의 unavailable 응답 계약을 사용한다.
 
+성공한 worker digest는 core release와 분리된 아래 경로에 기록된다.
+
+```text
+$XDG_STATE_HOME/jimin-os/<compose-project>/meeting-transcriber/
+├── current.env
+├── previous.env
+└── releases/
+```
+
+첫 분리 배포에서 기존 worker container가 실행 중이면 그 container의
+digest를 `current.env`로 먼저 기록한 뒤 새 digest를 적용한다. 따라서 새
+worker 검증이 실패해도 core release state를 건드리지 않고 기존 worker로
+되돌릴 수 있다.
+
 ## Secret
 
 필수 파일과 형식은 `deploy/secrets/README.md`를 따른다. `api_database_url`의 host는 Compose service 이름 `postgres`다. 실제 password와 DSN을 environment file에 넣지 않는다.

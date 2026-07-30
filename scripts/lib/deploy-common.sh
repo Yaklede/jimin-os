@@ -94,15 +94,19 @@ resolve_repo_path() {
 init_deployment() {
   local environment="$1"
   local config_file="$2"
+  local component_scope="${3:-all}"
 
   require_command docker
   [[ -f "${VERSIONS_ENV}" ]] || die "versions file not found: ${VERSIONS_ENV}"
   [[ -f "${config_file}" ]] || die "configuration file not found: ${config_file}"
+  [[ "${component_scope}" =~ ^(all|core|meeting-transcriber)$ ]] \
+    || die "deployment component scope must be all, core, or meeting-transcriber"
 
   DEPLOY_ENVIRONMENT="${environment}"
   DEPLOY_CONFIG_FILE="$(cd "$(dirname "${config_file}")" && pwd)/$(basename "${config_file}")"
   DEPLOY_PROJECT="$(effective_value JIMIN_COMPOSE_PROJECT)"
   DEPLOY_TLS_MODE="$(effective_value JIMIN_TLS_MODE)"
+  DEPLOY_COMPONENT_SCOPE="${component_scope}"
 
   [[ "${DEPLOY_ENVIRONMENT}" =~ ^(local|staging)$ ]] || die "environment must be local or staging"
   [[ "${DEPLOY_PROJECT}" =~ ^[a-z0-9][a-z0-9_-]+$ ]] || die "invalid Compose project name"
@@ -142,7 +146,12 @@ init_deployment() {
   [[ "${meeting_transcriber_enabled}" =~ ^[01]$ ]] \
     || die "JIMIN_MEETING_TRANSCRIBER_ENABLED must be 0 or 1"
   if [[ "${meeting_transcriber_enabled}" == "1" ]]; then
-    COMPOSE_ARGS+=(--file "${REPO_ROOT}/deploy/compose.meeting-transcriber.yaml")
+    COMPOSE_ARGS+=(--file "${REPO_ROOT}/deploy/compose.meeting-transcriber-client.yaml")
+    if [[ "${DEPLOY_COMPONENT_SCOPE}" != "core" ]]; then
+      COMPOSE_ARGS+=(--file "${REPO_ROOT}/deploy/compose.meeting-transcriber.yaml")
+    fi
+  elif [[ "${DEPLOY_COMPONENT_SCOPE}" == "meeting-transcriber" ]]; then
+    die "meeting transcriber deployment scope requires JIMIN_MEETING_TRANSCRIBER_ENABLED=1"
   fi
   if [[ -n "${JIMIN_RELEASE_ENV:-}" ]]; then
     [[ -f "${JIMIN_RELEASE_ENV}" ]] || die "release env not found: ${JIMIN_RELEASE_ENV}"
@@ -224,29 +233,39 @@ validate_secret_file() {
 }
 
 validate_runtime_secrets() {
+  local scope="${1:-all}"
   local secrets_dir
+  [[ "${scope}" =~ ^(all|core|meeting-transcriber)$ ]] \
+    || die "secret validation scope must be all, core, or meeting-transcriber"
   secrets_dir="$(resolve_repo_path "$(effective_value JIMIN_SECRETS_DIR)")"
   [[ -d "${secrets_dir}" ]] || die "secret directory not found: ${secrets_dir}"
 
-  validate_secret_file "${secrets_dir}/postgres_password" "PostgreSQL password file"
-  validate_secret_file "${secrets_dir}/api_database_url" "API database URL file"
-  validate_secret_file "${secrets_dir}/auth_signing_key" "access-token signing key file"
-  validate_secret_file "${secrets_dir}/auth_verify_key" "access-token verify key file"
-  validate_secret_file "${secrets_dir}/auth_refresh_pepper" "refresh-token pepper file"
-  validate_secret_file "${secrets_dir}/auth_pairing_pepper" "device-pairing pepper file"
-  if [[ "$(effective_value JIMIN_GOOGLE_CALENDAR_OAUTH_ENABLED)" == "1" ]]; then
-    validate_secret_file "${secrets_dir}/google_calendar_client_secret" "Google Calendar client secret file"
-    validate_secret_file "${secrets_dir}/calendar_encryption_key" "Calendar encryption key file"
+  if [[ "${scope}" != "meeting-transcriber" ]]; then
+    validate_secret_file "${secrets_dir}/postgres_password" "PostgreSQL password file"
+    validate_secret_file "${secrets_dir}/api_database_url" "API database URL file"
+    validate_secret_file "${secrets_dir}/auth_signing_key" "access-token signing key file"
+    validate_secret_file "${secrets_dir}/auth_verify_key" "access-token verify key file"
+    validate_secret_file "${secrets_dir}/auth_refresh_pepper" "refresh-token pepper file"
+    validate_secret_file "${secrets_dir}/auth_pairing_pepper" "device-pairing pepper file"
+    if [[ "$(effective_value JIMIN_GOOGLE_CALENDAR_OAUTH_ENABLED)" == "1" ]]; then
+      validate_secret_file "${secrets_dir}/google_calendar_client_secret" "Google Calendar client secret file"
+      validate_secret_file "${secrets_dir}/calendar_encryption_key" "Calendar encryption key file"
+    fi
+    if [[ "$(effective_value JIMIN_FIREBASE_MESSAGING_ENABLED)" == "1" ]]; then
+      validate_secret_file "${secrets_dir}/firebase_service_account" "Firebase service-account file"
+    fi
+    if [[ "${DEPLOY_TLS_MODE}" == "files" ]]; then
+      validate_secret_file "${secrets_dir}/gateway_tls_cert" "gateway certificate"
+      validate_secret_file "${secrets_dir}/gateway_tls_key" "gateway private key"
+    fi
   fi
-  if [[ "$(effective_value JIMIN_FIREBASE_MESSAGING_ENABLED)" == "1" ]]; then
-    validate_secret_file "${secrets_dir}/firebase_service_account" "Firebase service-account file"
-  fi
-  if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
+  if [[ "${scope}" != "core" ]] \
+    && [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
     validate_secret_file "${secrets_dir}/hugging_face_token" "Hugging Face token file"
   fi
-  if [[ "${DEPLOY_TLS_MODE}" == "files" ]]; then
-    validate_secret_file "${secrets_dir}/gateway_tls_cert" "gateway certificate"
-    validate_secret_file "${secrets_dir}/gateway_tls_key" "gateway private key"
+  if [[ "${scope}" == "meeting-transcriber" ]] \
+    && [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" != "1" ]]; then
+    die "meeting transcriber secret validation requires JIMIN_MEETING_TRANSCRIBER_ENABLED=1"
   fi
 }
 
@@ -257,19 +276,31 @@ assert_digest_reference() {
 }
 
 validate_staging_images() {
-  assert_digest_reference "$(effective_value JIMIN_API_IMAGE)" "JIMIN_API_IMAGE"
-  assert_digest_reference "$(effective_value JIMIN_AGENT_IMAGE)" "JIMIN_AGENT_IMAGE"
-  assert_digest_reference "$(effective_value JIMIN_GATEWAY_IMAGE)" "JIMIN_GATEWAY_IMAGE"
-  if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
+  local scope="${1:-all}"
+  [[ "${scope}" =~ ^(all|core|meeting-transcriber)$ ]] \
+    || die "image validation scope must be all, core, or meeting-transcriber"
+
+  if [[ "${scope}" != "meeting-transcriber" ]]; then
+    assert_digest_reference "$(effective_value JIMIN_API_IMAGE)" "JIMIN_API_IMAGE"
+    assert_digest_reference "$(effective_value JIMIN_AGENT_IMAGE)" "JIMIN_AGENT_IMAGE"
+    assert_digest_reference "$(effective_value JIMIN_GATEWAY_IMAGE)" "JIMIN_GATEWAY_IMAGE"
+    assert_digest_reference "$(effective_value POSTGRES_IMAGE)" "POSTGRES_IMAGE"
+
+    local build_sha
+    build_sha="$(effective_value JIMIN_BUILD_SHA)"
+    [[ "${build_sha}" =~ ^[0-9a-f]{40}$ ]] \
+      || die "JIMIN_BUILD_SHA must be a full 40-character Git SHA for staging"
+  fi
+  if [[ "${scope}" != "core" ]] \
+    && [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
     assert_digest_reference \
       "$(effective_value JIMIN_MEETING_TRANSCRIBER_IMAGE)" \
       "JIMIN_MEETING_TRANSCRIBER_IMAGE"
   fi
-  assert_digest_reference "$(effective_value POSTGRES_IMAGE)" "POSTGRES_IMAGE"
-
-  local build_sha
-  build_sha="$(effective_value JIMIN_BUILD_SHA)"
-  [[ "${build_sha}" =~ ^[0-9a-f]{40}$ ]] || die "JIMIN_BUILD_SHA must be a full 40-character Git SHA for staging"
+  if [[ "${scope}" == "meeting-transcriber" ]] \
+    && [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" != "1" ]]; then
+    die "meeting transcriber image validation requires JIMIN_MEETING_TRANSCRIBER_ENABLED=1"
+  fi
 }
 
 ensure_state_directory() {
@@ -329,6 +360,93 @@ record_rollback_release() {
   chmod 600 \
     "${DEPLOY_STATE_ROOT}/current.env" \
     "${DEPLOY_STATE_ROOT}/releases/${timestamp}-rollback.env"
+}
+
+meeting_transcriber_state_root() {
+  printf '%s/meeting-transcriber\n' "${DEPLOY_STATE_ROOT}"
+}
+
+ensure_meeting_transcriber_state_directory() {
+  local state_root
+  state_root="$(meeting_transcriber_state_root)"
+  umask 077
+  mkdir -p "${state_root}/releases"
+  chmod 700 "${state_root}" "${state_root}/releases"
+}
+
+write_meeting_transcriber_release() {
+  local target="$1"
+  local temporary="${target}.tmp.$$"
+
+  umask 077
+  printf 'JIMIN_MEETING_TRANSCRIBER_IMAGE=%s\n' \
+    "$(effective_value JIMIN_MEETING_TRANSCRIBER_IMAGE)" > "${temporary}"
+  chmod 600 "${temporary}"
+  mv "${temporary}" "${target}"
+}
+
+record_successful_meeting_transcriber_release() {
+  local pending="$1"
+  local state_root
+  local timestamp
+  state_root="$(meeting_transcriber_state_root)"
+  timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
+
+  ensure_meeting_transcriber_state_directory
+  if [[ -f "${state_root}/current.env" ]]; then
+    cp "${state_root}/current.env" "${state_root}/previous.env"
+  fi
+  cp "${pending}" "${state_root}/current.env"
+  cp "${pending}" "${state_root}/releases/${timestamp}.env"
+  chmod 600 "${state_root}/current.env" "${state_root}/releases/${timestamp}.env"
+  if [[ -f "${state_root}/previous.env" ]]; then
+    chmod 600 "${state_root}/previous.env"
+  fi
+}
+
+record_rollback_meeting_transcriber_release() {
+  local target="$1"
+  local state_root
+  local timestamp
+  state_root="$(meeting_transcriber_state_root)"
+  timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
+
+  ensure_meeting_transcriber_state_directory
+  if [[ -f "${state_root}/current.env" ]]; then
+    cp "${state_root}/current.env" "${state_root}/releases/${timestamp}-replaced.env"
+    chmod 600 "${state_root}/releases/${timestamp}-replaced.env"
+    if ! cmp -s "${state_root}/current.env" "${target}"; then
+      cp "${state_root}/current.env" "${state_root}/previous.env"
+      chmod 600 "${state_root}/previous.env"
+    fi
+  fi
+  cp "${target}" "${state_root}/current.env"
+  cp "${target}" "${state_root}/releases/${timestamp}-rollback.env"
+  chmod 600 \
+    "${state_root}/current.env" \
+    "${state_root}/releases/${timestamp}-rollback.env"
+}
+
+bootstrap_meeting_transcriber_release_state() {
+  local state_root
+  local container_id
+  local running_image
+  local bootstrap
+  state_root="$(meeting_transcriber_state_root)"
+  ensure_meeting_transcriber_state_directory
+  [[ ! -f "${state_root}/current.env" ]] || return 0
+
+  container_id="$(compose ps --quiet meeting-transcriber)"
+  [[ -n "${container_id}" ]] || return 0
+  running_image="$(docker inspect --format '{{.Config.Image}}' "${container_id}")"
+  assert_digest_reference "${running_image}" "running meeting transcriber image"
+
+  bootstrap="${state_root}/bootstrap.env"
+  umask 077
+  printf 'JIMIN_MEETING_TRANSCRIBER_IMAGE=%s\n' "${running_image}" > "${bootstrap}"
+  chmod 600 "${bootstrap}"
+  record_successful_meeting_transcriber_release "${bootstrap}"
+  rm -f "${bootstrap}"
 }
 
 export_internal_ca() {
