@@ -7,6 +7,7 @@ import {
   Scissors,
   Sparkles,
   Undo2,
+  UserPlus,
   X,
 } from "lucide-react";
 import {
@@ -29,6 +30,7 @@ import { copy } from "../copy";
 import { registerMobileBackHandler } from "../mobileBack";
 import { createUuidV7 } from "../uuid";
 import {
+  addMeetingTranscriptSpeaker,
   applyMeetingTranscriptDraft,
   canMergeMeetingTranscriptSegment,
   createMeetingTranscriptDraft,
@@ -61,6 +63,7 @@ type TranscriptSaveState =
 type MeetingTranscriptEditorProps = {
   meetingId: string;
   meetingVersion: number;
+  participants: string[];
   speakers: MeetingSpeaker[];
   segments: MeetingTranscriptSegment[];
   onSave(
@@ -77,6 +80,7 @@ const AUTOSAVE_DELAY_MILLISECONDS = 900;
 export function MeetingTranscriptEditor({
   meetingId,
   meetingVersion,
+  participants,
   speakers,
   segments,
   onSave,
@@ -411,6 +415,17 @@ export function MeetingTranscriptEditor({
     });
   }
 
+  function addSpeaker() {
+    const speakerKey = `MANUAL_${createUuidV7().replaceAll("-", "")}`;
+    changeDraft((current) =>
+      addMeetingTranscriptSpeaker(
+        current,
+        speakerKey,
+        nextUnassignedParticipant(participants, current),
+      ),
+    );
+  }
+
   return (
     <section
       ref={editorRef}
@@ -453,9 +468,20 @@ export function MeetingTranscriptEditor({
               </h4>
               <p>{copy.meetings.speakerNamesDescription}</p>
             </div>
-            <span>
-              {copy.meetings.count(draftState.present.speakers.length)}
-            </span>
+            <div className="meeting-transcript-editor__section-actions">
+              <span>
+                {copy.meetings.count(draftState.present.speakers.length)}
+              </span>
+              <button
+                className="secondary-button focus-visible-control"
+                type="button"
+                disabled={busy || draftState.present.speakers.length >= 100}
+                onClick={addSpeaker}
+              >
+                <UserPlus aria-hidden="true" />
+                {copy.meetings.addSpeaker}
+              </button>
+            </div>
           </div>
           <div className="meeting-transcript-editor__speaker-grid">
             {draftState.present.speakers.map((speaker) => (
@@ -728,6 +754,25 @@ export function MeetingTranscriptEditor({
         </div>
       </footer>
     </section>
+  );
+}
+
+function nextUnassignedParticipant(
+  participants: string[],
+  draft: MeetingTranscriptDraft,
+): string {
+  const assignedNames = new Set(
+    draft.speakers
+      .map((speaker) => speaker.displayName.trim().toLocaleLowerCase("ko-KR"))
+      .filter((name): name is string => Boolean(name)),
+  );
+  return (
+    participants
+      .find((participant) => {
+        const name = participant.trim();
+        return name && !assignedNames.has(name.toLocaleLowerCase("ko-KR"));
+      })
+      ?.trim() ?? ""
   );
 }
 

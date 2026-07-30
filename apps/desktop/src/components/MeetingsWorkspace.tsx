@@ -836,12 +836,7 @@ function MeetingComposer({
         startedAt: new Date().toISOString(),
       });
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1,
-        },
+        audio: meetingRecordingAudioConstraints(),
       });
       streamRef.current = stream;
       const audioTrack = stream.getAudioTracks()[0];
@@ -1588,6 +1583,7 @@ function MeetingReview({
           meetingId={detail.id}
           meetingVersion={detail.version}
           notes={detail.recording?.notes}
+          participants={detail.participants}
           speakers={detail.speakers}
           segments={detail.transcriptSegments}
           onSave={onSaveTranscript}
@@ -1956,6 +1952,18 @@ function preferredRecordingMimeType(): string | undefined {
     "audio/mp4",
     "audio/webm",
   ].find((mimeType) => MediaRecorder.isTypeSupported(mimeType));
+}
+
+export function meetingRecordingAudioConstraints(): MediaTrackConstraints {
+  return {
+    // Meeting capture needs the original voice characteristics for speaker
+    // embeddings. Browser call-processing can suppress a distant attendee or
+    // a voice played through the device speaker as echo/noise.
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    channelCount: 1,
+  };
 }
 
 function recordingTime(seconds: number): string {

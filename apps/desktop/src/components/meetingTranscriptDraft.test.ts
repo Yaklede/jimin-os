@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { type MeetingDetail } from "../api/meetings";
 import {
+  addMeetingTranscriptSpeaker,
   applyMeetingTranscriptDraft,
   applyMeetingTranscriptUpdateToDetail,
   createMeetingTranscriptDraft,
@@ -121,6 +122,38 @@ describe("meeting transcript draft", () => {
           ordinal: 1,
           text: "수정한 두 번째 발언입니다.",
         },
+      ],
+    });
+  });
+
+  it("adds a manual speaker so an incorrectly grouped segment can be reassigned", () => {
+    let draft = createMeetingTranscriptDraft(speakers.slice(0, 1), segments);
+    draft = addMeetingTranscriptSpeaker(
+      draft,
+      "MANUAL_019f5ce8b8327ab28fe84dd8958d676a",
+      "주홍석",
+    );
+    draft = updateMeetingTranscriptSegment(
+      draft,
+      "019f5ce8-b832-7ab1-8fe8-4dd8958d676a",
+      {
+        speakerKey: "MANUAL_019f5ce8b8327ab28fe84dd8958d676a",
+      },
+    );
+
+    expect(meetingTranscriptDraftIsValid(draft)).toBe(true);
+    expect(meetingTranscriptDraftToInput(draft, 4)).toMatchObject({
+      speakers: [
+        { speakerKey: "SPEAKER_00", ordinal: 0 },
+        {
+          speakerKey: "MANUAL_019f5ce8b8327ab28fe84dd8958d676a",
+          displayName: "주홍석",
+          ordinal: 1,
+        },
+      ],
+      segments: [
+        { speakerKey: "SPEAKER_00" },
+        { speakerKey: "MANUAL_019f5ce8b8327ab28fe84dd8958d676a" },
       ],
     });
   });

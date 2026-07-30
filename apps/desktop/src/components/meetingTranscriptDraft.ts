@@ -227,6 +227,33 @@ export function renameMeetingTranscriptSpeaker(
   };
 }
 
+export function addMeetingTranscriptSpeaker(
+  draft: MeetingTranscriptDraft,
+  speakerKey: string,
+  displayName = "",
+): MeetingTranscriptDraft {
+  const normalizedKey = speakerKey.trim();
+  if (
+    !normalizedKey ||
+    normalizedKey.length > MAX_SPEAKER_KEY_CHARS ||
+    draft.speakers.length >= 100 ||
+    draft.speakers.some((speaker) => speaker.speakerKey === normalizedKey)
+  ) {
+    return draft;
+  }
+  return {
+    ...draft,
+    speakers: [
+      ...draft.speakers,
+      {
+        speakerKey: normalizedKey,
+        displayName: displayName.trim().slice(0, MAX_SPEAKER_NAME_CHARS),
+        ordinal: draft.speakers.length,
+      },
+    ],
+  };
+}
+
 export function updateMeetingTranscriptSegment(
   draft: MeetingTranscriptDraft,
   localId: string,

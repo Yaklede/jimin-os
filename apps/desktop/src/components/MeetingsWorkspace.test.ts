@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { type MeetingTranscriptSegment } from "../api/meetings";
-import { groupTranscriptSegments } from "./MeetingsWorkspace";
+import {
+  groupTranscriptSegments,
+  meetingRecordingAudioConstraints,
+} from "./MeetingsWorkspace";
+import { meetingTranscriptQuality } from "./MeetingTranscriptPanel";
 
 function segment(
   id: string,
@@ -57,5 +61,49 @@ describe("meeting transcript grouping", () => {
 
     expect(groups.map((group) => group.segmentCount)).toEqual([3, 1, 1]);
     expect(groups[2].text).toBe("시간이 지난 뒤");
+  });
+});
+
+describe("meeting recording audio", () => {
+  it("preserves voice characteristics used for speaker separation", () => {
+    expect(meetingRecordingAudioConstraints()).toEqual({
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+      channelCount: 1,
+    });
+  });
+});
+
+describe("meeting transcript quality", () => {
+  it("asks for review when multiple participants collapse into one speaker", () => {
+    expect(
+      meetingTranscriptQuality(
+        ["조지민", "주홍석", " 조지민 "],
+        [segment("1", "speaker-a", 0, 2_000, "첫 발언")],
+      ),
+    ).toEqual({
+      needsReview: true,
+      participantCount: 2,
+      speakerCount: 1,
+    });
+  });
+
+  it("does not imply that every listed participant spoke", () => {
+    expect(
+      meetingTranscriptQuality(
+        ["조지민", "주홍석"],
+        [
+          segment("1", "speaker-a", 0, 2_000, "첫 발언"),
+          segment("2", "speaker-b", 3_000, 5_000, "두 번째 발언"),
+        ],
+      ).needsReview,
+    ).toBe(false);
+  });
+
+  it("does not offer transcript editing before any speech is available", () => {
+    expect(meetingTranscriptQuality(["조지민", "주홍석"], []).needsReview).toBe(
+      false,
+    );
   });
 });

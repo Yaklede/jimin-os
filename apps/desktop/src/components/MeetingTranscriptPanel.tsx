@@ -1,4 +1,4 @@
-import { ChevronDown, FileAudio, Pencil } from "lucide-react";
+import { ChevronDown, CircleAlert, FileAudio, Pencil } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import {
@@ -26,6 +26,7 @@ type MeetingTranscriptPanelProps = {
   meetingId: string;
   meetingVersion: number;
   notes: string | undefined;
+  participants: string[];
   speakers: MeetingSpeaker[];
   segments: MeetingTranscriptSegment[];
   onSave(
@@ -73,6 +74,7 @@ export function MeetingTranscriptPanel({
   meetingId,
   meetingVersion,
   notes,
+  participants,
   speakers,
   segments,
   onSave,
@@ -87,6 +89,7 @@ export function MeetingTranscriptPanel({
   const visibleGroups = expanded ? groups : groups.slice(0, previewLimit);
   const remainingCount = Math.max(0, groups.length - previewLimit);
   const speakerById = new Map(speakers.map((speaker) => [speaker.id, speaker]));
+  const quality = meetingTranscriptQuality(participants, segments);
 
   useEffect(() => {
     setExpanded(false);
@@ -114,6 +117,7 @@ export function MeetingTranscriptPanel({
       <MeetingTranscriptEditor
         meetingId={meetingId}
         meetingVersion={meetingVersion}
+        participants={participants}
         speakers={speakers}
         segments={segments}
         onSave={onSave}
@@ -179,6 +183,29 @@ export function MeetingTranscriptPanel({
         </div>
       </header>
 
+      {quality.needsReview && (
+        <section className="meeting-transcript-panel__quality" role="status">
+          <CircleAlert aria-hidden="true" />
+          <div>
+            <strong>{copy.meetings.speakerReviewTitle}</strong>
+            <p>
+              {copy.meetings.speakerReviewDescription(
+                quality.participantCount,
+                quality.speakerCount,
+              )}
+            </p>
+          </div>
+          <button
+            className="secondary-button focus-visible-control"
+            type="button"
+            onClick={() => setEditing(true)}
+          >
+            <Pencil aria-hidden="true" />
+            {copy.meetings.reviewSpeakers}
+          </button>
+        </section>
+      )}
+
       {notes && (
         <section className="meeting-transcript-panel__notes">
           <strong>{copy.meetings.recordedNotes}</strong>
@@ -235,6 +262,29 @@ export function MeetingTranscriptPanel({
       )}
     </section>
   );
+}
+
+export function meetingTranscriptQuality(
+  participants: string[],
+  segments: MeetingTranscriptSegment[],
+): {
+  needsReview: boolean;
+  participantCount: number;
+  speakerCount: number;
+} {
+  const participantCount = new Set(
+    participants
+      .map((participant) => participant.trim().toLocaleLowerCase("ko-KR"))
+      .filter(Boolean),
+  ).size;
+  const speakerCount = new Set(
+    segments.map((segment) => segment.speakerKey.trim()).filter(Boolean),
+  ).size;
+  return {
+    needsReview: participantCount >= 2 && speakerCount === 1,
+    participantCount,
+    speakerCount,
+  };
 }
 
 function speakerInitial(label: string, ordinal: number): string {

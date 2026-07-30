@@ -1,3 +1,4 @@
+import { meetingSpeakerRecoveryCopy } from "./copy/meetingSpeakerRecovery";
 import { projectCopy } from "./copy/projects";
 
 const settingsTab = "설정";
@@ -553,7 +554,7 @@ export const copy = {
     transcriptReanalyzeConfirm:
       "다듬은 회의록으로 요약과 후속 일을 다시 정리할까요? 아직 반영하지 않은 기존 결과는 새 결과로 바뀌고, 이미 반영한 일은 유지돼요.",
     speakerNamesTitle: "발언자 이름",
-    speakerNamesDescription: "같은 이름은 모든 발언에 함께 반영돼요.",
+    ...meetingSpeakerRecoveryCopy,
     speakerNamePlaceholder: "발언자 이름",
     segmentEditorTitle: "발언 내용",
     segmentEditorDescription: "발언자를 바꾸거나 문장을 나누고 합칠 수 있어요.",

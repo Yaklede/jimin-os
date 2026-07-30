@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import subprocess
 import tempfile
@@ -24,6 +25,7 @@ MODEL_LOCK = Lock()
 WHISPER_MODEL = None
 DIARIZATION_PIPELINE = None
 MODEL_ACCESS_READY = False
+LOGGER = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title="Jimin OS meeting transcriber", docs_url=None, redoc_url=None)
 
@@ -54,6 +56,7 @@ class AttributedWord:
     end: float
     text: str
     confidence: int | None
+    turn_index: int = -1
 
 
 @dataclass(frozen=True)
@@ -79,12 +82,16 @@ class SpeakerTimeline:
             self.prefix_max_end_indices.append(max_end_index)
 
     def speaker_for(self, start: float, end: float) -> str:
+        return self.attribution_for(start, end)[0]
+
+    def attribution_for(self, start: float, end: float) -> tuple[str, int]:
         if not self.tracks:
-            return "SPEAKER_00"
+            return "SPEAKER_00", -1
 
         first_possible_overlap = bisect_right(self.prefix_max_ends, start)
         after_last_possible_overlap = bisect_left(self.starts, end)
         best_speaker: str | None = None
+        best_index = -1
         best_overlap = 0.0
         for index in range(
             first_possible_overlap,
@@ -95,8 +102,9 @@ class SpeakerTimeline:
             if overlap > best_overlap:
                 best_overlap = overlap
                 best_speaker = track.speaker_key
+                best_index = index
         if best_speaker is not None:
-            return best_speaker
+            return best_speaker, best_index
 
         insertion_index = bisect_left(self.starts, start)
         nearest: list[tuple[float, int, str]] = []
@@ -115,7 +123,10 @@ class SpeakerTimeline:
             nearest.append(
                 (max(0.0, upcoming.start - end), insertion_index, upcoming.speaker_key)
             )
-        return min(nearest)[2] if nearest else "SPEAKER_00"
+        if not nearest:
+            return "SPEAKER_00", -1
+        _, nearest_index, nearest_speaker = min(nearest)
+        return nearest_speaker, nearest_index
 
 
 @app.get("/healthz")
@@ -161,8 +172,8 @@ def _transcribe_file(source: Path, participants: list[str]) -> Transcription:
         beam_size=5,
         word_timestamps=True,
     )
-    diarization = diarizer(str(source))
-    speaker_timeline = SpeakerTimeline(_diarization_tracks(diarization))
+    speaker_tracks = _diarization_tracks(diarizer(str(source)))
+    speaker_timeline = SpeakerTimeline(speaker_tracks)
 
     attributed_words: list[AttributedWord] = []
     for raw in segments:
@@ -192,6 +203,14 @@ def _transcribe_file(source: Path, participants: list[str]) -> Transcription:
         f"[{_timestamp(segment.starts_at_milliseconds)}] "
         f"{names[segment.speaker_key]}: {segment.text}"
         for segment in result_segments
+    )
+    LOGGER.info(
+        "transcription completed participants=%d speakers=%d segments=%d "
+        "diarization_turns=%d",
+        len(participants),
+        len(speakers),
+        len(result_segments),
+        len(speaker_tracks),
     )
     return Transcription(
         transcript=transcript,
@@ -353,13 +372,18 @@ def _attribute_segment_words(
                 continue
             start_value = float(start)
             end_value = max(float(end), start_value + 0.001)
+            speaker_key, turn_index = speaker_timeline.attribution_for(
+                start_value,
+                end_value,
+            )
             attributed.append(
                 AttributedWord(
-                    speaker_key=speaker_timeline.speaker_for(start_value, end_value),
+                    speaker_key=speaker_key,
                     start=start_value,
                     end=end_value,
                     text=text,
                     confidence=_word_confidence(getattr(word, "probability", None)),
+                    turn_index=turn_index,
                 )
             )
     if attributed:
@@ -370,13 +394,15 @@ def _attribute_segment_words(
         return []
     start = float(getattr(raw, "start", 0.0))
     end = max(float(getattr(raw, "end", start + 0.001)), start + 0.001)
+    speaker_key, turn_index = speaker_timeline.attribution_for(start, end)
     return [
         AttributedWord(
-            speaker_key=speaker_timeline.speaker_for(start, end),
+            speaker_key=speaker_key,
             start=start,
             end=end,
             text=f" {text}",
             confidence=_segment_confidence(getattr(raw, "avg_logprob", None)),
+            turn_index=turn_index,
         )
     ]
 
@@ -393,6 +419,7 @@ def _group_attributed_words(words: list[AttributedWord]) -> list[Segment]:
         if (
             groups
             and groups[-1][-1].speaker_key == word.speaker_key
+            and groups[-1][-1].turn_index == word.turn_index
             and word.start - groups[-1][-1].end <= MAX_WORD_GROUP_GAP_SECONDS
             and combined_text_length <= MAX_SEGMENT_TEXT_CHARS
         ):

@@ -215,6 +215,42 @@ class SpeakerAttributionTests(unittest.TestCase):
             ["A", "B", "A"],
         )
 
+    def test_preserves_same_label_diarization_turns_for_manual_review(self) -> None:
+        whisper = FakeWhisper(
+            [
+                whisper_segment(
+                    0.0,
+                    4.0,
+                    "하나 둘 셋 넷",
+                    [
+                        word(0.1, 0.6, " 하나"),
+                        word(1.1, 1.6, " 둘"),
+                        word(2.1, 2.6, " 셋"),
+                        word(3.1, 3.6, " 넷"),
+                    ],
+                )
+            ]
+        )
+        diarizer = FakeDiarizer(
+            FakeAnnotation(
+                [
+                    (0.0, 0.9, "A"),
+                    (1.0, 1.9, "A"),
+                    (2.0, 2.9, "A"),
+                    (3.0, 3.9, "A"),
+                ]
+            )
+        )
+
+        with patch.object(app, "_models", return_value=(whisper, diarizer)):
+            result = app._transcribe_file(Path("meeting.wav"), [])
+
+        self.assertEqual(len(result.speakers), 1)
+        self.assertEqual(
+            [segment.text for segment in result.segments],
+            ["하나", "둘", "셋", "넷"],
+        )
+
     def test_assigns_uncovered_word_to_nearest_speaker(self) -> None:
         timeline = app.SpeakerTimeline(
             app._diarization_tracks(
