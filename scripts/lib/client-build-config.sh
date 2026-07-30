@@ -5,6 +5,51 @@ set -Eeuo pipefail
 JIMIN_OS_DEFAULT_SERVER_URL="https://os.jimin.ai.kr"
 JIMIN_OS_LOCAL_TEST_SERVER_URL="http://127.0.0.1:8080"
 
+sign_macos_app() {
+  local app_path="${1:?macOS app path is required}"
+  local allow_adhoc="${2:-0}"
+  local configured_identity="${JIMIN_OS_CODESIGN_IDENTITY:-}"
+  local identity=""
+  local identities=()
+
+  if [[ -n "${configured_identity}" ]]; then
+    identities+=("${configured_identity}")
+  elif command -v security >/dev/null 2>&1; then
+    while IFS= read -r identity; do
+      [[ -n "${identity}" ]] && identities+=("${identity}")
+    done < <(
+      security find-identity -v -p codesigning 2>/dev/null |
+        awk -F '"' '/"Developer ID Application: / { print $2 }'
+      security find-identity -v -p codesigning 2>/dev/null |
+        awk -F '"' '/"Apple Development: / { print $2 }'
+    )
+  fi
+
+  for identity in "${identities[@]}"; do
+    if codesign --force --preserve-metadata=entitlements \
+      --sign "${identity}" "${app_path}"; then
+      printf 'Signed macOS app with stable identity: %s\n' "${identity}"
+      return 0
+    fi
+    printf 'Could not use macOS signing identity; trying the next available identity.\n' >&2
+  done
+
+  if [[ -n "${configured_identity}" ]]; then
+    printf 'The configured macOS signing identity could not sign the app: %s\n' \
+      "${configured_identity}" >&2
+    return 1
+  fi
+
+  if [[ "${allow_adhoc}" == "1" ]]; then
+    codesign --force --deep --sign - "${app_path}"
+    printf 'Signed local development app ad hoc; Keychain access may require approval again after rebuilding.\n' >&2
+    return 0
+  fi
+
+  printf 'A stable macOS signing identity is required for the production app. Set JIMIN_OS_CODESIGN_IDENTITY or install an Apple Development/Developer ID identity.\n' >&2
+  return 1
+}
+
 require_android_emulator() {
   local serial="${1:?Android serial is required}"
   if [[ "${serial}" != emulator-* ]]; then

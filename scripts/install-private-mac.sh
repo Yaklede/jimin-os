@@ -43,7 +43,7 @@ if [[ -e "${INSTALLED_APP}" ]]; then
   mv "${INSTALLED_APP}" "${previous_app}"
 fi
 ditto "${SOURCE_APP}" "${INSTALLED_APP}"
-codesign --force --deep --sign - "${INSTALLED_APP}"
+sign_macos_app "${INSTALLED_APP}" 0
 codesign --verify --deep --strict --verbose=2 "${INSTALLED_APP}"
 open "${INSTALLED_APP}"
 

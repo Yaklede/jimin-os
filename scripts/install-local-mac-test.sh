@@ -7,6 +7,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SOURCE_APP="${REPO_ROOT}/target/release/bundle/macos/Jimin OS Dev.app"
 INSTALLED_APP="/Applications/Jimin OS Dev.app"
 
+source "${SCRIPT_DIR}/lib/client-build-config.sh"
+
 cd "${REPO_ROOT}"
 
 VITE_API_BASE_URL="${VITE_API_BASE_URL:-http://127.0.0.1:8080}" \
@@ -17,7 +19,7 @@ VITE_API_BASE_URL="${VITE_API_BASE_URL:-http://127.0.0.1:8080}" \
 pkill -f "${INSTALLED_APP}/Contents/MacOS/jimin-desktop" 2>/dev/null || true
 rm -rf "${INSTALLED_APP}"
 ditto "${SOURCE_APP}" "${INSTALLED_APP}"
-codesign --force --deep --sign - "${INSTALLED_APP}"
+sign_macos_app "${INSTALLED_APP}" 1
 codesign --verify --deep --strict --verbose=2 "${INSTALLED_APP}"
 open "${INSTALLED_APP}"
 

@@ -7,8 +7,12 @@ const MAX_SESSION_BYTES: usize = 8 * 1024;
 
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // Tauri injects AppHandle as an owned command argument.
-fn read_device_session(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let entry = session_entry(&app)?;
+async fn read_device_session(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    run_secure_store(move || read_device_session_blocking(&app)).await
+}
+
+fn read_device_session_blocking(app: &tauri::AppHandle) -> Result<Option<String>, String> {
+    let entry = session_entry(app)?;
     match entry.get_password() {
         Ok(value) => Ok(Some(value)),
         Err(KeyringError::NoEntry) => Ok(None),
@@ -18,30 +22,40 @@ fn read_device_session(app: tauri::AppHandle) -> Result<Option<String>, String> 
 
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // Tauri injects AppHandle as an owned command argument.
-fn save_device_session(app: tauri::AppHandle, value: &str) -> Result<(), String> {
+async fn save_device_session(app: tauri::AppHandle, value: String) -> Result<(), String> {
     if value.len() > MAX_SESSION_BYTES {
         return Err("The device session is too large to store safely.".to_owned());
     }
 
-    session_entry(&app)?
-        .set_password(value)
-        .map_err(|_| "The device secure store could not be updated.".to_owned())
+    run_secure_store(move || {
+        session_entry(&app)?
+            .set_password(&value)
+            .map_err(|_| "The device secure store could not be updated.".to_owned())
+    })
+    .await
 }
 
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // Tauri injects AppHandle as an owned command argument.
-fn clear_device_session(app: tauri::AppHandle) -> Result<(), String> {
-    let entry = session_entry(&app)?;
-    match entry.delete_credential() {
-        Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-        Err(_) => Err("The device secure store could not be cleared.".to_owned()),
-    }
+async fn clear_device_session(app: tauri::AppHandle) -> Result<(), String> {
+    run_secure_store(move || {
+        let entry = session_entry(&app)?;
+        match entry.delete_credential() {
+            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+            Err(_) => Err("The device secure store could not be cleared.".to_owned()),
+        }
+    })
+    .await
 }
 
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)] // Tauri injects AppHandle as an owned command argument.
-fn read_or_create_installation_id(app: tauri::AppHandle) -> Result<String, String> {
-    let entry = installation_entry(&app)?;
+async fn read_or_create_installation_id(app: tauri::AppHandle) -> Result<String, String> {
+    run_secure_store(move || read_or_create_installation_id_blocking(&app)).await
+}
+
+fn read_or_create_installation_id_blocking(app: &tauri::AppHandle) -> Result<String, String> {
+    let entry = installation_entry(app)?;
     match entry.get_password() {
         Ok(value) if valid_installation_id(&value) => Ok(value),
         Err(KeyringError::NoEntry) => {
@@ -53,6 +67,16 @@ fn read_or_create_installation_id(app: tauri::AppHandle) -> Result<String, Strin
         }
         Ok(_) | Err(_) => Err("The device identity could not be read safely.".to_owned()),
     }
+}
+
+async fn run_secure_store<T, F>(operation: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(operation)
+        .await
+        .map_err(|_| "The device secure store operation could not finish.".to_owned())?
 }
 
 fn session_entry(app: &tauri::AppHandle) -> Result<Entry, String> {
@@ -117,6 +141,17 @@ mod tests {
             "550e8400-e29b-41d4-a716-446655440000"
         ));
         assert!(!valid_installation_id("not-an-installation-id"));
+    }
+
+    #[test]
+    fn secure_store_commands_do_not_block_the_ui_thread() {
+        const SOURCE: &str = include_str!("lib.rs");
+
+        assert!(SOURCE.contains("async fn read_device_session"));
+        assert!(SOURCE.contains("async fn save_device_session"));
+        assert!(SOURCE.contains("async fn clear_device_session"));
+        assert!(SOURCE.contains("async fn read_or_create_installation_id"));
+        assert!(SOURCE.contains("tauri::async_runtime::spawn_blocking(operation)"));
     }
 
     #[test]
