@@ -14,6 +14,7 @@ import {
   Plus,
   Quote,
   Save,
+  Trash2,
   Users,
   X,
 } from "lucide-react";
@@ -23,6 +24,7 @@ import { createPortal } from "react-dom";
 import {
   cancelMeetingRecording,
   createMeeting,
+  deleteMeeting,
   decideMeetingAction,
   finalizeMeetingRecording,
   fetchMeeting,
@@ -89,9 +91,12 @@ export function MeetingsWorkspace({
   const [savingItemId, setSavingItemId] = useState<string>();
   const [bulkApplying, setBulkApplying] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [success, setSuccess] = useState<string>();
   const [mobileListOpen, setMobileListOpen] = useState(false);
   const [transcriptDirty, setTranscriptDirty] = useState(false);
   const meetingListRef = useRef<HTMLDivElement>(null);
+  const successTimerRef = useRef<number | undefined>(undefined);
   const skeletonVisible = useDelayedSkeleton(loading || detailLoading);
 
   const loadList = useCallback(async () => {
@@ -131,6 +136,13 @@ export function MeetingsWorkspace({
   useEffect(() => {
     void loadList();
   }, [loadList]);
+
+  useEffect(
+    () => () => {
+      if (successTimerRef.current) window.clearTimeout(successTimerRef.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!selectedMeetingId) {
@@ -381,6 +393,43 @@ export function MeetingsWorkspace({
     }
   }
 
+  async function removeSelectedMeeting(): Promise<boolean> {
+    if (!detail) return false;
+    setDeleting(true);
+    setError(undefined);
+    setSuccess(undefined);
+    try {
+      await deleteMeeting(apiBaseUrl, accessToken, detail.id, detail.version);
+      const deletedIndex = meetings.findIndex(
+        (meeting) => meeting.id === detail.id,
+      );
+      const remaining = meetings.filter((meeting) => meeting.id !== detail.id);
+      const next =
+        remaining[
+          Math.min(Math.max(0, deletedIndex), Math.max(0, remaining.length - 1))
+        ];
+      setMeetings(remaining);
+      setDetail(undefined);
+      setSelectedMeetingId(next?.id);
+      setTranscriptDirty(false);
+      setSuccess(copy.meetings.deleteSuccess);
+      if (successTimerRef.current) {
+        window.clearTimeout(successTimerRef.current);
+      }
+      successTimerRef.current = window.setTimeout(
+        () => setSuccess(undefined),
+        5_000,
+      );
+      return true;
+    } catch {
+      await loadDetail(detail.id, true);
+      setError(copy.meetings.deleteErrorRetry);
+      return false;
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
     <section className="meetings-page" aria-labelledby="meetings-title">
       <header className="page-heading meetings-page__heading">
@@ -406,6 +455,12 @@ export function MeetingsWorkspace({
           <button type="button" onClick={() => void loadList()}>
             {copy.actions.checkAgain}
           </button>
+        </div>
+      )}
+      {success && (
+        <div className="workspace-notice" data-tone="success" role="status">
+          <Check aria-hidden="true" />
+          <span>{success}</span>
         </div>
       )}
 
@@ -476,11 +531,13 @@ export function MeetingsWorkspace({
             <MeetingDetailSkeleton visible={skeletonVisible} />
           ) : detail ? (
             <MeetingReview
+              key={detail.id}
               detail={detail}
               busyItemId={decisionBusyId}
               savingItemId={savingItemId}
               bulkApplying={bulkApplying}
               retrying={retrying}
+              deleting={deleting}
               onDecide={decide}
               onUpdate={updateAction}
               onApplyRemaining={applyRemaining}
@@ -489,6 +546,7 @@ export function MeetingsWorkspace({
               onReloadTranscript={reloadTranscript}
               onReanalyzeTranscript={reanalyzeTranscript}
               onTranscriptDirtyChange={setTranscriptDirty}
+              onDelete={removeSelectedMeeting}
             />
           ) : (
             <div className="meeting-detail__empty">
@@ -1281,6 +1339,7 @@ function MeetingReview({
   savingItemId,
   bulkApplying,
   retrying,
+  deleting,
   onDecide,
   onUpdate,
   onApplyRemaining,
@@ -1289,12 +1348,14 @@ function MeetingReview({
   onReloadTranscript,
   onReanalyzeTranscript,
   onTranscriptDirtyChange,
+  onDelete,
 }: {
   detail: MeetingDetail;
   busyItemId: string | undefined;
   savingItemId: string | undefined;
   bulkApplying: boolean;
   retrying: boolean;
+  deleting: boolean;
   onDecide(item: MeetingActionItem, decision: "approve" | "reject"): void;
   onUpdate(
     item: MeetingActionItem,
@@ -1308,7 +1369,45 @@ function MeetingReview({
   onReloadTranscript(): Promise<MeetingDetail>;
   onReanalyzeTranscript(expectedVersion: number): Promise<void>;
   onTranscriptDirtyChange(dirty: boolean): void;
+  onDelete(): Promise<boolean>;
 }) {
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const deleteTriggerRef = useRef<HTMLButtonElement>(null);
+  const deleteSafeActionRef = useRef<HTMLButtonElement>(null);
+  const restoreDeleteTriggerRef = useRef(false);
+
+  useEffect(() => {
+    if (confirmingDelete) {
+      deleteSafeActionRef.current?.focus();
+      return;
+    }
+    if (restoreDeleteTriggerRef.current) {
+      restoreDeleteTriggerRef.current = false;
+      deleteTriggerRef.current?.focus();
+    }
+  }, [confirmingDelete]);
+
+  useEffect(() => {
+    if (!confirmingDelete) return;
+    return registerMobileBackHandler(() => {
+      restoreDeleteTriggerRef.current = true;
+      setConfirmingDelete(false);
+      return true;
+    }, 120);
+  }, [confirmingDelete]);
+
+  useEffect(() => {
+    if (!confirmingDelete) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      restoreDeleteTriggerRef.current = true;
+      setConfirmingDelete(false);
+    }
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [confirmingDelete]);
+
   if (
     ["recording", "transcribing", "queued", "analyzing"].includes(detail.status)
   ) {
@@ -1408,13 +1507,67 @@ function MeetingReview({
             </div>
           )}
         </div>
-        {detail.durationSeconds && (
-          <span className="meeting-review__duration">
-            <Clock3 aria-hidden="true" />
-            {durationLabel(detail.durationSeconds)}
-          </span>
-        )}
+        <div className="meeting-review__header-actions">
+          {detail.durationSeconds && (
+            <span className="meeting-review__duration">
+              <Clock3 aria-hidden="true" />
+              {durationLabel(detail.durationSeconds)}
+            </span>
+          )}
+          <button
+            ref={deleteTriggerRef}
+            className="destructive-quiet-button focus-visible-control"
+            type="button"
+            disabled={deleting}
+            onClick={() => setConfirmingDelete(true)}
+          >
+            <Trash2 aria-hidden="true" />
+            {copy.meetings.deleteMeeting}
+          </button>
+        </div>
       </header>
+
+      {confirmingDelete && (
+        <section
+          className="meeting-review__delete-confirmation"
+          role="group"
+          aria-label={copy.meetings.deleteConfirmTitle}
+        >
+          <div>
+            <strong>{copy.meetings.deleteConfirmTitle}</strong>
+            <p>{copy.meetings.deleteConfirmDescription}</p>
+          </div>
+          <div className="meeting-review__delete-actions">
+            <button
+              ref={deleteSafeActionRef}
+              className="secondary-button focus-visible-control"
+              type="button"
+              disabled={deleting}
+              onClick={() => {
+                restoreDeleteTriggerRef.current = true;
+                setConfirmingDelete(false);
+              }}
+            >
+              {copy.meetings.keepMeeting}
+            </button>
+            <button
+              className="destructive-button focus-visible-control"
+              type="button"
+              disabled={deleting}
+              onClick={() => void onDelete()}
+            >
+              {deleting ? (
+                <LoaderCircle className="spin" aria-hidden="true" />
+              ) : (
+                <Trash2 aria-hidden="true" />
+              )}
+              {deleting
+                ? copy.meetings.deletingMeeting
+                : copy.meetings.deleteMeeting}
+            </button>
+          </div>
+        </section>
+      )}
 
       {detail.summary && (
         <section className="meeting-review__summary">

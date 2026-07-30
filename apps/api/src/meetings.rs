@@ -10,8 +10,8 @@ use jimin_observability::RequestId;
 use jimin_storage::{
     StorageError,
     meetings::{
-        EditedMeetingSpeaker, EditedMeetingTranscriptSegment, Meeting, MeetingActionItem,
-        MeetingActionItemUpdate, MeetingActionKind, MeetingActionStatus,
+        DeleteMeetingOutcome, EditedMeetingSpeaker, EditedMeetingTranscriptSegment, Meeting,
+        MeetingActionItem, MeetingActionItemUpdate, MeetingActionKind, MeetingActionStatus,
         MeetingAnalysisRetryOutcome, MeetingDecision, MeetingDetail, MeetingRecording,
         MeetingRecordingState, MeetingSpeaker, MeetingStatus, MeetingTranscriptEdit,
         MeetingTranscriptSegment, MeetingTranscriptUpdateOutcome, NewMeeting, NewRecordedMeeting,
@@ -25,7 +25,8 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
-    ApiState, auth, invalid_request_response, storage_error_response, unavailable_response,
+    ApiState, auth, error_response, invalid_request_response, storage_error_response,
+    unavailable_response,
 };
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -77,6 +78,12 @@ pub(crate) struct FinalizeMeetingRecordingRequest {
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReanalyzeMeetingRequest {
+    expected_version: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct DeleteMeetingRequest {
     expected_version: i64,
 }
 
@@ -331,7 +338,10 @@ pub(crate) enum MeetingActionStatusResponse {
 pub(crate) fn routes() -> Router<ApiState> {
     Router::new()
         .route("/v1/meetings", get(list_meetings).post(create_meeting))
-        .route("/v1/meetings/{meeting_id}", get(get_meeting))
+        .route(
+            "/v1/meetings/{meeting_id}",
+            get(get_meeting).delete(delete_meeting),
+        )
         .route("/v1/meeting-recordings", post(start_meeting_recording))
         .route(
             "/v1/meeting-recordings/{recording_id}/chunks/{sequence}",
@@ -792,6 +802,60 @@ pub(crate) async fn get_meeting(
             Err(()) => unavailable_response(request_id),
         },
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/meetings/{meeting_id}",
+    tag = "meetings",
+    params(("meeting_id" = Uuid, Path)),
+    request_body = DeleteMeetingRequest,
+    responses((status = 204), (status = 400), (status = 401), (status = 409), (status = 503))
+)]
+pub(crate) async fn delete_meeting(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(meeting_id): Path<Uuid>,
+    Json(body): Json<DeleteMeetingRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    if body.expected_version <= 0 {
+        return invalid_request_response(request_id);
+    }
+    let Some(database) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match database
+        .delete_meeting(
+            principal.identity().user_id(),
+            meeting_id,
+            body.expected_version,
+        )
+        .await
+    {
+        Ok(DeleteMeetingOutcome::Deleted | DeleteMeetingOutcome::AlreadyAbsent) => {
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(DeleteMeetingOutcome::VersionConflict) => error_response(
+            StatusCode::CONFLICT,
+            "meeting.version_conflict",
+            "회의 기록이 다른 곳에서 변경됐어요. 최신 내용을 확인해 주세요.",
+            request_id,
+            false,
+        ),
+        Ok(DeleteMeetingOutcome::Processing) => error_response(
+            StatusCode::CONFLICT,
+            "meeting.processing",
+            "회의를 정리하고 있어요. 녹음을 마치거나 정리가 끝난 뒤 삭제해 주세요.",
+            request_id,
+            false,
+        ),
         Err(error) => storage_error_response(&error, request_id),
     }
 }

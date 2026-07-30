@@ -180,6 +180,26 @@ export async function fetchMeeting(
   return normalizeMeetingDetail(body);
 }
 
+export async function deleteMeeting(
+  baseUrl: string,
+  access: string,
+  meetingId: string,
+  expectedVersion: number,
+): Promise<void> {
+  const response = await fetch(
+    `${normalizeBaseUrl(baseUrl)}/v1/meetings/${encodeURIComponent(meetingId)}`,
+    {
+      method: "DELETE",
+      headers: {
+        ...authHeaders(access),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ expectedVersion }),
+    },
+  );
+  if (!response.ok) throw errorFrom(response.status);
+}
+
 export async function updateMeetingTranscript(
   baseUrl: string,
   access: string,

@@ -8,7 +8,10 @@ use std::{
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::{Database, StorageError, auth::append_change};
+use crate::{
+    Database, StorageError,
+    auth::{append_change, append_delete_change},
+};
 
 const MAX_TITLE_CHARS: usize = 200;
 const MAX_PURPOSE_CHARS: usize = 2_000;
@@ -272,6 +275,14 @@ pub enum MeetingAnalysisRetryOutcome {
     Requeued(Box<Meeting>),
     NotFound,
     Conflict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteMeetingOutcome {
+    Deleted,
+    AlreadyAbsent,
+    VersionConflict,
+    Processing,
 }
 
 pub struct NewMeeting {
@@ -1819,6 +1830,99 @@ impl Database {
             decisions,
             action_items,
         }))
+    }
+
+    /// Deletes one owner-scoped meeting and all meeting-owned source material.
+    ///
+    /// Applied tasks and schedules are independent planning records and remain
+    /// available after their source meeting is deleted. An active recording or
+    /// analysis pipeline must be stopped or allowed to finish before deletion.
+    /// Replaying a completed deletion is idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation or classified persistence error.
+    pub async fn delete_meeting(
+        &self,
+        user_id: Uuid,
+        meeting_id: Uuid,
+        expected_version: i64,
+    ) -> Result<DeleteMeetingOutcome, StorageError> {
+        if !is_v7(user_id) || !is_v7(meeting_id) || expected_version <= 0 {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let current = sqlx::query_as::<_, (i64, String, bool, bool)>(
+            "SELECT meeting.version, meeting.status,
+                    EXISTS (
+                        SELECT 1
+                        FROM meeting_analysis_jobs AS job
+                        WHERE job.meeting_id = meeting.id
+                          AND job.state IN ('queued', 'claimed', 'running')
+                    ) AS analysis_active,
+                    EXISTS (
+                        SELECT 1
+                        FROM meeting_recordings AS recording
+                        WHERE recording.meeting_id = meeting.id
+                          AND recording.state IN ('recording', 'queued', 'claimed', 'running')
+                    ) AS recording_active
+             FROM meetings AS meeting
+             LEFT JOIN workspaces AS workspace
+               ON workspace.id = meeting.workspace_id
+              AND workspace.user_id = meeting.user_id
+             WHERE meeting.id = $1
+               AND meeting.user_id = $2
+               AND (meeting.workspace_id IS NULL OR workspace.id IS NOT NULL)
+             FOR UPDATE OF meeting",
+        )
+        .bind(meeting_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some((current_version, status, analysis_active, recording_active)) = current else {
+            transaction.commit().await.map_err(classify)?;
+            return Ok(DeleteMeetingOutcome::AlreadyAbsent);
+        };
+        if current_version != expected_version {
+            transaction.commit().await.map_err(classify)?;
+            return Ok(DeleteMeetingOutcome::VersionConflict);
+        }
+        if analysis_active
+            || recording_active
+            || matches!(
+                status.as_str(),
+                "recording" | "transcribing" | "queued" | "analyzing"
+            )
+        {
+            transaction.commit().await.map_err(classify)?;
+            return Ok(DeleteMeetingOutcome::Processing);
+        }
+        let deleted_version = sqlx::query_scalar::<_, i64>(
+            "DELETE FROM meetings
+             WHERE id = $1 AND user_id = $2 AND version = $3
+             RETURNING version",
+        )
+        .bind(meeting_id)
+        .bind(user_id)
+        .bind(expected_version)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some(deleted_version) = deleted_version else {
+            transaction.rollback().await.map_err(classify)?;
+            return Ok(DeleteMeetingOutcome::VersionConflict);
+        };
+        append_delete_change(
+            &mut transaction,
+            user_id,
+            "meeting",
+            meeting_id,
+            deleted_version,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        Ok(DeleteMeetingOutcome::Deleted)
     }
 
     /// Atomically replaces one owner's normalized transcript snapshot.

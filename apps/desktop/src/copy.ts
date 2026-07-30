@@ -430,6 +430,16 @@ export const copy = {
     selectDescription:
       "요약과 결정사항, 실행할 일을 한곳에서 확인할 수 있어요.",
     noProject: "프로젝트 연결 안 함",
+    deleteMeeting: "회의 기록 삭제",
+    deleteConfirmTitle: "이 회의 기록을 삭제할까요?",
+    deleteConfirmDescription:
+      "녹음, 회의록, 요약과 회의에서 정리한 항목을 모두 삭제해요. 이미 만든 할 일과 일정은 그대로 남아요.",
+    keepMeeting: "기록 유지",
+    deletingMeeting: "삭제하는 중",
+    deleteSuccess:
+      "회의 기록을 삭제했어요. 이미 만든 할 일과 일정은 그대로 유지돼요.",
+    deleteErrorRetry:
+      "회의 기록을 삭제하지 못했어요. 최신 내용을 다시 불러온 뒤 다시 시도해 주세요.",
     composerEyebrow: "새 회의",
     composerTitle: "회의 내용을 남겨 주세요",
     composerDescription:

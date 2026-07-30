@@ -9033,6 +9033,15 @@ svg {
   font-weight: 650;
 }
 
+.workspace-notice[data-tone="success"] {
+  border-color: color-mix(in srgb, var(--success) 35%, var(--border));
+  background: color-mix(in srgb, var(--success) 10%, var(--surface));
+}
+
+.workspace-notice[data-tone="success"] svg {
+  color: var(--success);
+}
+
 .meetings-layout {
   display: grid;
   grid-template-columns: minmax(260px, 0.31fr) minmax(0, 1fr);
@@ -9498,6 +9507,56 @@ svg {
 .meeting-review__duration svg {
   width: 16px;
   height: 16px;
+}
+
+.meeting-review__header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.meeting-review__header-actions .destructive-quiet-button {
+  min-height: 36px;
+  padding: 6px 9px;
+  font-size: 12px;
+}
+
+.meeting-review__delete-confirmation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 16px 18px;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--danger-tint) 72%, var(--surface));
+}
+
+.meeting-review__delete-confirmation strong {
+  color: var(--text-strong);
+  font-size: 14px;
+}
+
+.meeting-review__delete-confirmation p {
+  max-width: 720px;
+  margin: 5px 0 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.meeting-review__delete-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.meeting-review__delete-actions .secondary-button,
+.meeting-review__delete-actions .destructive-button {
+  min-height: 38px;
+  padding: 7px 11px;
+  font-size: 12px;
 }
 
 .meeting-review__summary {
@@ -13034,6 +13093,28 @@ svg {
 
   .meeting-review__header h2 {
     font-size: 21px;
+  }
+
+  .meeting-review__header-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .meeting-review__delete-confirmation {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .meeting-review__delete-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .meeting-review__delete-actions .secondary-button,
+  .meeting-review__delete-actions .destructive-button {
+    width: 100%;
+    min-height: 44px;
   }
 
   .meeting-review__summary {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createMeeting,
+  deleteMeeting,
   decideMeetingAction,
   fetchMeeting,
   fetchMeetings,
@@ -159,6 +160,23 @@ describe("meeting API", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "https://os.example/v1/meetings/meeting-1/reanalyze",
       expect.objectContaining({ method: "POST" }),
+    );
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      expectedVersion: 7,
+    });
+  });
+
+  it("deletes a meeting with its current optimistic version", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await deleteMeeting("https://os.example/", "access", "meeting-1", 7);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://os.example/v1/meetings/meeting-1",
+      expect.objectContaining({ method: "DELETE" }),
     );
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
       expectedVersion: 7,
