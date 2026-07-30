@@ -66,6 +66,14 @@ class SpeakerTrack:
     speaker_key: str
 
 
+@dataclass(frozen=True)
+class DiarizationSelection:
+    tracks: list[SpeakerTrack]
+    source: str
+    regular_speaker_count: int
+    exclusive_speaker_count: int
+
+
 class SpeakerTimeline:
     def __init__(self, tracks: list[SpeakerTrack]) -> None:
         self.tracks = tracks
@@ -172,7 +180,10 @@ def _transcribe_file(source: Path, participants: list[str]) -> Transcription:
         beam_size=5,
         word_timestamps=True,
     )
-    speaker_tracks = _diarization_tracks(diarizer(str(source)))
+    speaker_options = _diarization_speaker_options(participants)
+    diarization = diarizer(str(source), **speaker_options)
+    diarization_selection = _select_diarization_tracks(diarization)
+    speaker_tracks = diarization_selection.tracks
     speaker_timeline = SpeakerTimeline(speaker_tracks)
 
     attributed_words: list[AttributedWord] = []
@@ -206,11 +217,18 @@ def _transcribe_file(source: Path, participants: list[str]) -> Transcription:
     )
     LOGGER.info(
         "transcription completed participants=%d speakers=%d segments=%d "
-        "diarization_turns=%d",
+        "diarization_turns=%d diarization_source=%s "
+        "regular_speakers=%d exclusive_speakers=%d "
+        "min_speakers=%s max_speakers=%s",
         len(participants),
         len(speakers),
         len(result_segments),
         len(speaker_tracks),
+        diarization_selection.source,
+        diarization_selection.regular_speaker_count,
+        diarization_selection.exclusive_speaker_count,
+        speaker_options.get("min_speakers"),
+        speaker_options.get("max_speakers"),
     )
     return Transcription(
         transcript=transcript,
@@ -334,14 +352,47 @@ def _verify_model_access(token: str) -> None:
 
 
 def _diarization_tracks(diarization) -> list[SpeakerTrack]:
-    exclusive = getattr(diarization, "exclusive_speaker_diarization", None)
-    if exclusive is not None:
-        exclusive_tracks = _sorted_diarization_tracks(exclusive)
-        if exclusive_tracks:
-            return exclusive_tracks
-    return _sorted_diarization_tracks(
+    return _select_diarization_tracks(diarization).tracks
+
+
+def _select_diarization_tracks(diarization) -> DiarizationSelection:
+    regular = _sorted_diarization_tracks(
         getattr(diarization, "speaker_diarization", diarization)
     )
+    exclusive = getattr(diarization, "exclusive_speaker_diarization", None)
+    exclusive_tracks: list[SpeakerTrack] = []
+    if exclusive is not None:
+        exclusive_tracks = _sorted_diarization_tracks(exclusive)
+
+    regular_speaker_count = _speaker_count(regular)
+    exclusive_speaker_count = _speaker_count(exclusive_tracks)
+    if exclusive_tracks and exclusive_speaker_count >= regular_speaker_count:
+        return DiarizationSelection(
+            tracks=exclusive_tracks,
+            source="exclusive",
+            regular_speaker_count=regular_speaker_count,
+            exclusive_speaker_count=exclusive_speaker_count,
+        )
+    return DiarizationSelection(
+        tracks=regular,
+        source="regular",
+        regular_speaker_count=regular_speaker_count,
+        exclusive_speaker_count=exclusive_speaker_count,
+    )
+
+
+def _speaker_count(tracks: list[SpeakerTrack]) -> int:
+    return len({track.speaker_key for track in tracks})
+
+
+def _diarization_speaker_options(participants: list[str]) -> dict[str, int]:
+    participant_count = len(participants)
+    if participant_count < 2:
+        return {}
+    return {
+        "min_speakers": 2,
+        "max_speakers": participant_count,
+    }
 
 
 def _sorted_diarization_tracks(annotation) -> list[SpeakerTrack]:

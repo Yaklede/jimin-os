@@ -49,8 +49,10 @@ class FakeWhisper:
 class FakeDiarizer:
     def __init__(self, output) -> None:
         self.output = output
+        self.kwargs = None
 
-    def __call__(self, _source: str):
+    def __call__(self, _source: str, **kwargs):
+        self.kwargs = kwargs
         return self.output
 
 
@@ -176,6 +178,84 @@ class SpeakerAttributionTests(unittest.TestCase):
             "[00:00] A: 안녕하세요.\n[00:01] B: 네 맞아요.",
         )
 
+    def test_multi_participant_bounds_preserve_short_regular_speaker(self) -> None:
+        whisper = FakeWhisper(
+            [
+                whisper_segment(
+                    0.0,
+                    2.0,
+                    "확인했습니다. 진행할게요.",
+                    [
+                        word(0.0, 0.8, " 확인했습니다."),
+                        word(1.05, 1.6, " 진행할게요."),
+                    ],
+                )
+            ]
+        )
+        diarizer = FakeDiarizer(
+            FakeDiarization(
+                speaker_diarization=FakeAnnotation(
+                    [
+                        (0.0, 1.0, "A"),
+                        (1.0, 1.726, "B"),
+                    ]
+                ),
+                exclusive_speaker_diarization=FakeAnnotation(
+                    [
+                        (0.0, 2.0, "A"),
+                    ]
+                ),
+            )
+        )
+
+        with patch.object(app, "_models", return_value=(whisper, diarizer)):
+            result = app._transcribe_file(
+                Path("meeting.wav"),
+                ["참석자 1", "참석자 2", "참석자 3"],
+            )
+
+        self.assertEqual([speaker.key for speaker in result.speakers], ["A", "B"])
+        self.assertEqual(
+            diarizer.kwargs,
+            {
+                "min_speakers": 2,
+                "max_speakers": 3,
+            },
+        )
+
+    def test_does_not_force_speaker_bounds_for_zero_or_one_participant(
+        self,
+    ) -> None:
+        for participants in ([], ["참석자 1"]):
+            with self.subTest(participants=participants):
+                whisper = FakeWhisper(
+                    [
+                        whisper_segment(
+                            0.0,
+                            1.0,
+                            "확인했습니다.",
+                            [word(0.0, 1.0, " 확인했습니다.")],
+                        )
+                    ]
+                )
+                diarizer = FakeDiarizer(FakeAnnotation([(0.0, 1.0, "A")]))
+
+                with patch.object(
+                    app,
+                    "_models",
+                    return_value=(whisper, diarizer),
+                ):
+                    result = app._transcribe_file(
+                        Path("meeting.wav"),
+                        participants,
+                    )
+
+                self.assertEqual(diarizer.kwargs, {})
+                self.assertEqual(
+                    result.speakers[0].display_name,
+                    participants[0] if participants else None,
+                )
+
     def test_preserves_a_b_a_turn_order_and_unique_speaker_order(self) -> None:
         whisper = FakeWhisper(
             [
@@ -288,6 +368,53 @@ class SpeakerAttributionTests(unittest.TestCase):
             app._diarization_tracks(diarization)[0].speaker_key,
             "A",
         )
+
+    def test_uses_regular_tracks_when_exclusive_loses_a_speaker(self) -> None:
+        diarization = FakeDiarization(
+            speaker_diarization=FakeAnnotation(
+                [
+                    (0.0, 1.0, "A"),
+                    (1.0, 2.0, "B"),
+                ]
+            ),
+            exclusive_speaker_diarization=FakeAnnotation(
+                [
+                    (0.0, 2.0, "A"),
+                ]
+            ),
+        )
+
+        selection = app._select_diarization_tracks(diarization)
+
+        self.assertEqual(selection.source, "regular")
+        self.assertEqual(selection.regular_speaker_count, 2)
+        self.assertEqual(selection.exclusive_speaker_count, 1)
+        self.assertEqual(
+            [track.speaker_key for track in selection.tracks],
+            ["A", "B"],
+        )
+
+    def test_prefers_exclusive_tracks_when_speaker_count_is_preserved(self) -> None:
+        diarization = FakeDiarization(
+            speaker_diarization=FakeAnnotation(
+                [
+                    (0.0, 1.0, "A"),
+                    (1.0, 2.0, "B"),
+                ]
+            ),
+            exclusive_speaker_diarization=FakeAnnotation(
+                [
+                    (0.0, 0.8, "A"),
+                    (0.8, 2.0, "B"),
+                ]
+            ),
+        )
+
+        selection = app._select_diarization_tracks(diarization)
+
+        self.assertEqual(selection.source, "exclusive")
+        self.assertEqual(selection.regular_speaker_count, 2)
+        self.assertEqual(selection.exclusive_speaker_count, 2)
 
     def test_falls_back_to_segment_timestamps_without_words(self) -> None:
         whisper = FakeWhisper(
