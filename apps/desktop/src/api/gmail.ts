@@ -20,6 +20,7 @@ export interface GmailAccount {
   lastSuccessfulSyncAt: string | null;
   lastErrorCode: string | null;
   reauthRequired: boolean;
+  canRetryStoredCredential: boolean;
   version: number;
 }
 
@@ -237,6 +238,7 @@ function isGmailAccount(value: unknown): value is GmailAccount {
       value.lastSuccessfulSyncAt === null) &&
     (typeof value.lastErrorCode === "string" || value.lastErrorCode === null) &&
     typeof value.reauthRequired === "boolean" &&
+    typeof value.canRetryStoredCredential === "boolean" &&
     typeof value.version === "number" &&
     Number.isSafeInteger(value.version) &&
     value.version > 0

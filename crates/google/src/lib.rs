@@ -58,6 +58,7 @@ const MAX_GMAIL_INITIAL_IMPORT_MESSAGES: usize = 100;
 const MAX_GMAIL_LIST_RESPONSE_BYTES: usize = 512 * 1024;
 const MAX_GMAIL_MESSAGE_RESPONSE_BYTES: usize = 512 * 1024;
 const MAX_GMAIL_PROFILE_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_GMAIL_ERROR_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_GMAIL_HISTORY_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_GMAIL_HISTORY_RECORDS_PER_PAGE: usize = 500;
 const MAX_GMAIL_HISTORY_EVENTS_PER_PAGE: usize = 5_000;
@@ -85,6 +86,10 @@ pub enum GoogleAuthError {
     ProviderUnavailable,
     #[error("Google Gmail history ID expired")]
     GmailHistoryIdExpired,
+    #[error("Google Gmail API is not enabled for the OAuth project")]
+    GmailApiNotEnabled,
+    #[error("Google Gmail permission is denied for the linked account")]
+    GmailPermissionDenied,
     #[error("Google Calendar incremental synchronization token expired")]
     CalendarSyncTokenExpired,
     #[error("Google Calendar event changed before the requested mutation")]
@@ -508,6 +513,8 @@ pub struct GoogleGmailHistoryLabelChange {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GmailMessageFetchError {
     Credential,
+    ApiNotEnabled,
+    PermissionDenied,
     Rejected,
     NotFound,
     Transient,
@@ -1099,7 +1106,7 @@ impl GoogleCalendarAdapter {
             .await
             .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
         if !response.status().is_success() {
-            return Err(classify_provider_status(response.status().as_u16()));
+            return Err(classify_gmail_provider_response(response).await);
         }
         if !is_json_response(&response) {
             return Err(GoogleAuthError::ProviderUnavailable);
@@ -1134,8 +1141,11 @@ impl GoogleCalendarAdapter {
             .send()
             .await
             .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
-        if let Some(error) = classify_gmail_history_status(response.status().as_u16()) {
-            return Err(error);
+        if !response.status().is_success() {
+            if response.status().as_u16() == 404 {
+                return Err(GoogleAuthError::GmailHistoryIdExpired);
+            }
+            return Err(classify_gmail_provider_response(response).await);
         }
         if !is_json_response(&response) {
             return Err(GoogleAuthError::ProviderUnavailable);
@@ -1216,7 +1226,7 @@ impl GoogleCalendarAdapter {
                 .await
                 .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
             if !response.status().is_success() {
-                return Err(classify_provider_status(response.status().as_u16()));
+                return Err(classify_gmail_provider_response(response).await);
             }
             if !is_json_response(&response) {
                 return Err(GoogleAuthError::ProviderUnavailable);
@@ -1295,6 +1305,10 @@ async fn fetch_normalized_gmail_message(
         Err(GmailMessageFetchError::Credential | GmailMessageFetchError::Rejected) => {
             Err(GoogleAuthError::ProviderRejected)
         }
+        Err(GmailMessageFetchError::ApiNotEnabled) => Err(GoogleAuthError::GmailApiNotEnabled),
+        Err(GmailMessageFetchError::PermissionDenied) => {
+            Err(GoogleAuthError::GmailPermissionDenied)
+        }
         Err(GmailMessageFetchError::Transient) => Err(GoogleAuthError::ProviderUnavailable),
     }
 }
@@ -1317,6 +1331,10 @@ async fn fetch_gmail_metadata_fallback(
         Err(GmailMessageFetchError::Malformed | GmailMessageFetchError::NotFound) => Ok(None),
         Err(GmailMessageFetchError::Credential | GmailMessageFetchError::Rejected) => {
             Err(GoogleAuthError::ProviderRejected)
+        }
+        Err(GmailMessageFetchError::ApiNotEnabled) => Err(GoogleAuthError::GmailApiNotEnabled),
+        Err(GmailMessageFetchError::PermissionDenied) => {
+            Err(GoogleAuthError::GmailPermissionDenied)
         }
         Err(GmailMessageFetchError::Transient) => Err(GoogleAuthError::ProviderUnavailable),
     }
@@ -2078,6 +2096,25 @@ struct GoogleRefreshTokenResponse {
 }
 
 #[derive(Deserialize)]
+struct GoogleApiErrorEnvelope {
+    error: Option<GoogleApiErrorBody>,
+}
+
+#[derive(Deserialize)]
+struct GoogleApiErrorBody {
+    status: Option<String>,
+    #[serde(default)]
+    errors: Vec<GoogleApiErrorReason>,
+    #[serde(default)]
+    details: Vec<GoogleApiErrorReason>,
+}
+
+#[derive(Deserialize)]
+struct GoogleApiErrorReason {
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GoogleCalendarListPage {
     #[serde(default)]
@@ -2801,33 +2838,37 @@ async fn fetch_gmail_message(
         .send()
         .await
         .map_err(|_| GmailMessageFetchError::Transient)?;
-    classify_gmail_message_status(response.status().as_u16())?;
+    if !response.status().is_success() {
+        if response.status().as_u16() == 404 {
+            return Err(GmailMessageFetchError::NotFound);
+        }
+        return Err(gmail_message_fetch_error(
+            classify_gmail_provider_response(response).await,
+        ));
+    }
     if !is_json_response(&response) {
         return Err(GmailMessageFetchError::Malformed);
     }
-    if response
-        .content_length()
-        .is_some_and(|size| size > MAX_GMAIL_MESSAGE_RESPONSE_BYTES as u64)
-    {
-        return Err(GmailMessageFetchError::Malformed);
-    }
-    let payload = response
-        .bytes()
+    let payload = bounded_body(response, MAX_GMAIL_MESSAGE_RESPONSE_BYTES)
         .await
-        .map_err(|_| GmailMessageFetchError::Transient)?;
-    if payload.len() > MAX_GMAIL_MESSAGE_RESPONSE_BYTES {
-        return Err(GmailMessageFetchError::Malformed);
-    }
+        .map_err(gmail_message_body_error)?;
     serde_json::from_slice(&payload).map_err(|_| GmailMessageFetchError::Malformed)
 }
 
-const fn classify_gmail_message_status(status: u16) -> Result<(), GmailMessageFetchError> {
-    match status {
-        200..=299 => Ok(()),
-        401 | 403 => Err(GmailMessageFetchError::Credential),
-        404 => Err(GmailMessageFetchError::NotFound),
-        429 | 500..=599 => Err(GmailMessageFetchError::Transient),
-        _ => Err(GmailMessageFetchError::Rejected),
+const fn gmail_message_body_error(error: BoundedBodyError) -> GmailMessageFetchError {
+    match error {
+        BoundedBodyError::TooLarge => GmailMessageFetchError::Malformed,
+        BoundedBodyError::Transport => GmailMessageFetchError::Transient,
+    }
+}
+
+const fn gmail_message_fetch_error(error: GoogleAuthError) -> GmailMessageFetchError {
+    match error {
+        GoogleAuthError::GmailApiNotEnabled => GmailMessageFetchError::ApiNotEnabled,
+        GoogleAuthError::GmailPermissionDenied => GmailMessageFetchError::PermissionDenied,
+        GoogleAuthError::ProviderUnavailable => GmailMessageFetchError::Transient,
+        GoogleAuthError::ProviderRejected => GmailMessageFetchError::Credential,
+        _ => GmailMessageFetchError::Rejected,
     }
 }
 
@@ -3378,23 +3419,53 @@ fn valid_url_safe_value(value: &str, maximum_bytes: usize) -> bool {
 }
 
 async fn bounded_body(
-    response: Response,
+    mut response: Response,
     maximum_bytes: usize,
-) -> Result<Vec<u8>, GoogleAuthError> {
+) -> Result<Vec<u8>, BoundedBodyError> {
     if response
         .content_length()
         .is_some_and(|size| size > maximum_bytes as u64)
     {
-        return Err(GoogleAuthError::ProviderUnavailable);
+        return Err(BoundedBodyError::TooLarge);
     }
-    let body = response
-        .bytes()
+    let initial_capacity = response
+        .content_length()
+        .and_then(|size| usize::try_from(size).ok())
+        .unwrap_or_default()
+        .min(maximum_bytes);
+    let mut body = Vec::with_capacity(initial_capacity);
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
-    if body.len() > maximum_bytes {
-        return Err(GoogleAuthError::ProviderUnavailable);
+        .map_err(|_| BoundedBodyError::Transport)?
+    {
+        append_bounded_chunk(&mut body, &chunk, maximum_bytes)?;
     }
-    Ok(body.to_vec())
+    Ok(body)
+}
+
+fn append_bounded_chunk(
+    body: &mut Vec<u8>,
+    chunk: &[u8],
+    maximum_bytes: usize,
+) -> Result<(), BoundedBodyError> {
+    if chunk.len() > maximum_bytes.saturating_sub(body.len()) {
+        return Err(BoundedBodyError::TooLarge);
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundedBodyError {
+    TooLarge,
+    Transport,
+}
+
+impl From<BoundedBodyError> for GoogleAuthError {
+    fn from(_: BoundedBodyError) -> Self {
+        Self::ProviderUnavailable
+    }
 }
 
 fn cache_ttl(response: &Response) -> Duration {
@@ -3526,6 +3597,92 @@ fn classify_provider_status(status: u16) -> GoogleAuthError {
     }
 }
 
+async fn classify_gmail_provider_response(response: Response) -> GoogleAuthError {
+    let status = response.status().as_u16();
+    if status != 403 || !is_json_response(&response) {
+        return classify_gmail_provider_status(status, None);
+    }
+    let Ok(payload) = bounded_body(response, MAX_GMAIL_ERROR_RESPONSE_BYTES).await else {
+        return classify_gmail_provider_status(status, None);
+    };
+    let error = serde_json::from_slice::<GoogleApiErrorEnvelope>(&payload)
+        .ok()
+        .and_then(|envelope| envelope.error);
+    classify_gmail_provider_status(status, error.as_ref())
+}
+
+fn classify_gmail_provider_status(
+    status: u16,
+    error: Option<&GoogleApiErrorBody>,
+) -> GoogleAuthError {
+    match status {
+        429 | 500..=599 => GoogleAuthError::ProviderUnavailable,
+        403 if gmail_api_is_disabled(error) => GoogleAuthError::GmailApiNotEnabled,
+        403 if gmail_quota_is_exhausted(error) => GoogleAuthError::ProviderUnavailable,
+        403 => GoogleAuthError::GmailPermissionDenied,
+        _ => GoogleAuthError::ProviderRejected,
+    }
+}
+
+fn gmail_api_is_disabled(error: Option<&GoogleApiErrorBody>) -> bool {
+    let Some(error) = error else {
+        return false;
+    };
+    error
+        .errors
+        .iter()
+        .chain(&error.details)
+        .filter_map(|entry| entry.reason.as_deref())
+        .any(|reason| {
+            matches!(
+                reason.to_ascii_uppercase().as_str(),
+                "ACCESSNOTCONFIGURED"
+                    | "SERVICE_DISABLED"
+                    | "SERVICE_NOT_ACTIVATED"
+                    | "API_DISABLED"
+            )
+        })
+        || error.status.as_deref() == Some("SERVICE_DISABLED")
+}
+
+fn gmail_quota_is_exhausted(error: Option<&GoogleApiErrorBody>) -> bool {
+    let Some(error) = error else {
+        return false;
+    };
+    error
+        .errors
+        .iter()
+        .chain(&error.details)
+        .filter_map(|entry| entry.reason.as_deref())
+        .map(normalized_google_reason)
+        .any(|reason| {
+            matches!(
+                reason.as_str(),
+                "DAILYLIMITEXCEEDED"
+                    | "DAILYLIMITEXCEEDEDUNREG"
+                    | "QUOTAEXCEEDED"
+                    | "RATELIMITEXCEEDED"
+                    | "RATELIMITEXCEEDEDUNREG"
+                    | "RESOURCEEXHAUSTED"
+                    | "SHARINGRATELIMITEXCEEDED"
+                    | "USERRATELIMITEXCEEDED"
+            )
+        })
+        || matches!(
+            error.status.as_deref(),
+            Some("RESOURCE_EXHAUSTED" | "QUOTA_EXCEEDED")
+        )
+}
+
+fn normalized_google_reason(reason: &str) -> String {
+    reason
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
+#[cfg(test)]
 const fn classify_gmail_history_status(status: u16) -> Option<GoogleAuthError> {
     match status {
         200..=299 => None,
@@ -4082,6 +4239,127 @@ mod tests {
     }
 
     #[test]
+    fn gmail_provider_error_distinguishes_disabled_api_from_account_permission() {
+        let disabled: GoogleApiErrorEnvelope = serde_json::from_str(
+            r#"{
+                "error": {
+                    "code": 403,
+                    "status": "PERMISSION_DENIED",
+                    "details": [{
+                        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                        "reason": "SERVICE_DISABLED",
+                        "domain": "googleapis.com",
+                        "metadata": {
+                            "consumer": "projects/redacted",
+                            "service": "gmail.googleapis.com"
+                        }
+                    }]
+                }
+            }"#,
+        )
+        .expect("disabled Gmail API error should deserialize");
+        let permission: GoogleApiErrorEnvelope = serde_json::from_str(
+            r#"{
+                "error": {
+                    "code": 403,
+                    "status": "PERMISSION_DENIED",
+                    "errors": [{
+                        "domain": "global",
+                        "reason": "insufficientPermissions"
+                    }]
+                }
+            }"#,
+        )
+        .expect("Gmail permission error should deserialize");
+
+        assert_eq!(
+            classify_gmail_provider_status(403, disabled.error.as_ref()),
+            GoogleAuthError::GmailApiNotEnabled
+        );
+        assert_eq!(
+            classify_gmail_provider_status(403, permission.error.as_ref()),
+            GoogleAuthError::GmailPermissionDenied
+        );
+        assert_eq!(
+            classify_gmail_provider_status(401, permission.error.as_ref()),
+            GoogleAuthError::ProviderRejected
+        );
+        assert_eq!(
+            classify_gmail_provider_status(503, disabled.error.as_ref()),
+            GoogleAuthError::ProviderUnavailable
+        );
+    }
+
+    #[test]
+    fn gmail_provider_error_treats_quota_reasons_as_retryable() {
+        for reason in [
+            "dailyLimitExceeded",
+            "dailyLimitExceededUnreg",
+            "quotaExceeded",
+            "rateLimitExceeded",
+            "rateLimitExceededUnreg",
+            "resource_exhausted",
+            "sharingRateLimitExceeded",
+            "userRateLimitExceeded",
+        ] {
+            let payload = format!(
+                r#"{{
+                    "error": {{
+                        "status": "PERMISSION_DENIED",
+                        "errors": [{{ "reason": "{reason}" }}]
+                    }}
+                }}"#
+            );
+            let envelope: GoogleApiErrorEnvelope =
+                serde_json::from_str(&payload).expect("quota error should deserialize");
+
+            assert_eq!(
+                classify_gmail_provider_status(403, envelope.error.as_ref()),
+                GoogleAuthError::ProviderUnavailable,
+                "{reason} must be retried rather than forcing Gmail reauthorization"
+            );
+        }
+
+        let resource_exhausted: GoogleApiErrorEnvelope = serde_json::from_str(
+            r#"{
+                "error": {
+                    "status": "RESOURCE_EXHAUSTED",
+                    "details": []
+                }
+            }"#,
+        )
+        .expect("resource exhausted status should deserialize");
+        assert_eq!(
+            classify_gmail_provider_status(403, resource_exhausted.error.as_ref()),
+            GoogleAuthError::ProviderUnavailable
+        );
+    }
+
+    #[test]
+    fn bounded_chunk_collection_stops_before_exceeding_the_limit() {
+        let mut body = Vec::new();
+        append_bounded_chunk(&mut body, b"1234", 8).expect("first chunk should fit");
+        append_bounded_chunk(&mut body, b"5678", 8).expect("exact limit should fit");
+        assert_eq!(body, b"12345678");
+        assert_eq!(
+            append_bounded_chunk(&mut body, b"9", 8),
+            Err(BoundedBodyError::TooLarge)
+        );
+        assert_eq!(
+            body, b"12345678",
+            "the oversized chunk must not be buffered"
+        );
+        assert_eq!(
+            gmail_message_body_error(BoundedBodyError::TooLarge),
+            GmailMessageFetchError::Malformed
+        );
+        assert_eq!(
+            gmail_message_body_error(BoundedBodyError::Transport),
+            GmailMessageFetchError::Transient
+        );
+    }
+
+    #[test]
     fn gmail_history_ids_and_page_tokens_are_bounded() {
         assert!(
             validate_gmail_history_id("18446744073709551615", GoogleAuthError::InvalidRequest)
@@ -4113,31 +4391,26 @@ mod tests {
     }
 
     #[test]
-    fn gmail_message_fetch_status_separates_credentials_races_and_transient_failures() {
-        assert_eq!(classify_gmail_message_status(200), Ok(()));
+    fn gmail_message_fetch_status_separates_credentials_permissions_and_transient_failures() {
         assert_eq!(
-            classify_gmail_message_status(401),
-            Err(GmailMessageFetchError::Credential)
+            gmail_message_fetch_error(classify_gmail_provider_status(401, None)),
+            GmailMessageFetchError::Credential
         );
         assert_eq!(
-            classify_gmail_message_status(403),
-            Err(GmailMessageFetchError::Credential)
+            gmail_message_fetch_error(classify_gmail_provider_status(403, None)),
+            GmailMessageFetchError::PermissionDenied
         );
         assert_eq!(
-            classify_gmail_message_status(404),
-            Err(GmailMessageFetchError::NotFound)
+            gmail_message_fetch_error(classify_gmail_provider_status(429, None)),
+            GmailMessageFetchError::Transient
         );
         assert_eq!(
-            classify_gmail_message_status(429),
-            Err(GmailMessageFetchError::Transient)
+            gmail_message_fetch_error(classify_gmail_provider_status(503, None)),
+            GmailMessageFetchError::Transient
         );
         assert_eq!(
-            classify_gmail_message_status(503),
-            Err(GmailMessageFetchError::Transient)
-        );
-        assert_eq!(
-            classify_gmail_message_status(422),
-            Err(GmailMessageFetchError::Rejected)
+            gmail_message_fetch_error(classify_gmail_provider_status(422, None)),
+            GmailMessageFetchError::Credential
         );
     }
 

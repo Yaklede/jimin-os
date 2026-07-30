@@ -25,7 +25,7 @@ use jimin_storage::{
     gmail::{
         ApplyGmailHistorySync, ApplyGmailHistorySyncOutcome, CompleteGmailOAuthAuthorization,
         CreateGmailOAuthAuthorization, DeleteGmailAccountOutcome, EncryptedGmailSecret,
-        GmailHistorySyncMode, ProviderGmailMessage,
+        GmailAccountStatus, GmailHistorySyncMode, ProviderGmailMessage,
     },
     gmail_inflow::{
         GmailInflowAnalysisResult, GmailInflowClassification, GmailInflowStatus,
@@ -8543,7 +8543,7 @@ async fn gmail_history_cursor_is_atomic_idempotent_and_workspace_scoped() {
             .expect("valid rebuild should persist"),
         ApplyGmailHistorySyncOutcome::Applied(_)
     ));
-    database
+    let retryable_account = database
         .mark_gmail_sync_failure(
             personal_account,
             owner.profile.id,
@@ -8552,7 +8552,9 @@ async fn gmail_history_cursor_is_atomic_idempotent_and_workspace_scoped() {
             false,
         )
         .await
-        .expect("retryable failure should persist");
+        .expect("retryable failure should persist")
+        .expect("retryable account should remain visible");
+    assert_eq!(retryable_account.status, GmailAccountStatus::Error);
     assert_eq!(
         database
             .gmail_sync_connection(personal_account, owner.profile.id, personal.id)
@@ -8571,6 +8573,146 @@ async fn gmail_history_cursor_is_atomic_idempotent_and_workspace_scoped() {
             .expect("company connection should exist")
             .provider_history_id,
         None
+    );
+
+    database
+        .mark_gmail_sync_failure(
+            personal_account,
+            owner.profile.id,
+            personal.id,
+            "gmail.authorization_rejected",
+            true,
+        )
+        .await
+        .expect("legacy authorization failure should persist");
+    assert!(
+        database
+            .gmail_account_for_user(owner.profile.id, personal_account)
+            .await
+            .expect("legacy account metadata should load")
+            .expect("legacy account should remain visible")
+            .can_retry_stored_credential,
+        "an account with a complete encrypted refresh credential may offer one explicit retry"
+    );
+    for failure_code in ["gmail.provider_unavailable", "gmail.api_not_enabled"] {
+        let preserved_account = database
+            .mark_gmail_sync_failure(
+                personal_account,
+                owner.profile.id,
+                personal.id,
+                failure_code,
+                false,
+            )
+            .await
+            .expect("manual recovery failure should persist")
+            .expect("reauth account should remain visible");
+        assert_eq!(
+            preserved_account.status,
+            GmailAccountStatus::ReauthRequired,
+            "{failure_code} must not cross the existing reauthorization boundary"
+        );
+        assert_eq!(
+            preserved_account.last_error_code.as_deref(),
+            Some(failure_code)
+        );
+    }
+    assert!(
+        database
+            .gmail_sync_connection(personal_account, owner.profile.id, personal.id)
+            .await
+            .expect("automatic eligibility should load safely")
+            .is_none(),
+        "periodic synchronization must continue excluding reauth-required accounts"
+    );
+    let recovery_connection = database
+        .gmail_manual_sync_connection(personal_account, owner.profile.id, personal.id)
+        .await
+        .expect("manual recovery connection should load")
+        .expect("stored refresh credentials should be available for one explicit retry");
+    assert_eq!(
+        recovery_connection.provider_history_id.as_deref(),
+        Some("200")
+    );
+    assert!(
+        database
+            .active_gmail_sync_identities()
+            .await
+            .expect("periodic identities should load")
+            .iter()
+            .all(|identity| identity.account_id != personal_account),
+        "manual recovery must not make the account eligible for the periodic worker"
+    );
+    assert!(matches!(
+        database
+            .apply_gmail_history_sync(&ApplyGmailHistorySync {
+                account_id: personal_account,
+                user_id: owner.profile.id,
+                workspace_id: personal.id,
+                mode: GmailHistorySyncMode::Incremental,
+                expected_provider_history_id: Some("200"),
+                next_provider_history_id: "201",
+                messages: &[],
+                skipped_message_count: 0,
+            })
+            .await,
+        Err(StorageError::InvalidConfiguration)
+    ));
+    let recovered = database
+        .apply_manual_gmail_history_sync(&ApplyGmailHistorySync {
+            account_id: personal_account,
+            user_id: owner.profile.id,
+            workspace_id: personal.id,
+            mode: GmailHistorySyncMode::Incremental,
+            expected_provider_history_id: Some("200"),
+            next_provider_history_id: "201",
+            messages: &[],
+            skipped_message_count: 0,
+        })
+        .await
+        .expect("manual recovery should apply after provider validation");
+    assert!(matches!(
+        recovered,
+        ApplyGmailHistorySyncOutcome::Applied(_)
+    ));
+    assert_eq!(
+        database
+            .gmail_sync_connection(personal_account, owner.profile.id, personal.id)
+            .await
+            .expect("recovered account should be eligible again")
+            .expect("successful manual recovery should reactivate the account")
+            .provider_history_id
+            .as_deref(),
+        Some("201")
+    );
+    sqlx::query(
+        "\
+        UPDATE gmail_accounts
+        SET status = 'reauth_required',
+            refresh_token_ciphertext = NULL,
+            refresh_token_nonce = NULL,
+            encryption_key_version = NULL,
+            last_error_code = 'gmail.authorization_rejected'
+        WHERE id = $1 AND user_id = $2 AND workspace_id = $3",
+    )
+    .bind(company_account)
+    .bind(owner.profile.id)
+    .bind(company.id)
+    .execute(&pool)
+    .await
+    .expect("migration-style account should be configurable");
+    let migrated_account = database
+        .gmail_account_for_user(owner.profile.id, company_account)
+        .await
+        .expect("migration-style account metadata should load")
+        .expect("migration-style account should remain visible");
+    assert!(!migrated_account.can_retry_stored_credential);
+    assert!(
+        database
+            .gmail_manual_sync_connection(company_account, owner.profile.id, company.id)
+            .await
+            .expect("credential-less recovery lookup should remain safe")
+            .is_none(),
+        "a migration-created account without a credential must reconnect instead of retrying"
     );
     database.close().await;
     pool.close().await;

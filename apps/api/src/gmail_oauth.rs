@@ -352,6 +352,10 @@ pub enum GmailOAuthError {
     ProviderUnavailable,
     #[error("Google did not grant the Gmail read permission")]
     RequiredScopeMissing,
+    #[error("Gmail API is not enabled for the configured Google project")]
+    ApiNotEnabled,
+    #[error("The linked Google account cannot grant Gmail read permission")]
+    PermissionDenied,
     #[error("Google returned permissions outside the Gmail identity boundary")]
     ScopeBoundaryViolation,
     #[error("Google account does not match the Gmail account being reconnected")]
@@ -369,6 +373,8 @@ impl GmailOAuthError {
             Self::ProviderRejected => "gmail.authorization_rejected",
             Self::ProviderUnavailable => "gmail.provider_unavailable",
             Self::RequiredScopeMissing => "gmail.required_scope_missing",
+            Self::ApiNotEnabled => "gmail.api_not_enabled",
+            Self::PermissionDenied => "gmail.permission_denied",
             Self::ScopeBoundaryViolation => "gmail.scope_boundary_violation",
             Self::IdentityMismatch => "gmail.account_mismatch",
             Self::Encryption => "gmail.credential_encryption_failed",
@@ -387,6 +393,7 @@ impl GmailOAuthError {
             Self::InvalidCallback
                 | Self::ProviderRejected
                 | Self::RequiredScopeMissing
+                | Self::PermissionDenied
                 | Self::ScopeBoundaryViolation
                 | Self::IdentityMismatch
                 | Self::Encryption
@@ -398,6 +405,8 @@ impl GmailOAuthError {
             GoogleAuthError::ProviderUnavailable | GoogleAuthError::GmailHistoryIdExpired => {
                 Self::ProviderUnavailable
             }
+            GoogleAuthError::GmailApiNotEnabled => Self::ApiNotEnabled,
+            GoogleAuthError::GmailPermissionDenied => Self::PermissionDenied,
             GoogleAuthError::InvalidRequest | GoogleAuthError::ProviderRejected => {
                 Self::ProviderRejected
             }
@@ -554,7 +563,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use jimin_google::{
-        GoogleGmailHistoryChange, GoogleGmailHistoryLabelChange, GoogleGmailHistoryMessage,
+        GoogleAuthError, GoogleGmailHistoryChange, GoogleGmailHistoryLabelChange,
+        GoogleGmailHistoryMessage,
     };
     use secrecy::SecretString;
     use uuid::Uuid;
@@ -626,6 +636,22 @@ mod tests {
                 "openid".to_owned(),
             ])
         );
+    }
+
+    #[test]
+    fn gmail_provider_failures_keep_server_setup_separate_from_account_permission() {
+        let api_not_enabled = GmailOAuthError::from_google(GoogleAuthError::GmailApiNotEnabled);
+        let permission_denied =
+            GmailOAuthError::from_google(GoogleAuthError::GmailPermissionDenied);
+        let quota_exhausted = GmailOAuthError::from_google(GoogleAuthError::ProviderUnavailable);
+
+        assert_eq!(api_not_enabled.failure_code(), "gmail.api_not_enabled");
+        assert!(!api_not_enabled.reauth_required());
+        assert_eq!(permission_denied.failure_code(), "gmail.permission_denied");
+        assert!(permission_denied.reauth_required());
+        assert_eq!(quota_exhausted.failure_code(), "gmail.provider_unavailable");
+        assert!(quota_exhausted.retryable());
+        assert!(!quota_exhausted.reauth_required());
     }
 
     #[test]

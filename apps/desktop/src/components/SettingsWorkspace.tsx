@@ -989,6 +989,8 @@ export function SettingsWorkspace({
                             account.reauthRequired ||
                             account.status === "reauth_required" ||
                             account.status === "revoked";
+                          const canManuallySync =
+                            gmailManualSyncAvailable(account);
                           const hasProblem =
                             Boolean(account.lastErrorCode) ||
                             account.status === "error";
@@ -1064,6 +1066,32 @@ export function SettingsWorkspace({
                                 </div>
                               ) : (
                                 <div className="settings-gmail__account-actions">
+                                  {canManuallySync ? (
+                                    <button
+                                      className="text-button focus-visible-control"
+                                      type="button"
+                                      disabled={
+                                        !gmailAvailable ||
+                                        gmailLoading ||
+                                        accountBusy
+                                      }
+                                      onClick={() =>
+                                        void onSyncGmailAccount(account.id)
+                                      }
+                                    >
+                                      {syncing ? (
+                                        <LoaderCircle
+                                          className="spin"
+                                          aria-hidden="true"
+                                        />
+                                      ) : (
+                                        <RefreshCw aria-hidden="true" />
+                                      )}
+                                      {syncing
+                                        ? copy.settings.gmailSyncing
+                                        : copy.settings.gmailSync}
+                                    </button>
+                                  ) : null}
                                   {needsReconnect ? (
                                     <button
                                       className="text-button focus-visible-control"
@@ -1092,32 +1120,7 @@ export function SettingsWorkspace({
                                         ? copy.settings.gmailOpening
                                         : copy.settings.gmailReconnect}
                                     </button>
-                                  ) : (
-                                    <button
-                                      className="text-button focus-visible-control"
-                                      type="button"
-                                      disabled={
-                                        !gmailAvailable ||
-                                        gmailLoading ||
-                                        accountBusy
-                                      }
-                                      onClick={() =>
-                                        void onSyncGmailAccount(account.id)
-                                      }
-                                    >
-                                      {syncing ? (
-                                        <LoaderCircle
-                                          className="spin"
-                                          aria-hidden="true"
-                                        />
-                                      ) : (
-                                        <RefreshCw aria-hidden="true" />
-                                      )}
-                                      {syncing
-                                        ? copy.settings.gmailSyncing
-                                        : copy.settings.gmailSync}
-                                    </button>
-                                  )}
+                                  ) : null}
                                   <button
                                     ref={(element) => {
                                       if (element) {
@@ -1503,8 +1506,14 @@ export function groupGmailAccounts(
 }
 
 export function gmailAccountDetail(account: GmailAccount): string {
-  if (account.reauthRequired || account.status === "reauth_required") {
-    return copy.settings.gmailNeedsReconnect;
+  if (account.lastErrorCode === "gmail.api_not_enabled") {
+    return copy.settings.gmailApiNotEnabled;
+  }
+  if (
+    account.lastErrorCode === "gmail.permission_denied" ||
+    account.lastErrorCode === "gmail.required_scope_missing"
+  ) {
+    return copy.settings.gmailPermissionDenied;
   }
   if (account.status === "connecting") {
     return copy.settings.gmailConnecting;
@@ -1515,6 +1524,12 @@ export function gmailAccountDetail(account: GmailAccount): string {
   if (account.status === "revoked") {
     return copy.settings.gmailRevoked;
   }
+  if (account.reauthRequired || account.status === "reauth_required") {
+    if (!account.canRetryStoredCredential) {
+      return copy.settings.gmailReconnectRequired;
+    }
+    return copy.settings.gmailNeedsReconnect;
+  }
   if (account.status === "error" || account.lastErrorCode) {
     return copy.settings.gmailSyncProblem;
   }
@@ -1523,6 +1538,13 @@ export function gmailAccountDetail(account: GmailAccount): string {
   }
   return copy.settings.gmailLastSynced(
     formatGmailSyncTime(account.lastSuccessfulSyncAt),
+  );
+}
+
+export function gmailManualSyncAvailable(account: GmailAccount): boolean {
+  return (
+    account.canRetryStoredCredential &&
+    !["connecting", "revoking", "revoked"].includes(account.status)
   );
 }
 

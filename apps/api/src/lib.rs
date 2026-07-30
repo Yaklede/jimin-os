@@ -720,6 +720,7 @@ pub struct GmailAccountResponse {
     last_successful_sync_at: Option<String>,
     last_error_code: Option<String>,
     reauth_required: bool,
+    can_retry_stored_credential: bool,
     version: i64,
 }
 
@@ -1524,13 +1525,13 @@ struct DeleteTaskRequest {
     expected_version: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct ErrorEnvelope {
     error: ErrorBody,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct ErrorBody {
     code: &'static str,
@@ -1691,6 +1692,8 @@ pub(crate) fn error_response(
         StartGoogleCalendarAuthorizationResponse,
         GmailAccountResponse,
         GmailAccountListResponse,
+        ErrorEnvelope,
+        ErrorBody,
         StartGmailAuthorizationRequest,
         DeleteGmailAccountQuery,
         GmailInflowCandidateResponse,
@@ -2219,6 +2222,7 @@ pub fn spawn_gmail_sync_worker(state: &ApiState) -> Option<tokio::task::JoinHand
                         identity.account_id,
                         identity.user_id,
                         identity.workspace_id,
+                        GmailSyncOrigin::Automatic,
                     )
                     .await
                     {
@@ -5748,10 +5752,12 @@ async fn start_gmail_authorization(
     params(("account_id" = uuid::Uuid, Path)),
     responses(
         (status = 200, body = GmailAccountResponse),
-        (status = 400),
-        (status = 401),
-        (status = 404),
-        (status = 503)
+        (status = 400, body = ErrorEnvelope),
+        (status = 401, body = ErrorEnvelope),
+        (status = 403, body = ErrorEnvelope),
+        (status = 404, body = ErrorEnvelope),
+        (status = 409, body = ErrorEnvelope),
+        (status = 503, body = ErrorEnvelope)
     )
 )]
 async fn sync_gmail_account(
@@ -5767,9 +5773,6 @@ async fn sync_gmail_account(
     if account_id.get_version_num() != 7 {
         return invalid_request_response(request_id);
     }
-    let Some(runtime) = state.gmail_oauth() else {
-        return gmail_oauth_error_response(GmailOAuthError::Configuration, request_id);
-    };
     let Some(planning) = state.planning() else {
         return unavailable_response(request_id);
     };
@@ -5789,12 +5792,19 @@ async fn sync_gmail_account(
         }
         Err(error) => return storage_error_response(&error, request_id),
     };
+    if let Some(response) = gmail_sync_precondition_response(&account, request_id) {
+        return response;
+    }
+    let Some(runtime) = state.gmail_oauth() else {
+        return gmail_oauth_error_response(GmailOAuthError::Configuration, request_id);
+    };
     match synchronize_gmail_account(
         planning,
         runtime,
         account.id,
         principal.identity().user_id(),
         account.workspace_id,
+        GmailSyncOrigin::UserInitiated,
     )
     .await
     {
@@ -5812,6 +5822,36 @@ async fn sync_gmail_account(
             gmail_oauth_error_response(error, request_id)
         }
     }
+}
+
+fn gmail_sync_precondition_response(
+    account: &GmailAccount,
+    request_id: RequestId,
+) -> Option<Response> {
+    if matches!(account.status, GmailAccountStatus::ReauthRequired)
+        && !account.can_retry_stored_credential
+    {
+        return Some(error_response(
+            StatusCode::CONFLICT,
+            "gmail.reconnect_required",
+            "저장된 연결 권한이 없어요. Gmail 계정을 다시 연결해 주세요.",
+            request_id,
+            false,
+        ));
+    }
+    if matches!(
+        account.status,
+        GmailAccountStatus::Active | GmailAccountStatus::Error | GmailAccountStatus::ReauthRequired
+    ) {
+        return None;
+    }
+    Some(error_response(
+        StatusCode::CONFLICT,
+        "gmail.account_not_syncable",
+        "이 Gmail 계정은 지금 메일을 가져올 수 없어요. 연결 상태를 다시 확인해 주세요.",
+        request_id,
+        false,
+    ))
 }
 
 #[utoipa::path(
@@ -6265,7 +6305,16 @@ async fn finish_gmail_authorization(
             );
         }
     };
-    match synchronize_gmail_account(planning, runtime, account.id, user_id, workspace_id).await {
+    match synchronize_gmail_account(
+        planning,
+        runtime,
+        account.id,
+        user_id,
+        workspace_id,
+        GmailSyncOrigin::Automatic,
+    )
+    .await
+    {
         Ok(_) => calendar_callback_page(
             StatusCode::OK,
             "Gmail을 연결했어요",
@@ -7260,33 +7309,53 @@ fn format_google_chat_due_at(value: OffsetDateTime) -> String {
     )
 }
 
+#[derive(Clone, Copy)]
+enum GmailSyncOrigin {
+    Automatic,
+    UserInitiated,
+}
+
 async fn synchronize_gmail_account(
     planning: &Database,
     runtime: &GmailOAuthRuntime,
     account_id: uuid::Uuid,
     user_id: uuid::Uuid,
     workspace_id: uuid::Uuid,
+    origin: GmailSyncOrigin,
 ) -> Result<GmailAccount, GmailOAuthError> {
     for attempt in 0..2 {
-        let connection = planning
-            .gmail_sync_connection(account_id, user_id, workspace_id)
-            .await
-            .map_err(|_| GmailOAuthError::ProviderUnavailable)?
-            .ok_or(GmailOAuthError::ProviderRejected)?;
+        let connection = match origin {
+            GmailSyncOrigin::Automatic => {
+                planning
+                    .gmail_sync_connection(account_id, user_id, workspace_id)
+                    .await
+            }
+            GmailSyncOrigin::UserInitiated => {
+                planning
+                    .gmail_manual_sync_connection(account_id, user_id, workspace_id)
+                    .await
+            }
+        }
+        .map_err(|_| GmailOAuthError::ProviderUnavailable)?
+        .ok_or(GmailOAuthError::ProviderRejected)?;
         let batch = runtime.inbox_sync(&connection).await?;
-        let outcome = planning
-            .apply_gmail_history_sync(&ApplyGmailHistorySync {
-                account_id,
-                user_id,
-                workspace_id,
-                mode: batch.mode,
-                expected_provider_history_id: batch.expected_provider_history_id.as_deref(),
-                next_provider_history_id: &batch.next_provider_history_id,
-                messages: &batch.messages,
-                skipped_message_count: batch.skipped_message_count,
-            })
-            .await
-            .map_err(|_| GmailOAuthError::ProviderUnavailable)?;
+        let command = ApplyGmailHistorySync {
+            account_id,
+            user_id,
+            workspace_id,
+            mode: batch.mode,
+            expected_provider_history_id: batch.expected_provider_history_id.as_deref(),
+            next_provider_history_id: &batch.next_provider_history_id,
+            messages: &batch.messages,
+            skipped_message_count: batch.skipped_message_count,
+        };
+        let outcome = match origin {
+            GmailSyncOrigin::Automatic => planning.apply_gmail_history_sync(&command).await,
+            GmailSyncOrigin::UserInitiated => {
+                planning.apply_manual_gmail_history_sync(&command).await
+            }
+        }
+        .map_err(|_| GmailOAuthError::ProviderUnavailable)?;
         if let ApplyGmailHistorySyncOutcome::Applied(account) = outcome {
             return Ok(account);
         }
@@ -7360,6 +7429,14 @@ fn gmail_oauth_error_response(error: GmailOAuthError, request_id: RequestId) -> 
             StatusCode::SERVICE_UNAVAILABLE,
             "Gmail에 연결할 수 없어요. 잠시 후 다시 시도해 주세요.",
         ),
+        GmailOAuthError::ApiNotEnabled => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Google Cloud에서 Gmail API를 켠 뒤 다시 가져와 주세요.",
+        ),
+        GmailOAuthError::PermissionDenied => (
+            StatusCode::FORBIDDEN,
+            "Google 계정 또는 관리자 정책에서 메일 읽기 권한을 허용한 뒤 다시 연결해 주세요.",
+        ),
         GmailOAuthError::IdentityMismatch => (
             StatusCode::CONFLICT,
             "다시 연결하려던 Google 계정과 달라요. 계정을 확인해 주세요.",
@@ -7394,6 +7471,12 @@ fn gmail_callback_error_page(error: GmailOAuthError) -> Response {
         }
         GmailOAuthError::RequiredScopeMissing => {
             "메일 읽기 권한이 허용되지 않았어요. 앱에서 다시 연결해 주세요."
+        }
+        GmailOAuthError::ApiNotEnabled => {
+            "Google Cloud에서 Gmail API를 켠 뒤 앱에서 다시 가져와 주세요."
+        }
+        GmailOAuthError::PermissionDenied => {
+            "Google 계정 또는 관리자 정책에서 메일 읽기 권한을 허용한 뒤 다시 연결해 주세요."
         }
         GmailOAuthError::ScopeBoundaryViolation => {
             "다른 Google 서비스 권한이 함께 전달됐어요. 앱에서 Gmail을 다시 연결해 주세요."
@@ -8485,6 +8568,7 @@ fn gmail_account_response(account: GmailAccount) -> GmailAccountResponse {
             .and_then(|value| value.format(&Rfc3339).ok()),
         last_error_code: account.last_error_code,
         reauth_required: matches!(account.status, GmailAccountStatus::ReauthRequired),
+        can_retry_stored_credential: account.can_retry_stored_credential,
         version: account.version,
     }
 }
@@ -9825,6 +9909,63 @@ mod tests {
                 .is_some(),
             "goal updates must publish their JSON request contract",
         );
+    }
+
+    #[test]
+    fn gmail_openapi_publishes_recovery_capability_and_permission_failure() {
+        let document =
+            serde_json::to_value(openapi_document()).expect("OpenAPI document should serialize");
+        let account_schema = &document["components"]["schemas"]["GmailAccountResponse"];
+        assert_eq!(
+            account_schema["properties"]["canRetryStoredCredential"]["type"],
+            "boolean"
+        );
+        assert!(
+            account_schema["required"]
+                .as_array()
+                .is_some_and(|required| required
+                    .iter()
+                    .any(|field| field == "canRetryStoredCredential"))
+        );
+        let responses =
+            &document["paths"]["/v1/gmail/accounts/{account_id}/sync"]["post"]["responses"];
+        for status in ["400", "401", "403", "404", "409", "503"] {
+            assert_eq!(
+                responses[status]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/ErrorEnvelope",
+                "manual Gmail sync error {status} must publish the shared error body"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gmail_sync_requires_reconnect_when_no_stored_credential_exists() {
+        let account = GmailAccount {
+            id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            workspace_scope: "personal".to_owned(),
+            workspace_name: "개인".to_owned(),
+            email: "owner@example.test".to_owned(),
+            status: GmailAccountStatus::ReauthRequired,
+            granted_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_owned()],
+            last_successful_sync_at: None,
+            last_error_code: Some("gmail.authorization_rejected".to_owned()),
+            can_retry_stored_credential: false,
+            version: 1,
+        };
+        let response = gmail_sync_precondition_response(&account, RequestId::new(Uuid::now_v7()))
+            .expect("credential-less reauth account must be rejected before provider access");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("error body should be readable")
+            .to_bytes();
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("error body should be JSON");
+        assert_eq!(value["error"]["code"], "gmail.reconnect_required");
+        assert_eq!(value["error"]["retryable"], false);
     }
 
     #[tokio::test]

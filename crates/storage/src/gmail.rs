@@ -66,6 +66,7 @@ pub struct GmailAccount {
     pub granted_scopes: Vec<String>,
     pub last_successful_sync_at: Option<OffsetDateTime>,
     pub last_error_code: Option<String>,
+    pub can_retry_stored_credential: bool,
     pub version: i64,
 }
 
@@ -80,6 +81,7 @@ struct GmailAccountRow {
     granted_scopes: Vec<String>,
     last_successful_sync_at: Option<OffsetDateTime>,
     last_error_code: Option<String>,
+    can_retry_stored_credential: bool,
     version: i64,
 }
 
@@ -97,6 +99,7 @@ impl TryFrom<GmailAccountRow> for GmailAccount {
             granted_scopes: row.granted_scopes,
             last_successful_sync_at: row.last_successful_sync_at,
             last_error_code: row.last_error_code,
+            can_retry_stored_credential: row.can_retry_stored_credential,
             version: row.version,
         })
     }
@@ -338,6 +341,10 @@ impl Database {
                 workspace.name AS workspace_name,
                 account.email, account.status, account.granted_scopes,
                 account.last_successful_sync_at, account.last_error_code,
+                account.refresh_token_ciphertext IS NOT NULL
+                    AND account.refresh_token_nonce IS NOT NULL
+                    AND account.encryption_key_version IS NOT NULL
+                    AS can_retry_stored_credential,
                 account.version
             FROM gmail_accounts AS account
             JOIN workspaces AS workspace
@@ -375,6 +382,10 @@ impl Database {
                 workspace.name AS workspace_name,
                 account.email, account.status, account.granted_scopes,
                 account.last_successful_sync_at, account.last_error_code,
+                account.refresh_token_ciphertext IS NOT NULL
+                    AND account.refresh_token_nonce IS NOT NULL
+                    AND account.encryption_key_version IS NOT NULL
+                    AS can_retry_stored_credential,
                 account.version
             FROM gmail_accounts AS account
             JOIN workspaces AS workspace
@@ -605,6 +616,36 @@ impl Database {
         user_id: Uuid,
         workspace_id: Uuid,
     ) -> Result<Option<GmailSyncConnection>, StorageError> {
+        self.gmail_sync_connection_with_reauth(account_id, user_id, workspace_id, false)
+            .await
+    }
+
+    /// Loads encrypted sync material for one user-initiated recovery attempt.
+    ///
+    /// Unlike periodic synchronization, this path may read a
+    /// `reauth_required` account so the already stored refresh token can be
+    /// validated once before forcing the user through OAuth again.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified error for invalid persisted credential state.
+    pub async fn gmail_manual_sync_connection(
+        &self,
+        account_id: Uuid,
+        user_id: Uuid,
+        workspace_id: Uuid,
+    ) -> Result<Option<GmailSyncConnection>, StorageError> {
+        self.gmail_sync_connection_with_reauth(account_id, user_id, workspace_id, true)
+            .await
+    }
+
+    async fn gmail_sync_connection_with_reauth(
+        &self,
+        account_id: Uuid,
+        user_id: Uuid,
+        workspace_id: Uuid,
+        allow_reauth_required: bool,
+    ) -> Result<Option<GmailSyncConnection>, StorageError> {
         if !all_v7(&[account_id, user_id, workspace_id]) {
             return Err(StorageError::InvalidConfiguration);
         }
@@ -639,11 +680,18 @@ impl Database {
              AND sync_state.workspace_id = account.workspace_id
             WHERE account.id = $1 AND account.user_id = $2
               AND account.workspace_id = $3
-              AND account.status IN ('active', 'error')",
+              AND (
+                    account.status IN ('active', 'error')
+                    OR ($4 AND account.status = 'reauth_required')
+              )
+              AND account.refresh_token_ciphertext IS NOT NULL
+              AND account.refresh_token_nonce IS NOT NULL
+              AND account.encryption_key_version IS NOT NULL",
         )
         .bind(account_id)
         .bind(user_id)
         .bind(workspace_id)
+        .bind(allow_reauth_required)
         .fetch_optional(self.pool())
         .await
         .map_err(classify)?;
@@ -664,6 +712,8 @@ impl Database {
             FROM gmail_accounts
             WHERE status IN ('active', 'error')
               AND refresh_token_ciphertext IS NOT NULL
+              AND refresh_token_nonce IS NOT NULL
+              AND encryption_key_version IS NOT NULL
             ORDER BY last_successful_sync_at NULLS FIRST, id",
         )
         .fetch_all(self.pool())
@@ -767,30 +817,14 @@ impl Database {
         .execute(&mut *transaction)
         .await
         .map_err(classify)?;
-        let row = sqlx::query_as::<_, GmailAccountRow>(
-            "\
-            UPDATE gmail_accounts
-            SET status = 'active', last_successful_sync_at = NOW(),
-                last_error_code = $4
-            WHERE id = $1 AND user_id = $2 AND workspace_id = $3
-            RETURNING id, workspace_id,
-                (SELECT scope FROM workspaces
-                 WHERE workspaces.id = gmail_accounts.workspace_id)
-                    AS workspace_scope,
-                (SELECT name FROM workspaces
-                 WHERE workspaces.id = gmail_accounts.workspace_id)
-                    AS workspace_name,
-                email, status, granted_scopes, last_successful_sync_at,
-                last_error_code, version",
+        let account = activate_gmail_account(
+            &mut transaction,
+            account_id,
+            user_id,
+            workspace_id,
+            warning_code,
         )
-        .bind(account_id)
-        .bind(user_id)
-        .bind(workspace_id)
-        .bind(warning_code)
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(classify)?;
-        let account = GmailAccount::try_from(row)?;
+        .await?;
         append_change(
             &mut transaction,
             user_id,
@@ -819,6 +853,32 @@ impl Database {
         &self,
         command: &ApplyGmailHistorySync<'_>,
     ) -> Result<ApplyGmailHistorySyncOutcome, StorageError> {
+        self.apply_gmail_history_sync_with_reauth(command, false)
+            .await
+    }
+
+    /// Applies a Gmail History batch produced by an explicit user recovery
+    /// attempt. A successful provider refresh and inbox read may reactivate a
+    /// legacy `reauth_required` account; periodic workers cannot call this
+    /// method.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same validation, ownership, and persistence errors as
+    /// [`Self::apply_gmail_history_sync`].
+    pub async fn apply_manual_gmail_history_sync(
+        &self,
+        command: &ApplyGmailHistorySync<'_>,
+    ) -> Result<ApplyGmailHistorySyncOutcome, StorageError> {
+        self.apply_gmail_history_sync_with_reauth(command, true)
+            .await
+    }
+
+    async fn apply_gmail_history_sync_with_reauth(
+        &self,
+        command: &ApplyGmailHistorySync<'_>,
+        allow_reauth_required: bool,
+    ) -> Result<ApplyGmailHistorySyncOutcome, StorageError> {
         validate_history_sync(command)?;
         let warning_code =
             (command.skipped_message_count > 0).then_some("gmail.partial_message_failures");
@@ -833,12 +893,14 @@ impl Database {
             WHERE account.id = $1
               AND account.user_id = $2
               AND account.workspace_id = $3
-              AND account.status IN ('active', 'error')
+              AND (account.status IN ('active', 'error')
+                   OR ($4 AND account.status = 'reauth_required'))
             FOR UPDATE OF account, sync_state",
         )
         .bind(command.account_id)
         .bind(command.user_id)
         .bind(command.workspace_id)
+        .bind(allow_reauth_required)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(classify)?;
@@ -881,30 +943,14 @@ impl Database {
             transaction.rollback().await.map_err(classify)?;
             return Ok(ApplyGmailHistorySyncOutcome::CursorConflict);
         }
-        let row = sqlx::query_as::<_, GmailAccountRow>(
-            "\
-            UPDATE gmail_accounts
-            SET status = 'active', last_successful_sync_at = NOW(),
-                last_error_code = $4
-            WHERE id = $1 AND user_id = $2 AND workspace_id = $3
-            RETURNING id, workspace_id,
-                (SELECT scope FROM workspaces
-                 WHERE workspaces.id = gmail_accounts.workspace_id)
-                    AS workspace_scope,
-                (SELECT name FROM workspaces
-                 WHERE workspaces.id = gmail_accounts.workspace_id)
-                    AS workspace_name,
-                email, status, granted_scopes, last_successful_sync_at,
-                last_error_code, version",
+        let account = activate_gmail_account(
+            &mut transaction,
+            command.account_id,
+            command.user_id,
+            command.workspace_id,
+            warning_code,
         )
-        .bind(command.account_id)
-        .bind(command.user_id)
-        .bind(command.workspace_id)
-        .bind(warning_code)
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(classify)?;
-        let account = GmailAccount::try_from(row)?;
+        .await?;
         append_change(
             &mut transaction,
             command.user_id,
@@ -938,7 +984,11 @@ impl Database {
         let row = sqlx::query_as::<_, GmailAccountRow>(
             "\
             UPDATE gmail_accounts
-            SET status = CASE WHEN $5 THEN 'reauth_required' ELSE 'error' END,
+            SET status = CASE
+                    WHEN status = 'reauth_required' OR $5
+                        THEN 'reauth_required'
+                    ELSE 'error'
+                END,
                 last_error_code = $4
             WHERE id = $1 AND user_id = $2 AND workspace_id = $3
             RETURNING id, workspace_id,
@@ -949,7 +999,12 @@ impl Database {
                  WHERE workspaces.id = gmail_accounts.workspace_id)
                     AS workspace_name,
                 email, status, granted_scopes, last_successful_sync_at,
-                last_error_code, version",
+                last_error_code,
+                refresh_token_ciphertext IS NOT NULL
+                    AND refresh_token_nonce IS NOT NULL
+                    AND encryption_key_version IS NOT NULL
+                    AS can_retry_stored_credential,
+                version",
         )
         .bind(account_id)
         .bind(user_id)
@@ -1183,7 +1238,12 @@ async fn upsert_completed_gmail_account(
              WHERE workspaces.id = gmail_accounts.workspace_id)
                 AS workspace_name,
             email, status, granted_scopes, last_successful_sync_at,
-            last_error_code, version",
+            last_error_code,
+            refresh_token_ciphertext IS NOT NULL
+                AND refresh_token_nonce IS NOT NULL
+                AND encryption_key_version IS NOT NULL
+                AS can_retry_stored_credential,
+            version",
     )
     .bind(account_id)
     .bind(command.user_id)
@@ -1209,6 +1269,44 @@ async fn upsert_completed_gmail_account(
             .as_ref()
             .map(|value| value.key_version),
     )
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(classify)?;
+    GmailAccount::try_from(row)
+}
+
+async fn activate_gmail_account(
+    transaction: &mut Transaction<'_, Postgres>,
+    account_id: Uuid,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    warning_code: Option<&str>,
+) -> Result<GmailAccount, StorageError> {
+    let row = sqlx::query_as::<_, GmailAccountRow>(
+        "\
+        UPDATE gmail_accounts
+        SET status = 'active', last_successful_sync_at = NOW(),
+            last_error_code = $4
+        WHERE id = $1 AND user_id = $2 AND workspace_id = $3
+        RETURNING id, workspace_id,
+            (SELECT scope FROM workspaces
+             WHERE workspaces.id = gmail_accounts.workspace_id)
+                AS workspace_scope,
+            (SELECT name FROM workspaces
+             WHERE workspaces.id = gmail_accounts.workspace_id)
+                AS workspace_name,
+            email, status, granted_scopes, last_successful_sync_at,
+            last_error_code,
+            refresh_token_ciphertext IS NOT NULL
+                AND refresh_token_nonce IS NOT NULL
+                AND encryption_key_version IS NOT NULL
+                AS can_retry_stored_credential,
+            version",
+    )
+    .bind(account_id)
+    .bind(user_id)
+    .bind(workspace_id)
+    .bind(warning_code)
     .fetch_one(&mut **transaction)
     .await
     .map_err(classify)?;

@@ -977,7 +977,10 @@ export default function App() {
         );
         await loadGmailAccounts();
       } catch {
-        setGmailError(copy.settings.gmailSyncRecovery);
+        const refreshedAccounts = await loadGmailAccounts();
+        if (refreshedAccounts) {
+          setGmailError(copy.settings.gmailSyncRecovery);
+        }
       } finally {
         setGmailActions((current) =>
           current.filter((candidate) => candidate !== action),

@@ -8,6 +8,7 @@ import { copy } from "../copy";
 import {
   gmailAccountActionActive,
   gmailAccountDetail,
+  gmailManualSyncAvailable,
   groupGmailAccounts,
   SettingsWorkspace,
 } from "./SettingsWorkspace";
@@ -40,6 +41,7 @@ function account(
     lastSuccessfulSyncAt: "2026-07-29T05:00:00Z",
     lastErrorCode: null,
     reauthRequired: false,
+    canRetryStoredCredential: true,
     version: 1,
     ...overrides,
   };
@@ -155,6 +157,82 @@ describe("Gmail settings presentation", () => {
 
     expect(loadFailure).toContain("계정 다시 확인하기");
     expect(reconnect).toContain("다시 연결하기");
+  });
+
+  it("offers one manual token check before reconnecting a legacy reauth account", () => {
+    const legacyAccount = account({
+      id: "legacy-reauth",
+      workspaceId: "personal-workspace",
+      status: "reauth_required",
+      reauthRequired: true,
+      lastErrorCode: "gmail.authorization_rejected",
+    });
+    const markup = renderSettings({ gmailAccounts: [legacyAccount] });
+
+    expect(gmailManualSyncAvailable(legacyAccount)).toBe(true);
+    expect(markup).toContain(copy.settings.gmailSync);
+    expect(markup).toContain(copy.settings.gmailReconnect);
+    expect(gmailAccountDetail(legacyAccount)).toContain("기존 연결 권한");
+  });
+
+  it("does not offer a stored-token retry when a migrated account has no credential", () => {
+    const migratedAccount = account({
+      id: "migrated-reauth",
+      workspaceId: "personal-workspace",
+      status: "reauth_required",
+      reauthRequired: true,
+      canRetryStoredCredential: false,
+      lastErrorCode: "gmail.authorization_rejected",
+    });
+    const markup = renderSettings({ gmailAccounts: [migratedAccount] });
+
+    expect(gmailManualSyncAvailable(migratedAccount)).toBe(false);
+    expect(markup).not.toContain(copy.settings.gmailSync);
+    expect(markup).toContain(copy.settings.gmailReconnect);
+    expect(markup).toContain(copy.settings.gmailReconnectRequired);
+  });
+
+  it("does not retry a revoked Gmail account with stored credentials", () => {
+    const revokedAccount = account({
+      id: "revoked",
+      workspaceId: "personal-workspace",
+      status: "revoked",
+      reauthRequired: true,
+    });
+    const markup = renderSettings({ gmailAccounts: [revokedAccount] });
+
+    expect(gmailManualSyncAvailable(revokedAccount)).toBe(false);
+    expect(markup).not.toContain(copy.settings.gmailSync);
+    expect(markup).toContain(copy.settings.gmailReconnect);
+  });
+
+  it("explains whether Gmail is blocked by server setup or account permission", () => {
+    const serverSetup = renderSettings({
+      gmailAccounts: [
+        account({
+          id: "api-disabled",
+          workspaceId: "personal-workspace",
+          status: "error",
+          lastErrorCode: "gmail.api_not_enabled",
+        }),
+      ],
+    });
+    const accountPermission = renderSettings({
+      gmailAccounts: [
+        account({
+          id: "permission-denied",
+          workspaceId: "company-workspace",
+          status: "reauth_required",
+          reauthRequired: true,
+          lastErrorCode: "gmail.permission_denied",
+        }),
+      ],
+    });
+
+    expect(serverSetup).toContain(copy.settings.gmailApiNotEnabled);
+    expect(serverSetup).toContain(copy.settings.gmailSync);
+    expect(accountPermission).toContain(copy.settings.gmailPermissionDenied);
+    expect(accountPermission).toContain(copy.settings.gmailReconnect);
   });
 
   it("keeps account actions visible but disabled while Gmail is unavailable", () => {

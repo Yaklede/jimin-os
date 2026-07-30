@@ -905,7 +905,12 @@ export const copy = {
     gmailNotSynced:
       "아직 메일을 가져오지 않았어요. 메일 가져오기를 눌러 주세요.",
     gmailNeedsReconnect:
-      "Google 권한을 다시 확인해야 해요. 다시 연결해 주세요.",
+      "메일 가져오기로 기존 연결 권한을 다시 확인해 보세요. 계속 실패하면 계정을 다시 연결해 주세요.",
+    gmailReconnectRequired:
+      "저장된 연결 권한이 없어요. 계정을 다시 연결해 주세요.",
+    gmailApiNotEnabled:
+      "Google Cloud에서 Gmail API를 켠 뒤 메일 가져오기를 눌러 주세요.",
+    gmailPermissionDenied: "메일 읽기 권한을 허용한 뒤 다시 연결해 주세요.",
     gmailSyncProblem:
       "최근 메일을 가져오지 못했어요. 메일 가져오기를 다시 눌러 주세요.",
     gmailConnecting: "Google에서 계정 연결을 마쳐 주세요.",

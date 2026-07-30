@@ -565,6 +565,8 @@ impl GoogleChatOAuthError {
             GoogleAuthError::InvalidRequest
             | GoogleAuthError::ProviderRejected
             | GoogleAuthError::GmailHistoryIdExpired
+            | GoogleAuthError::GmailApiNotEnabled
+            | GoogleAuthError::GmailPermissionDenied
             | GoogleAuthError::CalendarSyncTokenExpired
             | GoogleAuthError::CalendarEventConflict
             | GoogleAuthError::CalendarEventNotFound

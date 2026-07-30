@@ -587,6 +587,8 @@ impl CalendarOAuthError {
         match error {
             GoogleAuthError::ProviderUnavailable => Self::ProviderUnavailable,
             GoogleAuthError::GmailHistoryIdExpired
+            | GoogleAuthError::GmailApiNotEnabled
+            | GoogleAuthError::GmailPermissionDenied
             | GoogleAuthError::CalendarSyncTokenExpired
             | GoogleAuthError::InvalidRequest
             | GoogleAuthError::ProviderRejected => Self::ProviderRejected,

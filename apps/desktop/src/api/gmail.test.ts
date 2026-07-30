@@ -25,6 +25,7 @@ const account: GmailAccount = {
   lastSuccessfulSyncAt: "2026-07-29T05:00:00Z",
   lastErrorCode: null,
   reauthRequired: false,
+  canRetryStoredCredential: true,
   version: 2,
 };
 
@@ -47,6 +48,26 @@ describe("Gmail accounts client", () => {
         headers: expect.objectContaining({ Authorization: "Bearer access" }),
       }),
     );
+  });
+
+  it("rejects account metadata that omits stored-credential retry capability", async () => {
+    const { canRetryStoredCredential: _, ...incompleteAccount } = account;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          JSON.stringify({ available: true, items: [incompleteAccount] }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+      ),
+    );
+
+    await expect(
+      fetchGmailAccounts("https://jimin-os.example", "access"),
+    ).rejects.toMatchObject({ code: "unavailable" });
   });
 
   it("starts a workspace-bound authorization on the Google consent host", async () => {
