@@ -27,6 +27,7 @@ import {
   type WeeklyReport,
 } from "../api/projects";
 import { type ProjectInflowItem } from "../api/googleChat";
+import { type GmailInflowCandidate } from "../api/gmailInflow";
 import { presentationForMessage } from "../assistantPresentation";
 import { copy } from "../copy";
 import {
@@ -47,6 +48,10 @@ import {
 } from "./ContentSkeleton";
 import { AssistantInteractiveCanvas } from "./AssistantInteractiveCanvas";
 import { HomeInflowReview } from "./HomeInflowReview";
+import {
+  GmailInflowReview,
+  type PromoteGmailInflowInput,
+} from "./GmailInflowReview";
 import { type PromoteInflowInput } from "./ProjectInflowPanel";
 
 type HomeWorkspaceProps = {
@@ -97,6 +102,26 @@ type HomeWorkspaceProps = {
   onDismissInflow(item: ProjectInflowItem): Promise<void>;
   onRetryInflowAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryInflowCompletion(item: ProjectInflowItem): Promise<void>;
+  gmailInflowItems: GmailInflowCandidate[];
+  gmailInflowProjects: Project[];
+  gmailInflowLoading: boolean;
+  gmailInflowLoadingMore: boolean;
+  gmailInflowLoadMoreError: boolean;
+  gmailInflowHasMore: boolean;
+  gmailInflowError: string | undefined;
+  gmailInflowSavingId: string | undefined;
+  onReloadGmailInflow(): void | Promise<void>;
+  onLoadMoreGmailInflow(): void | Promise<void>;
+  onPromoteGmailInflow(
+    candidate: GmailInflowCandidate,
+    input: PromoteGmailInflowInput,
+  ): Promise<void>;
+  onDismissGmailInflow(candidate: GmailInflowCandidate): Promise<void>;
+  onDeferGmailInflow(
+    candidate: GmailInflowCandidate,
+    revisitAt: string,
+  ): Promise<void>;
+  onRetryGmailInflowAnalysis(candidate: GmailInflowCandidate): Promise<void>;
 };
 
 export function HomeWorkspace({
@@ -133,6 +158,20 @@ export function HomeWorkspace({
   onDismissInflow,
   onRetryInflowAnalysis,
   onRetryInflowCompletion,
+  gmailInflowItems,
+  gmailInflowProjects,
+  gmailInflowLoading,
+  gmailInflowLoadingMore,
+  gmailInflowLoadMoreError,
+  gmailInflowHasMore,
+  gmailInflowError,
+  gmailInflowSavingId,
+  onReloadGmailInflow,
+  onLoadMoreGmailInflow,
+  onPromoteGmailInflow,
+  onDismissGmailInflow,
+  onDeferGmailInflow,
+  onRetryGmailInflowAnalysis,
 }: HomeWorkspaceProps) {
   const [completingTaskId, setCompletingTaskId] = useState<string>();
   const [assistantFocused, setAssistantFocused] = useState(false);
@@ -363,6 +402,23 @@ export function HomeWorkspace({
 
       {!assistantFocused && (
         <>
+          <GmailInflowReview
+            items={gmailInflowItems}
+            projects={gmailInflowProjects}
+            loading={gmailInflowLoading}
+            loadingMore={gmailInflowLoadingMore}
+            loadMoreError={gmailInflowLoadMoreError}
+            hasMore={gmailInflowHasMore}
+            error={gmailInflowError}
+            savingId={gmailInflowSavingId}
+            onReload={onReloadGmailInflow}
+            onLoadMore={onLoadMoreGmailInflow}
+            onPromote={onPromoteGmailInflow}
+            onDismiss={onDismissGmailInflow}
+            onDefer={onDeferGmailInflow}
+            onRetryAnalysis={onRetryGmailInflowAnalysis}
+          />
+
           {!showingSkeleton && Boolean(snapshot?.inflow.length) && (
             <HomeInflowReview
               items={snapshot?.inflow ?? []}

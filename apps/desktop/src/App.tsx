@@ -27,6 +27,15 @@ import {
   type GmailAuthorizationBaseline,
 } from "./api/gmail";
 import {
+  decideGmailInflow,
+  emptyGmailInflowLoadHealth,
+  fetchGmailInflow,
+  gmailInflowHealthAfterInitial,
+  gmailInflowHealthAfterLoadMore,
+  type GmailInflowCandidate,
+  type GmailInflowLoadHealth,
+} from "./api/gmailInflow";
+import {
   bootstrapTrustedNetworkSession,
   completeTask,
   createScheduleEntry,
@@ -140,6 +149,7 @@ import {
 } from "./components/ConversationWorkspace";
 import { DecisionInboxWorkspace } from "./components/DecisionInboxWorkspace";
 import { HomeWorkspace } from "./components/HomeWorkspace";
+import { type PromoteGmailInflowInput } from "./components/GmailInflowReview";
 import { MemoryWorkspace } from "./components/MemoryWorkspace";
 import { MeetingsWorkspace } from "./components/MeetingsWorkspace";
 import { OsShell, type OsDestination } from "./components/OsShell";
@@ -341,6 +351,19 @@ export default function App() {
     { expiresAt: string } & GmailAuthorizationBaseline
   >();
   const [gmailError, setGmailError] = useState<string>();
+  const [gmailInflowItems, setGmailInflowItems] = useState<
+    GmailInflowCandidate[]
+  >([]);
+  const [gmailInflowProjects, setGmailInflowProjects] = useState<Project[]>([]);
+  const [gmailInflowLoading, setGmailInflowLoading] = useState(false);
+  const [gmailInflowLoadingMore, setGmailInflowLoadingMore] = useState(false);
+  const [gmailInflowLoadHealth, setGmailInflowLoadHealth] =
+    useState<GmailInflowLoadHealth>(emptyGmailInflowLoadHealth);
+  const [gmailInflowCursors, setGmailInflowCursors] = useState<
+    Record<string, string | null>
+  >({});
+  const [gmailInflowError, setGmailInflowError] = useState<string>();
+  const [gmailInflowSavingId, setGmailInflowSavingId] = useState<string>();
   const [reminderSyncStatus, setReminderSyncStatus] =
     useState<ReminderSyncStatus>("idle");
   const [reminderSyncError, setReminderSyncError] = useState<string>();
@@ -359,6 +382,7 @@ export default function App() {
   const selectedConversationIdRef = useRef<string | undefined>(undefined);
   const conversationListRequestGateRef = useRef(new LatestRequestGate());
   const conversationMessageRequestGateRef = useRef(new LatestRequestGate());
+  const gmailInflowRequestGateRef = useRef(new LatestRequestGate());
   const openedAuthenticationUrl = useRef<string | undefined>(undefined);
   const activeSessionRef = useRef<SessionTokens | undefined>(undefined);
   const refreshInFlightRef = useRef<Promise<SessionTokens> | undefined>(
@@ -1073,6 +1097,181 @@ export default function App() {
     }
   }, [apiBaseUrl, tokens, withAuthenticatedSession]);
 
+  const loadGmailInflow = useCallback(async (): Promise<void> => {
+    if (!tokens) return;
+    if (workspaces.length === 0) {
+      setGmailInflowItems([]);
+      setGmailInflowProjects([]);
+      setGmailInflowCursors({});
+      setGmailInflowError(undefined);
+      setGmailInflowLoadHealth(emptyGmailInflowLoadHealth);
+      setGmailInflowLoading(false);
+      setGmailInflowLoadingMore(false);
+      return;
+    }
+    const requestGeneration = gmailInflowRequestGateRef.current.begin();
+    setGmailInflowLoading(true);
+    setGmailInflowLoadingMore(false);
+    setGmailInflowCursors({});
+    setGmailInflowError(undefined);
+    try {
+      const results = await Promise.all(
+        workspaces.map(async (workspace) => {
+          const [inflow, workspaceProjects] = await Promise.allSettled([
+            withAuthenticatedSession((accessToken) =>
+              fetchGmailInflow(apiBaseUrl, accessToken, workspace.id),
+            ),
+            withAuthenticatedSession((accessToken) =>
+              fetchProjects(apiBaseUrl, accessToken, workspace.id),
+            ),
+          ]);
+          return { workspace, inflow, workspaceProjects };
+        }),
+      );
+      if (!gmailInflowRequestGateRef.current.isCurrent(requestGeneration)) {
+        return;
+      }
+      const nextItems = results.flatMap(({ inflow }) =>
+        inflow.status === "fulfilled" ? inflow.value.items : [],
+      );
+      const nextProjects = results.flatMap(({ workspaceProjects }) =>
+        workspaceProjects.status === "fulfilled" ? workspaceProjects.value : [],
+      );
+      const initialFailedWorkspaces = results.flatMap(
+        ({ workspace, inflow, workspaceProjects }) =>
+          inflow.status === "rejected" ||
+          workspaceProjects.status === "rejected" ||
+          (inflow.status === "fulfilled" && inflow.value.partial)
+            ? [workspace.name]
+            : [],
+      );
+      setGmailInflowItems(
+        [...nextItems].sort(
+          (left, right) =>
+            (Date.parse(right.receivedAt) || 0) -
+            (Date.parse(left.receivedAt) || 0),
+        ),
+      );
+      const nextCursors: Record<string, string | null> = {};
+      for (const { workspace, inflow } of results) {
+        if (inflow.status === "fulfilled") {
+          nextCursors[workspace.id] = inflow.value.nextCursor;
+        }
+      }
+      setGmailInflowCursors(nextCursors);
+      setGmailInflowProjects(
+        Array.from(
+          new Map(
+            nextProjects.map((project) => [project.id, project]),
+          ).values(),
+        ),
+      );
+      setGmailInflowLoadHealth(
+        gmailInflowHealthAfterInitial(initialFailedWorkspaces),
+      );
+      setGmailInflowError(undefined);
+    } catch {
+      if (gmailInflowRequestGateRef.current.isCurrent(requestGeneration)) {
+        setGmailInflowLoadHealth(
+          gmailInflowHealthAfterInitial(
+            workspaces.map((workspace) => workspace.name),
+          ),
+        );
+        setGmailInflowError(copy.gmailInflow.loadProblem);
+      }
+    } finally {
+      if (gmailInflowRequestGateRef.current.isCurrent(requestGeneration)) {
+        setGmailInflowLoading(false);
+      }
+    }
+  }, [apiBaseUrl, tokens, withAuthenticatedSession, workspaces]);
+
+  const loadMoreGmailInflow = useCallback(async (): Promise<void> => {
+    if (!tokens || gmailInflowLoadingMore) return;
+    const pendingPages = workspaces.flatMap((workspace) => {
+      const cursor = gmailInflowCursors[workspace.id];
+      return cursor ? [{ workspace, cursor }] : [];
+    });
+    if (pendingPages.length === 0) return;
+    const requestGeneration = gmailInflowRequestGateRef.current.begin();
+    setGmailInflowLoadingMore(true);
+    setGmailInflowLoadHealth((current) =>
+      gmailInflowHealthAfterLoadMore(current, []),
+    );
+    try {
+      const results = await Promise.all(
+        pendingPages.map(async ({ workspace, cursor }) => ({
+          workspace,
+          cursor,
+          page: await Promise.resolve(
+            withAuthenticatedSession((accessToken) =>
+              fetchGmailInflow(apiBaseUrl, accessToken, workspace.id, cursor),
+            ),
+          ).then(
+            (value) => ({ status: "fulfilled" as const, value }),
+            (reason: unknown) => ({ status: "rejected" as const, reason }),
+          ),
+        })),
+      );
+      if (!gmailInflowRequestGateRef.current.isCurrent(requestGeneration)) {
+        return;
+      }
+      const loadedItems = results.flatMap(({ page }) =>
+        page.status === "fulfilled" ? page.value.items : [],
+      );
+      setGmailInflowItems((current) =>
+        Array.from(
+          new Map(
+            [...current, ...loadedItems].map((item) => [item.id, item]),
+          ).values(),
+        ).sort(
+          (left, right) =>
+            (Date.parse(right.receivedAt) || 0) -
+            (Date.parse(left.receivedAt) || 0),
+        ),
+      );
+      setGmailInflowCursors((current) => {
+        const next = { ...current };
+        for (const { workspace, cursor, page } of results) {
+          if (page.status === "fulfilled") {
+            next[workspace.id] =
+              page.value.nextCursor === cursor ? cursor : page.value.nextCursor;
+          }
+        }
+        return next;
+      });
+      const failedWorkspaces = results.flatMap(({ workspace, cursor, page }) =>
+        page.status === "rejected" ||
+        (page.status === "fulfilled" && page.value.nextCursor === cursor)
+          ? [workspace.name]
+          : [],
+      );
+      setGmailInflowLoadHealth((current) =>
+        gmailInflowHealthAfterLoadMore(current, failedWorkspaces),
+      );
+    } catch {
+      if (gmailInflowRequestGateRef.current.isCurrent(requestGeneration)) {
+        setGmailInflowLoadHealth((current) =>
+          gmailInflowHealthAfterLoadMore(
+            current,
+            pendingPages.map(({ workspace }) => workspace.name),
+          ),
+        );
+      }
+    } finally {
+      if (gmailInflowRequestGateRef.current.isCurrent(requestGeneration)) {
+        setGmailInflowLoadingMore(false);
+      }
+    }
+  }, [
+    apiBaseUrl,
+    gmailInflowCursors,
+    gmailInflowLoadingMore,
+    tokens,
+    withAuthenticatedSession,
+    workspaces,
+  ]);
+
   const loadGoals = useCallback(async () => {
     if (!tokens) return;
     setGoalsLoading(true);
@@ -1336,6 +1535,7 @@ export default function App() {
         loadHomeSnapshot(),
         loadGoogleCalendarConnection(),
         loadGmailAccounts(),
+        loadGmailInflow(),
       ]);
       if (
         conversationListRequestGateRef.current.isCurrent(
@@ -1357,6 +1557,7 @@ export default function App() {
   }, [
     loadGoogleCalendarConnection,
     loadGmailAccounts,
+    loadGmailInflow,
     loadHomeSnapshot,
     sessionLoaded,
     tokens,
@@ -1408,7 +1609,8 @@ export default function App() {
       const affectsGmail =
         forceFull ||
         entityTypes.has("gmail_account") ||
-        entityTypes.has("gmail_message");
+        entityTypes.has("gmail_message") ||
+        entityTypes.has("gmail_inflow_candidate");
 
       if (affectsWork) {
         const [from, to] = currentLocalDayRange();
@@ -1509,7 +1711,7 @@ export default function App() {
         if (selectedProjectId) await loadProjectInflow(selectedProjectId);
       }
       if (affectsGmail) {
-        await loadGmailAccounts();
+        await Promise.all([loadGmailAccounts(), loadGmailInflow()]);
       }
     },
     [
@@ -1521,6 +1723,7 @@ export default function App() {
       selectedWorkspaceId,
       loadGoogleChatAccounts,
       loadGmailAccounts,
+      loadGmailInflow,
       loadProjectInflow,
       loadConversationMessages,
       withAuthenticatedSession,
@@ -1601,6 +1804,13 @@ export default function App() {
       setGmailError(undefined);
       setGmailAuthorizationPending(undefined);
       setGmailActions([]);
+      setGmailInflowItems([]);
+      setGmailInflowProjects([]);
+      setGmailInflowCursors({});
+      setGmailInflowLoadingMore(false);
+      setGmailInflowLoadHealth(emptyGmailInflowLoadHealth);
+      setGmailInflowError(undefined);
+      setGmailInflowSavingId(undefined);
       setReminderSyncStatus("idle");
       setReminderSyncError(undefined);
       setRemoteReminderStatus("idle");
@@ -1609,6 +1819,7 @@ export default function App() {
       homeConversationStartingRef.current = false;
       conversationListRequestGateRef.current.invalidate();
       conversationMessageRequestGateRef.current.invalidate();
+      gmailInflowRequestGateRef.current.invalidate();
       await bootstrapTrustedNetworkDevice();
     }
   }
@@ -1966,6 +2177,11 @@ export default function App() {
   useEffect(() => {
     void loadWorkspaces();
   }, [loadWorkspaces]);
+
+  useEffect(() => {
+    if (!tokens || !workspacesReady) return;
+    void loadGmailInflow();
+  }, [loadGmailInflow, tokens, workspacesReady]);
 
   useEffect(() => {
     void loadGoals();
@@ -3568,6 +3784,90 @@ export default function App() {
     }
   }
 
+  async function promoteGmailInflow(
+    candidate: GmailInflowCandidate,
+    input: PromoteGmailInflowInput,
+  ): Promise<void> {
+    if (gmailInflowSavingId) return;
+    setGmailInflowSavingId(candidate.id);
+    try {
+      await withAuthenticatedSession((accessToken) =>
+        decideGmailInflow(apiBaseUrl, accessToken, candidate, {
+          decision: "promote",
+          ...input,
+        }),
+      );
+      setGmailInflowItems((current) =>
+        current.filter((item) => item.id !== candidate.id),
+      );
+      await Promise.all([loadHomeSnapshot(), loadPlanningSnapshot()]);
+    } finally {
+      setGmailInflowSavingId(undefined);
+    }
+  }
+
+  async function dismissGmailInflow(
+    candidate: GmailInflowCandidate,
+  ): Promise<void> {
+    if (gmailInflowSavingId) return;
+    setGmailInflowSavingId(candidate.id);
+    try {
+      await withAuthenticatedSession((accessToken) =>
+        decideGmailInflow(apiBaseUrl, accessToken, candidate, {
+          decision: "dismiss",
+        }),
+      );
+      setGmailInflowItems((current) =>
+        current.filter((item) => item.id !== candidate.id),
+      );
+    } finally {
+      setGmailInflowSavingId(undefined);
+    }
+  }
+
+  async function deferGmailInflow(
+    candidate: GmailInflowCandidate,
+    revisitAt: string,
+  ): Promise<void> {
+    if (gmailInflowSavingId) return;
+    setGmailInflowSavingId(candidate.id);
+    try {
+      await withAuthenticatedSession((accessToken) =>
+        decideGmailInflow(apiBaseUrl, accessToken, candidate, {
+          decision: "defer",
+          revisitAt,
+        }),
+      );
+      setGmailInflowItems((current) =>
+        current.filter((item) => item.id !== candidate.id),
+      );
+    } finally {
+      setGmailInflowSavingId(undefined);
+    }
+  }
+
+  async function retryGmailInflowAnalysis(
+    candidate: GmailInflowCandidate,
+  ): Promise<void> {
+    if (gmailInflowSavingId) return;
+    setGmailInflowSavingId(candidate.id);
+    try {
+      const updated = await withAuthenticatedSession((accessToken) =>
+        decideGmailInflow(apiBaseUrl, accessToken, candidate, {
+          decision: "retry_analysis",
+        }),
+      );
+      setGmailInflowItems((current) =>
+        updated.analysisStatus === "ready" ||
+        updated.analysisStatus === "failed"
+          ? current.map((item) => (item.id === updated.id ? updated : item))
+          : current.filter((item) => item.id !== updated.id),
+      );
+    } finally {
+      setGmailInflowSavingId(undefined);
+    }
+  }
+
   async function openNewAssistantRequest(): Promise<void> {
     setAssistantDraft(undefined);
     navigate("chat");
@@ -3964,6 +4264,34 @@ export default function App() {
               onDismissInflow={dismissWorkspaceInflow}
               onRetryInflowAnalysis={retryWorkspaceInflowAnalysis}
               onRetryInflowCompletion={retryWorkspaceInflowCompletion}
+              gmailInflowItems={gmailInflowItems}
+              gmailInflowProjects={gmailInflowProjects}
+              gmailInflowLoading={gmailInflowLoading}
+              gmailInflowLoadingMore={gmailInflowLoadingMore}
+              gmailInflowLoadMoreError={
+                gmailInflowLoadHealth.initialFailedWorkspaces.length === 0 &&
+                gmailInflowLoadHealth.loadMoreFailedWorkspaces.length > 0
+              }
+              gmailInflowHasMore={Object.values(gmailInflowCursors).some(
+                Boolean,
+              )}
+              gmailInflowError={
+                gmailInflowError ??
+                (gmailInflowLoadHealth.initialFailedWorkspaces.length > 0
+                  ? copy.gmailInflow.initialPartialProblem(
+                      gmailInflowLoadHealth.initialFailedWorkspaces,
+                    )
+                  : gmailInflowLoadHealth.loadMoreFailedWorkspaces.length > 0
+                    ? copy.gmailInflow.moreLoadProblem
+                    : undefined)
+              }
+              gmailInflowSavingId={gmailInflowSavingId}
+              onReloadGmailInflow={loadGmailInflow}
+              onLoadMoreGmailInflow={loadMoreGmailInflow}
+              onPromoteGmailInflow={promoteGmailInflow}
+              onDismissGmailInflow={dismissGmailInflow}
+              onDeferGmailInflow={deferGmailInflow}
+              onRetryGmailInflowAnalysis={retryGmailInflowAnalysis}
             />
           )}
           {destination === "calendar" && (
