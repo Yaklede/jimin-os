@@ -39,7 +39,10 @@ cat >"${mock_apkanalyzer}" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
   "manifest application-id")
-    printf '%s\n' "${MOCK_ANDROID_APPLICATION_ID:?}"
+    printf '%s\n' "${MOCK_ANDROID_APPLICATION_ID:-io.jimin.os}"
+    ;;
+  "manifest version-code")
+    printf '%s\n' "${MOCK_ANDROID_VERSION_CODE:-1000}"
     ;;
   "manifest debuggable")
     printf '%s\n' "${MOCK_ANDROID_DEBUGGABLE:-false}"
@@ -54,6 +57,30 @@ case "${1:-} ${2:-}" in
 esac
 EOF
 chmod +x "${mock_apkanalyzer}"
+mock_apksigner="${temporary_dir}/apksigner"
+cat >"${mock_apksigner}" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" != "verify" ]]; then
+  printf 'Unexpected apksigner invocation: %s\n' "$*" >&2
+  exit 1
+fi
+if [[ "${MOCK_ANDROID_SIGNATURE_VALID:-1}" != "1" ]]; then
+  printf 'DOES NOT VERIFY\n' >&2
+  exit 1
+fi
+apk_path="${!#}"
+signer_digest="${MOCK_ANDROID_SIGNER_SHA256:-1111111111111111111111111111111111111111111111111111111111111111}"
+if [[ "$(head -c 9 "${apk_path}" 2>/dev/null)" == "installed" ]]; then
+  signer_digest="${MOCK_ANDROID_INSTALLED_SIGNER_SHA256:-${signer_digest}}"
+fi
+printf 'Verifies\n'
+printf 'Number of signers: 1\n'
+printf 'Signer #1 certificate SHA-256 digest: %s\n' "${signer_digest}"
+EOF
+chmod +x "${mock_apksigner}"
+export JIMIN_ANDROID_APKANALYZER="${mock_apkanalyzer}"
+export JIMIN_ANDROID_APKSIGNER="${mock_apksigner}"
+
 JIMIN_ANDROID_APKANALYZER="${mock_apkanalyzer}" \
   MOCK_ANDROID_APPLICATION_ID='io.jimin.os.dev' \
 verify_android_apk_application_id "${mock_apk}" 'io.jimin.os.dev'
@@ -78,6 +105,11 @@ fi
 rm -f "${release_output}/duplicate-release.apk"
 JIMIN_ANDROID_APKANALYZER="${mock_apkanalyzer}" \
   verify_private_android_release_apk "${release_apk}"
+if MOCK_ANDROID_APPLICATION_ID='io.jimin.os.dev' \
+  verify_private_android_release_apk "${release_apk}" >/dev/null 2>&1; then
+  printf 'Expected a development application ID to fail the private release gate.\n' >&2
+  exit 1
+fi
 if JIMIN_ANDROID_APKANALYZER="${mock_apkanalyzer}" \
   MOCK_ANDROID_DEBUGGABLE=true \
   verify_private_android_release_apk "${release_apk}" >/dev/null 2>&1; then
@@ -90,6 +122,88 @@ if JIMIN_ANDROID_APKANALYZER="${mock_apkanalyzer}" \
   printf 'Expected a multi-ABI private release APK to be rejected.\n' >&2
   exit 1
 fi
+if MOCK_ANDROID_SIGNATURE_VALID=0 \
+  verify_private_android_release_apk "${release_apk}" >/dev/null 2>&1; then
+  printf 'Expected an invalid APK signature to fail the private release gate.\n' >&2
+  exit 1
+fi
+if JIMIN_ANDROID_EXPECTED_SIGNER_SHA256='2222222222222222222222222222222222222222222222222222222222222222' \
+  verify_private_android_release_apk "${release_apk}" >/dev/null 2>&1; then
+  printf 'Expected an unexpected APK signer to fail the private release gate.\n' >&2
+  exit 1
+fi
+
+mock_adb="${temporary_dir}/adb"
+cat >"${mock_adb}" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-s" ]]; then
+  shift 2
+fi
+case "${1:-} ${2:-} ${3:-}" in
+  "shell getprop ro.product.cpu.abilist")
+    printf '%s\n' "${MOCK_ANDROID_DEVICE_ABIS:-arm64-v8a}"
+    ;;
+  "shell pm path")
+    if [[ "${MOCK_ANDROID_PACKAGE_INSTALLED:-1}" == "1" ]]; then
+      printf 'package:/data/app/io.jimin.os/base.apk\n'
+    fi
+    ;;
+  "shell dumpsys package")
+    printf '  versionCode=%s minSdk=24 targetSdk=36\n' \
+      "${MOCK_ANDROID_INSTALLED_VERSION_CODE:-1000}"
+    ;;
+  "shell pidof io.jimin.os")
+    printf '%s\n' "${MOCK_ANDROID_PID-1234}"
+    ;;
+  "shell dumpsys activity")
+    printf '%s\n' \
+      "${MOCK_ANDROID_ACTIVITY_STATE:-topResumedActivity=ActivityRecord{ io.jimin.os/.MainActivity }}"
+    ;;
+  "pull /data/app/io.jimin.os/base.apk "*)
+    printf 'installed' >"${3:?pull destination is required}"
+    ;;
+  *)
+    printf 'Unexpected adb invocation: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "${mock_adb}"
+export JIMIN_ANDROID_ADB="${mock_adb}"
+
+verify_android_device_arm64 'R5KL20581QR'
+if MOCK_ANDROID_DEVICE_ABIS='x86_64' \
+  verify_android_device_arm64 'R5KL20581QR' >/dev/null 2>&1; then
+  printf 'Expected a device without arm64-v8a support to be rejected.\n' >&2
+  exit 1
+fi
+verify_android_device_update_compatibility \
+  "${release_apk}" 'io.jimin.os' 'R5KL20581QR'
+if MOCK_ANDROID_VERSION_CODE=999 \
+  MOCK_ANDROID_INSTALLED_VERSION_CODE=1000 \
+  verify_android_device_update_compatibility \
+    "${release_apk}" 'io.jimin.os' 'R5KL20581QR' >/dev/null 2>&1; then
+  printf 'Expected an Android versionCode downgrade to be rejected.\n' >&2
+  exit 1
+fi
+if MOCK_ANDROID_INSTALLED_SIGNER_SHA256='2222222222222222222222222222222222222222222222222222222222222222' \
+  verify_android_device_update_compatibility \
+    "${release_apk}" 'io.jimin.os' 'R5KL20581QR' >/dev/null 2>&1; then
+  printf 'Expected an installed-app signer mismatch to be rejected.\n' >&2
+  exit 1
+fi
+verify_android_app_running 'R5KL20581QR' 'io.jimin.os' 1
+if MOCK_ANDROID_PID='' \
+  verify_android_app_running 'R5KL20581QR' 'io.jimin.os' 1 >/dev/null 2>&1; then
+  printf 'Expected a missing Android app process to fail launch verification.\n' >&2
+  exit 1
+fi
+if MOCK_ANDROID_ACTIVITY_STATE='topResumedActivity=ActivityRecord{ io.jimin.os.dev/.MainActivity }' \
+  verify_android_app_running 'R5KL20581QR' 'io.jimin.os' 1 >/dev/null 2>&1; then
+  printf 'Expected a missing Android app activity to fail launch verification.\n' >&2
+  exit 1
+fi
+
 expect_rejected 'http://os.jimin.ai.kr'
 expect_rejected 'https://os.jimin.ai.kr/api'
 expect_rejected 'https://os.jimin.ai.kr?mode=private'

@@ -10,6 +10,7 @@ device_serial="${2:-${ANDROID_SERIAL:-}}"
 source "${SCRIPT_DIR}/lib/client-build-config.sh"
 
 server_url="$(production_server_url "${requested_server_url}")"
+adb_bin="$(android_adb)"
 
 if [[ -z "${device_serial}" ]]; then
   physical_devices=()
@@ -17,7 +18,7 @@ if [[ -z "${device_serial}" ]]; then
     if [[ "${state:-}" == "device" && "${serial}" != emulator-* ]]; then
       physical_devices+=("${serial}")
     fi
-  done < <(adb devices | tail -n +2)
+  done < <("${adb_bin}" devices | tail -n +2)
 
   if [[ ${#physical_devices[@]} -ne 1 ]]; then
     printf 'Expected one connected physical Android device; found %s. Pass its serial as the second argument.\n' "${#physical_devices[@]}" >&2
@@ -27,16 +28,17 @@ if [[ -z "${device_serial}" ]]; then
 fi
 require_android_physical_device "${device_serial}"
 
-adb_device=(adb -s "${device_serial}")
+adb_device=("${adb_bin}" -s "${device_serial}")
 "${SCRIPT_DIR}/build-private-client.sh" android "${server_url}"
 apk_path="$(
   private_android_release_apk \
     "${REPO_ROOT}/apps/desktop/src-tauri/gen/android/app/build/outputs/apk"
 )"
-verify_android_apk_application_id "${apk_path}" "io.jimin.os"
 verify_private_android_release_apk "${apk_path}"
 
 "${adb_device[@]}" wait-for-device
+verify_android_device_update_compatibility \
+  "${apk_path}" "io.jimin.os" "${device_serial}"
 "${adb_device[@]}" install -r "${apk_path}"
 "${adb_device[@]}" reverse --remove tcp:8080 2>/dev/null || true
 if "${adb_device[@]}" reverse --list | grep -q 'tcp:8080 tcp:8080'; then
@@ -45,5 +47,6 @@ if "${adb_device[@]}" reverse --list | grep -q 'tcp:8080 tcp:8080'; then
 fi
 "${adb_device[@]}" shell am force-stop io.jimin.os
 "${adb_device[@]}" shell monkey -p io.jimin.os 1 >/dev/null
+verify_android_app_running "${device_serial}" "io.jimin.os"
 
 printf 'Installed private-server Android app on %s with server: %s\n' "${device_serial}" "${server_url}"
