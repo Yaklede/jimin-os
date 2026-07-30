@@ -384,16 +384,16 @@ impl Database {
             .push(status_predicate(status));
         if let Some(cursor) = cursor {
             query
-                .push(" AND (candidate.created_at < ")
+                .push(" AND (candidate.attention_at < ")
                 .push_bind(cursor.created_at)
-                .push(" OR (candidate.created_at = ")
+                .push(" OR (candidate.attention_at = ")
                 .push_bind(cursor.created_at)
                 .push(" AND candidate.id < ")
                 .push_bind(cursor.id)
                 .push("))");
         }
         query
-            .push(" ORDER BY candidate.created_at DESC, candidate.id DESC LIMIT ")
+            .push(" ORDER BY candidate.attention_at DESC, candidate.id DESC LIMIT ")
             .push_bind(limit + 1);
         let mut rows = query
             .build_query_as::<GmailInflowCandidateRow>()
@@ -471,7 +471,7 @@ impl Database {
                 FROM gmail_inflow_candidates AS inflow
                 WHERE inflow.analysis_state = 'queued'
                   AND inflow.decision_status IN ('pending', 'promoted')
-                ORDER BY inflow.created_at, inflow.id
+                ORDER BY inflow.attention_at, inflow.id
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
             ), claimed AS (
@@ -635,9 +635,13 @@ impl Database {
         } else {
             let decision_status = if current.1 == "promoted" {
                 "promoted"
-            } else if result.classification.is_task()
-                || result.classification == GmailInflowClassification::Duplicate
-            {
+            } else if matches!(
+                result.classification,
+                GmailInflowClassification::NewTask
+                    | GmailInflowClassification::FollowUp
+                    | GmailInflowClassification::Question
+                    | GmailInflowClassification::Duplicate
+            ) {
                 "pending"
             } else {
                 "dismissed"
@@ -1107,10 +1111,14 @@ pub(crate) async fn upsert_gmail_inflow_candidate(
                 ELSE gmail_inflow_candidates.representative_message_id
              END,
              source_revision = gmail_inflow_candidates.source_revision + 1,
+             attention_at = NOW(),
              analysis_state = 'queued',
              decision_status = CASE
-                WHEN gmail_inflow_candidates.decision_status = 'dismissed'
+                WHEN gmail_inflow_candidates.decision_status IN (
+                    'dismissed', 'deferred', 'promoted'
+                )
                 THEN 'pending' ELSE gmail_inflow_candidates.decision_status END,
+             deferred_until = NULL,
              claim_owner = NULL, claim_expires_at = NULL,
              attempt_count = 0, error_code = NULL
         ",
@@ -1141,7 +1149,8 @@ fn candidate_select() -> &'static str {
         candidate.suggested_assignee_name, candidate.suggested_due_at,
         candidate.suggested_priority, candidate.decision_status,
         candidate.promoted_task_id, candidate.deferred_until,
-        candidate.error_code, candidate.created_at, candidate.version
+        candidate.error_code, candidate.attention_at AS created_at,
+        candidate.version
      FROM gmail_inflow_candidates AS candidate
      JOIN gmail_accounts AS account
        ON account.id = candidate.account_id
@@ -1162,7 +1171,9 @@ const fn status_predicate(status: GmailInflowStatus) -> &'static str {
             "candidate.decision_status = 'pending'
              AND (
                 (candidate.analysis_state = 'ready'
-                    AND candidate.classification IN ('new_task', 'duplicate'))
+                    AND candidate.classification IN (
+                        'new_task', 'follow_up', 'question', 'duplicate'
+                    ))
                 OR candidate.analysis_state = 'failed'
              )"
         }

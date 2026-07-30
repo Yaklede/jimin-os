@@ -302,7 +302,7 @@ export const copy = {
     description:
       "개인 메일과 회사 메일을 나눠 읽고, 해야 할 내용만 먼저 정리했어요.",
     initialScope:
-      "확인할 메일을 100개씩 보여줘요. 더 보기가 나타나면 이어서 확인할 수 있어요.",
+      "새 요청과 기존 할 일에 이어진 답장을 최근 순서대로 보여줘요.",
     count: (count: number) => `${count}개`,
     queueTitle: "확인할 메일",
     selectedTitle: "비서가 정리한 내용",
@@ -333,6 +333,12 @@ export const copy = {
     deferAt: "다시 볼 시간",
     deferHint: "선택한 시간이 되면 홈에 다시 보여드려요.",
     deferredReturned: (when: string) => `${when}에 다시 보기로 한 메일이에요.`,
+    linkedTaskReplyTitle: "기존 할 일에 새 답장이 왔어요",
+    linkedTaskReplyDescription:
+      "새 내용을 확인한 뒤 연결된 할 일에서 진행 상황을 이어서 정리해 주세요.",
+    openLinkedTask: "연결된 할 일 보기",
+    linkedTaskProblem:
+      "연결된 할 일을 열지 못했어요. 프로젝트에서 다시 확인해 주세요.",
     invalidDeferAt: "지금부터 1년 안의 시간을 선택해 주세요.",
     loading: "새 메일을 확인하고 있어요.",
     loadingMore: "이전 메일을 불러오는 중",
@@ -343,7 +349,7 @@ export const copy = {
       "이전 메일을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
     emptyTitle: "지금 확인할 업무 메일이 없어요",
     emptyDescription:
-      "최신 메일 100개에는 확인할 업무가 없어요. 새 요청이 오면 개인과 회사로 나눠 보여드릴게요.",
+      "새 요청이나 후속 답장이 오면 개인과 회사로 나눠 보여드릴게요.",
     loadProblem:
       "업무 메일을 불러오지 못했어요. Gmail 연결을 확인한 뒤 다시 시도해 주세요.",
     partialProblem:

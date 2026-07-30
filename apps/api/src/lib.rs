@@ -52,7 +52,8 @@ use jimin_storage::{
         DisconnectCalendarAccountOutcome,
     },
     gmail::{
-        CreateGmailOAuthAuthorization, DeleteGmailAccountOutcome, GmailAccount, GmailAccountStatus,
+        ApplyGmailHistorySync, ApplyGmailHistorySyncOutcome, CreateGmailOAuthAuthorization,
+        DeleteGmailAccountOutcome, GmailAccount, GmailAccountStatus,
     },
     gmail_inflow::{
         GmailInflowAnalysisState, GmailInflowCandidate, GmailInflowClassification,
@@ -7264,25 +7265,34 @@ async fn synchronize_gmail_account(
     user_id: uuid::Uuid,
     workspace_id: uuid::Uuid,
 ) -> Result<GmailAccount, GmailOAuthError> {
-    let connection = planning
-        .gmail_sync_connection(account_id, user_id)
-        .await
-        .map_err(|_| GmailOAuthError::ProviderUnavailable)?
-        .ok_or(GmailOAuthError::ProviderRejected)?;
-    if connection.workspace_id != workspace_id {
-        return Err(GmailOAuthError::ProviderRejected);
+    for attempt in 0..2 {
+        let connection = planning
+            .gmail_sync_connection(account_id, user_id, workspace_id)
+            .await
+            .map_err(|_| GmailOAuthError::ProviderUnavailable)?
+            .ok_or(GmailOAuthError::ProviderRejected)?;
+        let batch = runtime.inbox_sync(&connection).await?;
+        let outcome = planning
+            .apply_gmail_history_sync(&ApplyGmailHistorySync {
+                account_id,
+                user_id,
+                workspace_id,
+                mode: batch.mode,
+                expected_provider_history_id: batch.expected_provider_history_id.as_deref(),
+                next_provider_history_id: &batch.next_provider_history_id,
+                messages: &batch.messages,
+                skipped_message_count: batch.skipped_message_count,
+            })
+            .await
+            .map_err(|_| GmailOAuthError::ProviderUnavailable)?;
+        if let ApplyGmailHistorySyncOutcome::Applied(account) = outcome {
+            return Ok(account);
+        }
+        if attempt != 0 {
+            return Err(GmailOAuthError::ProviderUnavailable);
+        }
     }
-    let batch = runtime.inbox_sync(&connection).await?;
-    planning
-        .apply_gmail_inbox_sync_with_skipped_count(
-            account_id,
-            user_id,
-            workspace_id,
-            &batch.messages,
-            batch.skipped_message_count,
-        )
-        .await
-        .map_err(|_| GmailOAuthError::ProviderUnavailable)
+    Err(GmailOAuthError::ProviderUnavailable)
 }
 
 async fn synchronize_google_calendar(

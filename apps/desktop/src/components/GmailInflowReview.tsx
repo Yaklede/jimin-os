@@ -44,6 +44,7 @@ type GmailInflowReviewProps = {
   onDismiss(candidate: GmailInflowCandidate): Promise<void>;
   onDefer(candidate: GmailInflowCandidate, revisitAt: string): Promise<void>;
   onRetryAnalysis(candidate: GmailInflowCandidate): Promise<void>;
+  onOpenTask(taskId: string): Promise<void>;
 };
 
 export function GmailInflowReview({
@@ -61,6 +62,7 @@ export function GmailInflowReview({
   onDismiss,
   onDefer,
   onRetryAnalysis,
+  onOpenTask,
 }: GmailInflowReviewProps) {
   const [selectedId, setSelectedId] = useState<string>();
   const pendingItems = useMemo(
@@ -267,6 +269,7 @@ export function GmailInflowReview({
           onDismiss={onDismiss}
           onDefer={onDefer}
           onRetryAnalysis={onRetryAnalysis}
+          onOpenTask={onOpenTask}
         />
       </div>
     </section>
@@ -284,6 +287,7 @@ type GmailInflowDetailProps = {
   onDismiss(candidate: GmailInflowCandidate): Promise<void>;
   onDefer(candidate: GmailInflowCandidate, revisitAt: string): Promise<void>;
   onRetryAnalysis(candidate: GmailInflowCandidate): Promise<void>;
+  onOpenTask(taskId: string): Promise<void>;
 };
 
 function GmailInflowDetail({
@@ -294,6 +298,7 @@ function GmailInflowDetail({
   onDismiss,
   onDefer,
   onRetryAnalysis,
+  onOpenTask,
 }: GmailInflowDetailProps) {
   const [title, setTitle] = useState(item.suggestedTaskTitle);
   const [notes, setNotes] = useState(item.suggestedTaskNotes);
@@ -311,6 +316,7 @@ function GmailInflowDetail({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (item.promotedTaskId) return;
     const trimmedTitle = title.trim();
     if (!trimmedTitle) {
       setActionError(copy.gmailInflow.invalidTitle);
@@ -359,6 +365,16 @@ function GmailInflowDetail({
       await onRetryAnalysis(item);
     } catch (error) {
       setActionError(actionFailureMessage(error));
+    }
+  }
+
+  async function openLinkedTask() {
+    if (!item.promotedTaskId) return;
+    setActionError(undefined);
+    try {
+      await onOpenTask(item.promotedTaskId);
+    } catch {
+      setActionError(copy.gmailInflow.linkedTaskProblem);
     }
   }
 
@@ -414,74 +430,95 @@ function GmailInflowDetail({
         </div>
       )}
 
-      <form className="gmail-inflow__form" onSubmit={submit}>
-        <label>
-          <span>{copy.gmailInflow.project}</span>
-          <select
-            value={projectId}
-            onChange={(event) => setProjectId(event.target.value)}
+      {item.promotedTaskId && (
+        <div className="gmail-inflow__analysis-state" role="status">
+          <span>
+            <strong>{copy.gmailInflow.linkedTaskReplyTitle}</strong>
+            <small>{copy.gmailInflow.linkedTaskReplyDescription}</small>
+          </span>
+          <button
+            className="secondary-button focus-visible-control"
+            type="button"
             disabled={saving}
-            required
+            onClick={() => void openLinkedTask()}
           >
-            <option value="">{copy.gmailInflow.projectPlaceholder}</option>
-            {projects.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.title}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span>{copy.gmailInflow.suggestedTitle}</span>
-          <input
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            disabled={saving}
-          />
-        </label>
-        <label>
-          <span>{copy.gmailInflow.suggestedNotes}</span>
-          <textarea
-            value={notes}
-            onChange={(event) => setNotes(event.target.value)}
-            disabled={saving}
-            rows={4}
-          />
-        </label>
-        <div className="gmail-inflow__field-grid">
-          <label>
-            <span>{copy.gmailInflow.assignee}</span>
-            <input
-              value={assigneeName}
-              placeholder={copy.gmailInflow.noAssignee}
-              onChange={(event) => setAssigneeName(event.target.value)}
-              disabled={saving}
-            />
-          </label>
-          <label>
-            <span>{copy.gmailInflow.priority}</span>
-            <select
-              value={priority}
-              onChange={(event) => setPriority(Number(event.target.value))}
-              disabled={saving}
-            >
-              <option value={0}>{copy.forms.priorityNormal}</option>
-              <option value={1}>{copy.forms.prioritySoon}</option>
-              <option value={2}>{copy.forms.priorityImportant}</option>
-              <option value={3}>{copy.forms.priorityHighest}</option>
-            </select>
-          </label>
+            {copy.gmailInflow.openLinkedTask}
+          </button>
         </div>
-        <label className="gmail-inflow__due-at">
-          <span>{copy.gmailInflow.suggestedDueAt}</span>
-          <input
-            type="datetime-local"
-            value={dueAt}
-            onChange={(event) => setDueAt(event.target.value)}
-            disabled={saving}
-          />
-          <small>{copy.gmailInflow.dueAtHint}</small>
-        </label>
+      )}
+
+      <form className="gmail-inflow__form" onSubmit={submit}>
+        {!item.promotedTaskId && (
+          <>
+            <label>
+              <span>{copy.gmailInflow.project}</span>
+              <select
+                value={projectId}
+                onChange={(event) => setProjectId(event.target.value)}
+                disabled={saving}
+                required
+              >
+                <option value="">{copy.gmailInflow.projectPlaceholder}</option>
+                {projects.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>{copy.gmailInflow.suggestedTitle}</span>
+              <input
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                disabled={saving}
+              />
+            </label>
+            <label>
+              <span>{copy.gmailInflow.suggestedNotes}</span>
+              <textarea
+                value={notes}
+                onChange={(event) => setNotes(event.target.value)}
+                disabled={saving}
+                rows={4}
+              />
+            </label>
+            <div className="gmail-inflow__field-grid">
+              <label>
+                <span>{copy.gmailInflow.assignee}</span>
+                <input
+                  value={assigneeName}
+                  placeholder={copy.gmailInflow.noAssignee}
+                  onChange={(event) => setAssigneeName(event.target.value)}
+                  disabled={saving}
+                />
+              </label>
+              <label>
+                <span>{copy.gmailInflow.priority}</span>
+                <select
+                  value={priority}
+                  onChange={(event) => setPriority(Number(event.target.value))}
+                  disabled={saving}
+                >
+                  <option value={0}>{copy.forms.priorityNormal}</option>
+                  <option value={1}>{copy.forms.prioritySoon}</option>
+                  <option value={2}>{copy.forms.priorityImportant}</option>
+                  <option value={3}>{copy.forms.priorityHighest}</option>
+                </select>
+              </label>
+            </div>
+            <label className="gmail-inflow__due-at">
+              <span>{copy.gmailInflow.suggestedDueAt}</span>
+              <input
+                type="datetime-local"
+                value={dueAt}
+                onChange={(event) => setDueAt(event.target.value)}
+                disabled={saving}
+              />
+              <small>{copy.gmailInflow.dueAtHint}</small>
+            </label>
+          </>
+        )}
 
         <details className="gmail-inflow__original">
           <summary>{copy.gmailInflow.original}</summary>
@@ -540,13 +577,15 @@ function GmailInflowDetail({
         </label>
 
         <div className="gmail-inflow__actions">
-          <button
-            className="primary-button focus-visible-control"
-            type="submit"
-            disabled={saving || !analysisReady}
-          >
-            {saving ? copy.gmailInflow.promoting : copy.gmailInflow.promote}
-          </button>
+          {!item.promotedTaskId && (
+            <button
+              className="primary-button focus-visible-control"
+              type="submit"
+              disabled={saving || !analysisReady}
+            >
+              {saving ? copy.gmailInflow.promoting : copy.gmailInflow.promote}
+            </button>
+          )}
           <button
             className="secondary-button focus-visible-control"
             type="button"

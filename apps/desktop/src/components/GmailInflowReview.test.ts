@@ -264,6 +264,21 @@ describe("Gmail work intake presentation", () => {
     );
   });
 
+  it("routes a reply on a promoted thread back to its linked task", () => {
+    const markup = renderReview({
+      items: [
+        candidate("follow-up", {
+          analysisClassification: "follow_up",
+          promotedTaskId: "019f0000-0000-7000-8000-000000000001",
+        }),
+      ],
+    });
+
+    expect(markup).toContain(copy.gmailInflow.linkedTaskReplyTitle);
+    expect(markup).toContain(copy.gmailInflow.openLinkedTask);
+    expect(markup).not.toContain(`>${copy.gmailInflow.promote}</button>`);
+  });
+
   it("shows a calm empty state after every candidate is processed", () => {
     expect(renderReview({ items: [] })).toContain(copy.gmailInflow.emptyTitle);
   });
@@ -314,6 +329,7 @@ function renderReview(
     onDismiss: async () => undefined,
     onDefer: async () => undefined,
     onRetryAnalysis: async () => undefined,
+    onOpenTask: async () => undefined,
     ...overrides,
   };
   return renderToStaticMarkup(createElement(GmailInflowReview, props));

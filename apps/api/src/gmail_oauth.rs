@@ -12,15 +12,16 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit as AeadKeyInit, Payload},
 };
+use futures_util::{StreamExt, TryStreamExt, stream};
 use hmac::{Hmac, Mac, digest::KeyInit as HmacKeyInit};
 use jimin_domain::{ClientPlatform, PkceVerifier};
 use jimin_google::{
-    GoogleAuthError, GoogleAuthorizationCode, GoogleCalendarAdapter, GoogleGmailInboxBatch,
-    GoogleGmailMessageEntry, GoogleIdentityAdapter, GoogleOAuthProfile,
+    GoogleAuthError, GoogleAuthorizationCode, GoogleCalendarAdapter, GoogleGmailHistoryChange,
+    GoogleGmailInboxBatch, GoogleGmailMessageEntry, GoogleIdentityAdapter, GoogleOAuthProfile,
 };
 use jimin_storage::gmail::{
     ClaimedGmailOAuthAuthorization, CompleteGmailOAuthAuthorization, EncryptedGmailSecret,
-    GmailSyncConnection, ProviderGmailMessage,
+    GmailHistorySyncMode, GmailSyncConnection, ProviderGmailMessage,
 };
 use rand::Rng;
 use secrecy::{ExposeSecret, SecretString};
@@ -39,6 +40,9 @@ const GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readon
 const OPENID_SCOPE: &str = "openid";
 const EMAIL_SCOPE: &str = "email";
 const GOOGLE_EMAIL_SCOPE: &str = "https://www.googleapis.com/auth/userinfo.email";
+const MAX_GMAIL_HISTORY_PAGES: usize = 100;
+const MAX_GMAIL_HISTORY_CHANGED_MESSAGES: usize = 5_000;
+const GMAIL_MESSAGE_FETCH_CONCURRENCY: usize = 8;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -52,6 +56,9 @@ pub struct GmailOAuthRuntime {
 }
 
 pub struct GmailInboxSyncBatch {
+    pub mode: GmailHistorySyncMode,
+    pub expected_provider_history_id: Option<String>,
+    pub next_provider_history_id: String,
     pub messages: Vec<ProviderGmailMessage>,
     pub skipped_message_count: usize,
 }
@@ -193,7 +200,8 @@ impl GmailOAuthRuntime {
         })
     }
 
-    /// Synchronizes a bounded metadata-only inbox snapshot.
+    /// Synchronizes a bounded metadata-only inbox snapshot or catches up from
+    /// the account's persisted Gmail History cursor.
     ///
     /// # Errors
     ///
@@ -211,23 +219,116 @@ impl GmailOAuthRuntime {
             .refresh_access_token(&refresh_token)
             .await
             .map_err(GmailOAuthError::from_google)?;
+        let Some(history_id) = connection.provider_history_id.as_deref() else {
+            return self
+                .baseline_sync(&access_token, GmailHistorySyncMode::Baseline, None)
+                .await
+                .map_err(GmailOAuthError::from_google);
+        };
+        match self.incremental_sync(&access_token, history_id).await {
+            Ok(batch) => Ok(batch),
+            Err(GoogleAuthError::GmailHistoryIdExpired) => self
+                .baseline_sync(
+                    &access_token,
+                    GmailHistorySyncMode::Rebuild,
+                    Some(history_id),
+                )
+                .await
+                .map_err(GmailOAuthError::from_google),
+            Err(error) => Err(GmailOAuthError::from_google(error)),
+        }
+    }
+
+    async fn baseline_sync(
+        &self,
+        access_token: &SecretString,
+        mode: GmailHistorySyncMode,
+        expected_provider_history_id: Option<&str>,
+    ) -> Result<GmailInboxSyncBatch, GoogleAuthError> {
+        // Read the baseline before the bounded snapshot. Messages arriving
+        // during the import are then replayed by the next History catch-up.
+        let next_provider_history_id = self.gmail.gmail_profile_history_id(access_token).await?;
         let GoogleGmailInboxBatch {
             messages,
             skipped_message_count,
         } = self
             .gmail
-            .list_gmail_inbox_messages(
-                &access_token,
-                connection.latest_provider_message_id.as_deref(),
-                connection.latest_received_at,
-            )
-            .await
-            .map_err(GmailOAuthError::from_google)?;
+            .list_gmail_inbox_messages(access_token, None, None)
+            .await?;
         Ok(GmailInboxSyncBatch {
+            mode,
+            expected_provider_history_id: expected_provider_history_id.map(str::to_owned),
+            next_provider_history_id,
             messages: messages.into_iter().map(provider_message).collect(),
             skipped_message_count,
         })
     }
+
+    async fn incremental_sync(
+        &self,
+        access_token: &SecretString,
+        start_history_id: &str,
+    ) -> Result<GmailInboxSyncBatch, GoogleAuthError> {
+        let mut page_token = None;
+        let mut changed_message_ids = BTreeSet::new();
+        for _ in 0..MAX_GMAIL_HISTORY_PAGES {
+            let page = self
+                .gmail
+                .list_gmail_history_page(access_token, start_history_id, page_token.as_deref())
+                .await?;
+            for change in &page.changes {
+                collect_inbox_additions(change, &mut changed_message_ids);
+                if changed_message_ids.len() > MAX_GMAIL_HISTORY_CHANGED_MESSAGES {
+                    return Err(GoogleAuthError::ProviderRejected);
+                }
+            }
+            let next_provider_history_id = page.history_id;
+            let Some(next_page_token) = page.next_page_token else {
+                let fetched = stream::iter(changed_message_ids.into_iter().map(|message_id| {
+                    let gmail = &self.gmail;
+                    async move { gmail.get_gmail_message(access_token, &message_id).await }
+                }))
+                .buffer_unordered(GMAIL_MESSAGE_FETCH_CONCURRENCY)
+                .try_collect::<Vec<_>>()
+                .await?;
+                let mut messages = Vec::with_capacity(fetched.len());
+                let mut skipped_message_count = 0;
+                for entry in fetched {
+                    match entry {
+                        Some(entry) if entry.is_inbox => messages.push(provider_message(entry)),
+                        Some(_) => {}
+                        None => skipped_message_count += 1,
+                    }
+                }
+                return Ok(GmailInboxSyncBatch {
+                    mode: GmailHistorySyncMode::Incremental,
+                    expected_provider_history_id: Some(start_history_id.to_owned()),
+                    next_provider_history_id,
+                    messages,
+                    skipped_message_count,
+                });
+            };
+            page_token = Some(next_page_token);
+        }
+        Err(GoogleAuthError::ProviderUnavailable)
+    }
+}
+
+fn collect_inbox_additions(change: &GoogleGmailHistoryChange, message_ids: &mut BTreeSet<String>) {
+    message_ids.extend(
+        change
+            .messages_added
+            .iter()
+            .filter(|message| message.label_ids.iter().any(|label| label == "INBOX"))
+            .map(|message| message.provider_message_id.clone()),
+    );
+    message_ids.extend(
+        change
+            .labels_added
+            .iter()
+            .filter(|event| event.label_ids.iter().any(|label| label == "INBOX"))
+            .map(|event| event.message.provider_message_id.clone()),
+    );
 }
 
 /// Persistable half of a new OAuth request. Raw browser state is present only
@@ -294,7 +395,9 @@ impl GmailOAuthError {
 
     fn from_google(error: GoogleAuthError) -> Self {
         match error {
-            GoogleAuthError::ProviderUnavailable => Self::ProviderUnavailable,
+            GoogleAuthError::ProviderUnavailable | GoogleAuthError::GmailHistoryIdExpired => {
+                Self::ProviderUnavailable
+            }
             GoogleAuthError::InvalidRequest | GoogleAuthError::ProviderRejected => {
                 Self::ProviderRejected
             }
@@ -448,12 +551,17 @@ fn refresh_token_aad(user_id: Uuid, provider_subject: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    use jimin_google::{
+        GoogleGmailHistoryChange, GoogleGmailHistoryLabelChange, GoogleGmailHistoryMessage,
+    };
     use secrecy::SecretString;
     use uuid::Uuid;
 
     use super::{
-        GMAIL_READONLY_SCOPE, GmailCrypto, GmailOAuthError, gmail_only_scopes, pkce_aad,
-        refresh_token_aad,
+        GMAIL_READONLY_SCOPE, GmailCrypto, GmailOAuthError, collect_inbox_additions,
+        gmail_only_scopes, pkce_aad, refresh_token_aad,
     };
 
     #[test]
@@ -518,5 +626,34 @@ mod tests {
                 "openid".to_owned(),
             ])
         );
+    }
+
+    #[test]
+    fn history_candidate_collection_keeps_only_inbox_additions_and_deduplicates() {
+        let inbox_message = GoogleGmailHistoryMessage {
+            provider_message_id: "message-1".to_owned(),
+            provider_thread_id: "thread-1".to_owned(),
+            label_ids: vec!["INBOX".to_owned()],
+        };
+        let archived_message = GoogleGmailHistoryMessage {
+            provider_message_id: "message-2".to_owned(),
+            provider_thread_id: "thread-2".to_owned(),
+            label_ids: vec!["IMPORTANT".to_owned()],
+        };
+        let change = GoogleGmailHistoryChange {
+            history_id: "101".to_owned(),
+            messages_added: vec![inbox_message.clone(), archived_message],
+            messages_deleted: Vec::new(),
+            labels_added: vec![GoogleGmailHistoryLabelChange {
+                message: inbox_message,
+                label_ids: vec!["INBOX".to_owned()],
+            }],
+            labels_removed: Vec::new(),
+        };
+        let mut ids = BTreeSet::new();
+
+        collect_inbox_additions(&change, &mut ids);
+
+        assert_eq!(ids.into_iter().collect::<Vec<_>>(), vec!["message-1"]);
     }
 }

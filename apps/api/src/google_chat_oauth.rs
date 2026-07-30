@@ -564,6 +564,7 @@ impl GoogleChatOAuthError {
             GoogleAuthError::IdentityRejected => Self::InvalidCallback,
             GoogleAuthError::InvalidRequest
             | GoogleAuthError::ProviderRejected
+            | GoogleAuthError::GmailHistoryIdExpired
             | GoogleAuthError::CalendarSyncTokenExpired
             | GoogleAuthError::CalendarEventConflict
             | GoogleAuthError::CalendarEventNotFound

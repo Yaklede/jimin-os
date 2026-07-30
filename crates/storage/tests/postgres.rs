@@ -23,8 +23,9 @@ use jimin_storage::{
     calendar_mutation::{ScheduleCalendarMutationOperation, provider_event_id_for_schedule},
     device_signals::{CallLogPermission, MissedCallSyncRequest, NewMissedCallSignal},
     gmail::{
-        CompleteGmailOAuthAuthorization, CreateGmailOAuthAuthorization, DeleteGmailAccountOutcome,
-        EncryptedGmailSecret, ProviderGmailMessage,
+        ApplyGmailHistorySync, ApplyGmailHistorySyncOutcome, CompleteGmailOAuthAuthorization,
+        CreateGmailOAuthAuthorization, DeleteGmailAccountOutcome, EncryptedGmailSecret,
+        GmailHistorySyncMode, ProviderGmailMessage,
     },
     gmail_inflow::{
         GmailInflowAnalysisResult, GmailInflowClassification, GmailInflowStatus,
@@ -118,6 +119,15 @@ async fn insert_test_gmail_account(
     .execute(pool)
     .await
     .expect("test Gmail account should persist");
+    sqlx::query(
+        "INSERT INTO gmail_sync_states (account_id, workspace_id, status)
+         VALUES ($1, $2, 'idle')",
+    )
+    .bind(account_id)
+    .bind(workspace_id)
+    .execute(pool)
+    .await
+    .expect("test Gmail sync state should persist");
     account_id
 }
 
@@ -6392,6 +6402,16 @@ async fn gmail_accounts_are_workspace_scoped_and_delete_only_the_selected_mailbo
             .expect("selected Gmail account should delete"),
         DeleteGmailAccountOutcome::Deleted
     ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM gmail_sync_states WHERE account_id = $1",
+        )
+        .bind(personal_account)
+        .fetch_one(&pool)
+        .await
+        .expect("deleted Gmail sync state count should load"),
+        0
+    );
     let remaining_accounts = database
         .gmail_accounts_for_user(owner.profile.id)
         .await
@@ -6458,6 +6478,16 @@ async fn gmail_reconnect_rejects_a_different_identity_and_preserves_the_refresh_
         .expect("test database should be reachable");
     let account_id =
         insert_test_gmail_account(&pool, owner.profile.id, personal.id, "reconnect").await;
+    sqlx::query(
+        "UPDATE gmail_sync_states
+         SET provider_history_id = '777'
+         WHERE account_id = $1 AND workspace_id = $2",
+    )
+    .bind(account_id)
+    .bind(personal.id)
+    .execute(&pool)
+    .await
+    .expect("reconnect cursor fixture should persist");
     let provider_subject = GoogleSubject::parse(format!("reconnect-subject-{}", owner.profile.id))
         .expect("provider subject should be valid");
 
@@ -6559,7 +6589,7 @@ async fn gmail_reconnect_rejects_a_different_identity_and_preserves_the_refresh_
         .expect("matching reconnect should complete");
     assert_eq!(reconnected.id, account_id);
     let connection = database
-        .gmail_sync_connection(account_id, owner.profile.id)
+        .gmail_sync_connection(account_id, owner.profile.id, personal.id)
         .await
         .expect("sync connection should load")
         .expect("sync connection should remain active");
@@ -6568,6 +6598,7 @@ async fn gmail_reconnect_rejects_a_different_identity_and_preserves_the_refresh_
         connection.refresh_token.nonce,
         vec![b'r'.wrapping_add(1); 24]
     );
+    assert_eq!(connection.provider_history_id.as_deref(), Some("777"));
     let expired_authorization_id = Uuid::now_v7();
     let mut expired_state = expired_authorization_id.as_bytes().to_vec();
     expired_state.extend_from_slice(expired_authorization_id.as_bytes());
@@ -7923,7 +7954,7 @@ async fn gmail_inflow_preserves_workspace_revision_decisions_and_promotion_lifec
         .fetch_one(&pool)
         .await
         .expect("promoted candidate should remain queryable");
-    assert_eq!(queued_promoted_revision.0, "promoted");
+    assert_eq!(queued_promoted_revision.0, "pending");
     assert_eq!(queued_promoted_revision.1, "queued");
     assert!(
         queued_promoted_revision
@@ -7967,10 +7998,28 @@ async fn gmail_inflow_preserves_workspace_revision_decisions_and_promotion_lifec
     .fetch_one(&pool)
     .await
     .expect("reanalyzed promoted candidate should remain queryable");
-    assert_eq!(analyzed_promoted_revision.0, "promoted");
+    assert_eq!(analyzed_promoted_revision.0, "pending");
     assert_eq!(analyzed_promoted_revision.1, "ready");
     assert_eq!(analyzed_promoted_revision.2, analyzed_promoted_revision.3);
     assert_eq!(analyzed_promoted_revision.4, Some(promotable.id));
+    assert!(
+        database
+            .gmail_inflow_candidate_page(
+                owner.profile.id,
+                personal.id,
+                GmailInflowStatus::Attention,
+                100,
+                None,
+            )
+            .await
+            .expect("promoted follow-up should load")
+            .items
+            .iter()
+            .any(|candidate| {
+                candidate.id == promotable.id && candidate.promoted_task_id == Some(promotable.id)
+            }),
+        "a new reply must return the linked task thread to owner attention"
+    );
     let duplicate_thread = format!("duplicate-thread-{}", owner.profile.id);
     database
         .apply_gmail_inbox_sync(
@@ -8060,7 +8109,7 @@ async fn gmail_inflow_preserves_workspace_revision_decisions_and_promotion_lifec
     .fetch_one(&pool)
     .await
     .expect("source history should remain");
-    assert_eq!(lifecycle, ("promoted".to_owned(), None, None));
+    assert_eq!(lifecycle, ("pending".to_owned(), None, None));
     assert!(
         database
             .gmail_inflow_candidate_page(
@@ -8085,7 +8134,7 @@ async fn gmail_inflow_preserves_workspace_revision_decisions_and_promotion_lifec
     clippy::too_many_lines,
     reason = "The pagination regression keeps the representative-message mutation between page reads in one isolated database fixture."
 )]
-async fn gmail_inflow_attention_uses_stable_cursor_pagination_without_hiding_items() {
+async fn gmail_inflow_attention_moves_replied_threads_to_a_fresh_first_page() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;
     };
@@ -8204,7 +8253,7 @@ async fn gmail_inflow_attention_uses_stable_cursor_pagination_without_hiding_ite
         )
         .await
         .expect("second page should load");
-    assert_eq!(second.items.len(), 5);
+    assert_eq!(second.items.len(), 4);
     assert!(second.next_cursor.is_none());
     let ids = first
         .items
@@ -8212,7 +8261,317 @@ async fn gmail_inflow_attention_uses_stable_cursor_pagination_without_hiding_ite
         .chain(&second.items)
         .map(|item| item.id)
         .collect::<HashSet<_>>();
-    assert_eq!(ids.len(), 105);
+    assert_eq!(ids.len(), 104);
+    let refreshed = database
+        .gmail_inflow_candidate_page(
+            owner.profile.id,
+            workspace.id,
+            GmailInflowStatus::Attention,
+            100,
+            None,
+        )
+        .await
+        .expect("fresh first page should load");
+    assert_eq!(
+        refreshed
+            .items
+            .first()
+            .map(|candidate| candidate.provider_thread_id.as_str()),
+        Some(oldest_thread.as_str())
+    );
+    database.close().await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The History regression keeps baseline, concurrent CAS, replay, rebuild, failure, and workspace isolation in one account lifecycle."
+)]
+async fn gmail_history_cursor_is_atomic_idempotent_and_workspace_scoped() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        4,
+        Duration::from_secs(2),
+    )
+    .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let workspaces = database
+        .workspaces_for_user(owner.profile.id)
+        .await
+        .expect("workspaces should load");
+    let personal = workspaces
+        .iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Personal)
+        .expect("personal workspace should exist");
+    let company = workspaces
+        .iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Company)
+        .expect("company workspace should exist");
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("test database should be reachable");
+    let personal_account =
+        insert_test_gmail_account(&pool, owner.profile.id, personal.id, "history-personal").await;
+    let company_account =
+        insert_test_gmail_account(&pool, owner.profile.id, company.id, "history-company").await;
+    let now = OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .expect("whole second fixture");
+    let thread_id = format!("history-thread-{}", owner.profile.id);
+    let baseline_messages = [gmail_provider_message(
+        "history-baseline",
+        &thread_id,
+        now,
+        "기준 메일",
+        "초기 기준점을 저장한다.",
+    )];
+    let baseline = database
+        .apply_gmail_history_sync(&ApplyGmailHistorySync {
+            account_id: personal_account,
+            user_id: owner.profile.id,
+            workspace_id: personal.id,
+            mode: GmailHistorySyncMode::Baseline,
+            expected_provider_history_id: None,
+            next_provider_history_id: "100",
+            messages: &baseline_messages,
+            skipped_message_count: 0,
+        })
+        .await
+        .expect("baseline should persist");
+    assert!(matches!(baseline, ApplyGmailHistorySyncOutcome::Applied(_)));
+    let personal_connection = database
+        .gmail_sync_connection(personal_account, owner.profile.id, personal.id)
+        .await
+        .expect("personal connection should load")
+        .expect("personal connection should exist");
+    assert_eq!(
+        personal_connection.provider_history_id.as_deref(),
+        Some("100")
+    );
+    assert!(
+        database
+            .gmail_sync_connection(personal_account, owner.profile.id, company.id)
+            .await
+            .expect("foreign workspace lookup should remain safe")
+            .is_none()
+    );
+    assert_eq!(
+        database
+            .gmail_sync_connection(company_account, owner.profile.id, company.id)
+            .await
+            .expect("company connection should load")
+            .expect("company connection should exist")
+            .provider_history_id,
+        None
+    );
+    assert!(matches!(
+        database
+            .apply_gmail_history_sync(&ApplyGmailHistorySync {
+                account_id: personal_account,
+                user_id: owner.profile.id,
+                workspace_id: company.id,
+                mode: GmailHistorySyncMode::Baseline,
+                expected_provider_history_id: None,
+                next_provider_history_id: "100",
+                messages: &[],
+                skipped_message_count: 0,
+            })
+            .await,
+        Err(StorageError::InvalidConfiguration)
+    ));
+
+    let reply_messages = [gmail_provider_message(
+        "history-reply",
+        &thread_id,
+        now + TimeDuration::minutes(1),
+        "기준 메일 후속",
+        "동시에 실행되어도 한 번만 저장한다.",
+    )];
+    let first_command = ApplyGmailHistorySync {
+        account_id: personal_account,
+        user_id: owner.profile.id,
+        workspace_id: personal.id,
+        mode: GmailHistorySyncMode::Incremental,
+        expected_provider_history_id: Some("100"),
+        next_provider_history_id: "101",
+        messages: &reply_messages,
+        skipped_message_count: 0,
+    };
+    let second_command = ApplyGmailHistorySync {
+        next_provider_history_id: "102",
+        ..first_command
+    };
+    let (first, second) = tokio::join!(
+        database.apply_gmail_history_sync(&first_command),
+        database.apply_gmail_history_sync(&second_command)
+    );
+    let outcomes = [
+        first.expect("first concurrent sync should return an outcome"),
+        second.expect("second concurrent sync should return an outcome"),
+    ];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, ApplyGmailHistorySyncOutcome::Applied(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, ApplyGmailHistorySyncOutcome::CursorConflict))
+            .count(),
+        1
+    );
+    let current_history_id = database
+        .gmail_sync_connection(personal_account, owner.profile.id, personal.id)
+        .await
+        .expect("updated connection should load")
+        .expect("updated connection should exist")
+        .provider_history_id
+        .expect("incremental sync should advance the cursor");
+    assert!(matches!(current_history_id.as_str(), "101" | "102"));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM gmail_messages
+             WHERE account_id = $1 AND provider_message_id = $2",
+        )
+        .bind(personal_account)
+        .bind(&reply_messages[0].provider_message_id)
+        .fetch_one(&pool)
+        .await
+        .expect("reply count should load"),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>(
+            "SELECT source_revision FROM gmail_inflow_candidates
+             WHERE account_id = $1 AND provider_thread_id = $2",
+        )
+        .bind(personal_account)
+        .bind(&thread_id)
+        .fetch_one(&pool)
+        .await
+        .expect("candidate revision should load"),
+        2
+    );
+    assert!(matches!(
+        database
+            .apply_gmail_history_sync(&ApplyGmailHistorySync {
+                next_provider_history_id: "103",
+                ..first_command
+            })
+            .await
+            .expect("stale replay should return a conflict"),
+        ApplyGmailHistorySyncOutcome::CursorConflict
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>(
+            "SELECT source_revision FROM gmail_inflow_candidates
+             WHERE account_id = $1 AND provider_thread_id = $2",
+        )
+        .bind(personal_account)
+        .bind(&thread_id)
+        .fetch_one(&pool)
+        .await
+        .expect("replayed candidate revision should load"),
+        2
+    );
+
+    let mut invalid_message = gmail_provider_message(
+        "history-invalid",
+        "history-invalid-thread",
+        now,
+        "잘못된 메일",
+        "커서를 먼저 바꾸면 안 된다.",
+    );
+    invalid_message.provider_message_id = "invalid\nmessage".to_owned();
+    let invalid_messages = [invalid_message];
+    assert!(matches!(
+        database
+            .apply_gmail_history_sync(&ApplyGmailHistorySync {
+                account_id: personal_account,
+                user_id: owner.profile.id,
+                workspace_id: personal.id,
+                mode: GmailHistorySyncMode::Rebuild,
+                expected_provider_history_id: Some(&current_history_id),
+                next_provider_history_id: "200",
+                messages: &invalid_messages,
+                skipped_message_count: 0,
+            })
+            .await,
+        Err(StorageError::InvalidConfiguration)
+    ));
+    assert_eq!(
+        database
+            .gmail_sync_connection(personal_account, owner.profile.id, personal.id)
+            .await
+            .expect("connection after invalid rebuild should load")
+            .expect("connection after invalid rebuild should exist")
+            .provider_history_id
+            .as_deref(),
+        Some(current_history_id.as_str())
+    );
+    let rebuild_messages = [gmail_provider_message(
+        "history-rebuild",
+        "history-rebuild-thread",
+        now + TimeDuration::minutes(2),
+        "복구 기준 메일",
+        "오래된 커서를 새 기준점으로 교체한다.",
+    )];
+    assert!(matches!(
+        database
+            .apply_gmail_history_sync(&ApplyGmailHistorySync {
+                account_id: personal_account,
+                user_id: owner.profile.id,
+                workspace_id: personal.id,
+                mode: GmailHistorySyncMode::Rebuild,
+                expected_provider_history_id: Some(&current_history_id),
+                next_provider_history_id: "200",
+                messages: &rebuild_messages,
+                skipped_message_count: 0,
+            })
+            .await
+            .expect("valid rebuild should persist"),
+        ApplyGmailHistorySyncOutcome::Applied(_)
+    ));
+    database
+        .mark_gmail_sync_failure(
+            personal_account,
+            owner.profile.id,
+            personal.id,
+            "gmail.provider_unavailable",
+            false,
+        )
+        .await
+        .expect("retryable failure should persist");
+    assert_eq!(
+        database
+            .gmail_sync_connection(personal_account, owner.profile.id, personal.id)
+            .await
+            .expect("failed connection should load")
+            .expect("retryable account should remain eligible")
+            .provider_history_id
+            .as_deref(),
+        Some("200")
+    );
+    assert_eq!(
+        database
+            .gmail_sync_connection(company_account, owner.profile.id, company.id)
+            .await
+            .expect("company connection should remain isolated")
+            .expect("company connection should exist")
+            .provider_history_id,
+        None
+    );
     database.close().await;
     pool.close().await;
 }

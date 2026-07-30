@@ -172,4 +172,26 @@ After a Gmail account is authorized or synchronized, rollback requires the
 verified pre-migration backup because the previous image cannot interpret the
 workspace-scoped encrypted credentials or cache rows.
 
+Migration `0046_gmail_history_cursor.sql` adds one server-only Gmail History
+cursor to each account/workspace sync state. Existing accounts intentionally
+start with a null cursor and establish a fresh provider baseline before using
+incremental History synchronization. Apply it to an empty database and a
+restored version-45 backup, then verify personal and company accounts advance
+independently, a stale expected cursor cannot commit messages, reconnecting
+preserves the cursor, and `jimin_schema_metadata.schema_version = 46`. The
+migration is additive, but after a History cursor advances, rollback requires
+the verified pre-migration backup so an older image cannot silently resume from
+an unrelated inbox watermark.
+
+Migration `0047_gmail_inflow_attention.sql` orders Gmail assistant candidates
+by the latest source activity instead of their first-seen time. Existing rows
+start at their latest stored update time; a later message on a dismissed,
+deferred, or promoted thread returns that thread to review without removing its
+linked task. Apply it to an empty database and a restored version-46 backup,
+then verify that an older thread with a new reply moves to the first page and
+keyset pagination remains duplicate-free. Confirm
+`jimin_schema_metadata.schema_version = 47`. The migration is additive, but
+rollback after new replies are ingested requires the verified pre-migration
+backup so the previous image does not silently hide recent thread activity.
+
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.

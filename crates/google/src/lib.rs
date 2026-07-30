@@ -35,6 +35,10 @@ const GOOGLE_CALENDAR_LIST_ENDPOINT: &str =
 const GOOGLE_CALENDAR_EVENTS_ENDPOINT: &str = "https://www.googleapis.com/calendar/v3/calendars";
 const GOOGLE_GMAIL_MESSAGES_ENDPOINT: &str =
     "https://gmail.googleapis.com/gmail/v1/users/me/messages";
+const GOOGLE_GMAIL_PROFILE_ENDPOINT: &str =
+    "https://gmail.googleapis.com/gmail/v1/users/me/profile";
+const GOOGLE_GMAIL_HISTORY_ENDPOINT: &str =
+    "https://gmail.googleapis.com/gmail/v1/users/me/history";
 const GOOGLE_CHAT_SPACES_ENDPOINT: &str = "https://chat.googleapis.com/v1/spaces";
 const GOOGLE_ISSUERS: [&str; 2] = ["https://accounts.google.com", "accounts.google.com"];
 const MAX_AUTHORIZATION_CODE_BYTES: usize = 4 * 1024;
@@ -53,6 +57,13 @@ const MAX_GMAIL_CATCH_UP_MESSAGES: usize = 5_000;
 const MAX_GMAIL_INITIAL_IMPORT_MESSAGES: usize = 100;
 const MAX_GMAIL_LIST_RESPONSE_BYTES: usize = 512 * 1024;
 const MAX_GMAIL_MESSAGE_RESPONSE_BYTES: usize = 512 * 1024;
+const MAX_GMAIL_PROFILE_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_GMAIL_HISTORY_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_GMAIL_HISTORY_RECORDS_PER_PAGE: usize = 500;
+const MAX_GMAIL_HISTORY_EVENTS_PER_PAGE: usize = 5_000;
+const MAX_GMAIL_HISTORY_ID_BYTES: usize = 64;
+const MAX_GMAIL_HISTORY_PAGE_TOKEN_BYTES: usize = 4 * 1024;
+const MAX_GMAIL_LABELS_PER_MESSAGE: usize = 128;
 const MAX_GMAIL_BODY_CHARS: usize = 12_000;
 const MAX_GMAIL_REFERENCE_LINKS: usize = 16;
 const MAX_CHAT_LIST_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
@@ -72,6 +83,8 @@ pub enum GoogleAuthError {
     IdentityRejected,
     #[error("Google identity provider is temporarily unavailable")]
     ProviderUnavailable,
+    #[error("Google Gmail history ID expired")]
+    GmailHistoryIdExpired,
     #[error("Google Calendar incremental synchronization token expired")]
     CalendarSyncTokenExpired,
     #[error("Google Calendar event changed before the requested mutation")]
@@ -447,6 +460,7 @@ pub struct GoogleGmailMessageEntry {
     pub list_unsubscribe: bool,
     pub precedence: Option<String>,
     pub auto_submitted: Option<String>,
+    pub is_inbox: bool,
     pub is_unread: bool,
 }
 
@@ -454,6 +468,41 @@ pub struct GoogleGmailMessageEntry {
 pub struct GoogleGmailInboxBatch {
     pub messages: Vec<GoogleGmailMessageEntry>,
     pub skipped_message_count: usize,
+}
+
+/// One bounded Gmail history page. The top-level history ID is the latest
+/// mailbox position reported by Google; callers should persist it only after
+/// consuming the terminal page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoogleGmailHistoryPage {
+    pub history_id: String,
+    pub next_page_token: Option<String>,
+    pub changes: Vec<GoogleGmailHistoryChange>,
+}
+
+/// Provider changes that share one Gmail history position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoogleGmailHistoryChange {
+    pub history_id: String,
+    pub messages_added: Vec<GoogleGmailHistoryMessage>,
+    pub messages_deleted: Vec<GoogleGmailHistoryMessage>,
+    pub labels_added: Vec<GoogleGmailHistoryLabelChange>,
+    pub labels_removed: Vec<GoogleGmailHistoryLabelChange>,
+}
+
+/// The bounded message reference embedded in a Gmail history event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoogleGmailHistoryMessage {
+    pub provider_message_id: String,
+    pub provider_thread_id: String,
+    pub label_ids: Vec<String>,
+}
+
+/// A label mutation and the message state supplied with it by Gmail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoogleGmailHistoryLabelChange {
+    pub message: GoogleGmailHistoryMessage,
+    pub label_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1026,6 +1075,96 @@ impl GoogleCalendarAdapter {
         }
     }
 
+    /// Reads the current Gmail mailbox history position used to establish a
+    /// full-sync baseline. The caller should persist this value together with
+    /// the completed full import, never before it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized validation, credential, transport, or provider
+    /// error. The response body and access token are never retained.
+    pub async fn gmail_profile_history_id(
+        &self,
+        access_token: &SecretString,
+    ) -> Result<String, GoogleAuthError> {
+        let token = validate_access_token(access_token)?;
+        let mut url = reqwest::Url::parse(GOOGLE_GMAIL_PROFILE_ENDPOINT)
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        url.query_pairs_mut().append_pair("fields", "historyId");
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        if !response.status().is_success() {
+            return Err(classify_provider_status(response.status().as_u16()));
+        }
+        if !is_json_response(&response) {
+            return Err(GoogleAuthError::ProviderUnavailable);
+        }
+        let payload = bounded_body(response, MAX_GMAIL_PROFILE_RESPONSE_BYTES).await?;
+        let profile: GoogleGmailProfileResponse =
+            serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
+        validate_provider_gmail_history_id(profile.history_id)
+    }
+
+    /// Reads one Gmail history page after a previously persisted history ID.
+    /// No Gmail label filter is sent: runtime filtering needs both additions
+    /// and removals of the `INBOX` label, plus deletions for cached messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GoogleAuthError::GmailHistoryIdExpired`] when Google reports
+    /// that the starting history ID is no longer available. Authentication,
+    /// transport, and malformed-provider failures remain sanitized.
+    pub async fn list_gmail_history_page(
+        &self,
+        access_token: &SecretString,
+        start_history_id: &str,
+        page_token: Option<&str>,
+    ) -> Result<GoogleGmailHistoryPage, GoogleAuthError> {
+        let token = validate_access_token(access_token)?;
+        let url = gmail_history_url(start_history_id, page_token)?;
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        if let Some(error) = classify_gmail_history_status(response.status().as_u16()) {
+            return Err(error);
+        }
+        if !is_json_response(&response) {
+            return Err(GoogleAuthError::ProviderUnavailable);
+        }
+        let payload = bounded_body(response, MAX_GMAIL_HISTORY_RESPONSE_BYTES).await?;
+        let page: GoogleGmailHistoryResponse =
+            serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
+        normalize_gmail_history_page(page)
+    }
+
+    /// Loads and normalizes one changed Gmail message from the fixed provider
+    /// endpoint. Concurrently deleted messages return `None`, while malformed
+    /// full payloads use the same metadata-only fallback as the inbox importer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized validation, credential, transport, or provider
+    /// error. Attachments and raw provider payloads are never returned.
+    pub async fn get_gmail_message(
+        &self,
+        access_token: &SecretString,
+        provider_message_id: &str,
+    ) -> Result<Option<GoogleGmailMessageEntry>, GoogleAuthError> {
+        let token = validate_access_token(access_token)?;
+        let provider_message_id = validate_gmail_resource_id(provider_message_id.to_owned())
+            .map_err(|_| GoogleAuthError::InvalidRequest)?;
+        fetch_normalized_gmail_message(&self.client, token, &provider_message_id).await
+    }
+
     /// Lists a bounded, read-only view of the Gmail inbox. The adapter first
     /// receives message IDs, then requests only metadata headers for each
     /// entry; bounded text parts are sanitized while attachments are ignored.
@@ -1110,47 +1249,12 @@ impl GoogleCalendarAdapter {
         let mut skipped_messages = 0usize;
         for reference in references {
             let provider_message_id = validate_gmail_resource_id(reference.id)?;
-            let full = fetch_gmail_message(
-                &self.client,
-                token,
-                &provider_message_id,
-                "full",
-                "id,threadId,internalDate,labelIds,snippet,payload(headers,mimeType,filename,body(data,attachmentId),parts)",
-            )
-            .await;
-            match full {
-                Ok(message) => match normalize_gmail_message(message, &provider_message_id) {
-                    Ok(message) => messages.push(message),
-                    Err(_) => {
-                        if let Some(message) =
-                            fetch_gmail_metadata_fallback(&self.client, token, &provider_message_id)
-                                .await?
-                        {
-                            messages.push(message);
-                        } else {
-                            skipped_messages += 1;
-                        }
-                    }
-                },
-                Err(GmailMessageFetchError::Malformed) => {
-                    if let Some(message) =
-                        fetch_gmail_metadata_fallback(&self.client, token, &provider_message_id)
-                            .await?
-                    {
-                        messages.push(message);
-                    } else {
-                        skipped_messages += 1;
-                    }
-                }
-                Err(GmailMessageFetchError::NotFound) => {
-                    skipped_messages += 1;
-                }
-                Err(GmailMessageFetchError::Credential | GmailMessageFetchError::Rejected) => {
-                    return Err(GoogleAuthError::ProviderRejected);
-                }
-                Err(GmailMessageFetchError::Transient) => {
-                    return Err(GoogleAuthError::ProviderUnavailable);
-                }
+            if let Some(message) =
+                fetch_normalized_gmail_message(&self.client, token, &provider_message_id).await?
+            {
+                messages.push(message);
+            } else {
+                skipped_messages += 1;
             }
         }
         if skipped_messages > 0 {
@@ -1163,6 +1267,35 @@ impl GoogleCalendarAdapter {
             messages,
             skipped_message_count: skipped_messages,
         })
+    }
+}
+
+async fn fetch_normalized_gmail_message(
+    client: &Client,
+    token: &str,
+    provider_message_id: &str,
+) -> Result<Option<GoogleGmailMessageEntry>, GoogleAuthError> {
+    let full = fetch_gmail_message(
+        client,
+        token,
+        provider_message_id,
+        "full",
+        "id,threadId,internalDate,labelIds,snippet,payload(headers,mimeType,filename,body(data,attachmentId),parts)",
+    )
+    .await;
+    match full {
+        Ok(message) => match normalize_gmail_message(message, provider_message_id) {
+            Ok(message) => Ok(Some(message)),
+            Err(_) => fetch_gmail_metadata_fallback(client, token, provider_message_id).await,
+        },
+        Err(GmailMessageFetchError::Malformed) => {
+            fetch_gmail_metadata_fallback(client, token, provider_message_id).await
+        }
+        Err(GmailMessageFetchError::NotFound) => Ok(None),
+        Err(GmailMessageFetchError::Credential | GmailMessageFetchError::Rejected) => {
+            Err(GoogleAuthError::ProviderRejected)
+        }
+        Err(GmailMessageFetchError::Transient) => Err(GoogleAuthError::ProviderUnavailable),
     }
 }
 
@@ -2049,6 +2182,57 @@ struct GoogleGmailMessageReference {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct GoogleGmailProfileResponse {
+    history_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleGmailHistoryResponse {
+    #[serde(default)]
+    history: Vec<GoogleGmailHistoryRecord>,
+    next_page_token: Option<String>,
+    history_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleGmailHistoryRecord {
+    id: String,
+    #[serde(default)]
+    messages_added: Vec<GoogleGmailHistoryMessageEvent>,
+    #[serde(default)]
+    messages_deleted: Vec<GoogleGmailHistoryMessageEvent>,
+    #[serde(default)]
+    labels_added: Vec<GoogleGmailHistoryLabelEvent>,
+    #[serde(default)]
+    labels_removed: Vec<GoogleGmailHistoryLabelEvent>,
+}
+
+#[derive(Deserialize)]
+struct GoogleGmailHistoryMessageEvent {
+    message: GoogleGmailHistoryMessageResource,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleGmailHistoryLabelEvent {
+    message: GoogleGmailHistoryMessageResource,
+    #[serde(default)]
+    label_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GoogleGmailHistoryMessageResource {
+    id: String,
+    thread_id: String,
+    #[serde(default)]
+    label_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GoogleGmailMessageResponse {
     id: String,
     thread_id: String,
@@ -2568,6 +2752,10 @@ fn normalize_gmail_message(
     let received_at = message
         .internal_date
         .and_then(|value| parse_gmail_internal_date(&value));
+    let is_inbox = message
+        .label_ids
+        .as_deref()
+        .is_some_and(|labels| labels.iter().any(|label| label == "INBOX"));
     let is_unread = message
         .label_ids
         .as_deref()
@@ -2585,6 +2773,7 @@ fn normalize_gmail_message(
         list_unsubscribe,
         precedence,
         auto_submitted,
+        is_inbox,
         is_unread,
     })
 }
@@ -2663,6 +2852,150 @@ fn collect_gmail_message_references(
         }
     }
     Ok(false)
+}
+
+fn gmail_history_url(
+    start_history_id: &str,
+    page_token: Option<&str>,
+) -> Result<reqwest::Url, GoogleAuthError> {
+    validate_gmail_history_id(start_history_id, GoogleAuthError::InvalidRequest)?;
+    if page_token.is_some_and(|token| !valid_gmail_history_page_token(token)) {
+        return Err(GoogleAuthError::InvalidRequest);
+    }
+    let mut url = reqwest::Url::parse(GOOGLE_GMAIL_HISTORY_ENDPOINT)
+        .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("startHistoryId", start_history_id);
+        query.append_pair(
+            "maxResults",
+            &MAX_GMAIL_HISTORY_RECORDS_PER_PAGE.to_string(),
+        );
+        for history_type in [
+            "messageAdded",
+            "messageDeleted",
+            "labelAdded",
+            "labelRemoved",
+        ] {
+            query.append_pair("historyTypes", history_type);
+        }
+        if let Some(page_token) = page_token {
+            query.append_pair("pageToken", page_token);
+        }
+    }
+    Ok(url)
+}
+
+fn normalize_gmail_history_page(
+    page: GoogleGmailHistoryResponse,
+) -> Result<GoogleGmailHistoryPage, GoogleAuthError> {
+    if page.history.len() > MAX_GMAIL_HISTORY_RECORDS_PER_PAGE {
+        return Err(GoogleAuthError::ProviderRejected);
+    }
+    let history_id = validate_provider_gmail_history_id(page.history_id)?;
+    let next_page_token = page
+        .next_page_token
+        .map(|token| {
+            if valid_gmail_history_page_token(&token) {
+                Ok(token)
+            } else {
+                Err(GoogleAuthError::ProviderRejected)
+            }
+        })
+        .transpose()?;
+
+    let mut event_count = 0usize;
+    let mut changes = Vec::with_capacity(page.history.len());
+    for record in page.history {
+        let record_event_count = record
+            .messages_added
+            .len()
+            .checked_add(record.messages_deleted.len())
+            .and_then(|count| count.checked_add(record.labels_added.len()))
+            .and_then(|count| count.checked_add(record.labels_removed.len()))
+            .ok_or(GoogleAuthError::ProviderRejected)?;
+        event_count = event_count
+            .checked_add(record_event_count)
+            .ok_or(GoogleAuthError::ProviderRejected)?;
+        if event_count > MAX_GMAIL_HISTORY_EVENTS_PER_PAGE {
+            return Err(GoogleAuthError::ProviderRejected);
+        }
+        changes.push(normalize_gmail_history_change(record)?);
+    }
+    Ok(GoogleGmailHistoryPage {
+        history_id,
+        next_page_token,
+        changes,
+    })
+}
+
+fn normalize_gmail_history_change(
+    record: GoogleGmailHistoryRecord,
+) -> Result<GoogleGmailHistoryChange, GoogleAuthError> {
+    let history_id = validate_provider_gmail_history_id(record.id)?;
+    let messages_added = record
+        .messages_added
+        .into_iter()
+        .map(|event| normalize_gmail_history_message(event.message))
+        .collect::<Result<_, _>>()?;
+    let messages_deleted = record
+        .messages_deleted
+        .into_iter()
+        .map(|event| normalize_gmail_history_message(event.message))
+        .collect::<Result<_, _>>()?;
+    let labels_added = record
+        .labels_added
+        .into_iter()
+        .map(normalize_gmail_history_label_change)
+        .collect::<Result<_, _>>()?;
+    let labels_removed = record
+        .labels_removed
+        .into_iter()
+        .map(normalize_gmail_history_label_change)
+        .collect::<Result<_, _>>()?;
+    Ok(GoogleGmailHistoryChange {
+        history_id,
+        messages_added,
+        messages_deleted,
+        labels_added,
+        labels_removed,
+    })
+}
+
+fn normalize_gmail_history_message(
+    message: GoogleGmailHistoryMessageResource,
+) -> Result<GoogleGmailHistoryMessage, GoogleAuthError> {
+    Ok(GoogleGmailHistoryMessage {
+        provider_message_id: validate_provider_gmail_resource_id(message.id)?,
+        provider_thread_id: validate_provider_gmail_resource_id(message.thread_id)?,
+        label_ids: normalize_gmail_label_ids(message.label_ids)?,
+    })
+}
+
+fn normalize_gmail_history_label_change(
+    event: GoogleGmailHistoryLabelEvent,
+) -> Result<GoogleGmailHistoryLabelChange, GoogleAuthError> {
+    let label_ids = normalize_gmail_label_ids(event.label_ids)?;
+    if label_ids.is_empty() {
+        return Err(GoogleAuthError::ProviderRejected);
+    }
+    Ok(GoogleGmailHistoryLabelChange {
+        message: normalize_gmail_history_message(event.message)?,
+        label_ids,
+    })
+}
+
+fn normalize_gmail_label_ids(label_ids: Vec<String>) -> Result<Vec<String>, GoogleAuthError> {
+    if label_ids.len() > MAX_GMAIL_LABELS_PER_MESSAGE {
+        return Err(GoogleAuthError::ProviderRejected);
+    }
+    let mut label_ids = label_ids
+        .into_iter()
+        .map(validate_provider_gmail_resource_id)
+        .collect::<Result<Vec<_>, _>>()?;
+    label_ids.sort();
+    label_ids.dedup();
+    Ok(label_ids)
 }
 
 fn gmail_content(payload: &GoogleGmailMessagePayload) -> (Option<String>, Vec<String>) {
@@ -2923,6 +3256,31 @@ fn validate_gmail_resource_id(value: String) -> Result<String, GoogleAuthError> 
     }
 }
 
+fn validate_provider_gmail_resource_id(value: String) -> Result<String, GoogleAuthError> {
+    validate_gmail_resource_id(value).map_err(|_| GoogleAuthError::ProviderRejected)
+}
+
+fn validate_provider_gmail_history_id(value: String) -> Result<String, GoogleAuthError> {
+    validate_gmail_history_id(&value, GoogleAuthError::ProviderRejected)?;
+    Ok(value)
+}
+
+fn validate_gmail_history_id(value: &str, error: GoogleAuthError) -> Result<(), GoogleAuthError> {
+    if value.is_empty()
+        || value.len() > MAX_GMAIL_HISTORY_ID_BYTES
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn valid_gmail_history_page_token(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= MAX_GMAIL_HISTORY_PAGE_TOKEN_BYTES
+        && !value.chars().any(char::is_control)
+}
+
 fn normalize_gmail_text(value: &str, maximum_bytes: usize) -> Option<String> {
     let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
     (!normalized.is_empty() && normalized.len() <= maximum_bytes).then_some(normalized)
@@ -3165,6 +3523,15 @@ fn classify_provider_status(status: u16) -> GoogleAuthError {
         GoogleAuthError::ProviderUnavailable
     } else {
         GoogleAuthError::ProviderRejected
+    }
+}
+
+const fn classify_gmail_history_status(status: u16) -> Option<GoogleAuthError> {
+    match status {
+        200..=299 => None,
+        404 => Some(GoogleAuthError::GmailHistoryIdExpired),
+        429 | 500..=599 => Some(GoogleAuthError::ProviderUnavailable),
+        _ => Some(GoogleAuthError::ProviderRejected),
     }
 }
 
@@ -3589,8 +3956,160 @@ mod tests {
             normalize_gmail_message(message, "message-1").expect("metadata should normalize");
 
         assert_eq!(entry.subject.as_deref(), Some("내일 회의"));
+        assert!(entry.is_inbox);
         assert!(entry.is_unread);
         assert!(entry.received_at.is_some());
+    }
+
+    #[test]
+    fn gmail_history_query_requests_all_change_types_without_a_label_filter() {
+        let url = gmail_history_url("18446744073709551615", Some("opaque/page+token=="))
+            .expect("valid history query");
+        let query = url.query_pairs().collect::<Vec<_>>();
+        let history_types = query
+            .iter()
+            .filter_map(|(key, value)| (key == "historyTypes").then_some(value.as_ref()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            history_types,
+            vec![
+                "messageAdded",
+                "messageDeleted",
+                "labelAdded",
+                "labelRemoved"
+            ]
+        );
+        assert!(
+            query
+                .iter()
+                .all(|(key, _)| key != "labelId" && key != "labelIds")
+        );
+        assert!(
+            query
+                .iter()
+                .any(|(key, value)| key == "startHistoryId" && value == "18446744073709551615")
+        );
+        assert!(
+            query
+                .iter()
+                .any(|(key, value)| key == "pageToken" && value == "opaque/page+token==")
+        );
+    }
+
+    #[test]
+    fn gmail_history_page_normalizes_all_four_change_types() {
+        let page: GoogleGmailHistoryResponse = serde_json::from_str(
+            r#"{
+                "history": [{
+                    "id": "101",
+                    "messagesAdded": [{
+                        "message": {
+                            "id": "added-1",
+                            "threadId": "thread-1",
+                            "labelIds": ["UNREAD", "INBOX"]
+                        }
+                    }],
+                    "messagesDeleted": [{
+                        "message": {
+                            "id": "deleted-1",
+                            "threadId": "thread-2"
+                        }
+                    }],
+                    "labelsAdded": [{
+                        "message": {
+                            "id": "moved-in-1",
+                            "threadId": "thread-3",
+                            "labelIds": ["INBOX"]
+                        },
+                        "labelIds": ["INBOX"]
+                    }],
+                    "labelsRemoved": [{
+                        "message": {
+                            "id": "moved-out-1",
+                            "threadId": "thread-4"
+                        },
+                        "labelIds": ["INBOX"]
+                    }]
+                }],
+                "nextPageToken": "next/page==",
+                "historyId": "105"
+            }"#,
+        )
+        .expect("valid Gmail history page");
+
+        let page = normalize_gmail_history_page(page).expect("history page should normalize");
+        let change = page.changes.first().expect("one change should exist");
+
+        assert_eq!(page.history_id, "105");
+        assert_eq!(page.next_page_token.as_deref(), Some("next/page=="));
+        assert_eq!(change.history_id, "101");
+        assert_eq!(change.messages_added.len(), 1);
+        assert_eq!(change.messages_deleted.len(), 1);
+        assert_eq!(change.labels_added.len(), 1);
+        assert_eq!(change.labels_removed.len(), 1);
+        assert_eq!(change.messages_added[0].label_ids, vec!["INBOX", "UNREAD"]);
+        assert_eq!(change.labels_added[0].label_ids.as_slice(), ["INBOX"]);
+        assert_eq!(
+            change.labels_removed[0].message.provider_message_id,
+            "moved-out-1"
+        );
+    }
+
+    #[test]
+    fn gmail_history_status_distinguishes_expiry_and_transient_failures() {
+        assert_eq!(classify_gmail_history_status(200), None);
+        assert_eq!(
+            classify_gmail_history_status(404),
+            Some(GoogleAuthError::GmailHistoryIdExpired)
+        );
+        assert_eq!(
+            classify_gmail_history_status(401),
+            Some(GoogleAuthError::ProviderRejected)
+        );
+        assert_eq!(
+            classify_gmail_history_status(403),
+            Some(GoogleAuthError::ProviderRejected)
+        );
+        assert_eq!(
+            classify_gmail_history_status(429),
+            Some(GoogleAuthError::ProviderUnavailable)
+        );
+        assert_eq!(
+            classify_gmail_history_status(503),
+            Some(GoogleAuthError::ProviderUnavailable)
+        );
+    }
+
+    #[test]
+    fn gmail_history_ids_and_page_tokens_are_bounded() {
+        assert!(
+            validate_gmail_history_id("18446744073709551615", GoogleAuthError::InvalidRequest)
+                .is_ok()
+        );
+        assert_eq!(
+            validate_gmail_history_id("not-a-number", GoogleAuthError::InvalidRequest),
+            Err(GoogleAuthError::InvalidRequest)
+        );
+        assert!(
+            validate_gmail_history_id(
+                "1844674407370955161618446744073709551616",
+                GoogleAuthError::ProviderRejected
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            validate_gmail_history_id(
+                &"1".repeat(MAX_GMAIL_HISTORY_ID_BYTES + 1),
+                GoogleAuthError::ProviderRejected
+            ),
+            Err(GoogleAuthError::ProviderRejected)
+        );
+        assert!(valid_gmail_history_page_token("opaque/page+token=="));
+        assert!(!valid_gmail_history_page_token(" \t"));
+        assert!(!valid_gmail_history_page_token(
+            &"x".repeat(MAX_GMAIL_HISTORY_PAGE_TOKEN_BYTES + 1)
+        ));
     }
 
     #[test]

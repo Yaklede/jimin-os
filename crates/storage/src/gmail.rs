@@ -173,6 +173,7 @@ pub struct GmailSyncConnection {
     pub user_id: Uuid,
     pub workspace_id: Uuid,
     pub provider_subject: String,
+    pub provider_history_id: Option<String>,
     pub latest_provider_message_id: Option<String>,
     pub latest_received_at: Option<OffsetDateTime>,
     pub refresh_token: EncryptedGmailSecret,
@@ -184,6 +185,7 @@ struct GmailSyncConnectionRow {
     user_id: Uuid,
     workspace_id: Uuid,
     provider_subject: String,
+    provider_history_id: Option<String>,
     latest_provider_message_id: Option<String>,
     latest_received_at: Option<OffsetDateTime>,
     refresh_token_ciphertext: Option<Vec<u8>>,
@@ -204,6 +206,38 @@ pub enum DeleteGmailAccountOutcome {
     Deleted,
     AlreadyAbsent,
     VersionConflict,
+}
+
+/// Provider synchronization path guarded by the current Gmail History cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GmailHistorySyncMode {
+    /// First bounded inbox snapshot for an account without a cursor.
+    Baseline,
+    /// Normal History API catch-up from an existing cursor.
+    Incremental,
+    /// Bounded snapshot used only after Google reports an expired cursor.
+    Rebuild,
+}
+
+/// One complete provider batch. The storage layer advances the cursor only in
+/// the same transaction that persists every normalized message.
+#[derive(Clone, Copy)]
+pub struct ApplyGmailHistorySync<'a> {
+    pub account_id: Uuid,
+    pub user_id: Uuid,
+    pub workspace_id: Uuid,
+    pub mode: GmailHistorySyncMode,
+    pub expected_provider_history_id: Option<&'a str>,
+    pub next_provider_history_id: &'a str,
+    pub messages: &'a [ProviderGmailMessage],
+    pub skipped_message_count: usize,
+}
+
+/// Result of comparing and applying one account-owned History cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyGmailHistorySyncOutcome {
+    Applied(GmailAccount),
+    CursorConflict,
 }
 
 /// Validated metadata for one Gmail message, supplied only by a provider
@@ -569,14 +603,16 @@ impl Database {
         &self,
         account_id: Uuid,
         user_id: Uuid,
+        workspace_id: Uuid,
     ) -> Result<Option<GmailSyncConnection>, StorageError> {
-        if !is_v7(account_id) || !is_v7(user_id) {
+        if !all_v7(&[account_id, user_id, workspace_id]) {
             return Err(StorageError::InvalidConfiguration);
         }
         let row = sqlx::query_as::<_, GmailSyncConnectionRow>(
             "\
             SELECT account.id AS account_id, account.user_id,
                 account.workspace_id, account.provider_subject,
+                sync_state.provider_history_id,
                 (
                     SELECT message.provider_message_id
                     FROM gmail_messages AS message
@@ -598,11 +634,16 @@ impl Database {
                 account.refresh_token_ciphertext, account.refresh_token_nonce,
                 account.encryption_key_version
             FROM gmail_accounts AS account
+            JOIN gmail_sync_states AS sync_state
+              ON sync_state.account_id = account.id
+             AND sync_state.workspace_id = account.workspace_id
             WHERE account.id = $1 AND account.user_id = $2
-              AND status IN ('active', 'error')",
+              AND account.workspace_id = $3
+              AND account.status IN ('active', 'error')",
         )
         .bind(account_id)
         .bind(user_id)
+        .bind(workspace_id)
         .fetch_optional(self.pool())
         .await
         .map_err(classify)?;
@@ -760,6 +801,120 @@ impl Database {
         .await?;
         transaction.commit().await.map_err(classify)?;
         Ok(account)
+    }
+
+    /// Persists one complete Gmail History batch and advances its account-owned
+    /// cursor atomically. A stale expected cursor returns a conflict without
+    /// inserting messages or changing assistant candidates.
+    ///
+    /// Baseline mode requires an empty stored cursor. Incremental and rebuild
+    /// modes require the exact existing cursor, so a periodic and manual sync
+    /// cannot race and move account progress backwards.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid configuration for malformed cursors, unsafe provider
+    /// messages, mode/cursor mismatches, or a foreign account/workspace tuple.
+    pub async fn apply_gmail_history_sync(
+        &self,
+        command: &ApplyGmailHistorySync<'_>,
+    ) -> Result<ApplyGmailHistorySyncOutcome, StorageError> {
+        validate_history_sync(command)?;
+        let warning_code =
+            (command.skipped_message_count > 0).then_some("gmail.partial_message_failures");
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let stored_history_id = sqlx::query_scalar::<_, Option<String>>(
+            "\
+            SELECT sync_state.provider_history_id
+            FROM gmail_sync_states AS sync_state
+            JOIN gmail_accounts AS account
+              ON account.id = sync_state.account_id
+             AND account.workspace_id = sync_state.workspace_id
+            WHERE account.id = $1
+              AND account.user_id = $2
+              AND account.workspace_id = $3
+              AND account.status IN ('active', 'error')
+            FOR UPDATE OF account, sync_state",
+        )
+        .bind(command.account_id)
+        .bind(command.user_id)
+        .bind(command.workspace_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let Some(stored_history_id) = stored_history_id else {
+            transaction.rollback().await.map_err(classify)?;
+            return Err(StorageError::InvalidConfiguration);
+        };
+        if stored_history_id.as_deref() != command.expected_provider_history_id {
+            transaction.rollback().await.map_err(classify)?;
+            return Ok(ApplyGmailHistorySyncOutcome::CursorConflict);
+        }
+
+        upsert_gmail_messages(
+            &mut transaction,
+            command.account_id,
+            command.user_id,
+            command.workspace_id,
+            command.messages,
+        )
+        .await?;
+        let updated_state = sqlx::query(
+            "\
+            UPDATE gmail_sync_states
+            SET status = 'idle',
+                provider_history_id = $4,
+                last_successful_sync_at = NOW(),
+                last_error_code = $5
+            WHERE account_id = $1 AND workspace_id = $2
+              AND provider_history_id IS NOT DISTINCT FROM $3",
+        )
+        .bind(command.account_id)
+        .bind(command.workspace_id)
+        .bind(command.expected_provider_history_id)
+        .bind(command.next_provider_history_id)
+        .bind(warning_code)
+        .execute(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        if updated_state.rows_affected() != 1 {
+            transaction.rollback().await.map_err(classify)?;
+            return Ok(ApplyGmailHistorySyncOutcome::CursorConflict);
+        }
+        let row = sqlx::query_as::<_, GmailAccountRow>(
+            "\
+            UPDATE gmail_accounts
+            SET status = 'active', last_successful_sync_at = NOW(),
+                last_error_code = $4
+            WHERE id = $1 AND user_id = $2 AND workspace_id = $3
+            RETURNING id, workspace_id,
+                (SELECT scope FROM workspaces
+                 WHERE workspaces.id = gmail_accounts.workspace_id)
+                    AS workspace_scope,
+                (SELECT name FROM workspaces
+                 WHERE workspaces.id = gmail_accounts.workspace_id)
+                    AS workspace_name,
+                email, status, granted_scopes, last_successful_sync_at,
+                last_error_code, version",
+        )
+        .bind(command.account_id)
+        .bind(command.user_id)
+        .bind(command.workspace_id)
+        .bind(warning_code)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let account = GmailAccount::try_from(row)?;
+        append_change(
+            &mut transaction,
+            command.user_id,
+            "gmail_account",
+            account.id,
+            account.version,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        Ok(ApplyGmailHistorySyncOutcome::Applied(account))
     }
 
     /// Records only a safe sync failure code. Authentication failures can
@@ -1271,6 +1426,7 @@ fn sync_connection(row: GmailSyncConnectionRow) -> Result<GmailSyncConnection, S
         user_id: row.user_id,
         workspace_id: row.workspace_id,
         provider_subject: row.provider_subject,
+        provider_history_id: row.provider_history_id,
         latest_provider_message_id: row.latest_provider_message_id,
         latest_received_at: row.latest_received_at,
         refresh_token,
@@ -1321,6 +1477,33 @@ fn valid_scopes(scopes: &[String]) -> bool {
                 && scope.len() <= MAX_SCOPE_BYTES
                 && !scope.chars().any(char::is_control)
         })
+}
+
+fn validate_history_sync(command: &ApplyGmailHistorySync<'_>) -> Result<(), StorageError> {
+    let mode_matches_cursor = matches!(
+        (command.mode, command.expected_provider_history_id),
+        (GmailHistorySyncMode::Baseline, None)
+            | (
+                GmailHistorySyncMode::Incremental | GmailHistorySyncMode::Rebuild,
+                Some(_)
+            )
+    );
+    if !all_v7(&[command.account_id, command.user_id, command.workspace_id])
+        || !mode_matches_cursor
+        || command
+            .expected_provider_history_id
+            .is_some_and(|value| !valid_provider_history_id(value))
+        || !valid_provider_history_id(command.next_provider_history_id)
+        || !valid_messages(command.messages)
+        || command.skipped_message_count > MAX_SYNC_MESSAGES
+    {
+        return Err(StorageError::InvalidConfiguration);
+    }
+    Ok(())
+}
+
+fn valid_provider_history_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64 && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn valid_messages(messages: &[ProviderGmailMessage]) -> bool {
@@ -1413,8 +1596,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        CreateGmailOAuthAuthorization, EncryptedGmailSecret, ProviderGmailMessage,
-        valid_failure_code, valid_messages, validate_oauth_command,
+        ApplyGmailHistorySync, CreateGmailOAuthAuthorization, EncryptedGmailSecret,
+        GmailHistorySyncMode, ProviderGmailMessage, valid_failure_code, valid_messages,
+        valid_provider_history_id, validate_history_sync, validate_oauth_command,
     };
 
     #[test]
@@ -1475,6 +1659,42 @@ mod tests {
         assert!(validate_oauth_command(&command).is_ok());
         command.workspace_id = Uuid::nil();
         assert!(validate_oauth_command(&command).is_err());
+    }
+
+    #[test]
+    fn history_sync_requires_numeric_cursors_and_mode_specific_expectations() {
+        assert!(valid_provider_history_id("18446744073709551615"));
+        assert!(!valid_provider_history_id(""));
+        assert!(!valid_provider_history_id("history-100"));
+        assert!(!valid_provider_history_id(&"1".repeat(65)));
+
+        let command = ApplyGmailHistorySync {
+            account_id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            mode: GmailHistorySyncMode::Baseline,
+            expected_provider_history_id: None,
+            next_provider_history_id: "101",
+            messages: &[],
+            skipped_message_count: 0,
+        };
+        assert!(validate_history_sync(&command).is_ok());
+        assert!(
+            validate_history_sync(&ApplyGmailHistorySync {
+                mode: GmailHistorySyncMode::Incremental,
+                ..command
+            })
+            .is_err()
+        );
+        assert!(
+            validate_history_sync(&ApplyGmailHistorySync {
+                mode: GmailHistorySyncMode::Rebuild,
+                expected_provider_history_id: Some("101"),
+                next_provider_history_id: "102",
+                ..command
+            })
+            .is_ok()
+        );
     }
 
     #[test]

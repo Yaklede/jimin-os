@@ -417,6 +417,13 @@ export function HomeWorkspace({
             onDismiss={onDismissGmailInflow}
             onDefer={onDeferGmailInflow}
             onRetryAnalysis={onRetryGmailInflowAnalysis}
+            onOpenTask={async (taskId) => {
+              const task = await onLoadAssistantTask({
+                id: taskId,
+                projectId: null,
+              });
+              await onOpenTask(task);
+            }}
           />
 
           {!showingSkeleton && Boolean(snapshot?.inflow.length) && (

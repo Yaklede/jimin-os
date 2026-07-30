@@ -586,13 +586,13 @@ impl CalendarOAuthError {
     fn from_google(error: GoogleAuthError) -> Self {
         match error {
             GoogleAuthError::ProviderUnavailable => Self::ProviderUnavailable,
-            GoogleAuthError::CalendarSyncTokenExpired => Self::ProviderRejected,
+            GoogleAuthError::GmailHistoryIdExpired
+            | GoogleAuthError::CalendarSyncTokenExpired
+            | GoogleAuthError::InvalidRequest
+            | GoogleAuthError::ProviderRejected => Self::ProviderRejected,
             GoogleAuthError::CalendarEventConflict => Self::Conflict,
             GoogleAuthError::CalendarEventNotFound => Self::EventNotFound,
             GoogleAuthError::CalendarEventRejected => Self::EventRejected,
-            GoogleAuthError::InvalidRequest | GoogleAuthError::ProviderRejected => {
-                Self::ProviderRejected
-            }
             GoogleAuthError::IdentityRejected => Self::InvalidCallback,
         }
     }
