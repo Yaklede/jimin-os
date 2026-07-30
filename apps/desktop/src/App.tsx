@@ -192,6 +192,11 @@ import {
   installAndroidBackBridge,
   registerMobileBackHandler,
 } from "./mobileBack";
+import {
+  calendarDestinationActivation,
+  calendarDestinationLoad,
+  type CalendarNavigationIntent,
+} from "./calendarNavigation";
 import { localDayKey, millisecondsUntilNextLocalDay } from "./homeSchedule";
 import {
   acknowledgePendingReminderNavigation,
@@ -205,6 +210,7 @@ import {
   type RemoteReminderStatus,
   type ReminderSyncStatus,
 } from "./local-notifications";
+import { WorkspaceRouteBoundary } from "./components/WorkspaceRouteBoundary";
 
 type AppMode =
   "configuration" | "server-unreachable" | "loading" | "ready" | "error";
@@ -267,6 +273,10 @@ export default function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [destination, setDestination] = useState<OsDestination>("home");
   const navigationHistoryRef = useRef<OsDestination[]>([]);
+  const calendarNavigationIntentRef = useRef<
+    CalendarNavigationIntent | undefined
+  >(undefined);
+  const calendarDestinationActiveRef = useRef(false);
   const [homeSnapshot, setHomeSnapshot] = useState<HomeSnapshot | undefined>();
   const [homeLoading, setHomeLoading] = useState(false);
   const [homeError, setHomeError] = useState<string | undefined>();
@@ -2046,7 +2056,10 @@ export default function App() {
             ),
           );
           if (!active || !snapshot) return;
-          navigate(reminderFallbackDestination(navigation));
+          const reminderDestination = reminderFallbackDestination(navigation);
+          navigate(reminderDestination, {
+            calendarDataReady: reminderDestination === "calendar",
+          });
           if (navigation.itemType === "schedule") {
             setHighlightedPlanningTaskId(undefined);
             setHighlightedScheduleId(navigation.itemId);
@@ -2120,9 +2133,22 @@ export default function App() {
   }, [destination, loadAgentModelSettings]);
 
   useEffect(() => {
-    if (destination === "calendar") {
+    const activation = calendarDestinationActivation(
+      calendarDestinationActiveRef.current,
+      destination === "calendar",
+    );
+    calendarDestinationActiveRef.current = activation.active;
+    if (!activation.active) {
+      calendarNavigationIntentRef.current = undefined;
+    }
+    if (activation.shouldLoad) {
+      const intent = calendarNavigationIntentRef.current;
+      calendarNavigationIntentRef.current = undefined;
+      const planningLoad = calendarDestinationLoad(intent);
       void Promise.all([
-        loadPlanningSnapshot(),
+        planningLoad.shouldLoadPlanning
+          ? loadPlanningSnapshot(planningLoad.targetStartsAt)
+          : Promise.resolve(undefined),
         loadGoogleCalendarConnection(),
       ]);
       return;
@@ -2130,11 +2156,7 @@ export default function App() {
     if (destination === "settings") {
       void loadGoogleCalendarConnection();
     }
-  }, [
-    destination,
-    loadGoogleCalendarConnection,
-    loadPlanningSnapshot,
-  ]);
+  }, [destination, loadGoogleCalendarConnection, loadPlanningSnapshot]);
 
   useEffect(() => {
     if (destination !== "settings") return;
@@ -3176,7 +3198,7 @@ export default function App() {
     }
     setHighlightedPlanningTaskId(undefined);
     setHighlightedScheduleId(entry.id);
-    navigate("calendar");
+    navigate("calendar", { calendarDataReady: true });
   }
 
   async function openPlanningTask(task: Task): Promise<void> {
@@ -3188,7 +3210,7 @@ export default function App() {
     }
     setHighlightedScheduleId(undefined);
     setHighlightedPlanningTaskId(task.id);
-    navigate("calendar");
+    navigate("calendar", { calendarDataReady: true });
   }
 
   async function createWorkspaceProject(input: {
@@ -4211,7 +4233,10 @@ export default function App() {
 
   function navigate(
     nextDestination: OsDestination,
-    options: { projectDataReady?: boolean } = {},
+    options: {
+      projectDataReady?: boolean;
+      calendarDataReady?: boolean;
+    } = {},
   ): void {
     if (
       nextDestination !== destination &&
@@ -4244,7 +4269,18 @@ export default function App() {
       ]
         .reverse()
         .find((item) => item.type === "schedule");
-      void loadPlanningSnapshot(latestSchedule?.startsAt);
+      const intent: CalendarNavigationIntent = {
+        planningReady: options.calendarDataReady === true,
+        targetStartsAt: latestSchedule?.startsAt,
+      };
+      calendarNavigationIntentRef.current = intent;
+      if (nextDestination === destination) {
+        const planningLoad = calendarDestinationLoad(intent);
+        calendarNavigationIntentRef.current = undefined;
+        if (planningLoad.shouldLoadPlanning) {
+          void loadPlanningSnapshot(planningLoad.targetStartsAt);
+        }
+      }
       return;
     }
     if (nextDestination === "projects") {
@@ -4336,7 +4372,11 @@ export default function App() {
             (destination === "decisions" && decisionsLoading)
           }
         >
-          <Suspense fallback={<WorkspaceRouteFallback />}>
+          <WorkspaceRouteBoundary
+            key={destination}
+            loadingFallback={<WorkspaceRouteFallback />}
+            onRetry={() => window.location.reload()}
+          >
             {destination === "home" && (
               <HomeWorkspace
                 snapshot={homeSnapshot}
@@ -4617,7 +4657,7 @@ export default function App() {
                 onResolveAction={resolveConversationAction}
               />
             )}
-          </Suspense>
+          </WorkspaceRouteBoundary>
           {planningEditTarget && (
             <Suspense fallback={null}>
               <PlanningItemEditor

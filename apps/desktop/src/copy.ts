@@ -44,6 +44,10 @@ export const copy = {
   scope: "개인 서버",
   launch: {
     loading: "개인 비서를 준비하고 있어요.",
+    routeLoadFailedTitle: "화면을 불러오지 못했어요.",
+    routeLoadFailedBody:
+      "앱을 다시 불러오면 하던 작업을 이어서 확인할 수 있어요.",
+    retryRouteLoad: "다시 불러오기",
   },
   actions: {
     checkAgain: "다시 확인하기",
