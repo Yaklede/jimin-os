@@ -37,13 +37,27 @@ class FakeDiarization:
 
 
 class FakeWhisper:
-    def __init__(self, segments: list[SimpleNamespace]) -> None:
-        self.segments = segments
+    def __init__(
+        self,
+        segments: list[SimpleNamespace],
+        auxiliary_segments: list[SimpleNamespace] | None = None,
+    ) -> None:
+        self.responses = [segments]
+        if auxiliary_segments is not None:
+            self.responses.append(auxiliary_segments)
         self.kwargs = None
+        self.calls: list[tuple[str, dict]] = []
 
-    def transcribe(self, _source: str, **kwargs):
+    def transcribe(self, source: str, **kwargs):
+        call_index = len(self.calls)
+        self.calls.append((source, kwargs))
         self.kwargs = kwargs
-        return iter(self.segments), SimpleNamespace()
+        segments = (
+            self.responses[call_index]
+            if call_index < len(self.responses)
+            else []
+        )
+        return iter(segments), SimpleNamespace()
 
 
 class FakeDiarizer:
@@ -82,6 +96,25 @@ def whisper_segment(
         text=text,
         words=words,
         avg_logprob=-0.1,
+    )
+
+
+def operational_missing_speaker_diarization() -> FakeDiarization:
+    return FakeDiarization(
+        speaker_diarization=FakeAnnotation(
+            [
+                (0.0, 1.0, "A"),
+                (1.0, 4.071, "B"),
+                (4.071, 6.0, "A"),
+            ]
+        ),
+        exclusive_speaker_diarization=FakeAnnotation(
+            [
+                (0.0, 1.2, "A"),
+                (1.2, 3.529, "B"),
+                (3.529, 6.0, "A"),
+            ]
+        ),
     )
 
 
@@ -222,6 +255,329 @@ class SpeakerAttributionTests(unittest.TestCase):
                 "max_speakers": 3,
             },
         )
+
+    def test_falls_back_to_regular_when_equal_raw_labels_collapse_after_word_assignment(
+        self,
+    ) -> None:
+        whisper = FakeWhisper(
+            [
+                whisper_segment(
+                    0.0,
+                    2.0,
+                    "확인했습니다. 진행할게요.",
+                    [
+                        word(0.0, 0.8, " 확인했습니다."),
+                        word(1.05, 1.6, " 진행할게요."),
+                    ],
+                )
+            ]
+        )
+        diarization = FakeDiarization(
+            speaker_diarization=FakeAnnotation(
+                [
+                    (0.0, 1.0, "A"),
+                    (1.0, 1.7, "B"),
+                ]
+            ),
+            exclusive_speaker_diarization=FakeAnnotation(
+                [
+                    (0.0, 1.8, "A"),
+                    (1.8, 2.0, "B"),
+                ]
+            ),
+        )
+
+        with patch.object(
+            app,
+            "_models",
+            return_value=(whisper, FakeDiarizer(diarization)),
+        ):
+            result = app._transcribe_file(
+                Path("meeting.wav"),
+                ["참석자 1", "참석자 2", "참석자 3"],
+            )
+
+        self.assertEqual([speaker.key for speaker in result.speakers], ["A", "B"])
+        self.assertEqual(
+            [
+                (segment.speaker_key, segment.text)
+                for segment in result.segments
+            ],
+            [
+                ("A", "확인했습니다."),
+                ("B", "진행할게요."),
+            ],
+        )
+
+    def test_keeps_exclusive_when_equal_raw_and_attributed_speaker_counts(
+        self,
+    ) -> None:
+        raw_segments = [
+            whisper_segment(
+                0.0,
+                2.0,
+                "첫째 둘째 셋째",
+                [
+                    word(0.0, 0.4, " 첫째"),
+                    word(0.85, 1.15, " 둘째"),
+                    word(1.4, 1.8, " 셋째"),
+                ],
+            )
+        ]
+        diarization = FakeDiarization(
+            speaker_diarization=FakeAnnotation(
+                [
+                    (0.0, 0.7, "A"),
+                    (0.7, 2.0, "B"),
+                ]
+            ),
+            exclusive_speaker_diarization=FakeAnnotation(
+                [
+                    (0.0, 1.0, "A"),
+                    (1.0, 2.0, "B"),
+                ]
+            ),
+        )
+
+        selection = app._select_attributed_diarization(
+            diarization,
+            raw_segments,
+        )
+
+        self.assertEqual(selection.diarization.source, "exclusive")
+        self.assertEqual(selection.regular_attributed_speaker_count, 2)
+        self.assertEqual(selection.exclusive_attributed_speaker_count, 2)
+        self.assertEqual(
+            [
+                (segment.speaker_key, segment.text)
+                for segment in selection.result_segments
+            ],
+            [
+                ("A", "첫째 둘째"),
+                ("B", "셋째"),
+            ],
+        )
+
+    def test_recovers_operational_missing_speaker_with_one_clipped_pass(
+        self,
+    ) -> None:
+        whisper = FakeWhisper(
+            [
+                whisper_segment(
+                    0.0,
+                    0.8,
+                    "확인했습니다.",
+                    [word(0.0, 0.8, " 확인했습니다.")],
+                )
+            ],
+            auxiliary_segments=[
+                whisper_segment(
+                    2.0,
+                    2.5,
+                    "진행할게요.",
+                    [word(2.0, 2.5, " 진행할게요.", 0.8)],
+                )
+            ],
+        )
+
+        with patch.object(
+            app,
+            "_models",
+            return_value=(
+                whisper,
+                FakeDiarizer(operational_missing_speaker_diarization()),
+            ),
+        ):
+            result = app._transcribe_file(
+                Path("meeting.wav"),
+                ["참석자 1", "참석자 2", "참석자 3"],
+            )
+
+        self.assertEqual(len(whisper.calls), 2)
+        self.assertEqual(whisper.calls[0][0], whisper.calls[1][0])
+        self.assertTrue(whisper.calls[0][1]["vad_filter"])
+        auxiliary_kwargs = whisper.calls[1][1]
+        self.assertFalse(auxiliary_kwargs["vad_filter"])
+        self.assertFalse(auxiliary_kwargs["condition_on_previous_text"])
+        self.assertTrue(auxiliary_kwargs["word_timestamps"])
+        self.assertEqual(len(auxiliary_kwargs["clip_timestamps"]), 2)
+        self.assertAlmostEqual(auxiliary_kwargs["clip_timestamps"][0], 1.0)
+        self.assertAlmostEqual(auxiliary_kwargs["clip_timestamps"][1], 3.729)
+        self.assertEqual(
+            [speaker.key for speaker in result.speakers],
+            ["A", "B"],
+        )
+        self.assertEqual(
+            [(segment.speaker_key, segment.text) for segment in result.segments],
+            [("A", "확인했습니다."), ("B", "진행할게요.")],
+        )
+
+    def test_recovery_does_not_invent_text_without_core_word_evidence(
+        self,
+    ) -> None:
+        whisper = FakeWhisper(
+            [
+                whisper_segment(
+                    0.0,
+                    0.8,
+                    "확인했습니다.",
+                    [word(0.0, 0.8, " 확인했습니다.")],
+                )
+            ],
+            auxiliary_segments=[
+                whisper_segment(1.0, 3.729, "padding hallucination", None),
+                whisper_segment(
+                    0.91,
+                    0.99,
+                    "코어 밖",
+                    [word(0.91, 0.99, " 코어 밖")],
+                ),
+            ],
+        )
+
+        with patch.object(
+            app,
+            "_models",
+            return_value=(
+                whisper,
+                FakeDiarizer(operational_missing_speaker_diarization()),
+            ),
+        ):
+            result = app._transcribe_file(Path("meeting.wav"), [])
+
+        self.assertEqual(len(whisper.calls), 2)
+        self.assertEqual([speaker.key for speaker in result.speakers], ["A"])
+        self.assertNotIn("padding hallucination", result.transcript)
+        self.assertNotIn("코어 밖", result.transcript)
+
+    def test_recovery_combines_missing_speakers_and_deduplicates_in_time_order(
+        self,
+    ) -> None:
+        diarization = FakeDiarization(
+            speaker_diarization=FakeAnnotation(
+                [
+                    (0.0, 1.0, "A"),
+                    (1.0, 2.1, "B"),
+                    (2.5, 3.6, "C"),
+                    (3.6, 4.5, "A"),
+                ]
+            ),
+            exclusive_speaker_diarization=FakeAnnotation(
+                [
+                    (0.0, 1.0, "A"),
+                    (1.0, 2.1, "B"),
+                    (2.5, 3.6, "C"),
+                    (3.6, 4.5, "A"),
+                ]
+            ),
+        )
+        whisper = FakeWhisper(
+            [
+                whisper_segment(
+                    0.0,
+                    0.6,
+                    "첫째",
+                    [word(0.0, 0.6, " 첫째")],
+                )
+            ],
+            auxiliary_segments=[
+                whisper_segment(
+                    1.0,
+                    3.6,
+                    "셋째 둘째 둘째",
+                    [
+                        word(2.7, 3.0, " 셋째"),
+                        word(1.2, 1.5, " 둘째"),
+                        word(1.2, 1.5, " 둘째"),
+                    ],
+                )
+            ],
+        )
+
+        with patch.object(
+            app,
+            "_models",
+            return_value=(whisper, FakeDiarizer(diarization)),
+        ):
+            result = app._transcribe_file(Path("meeting.wav"), [])
+
+        self.assertEqual(len(whisper.calls), 2)
+        self.assertEqual(
+            [(segment.speaker_key, segment.text) for segment in result.segments],
+            [("A", "첫째"), ("B", "둘째"), ("C", "셋째")],
+        )
+        self.assertEqual(result.transcript.count("둘째"), 1)
+
+    def test_recovery_rejects_primary_time_overlap(self) -> None:
+        primary = app.AttributedWord("A", 1.2, 1.5, " 기존", 90, 0)
+        recovered = app._accepted_recovery_words(
+            [
+                whisper_segment(
+                    1.2,
+                    1.5,
+                    "다른 해석",
+                    [word(1.2, 1.5, " 다른 해석")],
+                )
+            ],
+            core_tracks=[app.SpeakerTrack(1.0, 2.1, "B")],
+            selected_tracks=[app.SpeakerTrack(1.0, 2.1, "B")],
+            primary_words=[primary],
+        )
+
+        self.assertEqual(recovered, [])
+
+    def test_recovery_requires_minimum_track_evidence(self) -> None:
+        fragmented = [
+            app.SpeakerTrack(index * 0.3, index * 0.3 + 0.18, "B")
+            for index in range(6)
+        ]
+        two_turns = [
+            app.SpeakerTrack(index * 0.5, index * 0.5 + 0.25, "B")
+            for index in range(4)
+        ]
+        standalone = [app.SpeakerTrack(0.0, 1.0, "B")]
+
+        self.assertFalse(app._has_recovery_track_evidence(fragmented))
+        self.assertTrue(app._has_recovery_track_evidence(two_turns))
+        self.assertTrue(app._has_recovery_track_evidence(standalone))
+
+    def test_recovery_skips_auxiliary_pass_when_clip_budget_is_exceeded(
+        self,
+    ) -> None:
+        whisper = FakeWhisper(
+            [
+                whisper_segment(
+                    0.0,
+                    0.8,
+                    "확인했습니다.",
+                    [word(0.0, 0.8, " 확인했습니다.")],
+                )
+            ],
+            auxiliary_segments=[
+                whisper_segment(
+                    2.0,
+                    2.5,
+                    "실행되면 안 됨",
+                    [word(2.0, 2.5, " 실행되면 안 됨")],
+                )
+            ],
+        )
+
+        with (
+            patch.object(app, "MAX_RECOVERY_CLIP_SECONDS", 1.0),
+            patch.object(
+                app,
+                "_models",
+                return_value=(
+                    whisper,
+                    FakeDiarizer(operational_missing_speaker_diarization()),
+                ),
+            ),
+        ):
+            result = app._transcribe_file(Path("meeting.wav"), [])
+
+        self.assertEqual(len(whisper.calls), 1)
+        self.assertEqual([speaker.key for speaker in result.speakers], ["A"])
 
     def test_does_not_force_speaker_bounds_for_zero_or_one_participant(
         self,
