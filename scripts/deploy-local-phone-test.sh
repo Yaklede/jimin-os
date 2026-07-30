@@ -20,7 +20,7 @@ export JIMIN_LOCAL_PHONE_TEST_PORT
 "${SCRIPT_DIR}/validate-compose.sh" local "${config_file}"
 compose config --quiet
 info "Building local phone-test images"
-compose build --pull gateway api agent
+compose build --pull gateway api agent meeting-transcriber
 info "Starting local phone-test services"
 # Local images intentionally keep stable development tags. Recreate services
 # after every build so the emulator never tests an older API container.
