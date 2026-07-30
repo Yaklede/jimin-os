@@ -492,7 +492,7 @@ mod tests {
             WebhookProvider::GoogleChat,
             "task.created",
             &serde_json::json!({
-                "message": "새 할 일이 배정됐어요.\n프로젝트: 비스킷링크\n할 일: 권한 이슈 확인\n담당자: 조지민\n\n요청 내용:\n가맹점 권한을 확인하고 결과를 공유해 주세요.",
+                "message": "새 할 일이 배정됐어요.\n\n프로젝트: 비스킷링크\n할 일: 권한 이슈 확인\n담당자: 조지민\n마감: 2026년 7월 31일 18:00\n우선순위: 우선 처리\n\n업무 목적\n가맹점 권한 오류의 원인을 확인합니다.\n\n처리할 내용\n- 재현 조건을 확인합니다.\n\n완료 기준\n오류 없이 거래내역을 조회할 수 있습니다.\n\n관련 자료\n- https://itsm.example/issues/3876",
                 "assigneeName": "조지민"
             }),
             &directory,
@@ -502,9 +502,17 @@ mod tests {
         assert_eq!(
             payload,
             serde_json::json!({
-                "text": "<users/113145855577166216187> 새 할 일이 배정됐어요.\n프로젝트: 비스킷링크\n할 일: 권한 이슈 확인\n담당자: 조지민\n\n요청 내용:\n가맹점 권한을 확인하고 결과를 공유해 주세요."
+                "text": "<users/113145855577166216187> 새 할 일이 배정됐어요.\n\n프로젝트: 비스킷링크\n할 일: 권한 이슈 확인\n담당자: 조지민\n마감: 2026년 7월 31일 18:00\n우선순위: 우선 처리\n\n업무 목적\n가맹점 권한 오류의 원인을 확인합니다.\n\n처리할 내용\n- 재현 조건을 확인합니다.\n\n완료 기준\n오류 없이 거래내역을 조회할 수 있습니다.\n\n관련 자료\n- https://itsm.example/issues/3876"
             })
         );
+        let text = payload["text"]
+            .as_str()
+            .expect("Google Chat payload should contain text");
+        assert_eq!(text.matches("<users/113145855577166216187>").count(), 1);
+        assert!(text.contains("업무 목적"));
+        assert!(text.contains("처리할 내용"));
+        assert!(text.contains("완료 기준"));
+        assert!(text.contains("관련 자료"));
     }
 
     #[test]

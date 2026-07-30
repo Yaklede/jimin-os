@@ -23,8 +23,10 @@ use crate::{
 const MAX_TITLE_CHARS: usize = 200;
 const MAX_NOTES_CHARS: usize = 10_000;
 const MAX_ASSIGNEE_NAME_CHARS: usize = 80;
-const MAX_WEBHOOK_TASK_SUMMARY_CHARS: usize = 240;
-const MAX_WEBHOOK_MESSAGE_CHARS: usize = 800;
+const MAX_WEBHOOK_PROJECT_CHARS: usize = 120;
+const MAX_WEBHOOK_SECTION_CHARS: usize = 400;
+const MAX_WEBHOOK_REFERENCE_CHARS: usize = 420;
+const MAX_WEBHOOK_MESSAGE_CHARS: usize = 1_600;
 
 /// Validated manual schedule input. Provider-originated entries will use a
 /// separate adapter path so clients cannot spoof a provider source.
@@ -1651,8 +1653,11 @@ fn task_event_message(event_type: &str, project_title: &str, task: &Task) -> Str
     let assignee = task.assignee_name.as_deref().unwrap_or("미정");
     let title =
         concise_webhook_text(&task.title, MAX_TITLE_CHARS).unwrap_or_else(|| "새 할 일".to_owned());
-    let mut lines = vec![
+    let project_title = concise_webhook_text(project_title, MAX_WEBHOOK_PROJECT_CHARS)
+        .unwrap_or_else(|| "프로젝트".to_owned());
+    let lines = [
         action.to_owned(),
+        String::new(),
         format!("프로젝트: {project_title}"),
         format!("할 일: {title}"),
         format!("담당자: {assignee}"),
@@ -1661,44 +1666,244 @@ fn task_event_message(event_type: &str, project_title: &str, task: &Task) -> Str
             task.due_at
                 .map_or_else(|| "정하지 않음".to_owned(), korean_deadline)
         ),
+        format!("우선순위: {}", task_priority_name(task.priority)),
     ];
-    if let Some(summary) = task.notes.as_deref().and_then(task_summary_for_webhook) {
-        lines.push(format!("요약: {summary}"));
-    }
+    let mut message = lines.join("\n");
     if let Some(notes) = task.notes.as_deref() {
-        for link in http_links(notes).into_iter().take(3) {
-            let reference = format!("관련 링크: {link}");
-            let candidate_length = lines.iter().map(|line| line.chars().count()).sum::<usize>()
-                + lines.len()
-                + reference.chars().count();
-            if candidate_length > MAX_WEBHOOK_MESSAGE_CHARS {
-                break;
-            }
-            lines.push(reference);
+        let details = task_webhook_details(notes);
+        let references = webhook_reference_block(&details.references);
+        let details_limit = MAX_WEBHOOK_MESSAGE_CHARS.saturating_sub(
+            references
+                .as_ref()
+                .map_or(0, |block| block.chars().count() + 2),
+        );
+        append_task_detail_blocks(&mut message, &details, details_limit);
+        if let Some(references) = references
+            && message.chars().count() + references.chars().count() + 2 <= MAX_WEBHOOK_MESSAGE_CHARS
+        {
+            message.push_str("\n\n");
+            message.push_str(&references);
         }
     }
-    lines.join("\n")
+    message
 }
 
-fn task_summary_for_webhook(notes: &str) -> Option<String> {
-    let mut lines = notes.lines().map(str::trim).filter(|line| !line.is_empty());
-    let first = lines.next()?;
-    let candidate = if matches!(first, "업무 목적" | "요약" | "목적") {
-        lines.next()?
-    } else {
-        first
+#[derive(Clone, Copy)]
+enum TaskWebhookSection {
+    Purpose,
+    Actions,
+    Completion,
+    References,
+}
+
+#[derive(Default)]
+struct TaskWebhookDetails {
+    purpose: Vec<String>,
+    actions: Vec<String>,
+    completion: Vec<String>,
+    unstructured: Vec<String>,
+    references: Vec<String>,
+}
+
+fn task_webhook_details(notes: &str) -> TaskWebhookDetails {
+    let mut details = TaskWebhookDetails {
+        references: http_links(notes),
+        ..TaskWebhookDetails::default()
     };
-    concise_webhook_text(candidate, MAX_WEBHOOK_TASK_SUMMARY_CHARS)
+    let mut section = None;
+    let mut found_heading = false;
+
+    for raw_line in notes.lines() {
+        let line = clean_webhook_note_line(raw_line, &details.references);
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((next_section, inline_content)) = task_webhook_section(&line) {
+            section = Some(next_section);
+            found_heading = true;
+            if !inline_content.is_empty() {
+                task_webhook_section_lines(&mut details, next_section)
+                    .push(inline_content.to_owned());
+            }
+            continue;
+        }
+        if let Some(section) = section {
+            task_webhook_section_lines(&mut details, section).push(line);
+        } else {
+            details.unstructured.push(line);
+        }
+    }
+
+    if found_heading {
+        details.unstructured.clear();
+    }
+    details
+}
+
+fn task_webhook_section_lines(
+    details: &mut TaskWebhookDetails,
+    section: TaskWebhookSection,
+) -> &mut Vec<String> {
+    match section {
+        TaskWebhookSection::Purpose => &mut details.purpose,
+        TaskWebhookSection::Actions => &mut details.actions,
+        TaskWebhookSection::Completion => &mut details.completion,
+        TaskWebhookSection::References => &mut details.references,
+    }
+}
+
+fn task_webhook_section(line: &str) -> Option<(TaskWebhookSection, &str)> {
+    const HEADINGS: [(&str, TaskWebhookSection); 11] = [
+        ("업무 목적", TaskWebhookSection::Purpose),
+        ("목적", TaskWebhookSection::Purpose),
+        ("요약", TaskWebhookSection::Purpose),
+        ("처리할 내용", TaskWebhookSection::Actions),
+        ("확인할 내용", TaskWebhookSection::Actions),
+        ("해야 할 일", TaskWebhookSection::Actions),
+        ("작업 내용", TaskWebhookSection::Actions),
+        ("완료 기준", TaskWebhookSection::Completion),
+        ("관련 자료", TaskWebhookSection::References),
+        ("관련 링크", TaskWebhookSection::References),
+        ("참고 자료", TaskWebhookSection::References),
+    ];
+    HEADINGS.iter().find_map(|(heading, section)| {
+        if line == *heading {
+            return Some((*section, ""));
+        }
+        line.strip_prefix(heading)
+            .and_then(|rest| rest.strip_prefix(':').or_else(|| rest.strip_prefix('：')))
+            .map(|rest| (*section, rest.trim()))
+    })
+}
+
+fn clean_webhook_note_line(line: &str, references: &[String]) -> String {
+    let mut line = line.trim();
+    if let Some(rest) = line.strip_prefix("보낸 사람 정보 없음") {
+        line = rest
+            .strip_prefix(':')
+            .or_else(|| rest.strip_prefix('：'))
+            .unwrap_or_default()
+            .trim();
+    }
+    let mut cleaned = line.to_owned();
+    for reference in references {
+        cleaned = cleaned.replace(reference, "");
+    }
+    let cleaned = cleaned
+        .replace("보낸 사람 정보 없음:", "")
+        .replace("보낸 사람 정보 없음：", "")
+        .replace("보낸 사람 정보 없음", "")
+        .replace("보낸사람 정보 없음:", "")
+        .replace("보낸사람 정보 없음", "");
+    let cleaned = cleaned
+        .split_whitespace()
+        .filter(|part| !part.starts_with('@'))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_owned();
+    if cleaned.chars().all(|character| {
+        character.is_whitespace()
+            || matches!(
+                character,
+                '-' | '•' | '[' | ']' | '(' | ')' | '.' | ',' | ':' | ';'
+            )
+    }) {
+        String::new()
+    } else {
+        cleaned
+    }
+}
+
+fn append_task_detail_blocks(message: &mut String, details: &TaskWebhookDetails, maximum: usize) {
+    let blocks = if details.purpose.is_empty()
+        && details.actions.is_empty()
+        && details.completion.is_empty()
+    {
+        vec![("상세 내용", details.unstructured.as_slice())]
+    } else {
+        vec![
+            ("업무 목적", details.purpose.as_slice()),
+            ("처리할 내용", details.actions.as_slice()),
+            ("완료 기준", details.completion.as_slice()),
+        ]
+    };
+    let mut remaining_blocks = blocks.iter().filter(|(_, lines)| !lines.is_empty()).count();
+    for (heading, lines) in blocks {
+        if lines.is_empty() || message.chars().count() >= maximum {
+            continue;
+        }
+        remaining_blocks = remaining_blocks.saturating_sub(1);
+        let separator_length = 2;
+        let heading_length = heading.chars().count() + 1;
+        let reserve = remaining_blocks.saturating_mul(96);
+        let available = maximum
+            .saturating_sub(message.chars().count())
+            .saturating_sub(separator_length + heading_length + reserve)
+            .min(MAX_WEBHOOK_SECTION_CHARS);
+        let Some(content) = concise_webhook_section(lines, available) else {
+            continue;
+        };
+        message.push_str("\n\n");
+        message.push_str(heading);
+        message.push('\n');
+        message.push_str(&content);
+    }
+}
+
+fn concise_webhook_section(lines: &[String], maximum: usize) -> Option<String> {
+    if maximum < 24 {
+        return None;
+    }
+    let content = lines
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let content = content.trim();
+    if content.is_empty() {
+        return None;
+    }
+    let truncated = content.chars().count() > maximum;
+    let take = if truncated {
+        maximum.saturating_sub(1)
+    } else {
+        maximum
+    };
+    let mut result = content.chars().take(take).collect::<String>();
+    if truncated {
+        result = result.trim_end().to_owned();
+        result.push('…');
+    }
+    Some(result)
+}
+
+fn webhook_reference_block(references: &[String]) -> Option<String> {
+    let mut block = "관련 자료".to_owned();
+    let mut included = 0;
+    for reference in references.iter().take(3) {
+        let line = format!("\n- {reference}");
+        if block.chars().count() + line.chars().count() > MAX_WEBHOOK_REFERENCE_CHARS {
+            break;
+        }
+        block.push_str(&line);
+        included += 1;
+    }
+    (included > 0).then_some(block)
 }
 
 fn concise_webhook_text(value: &str, maximum: usize) -> Option<String> {
+    let value = value
+        .replace("보낸 사람 정보 없음:", "")
+        .replace("보낸 사람 정보 없음：", "")
+        .replace("보낸 사람 정보 없음", "")
+        .replace("보낸사람 정보 없음:", "")
+        .replace("보낸사람 정보 없음", "");
     let compact = value
         .split_whitespace()
         .filter(|part| {
-            !part.starts_with("http://")
-                && !part.starts_with("https://")
-                && !part.starts_with('@')
-                && !part.starts_with("보낸")
+            !part.starts_with("http://") && !part.starts_with("https://") && !part.starts_with('@')
         })
         .collect::<Vec<_>>()
         .join(" ");
@@ -1711,6 +1916,14 @@ fn concise_webhook_text(value: &str, maximum: usize) -> Option<String> {
         result.push('…');
     }
     Some(result)
+}
+
+const fn task_priority_name(priority: i16) -> &'static str {
+    match priority {
+        0 | 1 => "일반",
+        2 => "우선 처리",
+        _ => "가장 먼저",
+    }
 }
 
 fn http_links(value: &str) -> Vec<String> {
@@ -1831,7 +2044,7 @@ mod tests {
     }
 
     #[test]
-    fn assigned_task_webhook_message_contains_the_work_context() {
+    fn assigned_task_webhook_message_keeps_structured_work_context() {
         let due_at = OffsetDateTime::from_unix_timestamp(1_785_289_400)
             .expect("fixture timestamp should be valid");
         let task = Task {
@@ -1839,7 +2052,19 @@ mod tests {
             project_id: Some(Uuid::now_v7()),
             parent_task_id: None,
             title: "가맹점 권한 이슈 확인".to_owned(),
-            notes: Some("고객 요청을 확인하고 처리 결과를 공유합니다.".to_owned()),
+            notes: Some(
+                "\
+업무 목적
+가맹점에서 발생한 권한 오류의 원인을 확인합니다.
+
+처리할 내용
+- 재현 조건과 권한 설정을 확인합니다.
+- 수정 결과를 요청자에게 공유합니다.
+
+완료 기준
+가맹점에서 오류 없이 거래내역을 조회할 수 있습니다."
+                    .to_owned(),
+            ),
             assignee_name: Some("조지민".to_owned()),
             status: TaskStatus::Open,
             priority: 2,
@@ -1855,19 +2080,24 @@ mod tests {
         assert!(message.contains("할 일: 가맹점 권한 이슈 확인"));
         assert!(message.contains("담당자: 조지민"));
         assert!(message.contains("마감: 2026년"));
-        assert!(message.contains("요약: 고객 요청을 확인하고 처리 결과를 공유합니다."));
-        assert!(!message.contains("요청 내용:"));
-        assert!(message.chars().count() <= 800);
+        assert!(message.contains("우선순위: 우선 처리"));
+        assert!(message.contains("업무 목적\n가맹점에서 발생한 권한 오류의 원인을 확인합니다."));
+        assert!(message.contains("처리할 내용\n- 재현 조건과 권한 설정을 확인합니다."));
+        assert!(message.contains("완료 기준\n가맹점에서 오류 없이 거래내역을 조회할 수 있습니다."));
+        assert!(message.chars().count() <= MAX_WEBHOOK_MESSAGE_CHARS);
     }
 
     #[test]
-    fn task_webhook_message_bounds_long_request_content() {
+    fn task_webhook_message_uses_detail_fallback_and_missing_field_copy() {
         let task = Task {
             id: Uuid::now_v7(),
             project_id: Some(Uuid::now_v7()),
             parent_task_id: None,
             title: "요청 확인".to_owned(),
-            notes: Some("가".repeat(MAX_NOTES_CHARS)),
+            notes: Some(
+                "보낸 사람 정보 없음: 정산 내역의 금액 표기 오류를 확인하고 결과를 공유해 주세요."
+                    .to_owned(),
+            ),
             assignee_name: None,
             status: TaskStatus::Open,
             priority: 1,
@@ -1881,19 +2111,23 @@ mod tests {
         assert!(message.starts_with("새 할 일이 등록됐어요."));
         assert!(message.contains("담당자: 미정"));
         assert!(message.contains("마감: 정하지 않음"));
-        assert!(message.ends_with('…'));
-        assert!(message.chars().count() <= 800);
+        assert!(message.contains("우선순위: 일반"));
+        assert!(
+            message
+                .contains("상세 내용\n정산 내역의 금액 표기 오류를 확인하고 결과를 공유해 주세요.")
+        );
+        assert!(!message.contains("보낸 사람 정보 없음"));
     }
 
     #[test]
-    fn task_webhook_keeps_reference_links_outside_the_clean_summary() {
+    fn task_webhook_keeps_deduplicated_reference_links_outside_the_clean_sections() {
         let task = Task {
             id: Uuid::now_v7(),
             project_id: Some(Uuid::now_v7()),
             parent_task_id: None,
             title: "거래내역 정산방식 표시 추가".to_owned(),
             notes: Some(
-                "업무 목적\nhttps://itsm.example/issues/3876 @조지민 거래내역에 정산방식을 표시한다.\n\n처리할 내용\n- 화면을 수정한다."
+                "업무 목적\nhttps://itsm.example/issues/3876 @조지민 거래내역에 정산방식을 표시한다.\n\n처리할 내용\n- 화면을 수정한다.\n- https://docs.example/spec 정산 규칙을 확인한다.\n\n완료 기준\n표시 결과를 검증한다.\n\n관련 링크\n- https://itsm.example/issues/3876"
                     .to_owned(),
             ),
             assignee_name: Some("이의현".to_owned()),
@@ -1906,10 +2140,48 @@ mod tests {
 
         let message = task_event_message("task.created", "비스킷링크", &task);
 
-        assert!(message.contains("요약: 거래내역에 정산방식을 표시한다."));
+        assert!(message.contains("업무 목적\n거래내역에 정산방식을 표시한다."));
+        assert!(message.contains("처리할 내용\n- 화면을 수정한다."));
+        assert!(message.contains("완료 기준\n표시 결과를 검증한다."));
         assert!(message.contains("마감: 정하지 않음"));
-        assert!(message.contains("관련 링크: https://itsm.example/issues/3876"));
+        assert!(message.contains("관련 자료\n- https://itsm.example/issues/3876"));
+        assert!(message.contains("- https://docs.example/spec"));
+        assert_eq!(
+            message.matches("https://itsm.example/issues/3876").count(),
+            1
+        );
         assert!(!message.contains("@조지민"));
+        assert!(message.chars().count() <= MAX_WEBHOOK_MESSAGE_CHARS);
+    }
+
+    #[test]
+    fn task_webhook_message_bounds_every_section_without_dropping_its_heading() {
+        let task = Task {
+            id: Uuid::now_v7(),
+            project_id: Some(Uuid::now_v7()),
+            parent_task_id: None,
+            title: "긴 요청 확인".to_owned(),
+            notes: Some(format!(
+                "업무 목적\n{}\n\n처리할 내용\n{}\n\n완료 기준\n{}\n\n관련 자료\nhttps://itsm.example/issues/9999",
+                "목".repeat(2_000),
+                "처".repeat(4_000),
+                "완".repeat(2_000),
+            )),
+            assignee_name: Some("김경주".to_owned()),
+            status: TaskStatus::Open,
+            priority: 3,
+            due_at: None,
+            completed_at: None,
+            version: 1,
+        };
+
+        let message = task_event_message("task.created", "비스킷링크", &task);
+
+        assert!(message.contains("업무 목적\n"));
+        assert!(message.contains("처리할 내용\n"));
+        assert!(message.contains("완료 기준\n"));
+        assert!(message.contains("관련 자료\n- https://itsm.example/issues/9999"));
+        assert!(message.contains('…'));
         assert!(message.chars().count() <= MAX_WEBHOOK_MESSAGE_CHARS);
     }
 }
