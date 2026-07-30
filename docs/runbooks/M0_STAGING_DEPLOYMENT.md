@@ -37,9 +37,35 @@ M7 CI가 준비되기 전 M0에서는 clean commit에서만 다음 script로 ima
   linux/amd64,linux/arm64
 ```
 
-로컬 서버 platform 하나만 검증할 때는 두 번째 인자를 `linux/amd64` 또는 `linux/arm64`로 제한할 수 있다. Script는 dirty worktree를 거절하고 API, Agent, gateway를 source SHA tag로 push한 뒤 registry manifest digest가 담긴 release env를 user state directory에 만든다.
+로컬 서버 platform 하나만 검증할 때는 두 번째 인자를 `linux/amd64` 또는 `linux/arm64`로 제한할 수 있다. Script는 dirty worktree를 거절하고 API, Agent, gateway만 source SHA tag로 push한 뒤 registry manifest digest가 담긴 core release env를 user state directory에 만든다. 선택 기능인 meeting transcriber image는 이 경로에서 build하지 않는다.
 
 생성된 digest를 actual `staging.env`에 복사한다. Tag를 복사하거나 image를 다시 build하지 않는다. Registry 로그인 credential은 Docker credential store에서 관리하고 script argument나 env file에 넣지 않는다.
+
+## 선택 기능: Meeting transcriber
+
+Meeting transcriber는 약 3GB의 독립 worker image이므로 core API·Agent·gateway
+release와 분리한다. 전사 코드나 Python dependency를 변경했을 때만 별도
+workflow 또는 다음 script를 실행한다.
+
+```bash
+./scripts/build-staging-meeting-transcriber-image.sh \
+  ghcr.io/<owner> \
+  linux/amd64
+```
+
+출력된 `JIMIN_MEETING_TRANSCRIBER_IMAGE` digest를 actual `staging.env`에
+반영하고 선택 worker만 배포한다.
+
+```bash
+./scripts/deploy-staging-meeting-transcriber.sh \
+  "$HOME/.config/jimin-os/staging.env"
+```
+
+이 경로는 `meeting-transcriber`만 pull·recreate하고 전체 health check를
+수행한다. 반대로 일반 `deploy-staging.sh`와 `rollback-staging.sh`는
+worker를 pull하거나 재기동하지 않는다. Agent는 worker와 생명주기가
+분리되어 있으므로 worker 장애 중에도 일정·일감·대화 기능을 계속
+제공하며, 전사 요청만 기존의 unavailable 응답 계약을 사용한다.
 
 ## Secret
 
@@ -67,7 +93,10 @@ docker buildx imagetools inspect '<gateway-image@sha256:digest>'
 ./scripts/deploy-staging.sh "$HOME/.config/jimin-os/staging.env"
 ```
 
-script는 image를 다시 build하지 않고 지정 digest를 pull하며 `--no-build`로 기동한다. 성공 전에는 current release state를 바꾸지 않는다.
+script는 core image를 다시 build하지 않고 지정 digest를 pull하며
+`--no-build`로 API, Agent, gateway, PostgreSQL만 기동한다. 활성화된 meeting
+transcriber도 일반 core 배포에서는 pull·recreate하지 않는다. 성공 전에는
+current core release state를 바꾸지 않는다.
 
 성공 후 확인:
 

@@ -287,8 +287,6 @@ write_desired_release() {
     printf 'JIMIN_API_IMAGE=%s\n' "$(effective_value JIMIN_API_IMAGE)"
     printf 'JIMIN_AGENT_IMAGE=%s\n' "$(effective_value JIMIN_AGENT_IMAGE)"
     printf 'JIMIN_GATEWAY_IMAGE=%s\n' "$(effective_value JIMIN_GATEWAY_IMAGE)"
-    printf 'JIMIN_MEETING_TRANSCRIBER_IMAGE=%s\n' \
-      "$(effective_value JIMIN_MEETING_TRANSCRIBER_IMAGE)"
     printf 'JIMIN_BUILD_SHA=%s\n' "$(effective_value JIMIN_BUILD_SHA)"
   } > "${temporary}"
   chmod 600 "${temporary}"

@@ -1,11 +1,6 @@
 ARG PYTHON_RUNTIME_IMAGE=docker.io/library/python:3.12-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b
 FROM ${PYTHON_RUNTIME_IMAGE}
 
-ARG JIMIN_BUILD_SHA=dev
-LABEL org.opencontainers.image.title="Jimin OS Meeting Transcriber" \
-      org.opencontainers.image.source="https://github.com/Yaklede/jimin-os" \
-      org.opencontainers.image.revision="${JIMIN_BUILD_SHA}"
-
 RUN apt-get update \
     && apt-get install --no-install-recommends --yes ffmpeg \
     && rm -rf /var/lib/apt/lists/*
@@ -18,6 +13,15 @@ COPY services/meeting-transcriber/app.py /app/app.py
 RUN useradd --create-home --uid 10002 transcriber \
     && mkdir -p /home/transcriber/.cache/huggingface /var/lib/jimin-transcriber/tmp/matplotlib \
     && chown -R 10002:10002 /home/transcriber /var/lib/jimin-transcriber
+
+# Keep the source revision in the image metadata without invalidating the
+# expensive ffmpeg, PyTorch and diarization dependency layers on every core
+# commit.
+ARG JIMIN_BUILD_SHA=dev
+LABEL org.opencontainers.image.title="Jimin OS Meeting Transcriber" \
+      org.opencontainers.image.source="https://github.com/Yaklede/jimin-os" \
+      org.opencontainers.image.revision="${JIMIN_BUILD_SHA}"
+
 USER 10002:10002
 
 ENV HF_HOME=/home/transcriber/.cache/huggingface \

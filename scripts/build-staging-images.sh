@@ -32,7 +32,6 @@ short_sha="${build_sha:0:12}"
 api_tag="${registry_prefix}/jimin-os-api:sha-${short_sha}"
 agent_tag="${registry_prefix}/jimin-os-agent:sha-${short_sha}"
 gateway_tag="${registry_prefix}/jimin-os-gateway:sha-${short_sha}"
-meeting_transcriber_tag="${registry_prefix}/jimin-os-meeting-transcriber:sha-${short_sha}"
 
 info "Building and pushing API image"
 docker buildx build \
@@ -68,16 +67,6 @@ docker buildx build \
   --push \
   "${REPO_ROOT}/deploy/gateway"
 
-info "Building and pushing meeting transcriber image"
-docker buildx build \
-  --platform "${platforms}" \
-  --file "${REPO_ROOT}/services/meeting-transcriber/Dockerfile" \
-  --build-arg "PYTHON_RUNTIME_IMAGE=$(effective_value PYTHON_RUNTIME_IMAGE)" \
-  --build-arg "JIMIN_BUILD_SHA=${build_sha}" \
-  --tag "${meeting_transcriber_tag}" \
-  --push \
-  "${REPO_ROOT}"
-
 manifest_digest() {
   local image="$1"
   local digest=""
@@ -106,12 +95,9 @@ manifest_digest() {
 api_digest="$(manifest_digest "${api_tag}")"
 agent_digest="$(manifest_digest "${agent_tag}")"
 gateway_digest="$(manifest_digest "${gateway_tag}")"
-meeting_transcriber_digest="$(manifest_digest "${meeting_transcriber_tag}")"
 [[ "${api_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "could not read API manifest digest"
 [[ "${agent_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "could not read Agent manifest digest"
 [[ "${gateway_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "could not read gateway manifest digest"
-[[ "${meeting_transcriber_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] \
-  || die "could not read meeting transcriber manifest digest"
 
 if [[ -z "${release_env}" ]]; then
   release_env="${XDG_STATE_HOME:-${HOME}/.local/state}/jimin-os/builds/${build_sha}.env"
@@ -122,8 +108,6 @@ umask 077
   printf 'JIMIN_API_IMAGE=%s@%s\n' "${api_tag}" "${api_digest}"
   printf 'JIMIN_AGENT_IMAGE=%s@%s\n' "${agent_tag}" "${agent_digest}"
   printf 'JIMIN_GATEWAY_IMAGE=%s@%s\n' "${gateway_tag}" "${gateway_digest}"
-  printf 'JIMIN_MEETING_TRANSCRIBER_IMAGE=%s@%s\n' \
-    "${meeting_transcriber_tag}" "${meeting_transcriber_digest}"
   printf 'JIMIN_BUILD_SHA=%s\n' "${build_sha}"
 } > "${release_env}"
 chmod 600 "${release_env}"

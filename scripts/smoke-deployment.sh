@@ -56,8 +56,16 @@ compose exec -T agent codex --version | grep -F "${codex_version}" >/dev/null ||
 compose exec -T agent /usr/bin/test -r /opt/jimin-agent/fixtures/generic-prompt.txt \
   || die "Agent verification fixture is missing or unreadable"
 
+include_meeting_transcriber="${JIMIN_SMOKE_INCLUDE_MEETING_TRANSCRIBER:-$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)}"
+[[ "${include_meeting_transcriber}" =~ ^[01]$ ]] \
+  || die "JIMIN_SMOKE_INCLUDE_MEETING_TRANSCRIBER must be 0 or 1"
+if [[ "${include_meeting_transcriber}" == "1" ]] \
+  && [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" != "1" ]]; then
+  die "meeting transcriber smoke requires JIMIN_MEETING_TRANSCRIBER_ENABLED=1"
+fi
+
 services=(gateway api agent postgres)
-if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
+if [[ "${include_meeting_transcriber}" == "1" ]]; then
   services+=(meeting-transcriber)
   compose exec -T meeting-transcriber python -c \
     "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3).read()"

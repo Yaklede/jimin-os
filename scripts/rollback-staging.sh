@@ -37,20 +37,25 @@ validate_staging_images
 
 info "Pulling rollback image digests"
 services=(gateway api agent)
-if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
-  services+=(meeting-transcriber)
-fi
 compose pull "${services[@]}"
 info "Applying application-only rollback; database volumes are not replaced"
-compose up --detach --remove-orphans --no-build --wait --wait-timeout 180
+compose up \
+  --detach \
+  --remove-orphans \
+  --no-build \
+  --wait \
+  --wait-timeout 180 \
+  "${services[@]}"
 
 if [[ "${DEPLOY_TLS_MODE}" == "internal" ]]; then
   ca_file="$(export_internal_ca)"
   env -u JIMIN_RELEASE_ENV \
+    JIMIN_SMOKE_INCLUDE_MEETING_TRANSCRIBER=0 \
     JIMIN_TLS_CA_FILE="${ca_file}" \
     "${SCRIPT_DIR}/smoke-deployment.sh" staging "${config_file}" "${release_file}"
 else
   env -u JIMIN_RELEASE_ENV \
+    JIMIN_SMOKE_INCLUDE_MEETING_TRANSCRIBER=0 \
     "${SCRIPT_DIR}/smoke-deployment.sh" staging "${config_file}" "${release_file}"
 fi
 

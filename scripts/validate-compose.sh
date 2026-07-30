@@ -120,6 +120,21 @@ assert_dependency_condition() {
   ' "${rendered}" || die "service ${service} dependency ${dependency} must use ${condition}"
 }
 
+assert_service_without_dependency() {
+  local service="$1"
+  local dependency="$2"
+
+  if awk -v service="${service}" -v dependency="${dependency}" '
+    $0 == "  " service ":" { in_service = 1; next }
+    in_service && /^  [a-zA-Z0-9_-]+:$/ { exit }
+    in_service && $0 == "    depends_on:" { in_dependencies = 1; next }
+    in_dependencies && $0 == "      " dependency ":" { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "${rendered}"; then
+    die "service ${service} must not depend on optional service ${dependency}"
+  fi
+}
+
 services=(gateway api agent postgres)
 if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
   services+=(meeting-transcriber)
@@ -142,7 +157,7 @@ assert_dependency_condition gateway api service_started
 assert_dependency_condition api postgres service_started
 assert_dependency_condition agent postgres service_started
 if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
-  assert_dependency_condition agent meeting-transcriber service_healthy
+  assert_service_without_dependency agent meeting-transcriber
 fi
 
 for dockerfile in \

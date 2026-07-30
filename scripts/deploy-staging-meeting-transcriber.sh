@@ -8,36 +8,32 @@ source "${SCRIPT_DIR}/lib/deploy-common.sh"
 reject_external_release_override
 config_file="${1:-${REPO_ROOT}/deploy/env/staging.env.example}"
 init_deployment staging "${config_file}"
+[[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]] \
+  || die "set JIMIN_MEETING_TRANSCRIBER_ENABLED=1 before deploying the optional worker"
 validate_runtime_secrets
 validate_staging_images
 
 "${SCRIPT_DIR}/validate-compose.sh" staging "${config_file}"
-ensure_state_directory
-pending="${DEPLOY_STATE_ROOT}/desired.env"
-write_desired_release "${pending}"
 
-info "Pulling immutable staging images"
-services=(gateway api agent postgres)
-compose pull "${services[@]}"
-info "Starting staging services without local builds"
+info "Pulling the optional meeting transcriber image"
+compose pull meeting-transcriber
+info "Updating only the optional meeting transcriber service"
 compose up \
   --detach \
-  --remove-orphans \
+  --no-deps \
   --no-build \
   --wait \
   --wait-timeout 180 \
-  "${services[@]}"
+  meeting-transcriber
 
 if [[ "${DEPLOY_TLS_MODE}" == "internal" ]]; then
   ca_file="$(export_internal_ca)"
-  JIMIN_SMOKE_INCLUDE_MEETING_TRANSCRIBER=0 \
+  JIMIN_SMOKE_INCLUDE_MEETING_TRANSCRIBER=1 \
     JIMIN_TLS_CA_FILE="${ca_file}" \
     "${SCRIPT_DIR}/smoke-deployment.sh" staging "${config_file}"
 else
-  JIMIN_SMOKE_INCLUDE_MEETING_TRANSCRIBER=0 \
+  JIMIN_SMOKE_INCLUDE_MEETING_TRANSCRIBER=1 \
     "${SCRIPT_DIR}/smoke-deployment.sh" staging "${config_file}"
 fi
 
-record_successful_release "${pending}"
-rm -f "${pending}"
-info "Staging deployment passed smoke checks and was recorded"
+info "Meeting transcriber deployment passed its health checks"

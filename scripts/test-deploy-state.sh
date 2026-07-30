@@ -52,3 +52,14 @@ export JIMIN_RELEASE_ENV
 [[ "$(effective_value JIMIN_BUILD_SHA)" == "$(printf '0%.0s' {1..39})4" ]]
 
 info "Authoritative environment precedence tests passed"
+
+core_release="${temporary_root}/core-release.env"
+write_desired_release "${core_release}"
+grep -Fq 'JIMIN_API_IMAGE=' "${core_release}"
+grep -Fq 'JIMIN_AGENT_IMAGE=' "${core_release}"
+grep -Fq 'JIMIN_GATEWAY_IMAGE=' "${core_release}"
+if grep -Fq 'JIMIN_MEETING_TRANSCRIBER_IMAGE=' "${core_release}"; then
+  die "core release state must not pin the optional meeting transcriber image"
+fi
+
+info "Core release state excludes the optional meeting transcriber image"

@@ -1,4 +1,4 @@
-name: Build staging core images
+name: Build staging meeting transcriber image
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: staging-images-${{ github.ref }}
+  group: staging-meeting-transcriber-image-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -29,18 +29,17 @@ jobs:
           printf '%s' "${REGISTRY_CREDENTIAL}" \
             | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
 
-      - name: Build and push immutable staging core images
+      - name: Build and push the optional meeting transcriber image
         run: |
-          ./scripts/build-staging-images.sh \
+          ./scripts/build-staging-meeting-transcriber-image.sh \
             ghcr.io/yaklede \
             linux/amd64 \
-            "${RUNNER_TEMP}/jimin-os-release.env"
+            "${RUNNER_TEMP}/jimin-os-meeting-transcriber-release.env"
 
-      - name: Upload release references
+      - name: Upload meeting transcriber release reference
         uses: actions/upload-artifact@v4
         with:
-          # Keep the established artifact contract used by the deployment host.
-          name: jimin-os-release-${{ github.sha }}
-          path: ${{ runner.temp }}/jimin-os-release.env
+          name: jimin-os-meeting-transcriber-release-${{ github.sha }}
+          path: ${{ runner.temp }}/jimin-os-meeting-transcriber-release.env
           if-no-files-found: error
           retention-days: 14
