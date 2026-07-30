@@ -7,11 +7,11 @@ import {
 
 describe("planning create dialog", () => {
   it("prepares the next half-hour as a one-hour schedule", () => {
-    expect(defaultScheduleRange(new Date(2026, 6, 15, 10, 8))).toEqual({
+    expect(defaultScheduleRange(new Date("2026-07-15T01:08:00.000Z"))).toEqual({
       startsAt: "2026-07-15T10:30",
       endsAt: "2026-07-15T11:30",
     });
-    expect(defaultScheduleRange(new Date(2026, 6, 15, 10, 45))).toEqual({
+    expect(defaultScheduleRange(new Date("2026-07-15T01:45:00.000Z"))).toEqual({
       startsAt: "2026-07-15T11:00",
       endsAt: "2026-07-15T12:00",
     });

@@ -6,6 +6,8 @@
 
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+use sqlx::types::Json;
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -18,6 +20,10 @@ const MAX_DETAIL_CHARS: usize = 2_000;
 const MAX_ASSIGNEE_CHARS: usize = 80;
 const MAX_ACTION_ITEMS: usize = 8;
 const MAX_ERROR_CODE_BYTES: usize = 120;
+const MAX_REFERENCE_DOCUMENTS: usize = 4;
+const MAX_REFERENCE_URL_CHARS: usize = 2_048;
+const MAX_REFERENCE_ID_CHARS: usize = 64;
+const MAX_REFERENCE_CONTENT_CHARS: usize = 40_000;
 const ANALYSIS_VERSION: &str = "inflow-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +52,8 @@ pub struct ProjectInflowAnalysis {
     pub source_id: Uuid,
     pub conversation_key: String,
     pub representative_item_id: Uuid,
+    pub source_revision: i32,
+    pub analyzed_revision: Option<i32>,
     pub state: InflowAnalysisState,
     pub classification: Option<InflowClassification>,
     pub confidence: Option<i16>,
@@ -56,6 +64,7 @@ pub struct ProjectInflowAnalysis {
     pub suggested_assignee_name: Option<String>,
     pub suggested_due_at: Option<OffsetDateTime>,
     pub suggested_priority: Option<i16>,
+    pub reference_documents: Vec<InflowReferenceDocument>,
     pub linked_task_id: Option<Uuid>,
     pub error_code: Option<String>,
     pub version: i64,
@@ -102,6 +111,18 @@ pub struct InflowAnalysisResult {
     pub suggested_assignee_name: Option<String>,
     pub suggested_due_at: Option<OffsetDateTime>,
     pub suggested_priority: Option<i16>,
+    pub reference_documents: Vec<InflowReferenceDocument>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct InflowReferenceDocument {
+    pub provider: String,
+    pub url: String,
+    pub external_id: String,
+    pub title: Option<String>,
+    pub original_content: Option<String>,
+    pub error_code: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -111,6 +132,8 @@ struct ProjectInflowAnalysisRow {
     source_id: Uuid,
     conversation_key: String,
     representative_item_id: Uuid,
+    source_revision: i32,
+    analyzed_revision: Option<i32>,
     state: String,
     classification: Option<String>,
     confidence: Option<i16>,
@@ -121,6 +144,7 @@ struct ProjectInflowAnalysisRow {
     suggested_assignee_name: Option<String>,
     suggested_due_at: Option<OffsetDateTime>,
     suggested_priority: Option<i16>,
+    reference_documents: Json<Vec<InflowReferenceDocument>>,
     linked_task_id: Option<Uuid>,
     error_code: Option<String>,
     version: i64,
@@ -175,6 +199,11 @@ impl InflowAnalysisResult {
                 .suggested_assignee_name
                 .as_deref()
                 .is_some_and(|value| !valid_text(value, MAX_ASSIGNEE_CHARS))
+            || self.reference_documents.len() > MAX_REFERENCE_DOCUMENTS
+            || self
+                .reference_documents
+                .iter()
+                .any(|document| !document.is_valid())
         {
             return Err(StorageError::InvalidConfiguration);
         }
@@ -207,6 +236,26 @@ impl InflowAnalysisResult {
     }
 }
 
+impl InflowReferenceDocument {
+    fn is_valid(&self) -> bool {
+        self.provider == "itsm"
+            && self.url.starts_with("https://")
+            && valid_text(&self.url, MAX_REFERENCE_URL_CHARS)
+            && valid_text(&self.external_id, MAX_REFERENCE_ID_CHARS)
+            && self.external_id.bytes().all(|value| value.is_ascii_digit())
+            && self
+                .title
+                .as_deref()
+                .is_none_or(|value| valid_text(value, MAX_TITLE_CHARS))
+            && self
+                .original_content
+                .as_deref()
+                .is_none_or(|value| valid_text(value, MAX_REFERENCE_CONTENT_CHARS))
+            && self.error_code.as_deref().is_none_or(valid_error_code)
+            && (self.original_content.is_some() || self.error_code.is_some())
+    }
+}
+
 impl TryFrom<ProjectInflowAnalysisRow> for ProjectInflowAnalysis {
     type Error = StorageError;
 
@@ -217,6 +266,8 @@ impl TryFrom<ProjectInflowAnalysisRow> for ProjectInflowAnalysis {
             source_id: row.source_id,
             conversation_key: row.conversation_key,
             representative_item_id: row.representative_item_id,
+            source_revision: row.source_revision,
+            analyzed_revision: row.analyzed_revision,
             state: parse_state(&row.state)?,
             classification: row
                 .classification
@@ -231,6 +282,7 @@ impl TryFrom<ProjectInflowAnalysisRow> for ProjectInflowAnalysis {
             suggested_assignee_name: row.suggested_assignee_name,
             suggested_due_at: row.suggested_due_at,
             suggested_priority: row.suggested_priority,
+            reference_documents: row.reference_documents.0,
             linked_task_id: row.linked_task_id,
             error_code: row.error_code,
             version: row.version,
@@ -421,6 +473,10 @@ impl Database {
     ///
     /// Returns a validation or persistence error when the result violates its
     /// contract, the assignee is unknown, or the atomic update cannot commit.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Completion validates the lease and persists one atomic analysis snapshot."
+    )]
     pub async fn complete_inflow_analysis(
         &self,
         job: &ClaimedInflowAnalysis,
@@ -437,8 +493,8 @@ impl Database {
             return Err(StorageError::InvalidConfiguration);
         }
         let mut transaction = self.pool().begin().await.map_err(classify)?;
-        let current_revision = sqlx::query_scalar::<_, i32>(
-            "SELECT source_revision
+        let current = sqlx::query_as::<_, (i32, Json<Vec<InflowReferenceDocument>>)>(
+            "SELECT source_revision, reference_documents
              FROM project_inflow_analyses
              WHERE id = $1 AND user_id = $2 AND claim_owner = $3
                AND state = 'running'
@@ -450,7 +506,7 @@ impl Database {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(classify)?;
-        let Some(current_revision) = current_revision else {
+        let Some((current_revision, current_reference_documents)) = current else {
             transaction.rollback().await.map_err(classify)?;
             return Ok(false);
         };
@@ -478,6 +534,10 @@ impl Database {
             transaction.commit().await.map_err(classify)?;
             return Ok(true);
         }
+        let reference_documents = reference_documents_for_persistence(
+            &current_reference_documents.0,
+            &result.reference_documents,
+        );
         let version = sqlx::query_scalar::<_, i64>(
             "UPDATE project_inflow_analyses
              SET state = 'ready', classification = $4, confidence = $5,
@@ -487,6 +547,7 @@ impl Database {
                  suggested_assignee_name = $10, suggested_due_at = $11,
                  suggested_priority = $12, linked_task_id = $13,
                  analysis_model_id = $14, analysis_version = $15,
+                 reference_documents = $16,
                  analyzed_revision = source_revision, analyzed_at = NOW(),
                  claim_owner = NULL, claim_expires_at = NULL,
                  error_code = NULL
@@ -511,6 +572,7 @@ impl Database {
         .bind(job.linked_task_id)
         .bind(job.processing_model_id.as_deref())
         .bind(ANALYSIS_VERSION)
+        .bind(Json(&reference_documents))
         .fetch_one(&mut *transaction)
         .await
         .map_err(classify)?;
@@ -710,13 +772,7 @@ pub(crate) async fn queue_inflow_analysis_in_transaction(
                 THEN project_inflow_analyses.state
                 ELSE 'queued'
              END,
-             classification = NULL, confidence = NULL, summary = NULL,
-             suggested_task_title = NULL, suggested_action_items = '{}',
-             suggested_completion_criteria = NULL,
-             suggested_assignee_name = NULL, suggested_due_at = NULL,
-             suggested_priority = NULL, analysis_model_id = NULL,
-             analysis_version = NULL, analyzed_revision = NULL,
-             analyzed_at = NULL, error_code = NULL,
+             error_code = NULL,
              attempt_count = CASE
                 WHEN project_inflow_analyses.state IN ('claimed', 'running')
                 THEN project_inflow_analyses.attempt_count
@@ -746,11 +802,12 @@ async fn analyses(
     }
     sqlx::query_as::<_, ProjectInflowAnalysisRow>(
         "SELECT id, project_id, source_id, conversation_key,
-            representative_item_id, state, classification, confidence, summary,
+            representative_item_id, source_revision, analyzed_revision,
+            state, classification, confidence, summary,
             suggested_task_title, suggested_action_items,
             suggested_completion_criteria, suggested_assignee_name,
             suggested_due_at, suggested_priority, linked_task_id,
-            error_code, version
+            reference_documents, error_code, version
          FROM project_inflow_analyses
          WHERE user_id = $1 AND ($2::UUID IS NULL OR project_id = $2)
          ORDER BY updated_at DESC, id DESC
@@ -800,7 +857,7 @@ async fn analysis_messages(
                 ($2 LIKE 'message:%'
                     AND item.provider_message_name = substr($2, 9))
            )
-         ORDER BY item.received_at, item.id
+         ORDER BY item.received_at DESC, item.id DESC
          LIMIT 100",
     )
     .bind(source_id)
@@ -808,8 +865,14 @@ async fn analysis_messages(
     .fetch_all(database.pool())
     .await
     .map_err(classify)?;
-    Ok(rows
-        .into_iter()
+    Ok(chronological_analysis_messages(rows))
+}
+
+fn chronological_analysis_messages(
+    rows: Vec<InflowAnalysisMessageRow>,
+) -> Vec<InflowAnalysisMessage> {
+    rows.into_iter()
+        .rev()
         .map(|row| InflowAnalysisMessage {
             id: row.id,
             sender_name: row.sender_name,
@@ -817,7 +880,7 @@ async fn analysis_messages(
             content_text: row.content_text,
             received_at: row.received_at,
         })
-        .collect())
+        .collect()
 }
 
 fn parse_state(value: &str) -> Result<InflowAnalysisState, StorageError> {
@@ -870,6 +933,42 @@ fn trimmed_strings(values: &[String]) -> Vec<String> {
         .collect()
 }
 
+fn reference_documents_for_persistence(
+    current: &[InflowReferenceDocument],
+    incoming: &[InflowReferenceDocument],
+) -> Vec<InflowReferenceDocument> {
+    incoming
+        .iter()
+        .map(|incoming_document| {
+            if incoming_document.original_content.is_some()
+                || incoming_document.error_code.is_none()
+            {
+                return incoming_document.clone();
+            }
+
+            let Some(previous_success) = current.iter().find(|current_document| {
+                current_document.provider == incoming_document.provider
+                    && current_document.external_id == incoming_document.external_id
+                    && current_document.original_content.is_some()
+            }) else {
+                return incoming_document.clone();
+            };
+
+            InflowReferenceDocument {
+                provider: incoming_document.provider.clone(),
+                url: incoming_document.url.clone(),
+                external_id: incoming_document.external_id.clone(),
+                title: incoming_document
+                    .title
+                    .clone()
+                    .or_else(|| previous_success.title.clone()),
+                original_content: previous_success.original_content.clone(),
+                error_code: incoming_document.error_code.clone(),
+            }
+        })
+        .collect()
+}
+
 fn valid_text(value: &str, maximum: usize) -> bool {
     let value = value.trim();
     !value.is_empty()
@@ -908,7 +1007,13 @@ fn classify(_error: sqlx::Error) -> StorageError {
 
 #[cfg(test)]
 mod tests {
-    use super::{InflowAnalysisResult, InflowClassification};
+    use super::{
+        InflowAnalysisMessageRow, InflowAnalysisResult, InflowClassification,
+        InflowReferenceDocument, chronological_analysis_messages,
+        reference_documents_for_persistence,
+    };
+    use time::OffsetDateTime;
+    use uuid::Uuid;
 
     #[test]
     fn new_task_requires_structured_execution_details() {
@@ -924,6 +1029,7 @@ mod tests {
             suggested_assignee_name: None,
             suggested_due_at: None,
             suggested_priority: Some(1),
+            reference_documents: Vec::new(),
         };
         assert!(result.validate().is_ok());
     }
@@ -940,7 +1046,140 @@ mod tests {
             suggested_assignee_name: None,
             suggested_due_at: None,
             suggested_priority: None,
+            reference_documents: Vec::new(),
         };
         assert!(result.validate().is_err());
+    }
+
+    #[test]
+    fn reference_document_requires_bounded_source_or_failure_evidence() {
+        let mut result = InflowAnalysisResult {
+            classification: InflowClassification::NewTask,
+            confidence: 90,
+            summary: "정산방식 표시를 추가해야 한다.".to_owned(),
+            suggested_task_title: Some("거래내역 정산방식 표시 추가".to_owned()),
+            suggested_action_items: vec!["거래내역 응답에 정산방식을 표시한다.".to_owned()],
+            suggested_completion_criteria: Some(
+                "거래내역에서 정산방식을 확인할 수 있다.".to_owned(),
+            ),
+            suggested_assignee_name: None,
+            suggested_due_at: None,
+            suggested_priority: Some(1),
+            reference_documents: vec![InflowReferenceDocument {
+                provider: "itsm".to_owned(),
+                url: "https://itsm.example/issues/3876".to_owned(),
+                external_id: "3876".to_owned(),
+                title: Some("정산방식 표시 요청".to_owned()),
+                original_content: Some("원문 요청 내용".to_owned()),
+                error_code: None,
+            }],
+        };
+        assert!(result.validate().is_ok());
+
+        result.reference_documents[0].error_code = Some("itsm.unavailable".to_owned());
+        assert!(
+            result.validate().is_ok(),
+            "a cached source may carry the latest refresh failure"
+        );
+
+        result.reference_documents[0].original_content = None;
+        result.reference_documents[0].error_code = None;
+        assert!(result.validate().is_err());
+    }
+
+    #[test]
+    fn failed_refresh_preserves_only_the_matching_successful_reference_snapshot() {
+        let current = vec![successful_reference_document("3876", "기존 원문")];
+        let incoming = vec![failed_reference_document("3876", "itsm.unavailable")];
+
+        let persisted = reference_documents_for_persistence(&current, &incoming);
+
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].original_content.as_deref(), Some("기존 원문"));
+        assert_eq!(persisted[0].error_code.as_deref(), Some("itsm.unavailable"));
+    }
+
+    #[test]
+    fn failed_refresh_does_not_reuse_an_unrelated_successful_snapshot() {
+        let current = vec![successful_reference_document("3876", "다른 이슈 원문")];
+        let incoming = vec![failed_reference_document("9999", "itsm.unavailable")];
+
+        assert_eq!(
+            reference_documents_for_persistence(&current, &incoming),
+            incoming
+        );
+    }
+
+    #[test]
+    fn initial_reference_failure_is_persisted_without_a_successful_snapshot() {
+        let incoming = vec![failed_reference_document("3876", "itsm.unavailable")];
+
+        assert_eq!(
+            reference_documents_for_persistence(&[], &incoming),
+            incoming
+        );
+    }
+
+    #[test]
+    fn successful_refresh_replaces_a_previous_failure_snapshot() {
+        let current = vec![failed_reference_document("3876", "itsm.unavailable")];
+        let incoming = vec![successful_reference_document("3876", "새 원문")];
+
+        assert_eq!(
+            reference_documents_for_persistence(&current, &incoming),
+            incoming
+        );
+    }
+
+    #[test]
+    fn newest_analysis_rows_are_returned_in_chronological_order() {
+        let oldest_selected = analysis_message_row(101);
+        let newest_selected = analysis_message_row(200);
+        let expected_ids = vec![oldest_selected.id, newest_selected.id];
+
+        let messages = chronological_analysis_messages(vec![newest_selected, oldest_selected]);
+
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            expected_ids
+        );
+    }
+
+    fn analysis_message_row(second: i64) -> InflowAnalysisMessageRow {
+        InflowAnalysisMessageRow {
+            id: Uuid::from_u128(
+                u128::try_from(second).expect("test message timestamp must be non-negative"),
+            ),
+            sender_name: Some("업무 담당자".to_owned()),
+            sent_by_owner: false,
+            content_text: format!("{second}번째 메시지"),
+            received_at: OffsetDateTime::from_unix_timestamp(second)
+                .expect("test timestamp should be valid"),
+        }
+    }
+
+    fn successful_reference_document(external_id: &str, content: &str) -> InflowReferenceDocument {
+        InflowReferenceDocument {
+            provider: "itsm".to_owned(),
+            url: format!("https://itsm.example/issues/{external_id}"),
+            external_id: external_id.to_owned(),
+            title: Some("정산방식 표시 요청".to_owned()),
+            original_content: Some(content.to_owned()),
+            error_code: None,
+        }
+    }
+
+    fn failed_reference_document(external_id: &str, error_code: &str) -> InflowReferenceDocument {
+        InflowReferenceDocument {
+            provider: "itsm".to_owned(),
+            url: format!("https://itsm.example/issues/{external_id}"),
+            external_id: external_id.to_owned(),
+            title: None,
+            original_content: None,
+            error_code: Some(error_code.to_owned()),
+        }
     }
 }

@@ -150,7 +150,10 @@ import { assistantResponseAfterLatestRequest } from "./components/conversationRe
 import { HomeWorkspace } from "./components/HomeWorkspace";
 import { type PromoteGmailInflowInput } from "./components/GmailInflowReview";
 import { OsShell, type OsDestination } from "./components/OsShell";
-import { type PromoteInflowInput } from "./components/ProjectInflowPanel";
+import {
+  inflowConversationKey,
+  type PromoteInflowInput,
+} from "./components/ProjectInflowPanel";
 import { type PlanningEditTarget } from "./components/PlanningItemEditor";
 import { type VoiceCommandOutcome } from "./components/VoiceCommandSheet";
 import { copy } from "./copy";
@@ -3801,7 +3804,10 @@ export default function App() {
         }),
       );
       setProjectInflowItems((current) =>
-        current.filter((currentItem) => currentItem.id !== item.id),
+        current.filter(
+          (currentItem) =>
+            inflowConversationKey(currentItem) !== inflowConversationKey(item),
+        ),
       );
       await loadHomeSnapshot();
       if (selectedProjectId === item.projectId) {
@@ -3834,7 +3840,10 @@ export default function App() {
         }),
       );
       setProjectInflowItems((current) =>
-        current.filter((currentItem) => currentItem.id !== item.id),
+        current.filter(
+          (currentItem) =>
+            inflowConversationKey(currentItem) !== inflowConversationKey(item),
+        ),
       );
       await loadHomeSnapshot();
       if (selectedProjectId === item.projectId) {

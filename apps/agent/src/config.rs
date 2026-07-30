@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     env::{self, VarError},
     fs,
     path::Path,
@@ -8,6 +9,9 @@ use std::{
 use jimin_storage::Database;
 use secrecy::SecretString;
 use thiserror::Error;
+use uuid::Uuid;
+
+use crate::itsm::ItsmClient;
 
 const DEFAULT_MAX_CONNECTIONS: u32 = 2;
 const DEFAULT_ACQUIRE_TIMEOUT_MS: u64 = 2_000;
@@ -23,6 +27,7 @@ pub(crate) struct AgentConfig {
     poll_interval: Duration,
     runner_id: String,
     meeting_transcriber_url: Option<String>,
+    itsm_client: Option<ItsmClient>,
 }
 
 #[derive(Debug, Clone, Copy, Error)]
@@ -31,6 +36,8 @@ pub(crate) enum ConfigError {
     InvalidDatabase,
     #[error("agent runner configuration is invalid")]
     InvalidRunner,
+    #[error("agent ITSM configuration is invalid")]
+    InvalidItsm,
     #[error("agent environment contains non-Unicode data")]
     NonUnicodeEnvironment,
 }
@@ -40,6 +47,7 @@ impl ConfigError {
         match self {
             Self::InvalidDatabase => "agent_database_configuration_invalid",
             Self::InvalidRunner => "agent_runner_configuration_invalid",
+            Self::InvalidItsm => "agent_itsm_configuration_invalid",
             Self::NonUnicodeEnvironment => "agent_environment_non_unicode",
         }
     }
@@ -90,6 +98,25 @@ impl AgentConfig {
         }) {
             return Err(ConfigError::InvalidRunner);
         }
+        let itsm_base_url =
+            env_string("JIMIN_ITSM_BASE_URL")?.filter(|value| !value.trim().is_empty());
+        let itsm_token_file =
+            env_string("JIMIN_ITSM_API_TOKEN_FILE")?.filter(|value| !value.trim().is_empty());
+        let itsm_allowed_source_ids = env_string("JIMIN_ITSM_ALLOWED_SOURCE_IDS")?;
+        let itsm_client = match (itsm_base_url, itsm_token_file, itsm_allowed_source_ids) {
+            (None, None, None) => None,
+            (Some(base_url), token_file, Some(allowed_source_ids)) => {
+                let token = token_file
+                    .map(|path| read_secret_file(&path, ConfigError::InvalidItsm))
+                    .transpose()?;
+                let allowed_source_ids = parse_itsm_allowed_source_ids(&allowed_source_ids)?;
+                Some(
+                    ItsmClient::new(&base_url, token, allowed_source_ids)
+                        .map_err(|_| ConfigError::InvalidItsm)?,
+                )
+            }
+            _ => return Err(ConfigError::InvalidItsm),
+        };
 
         Ok(Self {
             database_url,
@@ -99,6 +126,7 @@ impl AgentConfig {
             poll_interval,
             runner_id,
             meeting_transcriber_url,
+            itsm_client,
         })
     }
 
@@ -126,25 +154,33 @@ impl AgentConfig {
     pub(crate) fn meeting_transcriber_url(&self) -> Option<&str> {
         self.meeting_transcriber_url.as_deref()
     }
+
+    pub(crate) const fn itsm_client(&self) -> Option<&ItsmClient> {
+        self.itsm_client.as_ref()
+    }
 }
 
 fn read_database_url() -> Result<SecretString, ConfigError> {
     let Some(path) = env_string("DATABASE_URL_FILE")? else {
         return Err(ConfigError::InvalidDatabase);
     };
+    read_secret_file(&path, ConfigError::InvalidDatabase)
+}
+
+fn read_secret_file(path: &str, error: ConfigError) -> Result<SecretString, ConfigError> {
     if path.is_empty() || !Path::new(&path).is_absolute() {
-        return Err(ConfigError::InvalidDatabase);
+        return Err(error);
     }
-    let metadata = fs::metadata(&path).map_err(|_| ConfigError::InvalidDatabase)?;
+    let metadata = fs::metadata(path).map_err(|_| error)?;
     if metadata.len() == 0 || metadata.len() > MAX_SECRET_FILE_BYTES || !metadata.is_file() {
-        return Err(ConfigError::InvalidDatabase);
+        return Err(error);
     }
-    let mut value = fs::read_to_string(path).map_err(|_| ConfigError::InvalidDatabase)?;
+    let mut value = fs::read_to_string(path).map_err(|_| error)?;
     while value.ends_with('\n') || value.ends_with('\r') {
         value.pop();
     }
     if value.is_empty() || value.contains('\0') {
-        return Err(ConfigError::InvalidDatabase);
+        return Err(error);
     }
     Ok(SecretString::from(value))
 }
@@ -155,6 +191,25 @@ fn env_string(key: &str) -> Result<Option<String>, ConfigError> {
         Err(VarError::NotPresent) => Ok(None),
         Err(VarError::NotUnicode(_)) => Err(ConfigError::NonUnicodeEnvironment),
     }
+}
+
+fn parse_itsm_allowed_source_ids(value: &str) -> Result<BTreeSet<Uuid>, ConfigError> {
+    let mut source_ids = BTreeSet::new();
+    for candidate in value.split(',') {
+        let candidate = candidate.trim();
+        if candidate.is_empty() {
+            return Err(ConfigError::InvalidItsm);
+        }
+        let source_id = Uuid::parse_str(candidate).map_err(|_| ConfigError::InvalidItsm)?;
+        if source_id.get_version_num() != 7 {
+            return Err(ConfigError::InvalidItsm);
+        }
+        source_ids.insert(source_id);
+    }
+    if source_ids.is_empty() {
+        return Err(ConfigError::InvalidItsm);
+    }
+    Ok(source_ids)
 }
 
 fn parse_bounded_u32(
@@ -197,13 +252,31 @@ fn valid_runner_id(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigError, parse_bounded_u64, valid_runner_id};
+    use super::{ConfigError, parse_bounded_u64, parse_itsm_allowed_source_ids, valid_runner_id};
+    use uuid::Uuid;
 
     #[test]
     fn runner_id_is_bounded_and_content_free() {
         assert!(valid_runner_id("agent-019f4ad1"));
         assert!(!valid_runner_id(""));
         assert!(!valid_runner_id("agent\nunsafe"));
+    }
+
+    #[test]
+    fn itsm_allowed_sources_require_nonempty_v7_uuids() {
+        let first = Uuid::now_v7();
+        let second = Uuid::now_v7();
+        let parsed = parse_itsm_allowed_source_ids(&format!("{first}, {second}"))
+            .expect("v7 source allowlist should parse");
+        assert_eq!(parsed, [first, second].into_iter().collect());
+
+        assert!(parse_itsm_allowed_source_ids("").is_err());
+        assert!(parse_itsm_allowed_source_ids(&format!("{first},")).is_err());
+        assert!(parse_itsm_allowed_source_ids("not-a-uuid").is_err());
+        assert!(
+            parse_itsm_allowed_source_ids("550e8400-e29b-41d4-a716-446655440000").is_err(),
+            "non-v7 UUIDs must not identify a Google Chat source"
+        );
     }
 
     #[test]

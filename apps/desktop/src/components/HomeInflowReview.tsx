@@ -3,7 +3,11 @@ import { useMemo, useState } from "react";
 
 import { type ProjectInflowItem } from "../api/googleChat";
 import { copy } from "../copy";
-import { InflowItemRow, type PromoteInflowInput } from "./ProjectInflowPanel";
+import {
+  InflowItemRow,
+  inflowConversationKey,
+  type PromoteInflowInput,
+} from "./ProjectInflowPanel";
 
 type HomeInflowReviewProps = {
   items: ProjectInflowItem[];
@@ -23,10 +27,14 @@ export function HomeInflowReview({
   onRetryCompletion,
 }: HomeInflowReviewProps) {
   const visibleItems = useMemo(() => items.slice(0, 5), [items]);
-  const [selectedId, setSelectedId] = useState(visibleItems[0]?.id);
+  const [selectedConversationId, setSelectedConversationId] = useState(
+    visibleItems[0] ? inflowConversationKey(visibleItems[0]) : undefined,
+  );
   const [mobileExpanded, setMobileExpanded] = useState(false);
   const selectedItem =
-    visibleItems.find((item) => item.id === selectedId) ?? visibleItems[0];
+    visibleItems.find(
+      (item) => inflowConversationKey(item) === selectedConversationId,
+    ) ?? visibleItems[0];
 
   if (!selectedItem) return <></>;
 
@@ -76,15 +84,17 @@ export function HomeInflowReview({
           </div>
           <ol>
             {visibleItems.map((item) => {
-              const active = item.id === selectedItem.id;
+              const conversationId = inflowConversationKey(item);
+              const active =
+                conversationId === inflowConversationKey(selectedItem);
               return (
-                <li key={item.id}>
+                <li key={conversationId}>
                   <button
                     className="home-inflow-review__queue-item focus-visible-control"
                     type="button"
                     aria-pressed={active}
                     data-active={active}
-                    onClick={() => setSelectedId(item.id)}
+                    onClick={() => setSelectedConversationId(conversationId)}
                   >
                     <span className="home-inflow-review__queue-meta">
                       <strong>
@@ -119,7 +129,7 @@ export function HomeInflowReview({
           </header>
           <ul>
             <InflowItemRow
-              key={selectedItem.id}
+              key={inflowConversationKey(selectedItem)}
               item={selectedItem}
               saving={saving}
               onPromote={onPromote}

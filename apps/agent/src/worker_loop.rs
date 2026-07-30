@@ -222,6 +222,10 @@ impl WorkerError {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the worker entry point explicitly receives each independently configured runtime dependency"
+)]
 pub(crate) async fn run_until_shutdown<R, W>(
     client: &mut AppServerClient<R, W>,
     database: &Database,
@@ -230,6 +234,7 @@ pub(crate) async fn run_until_shutdown<R, W>(
     poll_interval: Duration,
     workspace: &Path,
     meeting_transcriber_url: Option<&str>,
+    itsm_client: Option<&crate::itsm::ItsmClient>,
 ) -> Result<WorkerExit, WorkerError>
 where
     R: AsyncBufRead + Unpin,
@@ -292,6 +297,7 @@ where
             lease,
             workspace,
             meeting_transcriber_url,
+            itsm_client,
         )
         .await?;
         background_cursor = (background_cursor + 1) % BACKGROUND_QUEUE_COUNT;
@@ -316,6 +322,10 @@ where
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "background queue dispatch forwards the worker's independently configured runtime dependencies"
+)]
 async fn process_background_queue<R, W>(
     cursor: usize,
     client: &mut AppServerClient<R, W>,
@@ -324,6 +334,7 @@ async fn process_background_queue<R, W>(
     lease: Duration,
     workspace: &Path,
     meeting_transcriber_url: Option<&str>,
+    itsm_client: Option<&crate::itsm::ItsmClient>,
 ) -> Result<bool, WorkerError>
 where
     R: AsyncBufRead + Unpin,
@@ -331,8 +342,15 @@ where
 {
     match cursor % BACKGROUND_QUEUE_COUNT {
         0 => {
-            crate::inflow_analysis::process_next(client, database, runner_id, lease, workspace)
-                .await
+            crate::inflow_analysis::process_next(
+                client,
+                database,
+                runner_id,
+                lease,
+                workspace,
+                itsm_client,
+            )
+            .await
         }
         1 => {
             crate::gmail_inflow_analysis::process_next(

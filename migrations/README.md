@@ -207,3 +207,22 @@ Rollback uses the previous image together with a verified database restore.
 Rows containing pending or dismissed follow-up attention must be handled before
 restoring the older promotion-state constraint, so rollback should restore the
 verified pre-migration backup rather than mutate those links in place.
+
+Migration `0049_inflow_reference_documents.sql` stores up to four bounded,
+read-only source snapshots alongside each Google Chat inflow analysis. Apply it
+to an empty database and a restored version-48 backup, then verify existing
+analyses receive an empty JSON array, an ITSM-enriched analysis persists only
+validated HTTPS references, and `jimin_schema_metadata.schema_version = 49`.
+The migration is additive. After enriched analyses are written, rollback must
+use the verified pre-migration backup because the older worker cannot preserve
+the evidence used to produce its task summary.
+
+Migration `0050_task_assignment_public_details.sql` stores the reviewed public
+assignment projection separately from editable task notes and immutable inflow
+evidence. Apply it to an empty database and a restored version-49 backup, then
+verify promoted tasks persist only bounded summary, action item, completion
+criterion, and reference-link arrays and that
+`jimin_schema_metadata.schema_version = 50`. Existing tasks remain valid
+without a projection and use their explicitly public notes as the notification
+summary. Rollback uses the previous image together with a verified version-49
+backup after new task assignment projections have been written.

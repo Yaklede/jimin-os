@@ -8,7 +8,14 @@ import {
 } from "react";
 
 import { copy } from "../copy";
+import { deadlinePickerCopy } from "../copy/deadlinePicker";
 import { registerMobileBackHandler } from "../mobileBack";
+import {
+  DeadlinePicker,
+  isoToSeoulLocalDateTime,
+  resolveOptionalSeoulDateTime,
+  seoulLocalDateTimeToIso,
+} from "./DeadlinePicker";
 
 export type PlanningCreateKind = "task" | "schedule";
 
@@ -116,6 +123,22 @@ export function PlanningCreateDialog({
       titleInputRef.current?.focus();
       return;
     }
+    let taskDueAt: string | undefined;
+    if (taskMode) {
+      const deadline = resolveOptionalSeoulDateTime(dueAt);
+      if (!deadline.valid) {
+        setError(deadlinePickerCopy.invalid);
+        document.getElementById("planning-create-due-at-date")?.focus();
+        return;
+      }
+      taskDueAt = deadline.value;
+    } else {
+      const scheduleError = validateScheduleTimes(startsAt, endsAt);
+      if (scheduleError) {
+        setError(scheduleError);
+        return;
+      }
+    }
 
     setSaving(true);
     setError(undefined);
@@ -125,15 +148,9 @@ export function PlanningCreateDialog({
           title: nextTitle,
           notes: notes.trim() || undefined,
           priority,
-          dueAt: dueAt ? localInputToIso(dueAt) : undefined,
+          dueAt: taskDueAt,
         });
       } else {
-        const scheduleError = validateScheduleTimes(startsAt, endsAt);
-        if (scheduleError) {
-          setError(scheduleError);
-          setSaving(false);
-          return;
-        }
         await onCreateSchedule({
           title: nextTitle,
           notes: notes.trim() || undefined,
@@ -229,53 +246,46 @@ export function PlanningCreateDialog({
                   <option value={3}>{copy.forms.priorityHighest}</option>
                 </select>
               </CreateField>
-              <CreateField
+              <DeadlinePicker
+                className="planning-editor__field"
+                id="planning-create-due-at"
                 label={copy.forms.dueAt}
-                htmlFor="planning-create-due-at"
-                description={copy.forms.dueAtDescription}
-              >
-                <input
-                  id="planning-create-due-at"
-                  type="datetime-local"
-                  value={dueAt}
-                  onInput={(event) => setDueAt(event.currentTarget.value)}
-                />
-              </CreateField>
+                value={dueAt}
+                disabled={saving}
+                showPresets
+                onChange={setDueAt}
+              />
             </div>
           ) : (
             <div className="planning-editor__field-grid">
-              <CreateField
+              <DeadlinePicker
+                className="planning-editor__field"
+                id="planning-create-starts-at"
                 label={copy.forms.startsAt}
-                htmlFor="planning-create-starts-at"
-              >
-                <input
-                  id="planning-create-starts-at"
-                  type="datetime-local"
-                  required
-                  value={startsAt}
-                  aria-describedby={error ? "planning-create-error" : undefined}
-                  onInput={(event) => {
-                    setStartsAt(event.currentTarget.value);
-                    setError(undefined);
-                  }}
-                />
-              </CreateField>
-              <CreateField
+                value={startsAt}
+                disabled={saving}
+                required
+                allowClear={false}
+                describedBy={error ? "planning-create-error" : undefined}
+                onChange={(value) => {
+                  setStartsAt(value);
+                  setError(undefined);
+                }}
+              />
+              <DeadlinePicker
+                className="planning-editor__field"
+                id="planning-create-ends-at"
                 label={copy.forms.endsAt}
-                htmlFor="planning-create-ends-at"
-              >
-                <input
-                  id="planning-create-ends-at"
-                  type="datetime-local"
-                  required
-                  value={endsAt}
-                  aria-describedby={error ? "planning-create-error" : undefined}
-                  onInput={(event) => {
-                    setEndsAt(event.currentTarget.value);
-                    setError(undefined);
-                  }}
-                />
-              </CreateField>
+                value={endsAt}
+                disabled={saving}
+                required
+                allowClear={false}
+                describedBy={error ? "planning-create-error" : undefined}
+                onChange={(value) => {
+                  setEndsAt(value);
+                  setError(undefined);
+                }}
+              />
             </div>
           )}
         </fieldset>
@@ -344,13 +354,9 @@ export function validateScheduleTimes(
   endsAt: string,
 ): string | undefined {
   if (!startsAt || !endsAt) return copy.forms.scheduleTimeRequired;
-  const start = new Date(startsAt);
-  const end = new Date(endsAt);
-  if (
-    Number.isNaN(start.getTime()) ||
-    Number.isNaN(end.getTime()) ||
-    end <= start
-  ) {
+  const start = seoulLocalDateTimeToIso(startsAt);
+  const end = seoulLocalDateTimeToIso(endsAt);
+  if (!start || !end || new Date(end).getTime() <= new Date(start).getTime()) {
     return copy.forms.scheduleTimeOrder;
   }
   return undefined;
@@ -358,21 +364,18 @@ export function validateScheduleTimes(
 
 export function defaultScheduleRange(now = new Date()) {
   const start = new Date(now);
-  start.setSeconds(0, 0);
-  const minutes = start.getMinutes();
-  start.setMinutes(minutes < 30 ? 30 : 60);
+  start.setUTCSeconds(0, 0);
+  const minutes = start.getUTCMinutes();
+  start.setUTCMinutes(minutes < 30 ? 30 : 60);
   const end = new Date(start.getTime() + 60 * 60 * 1_000);
   return {
-    startsAt: dateToLocalInput(start),
-    endsAt: dateToLocalInput(end),
+    startsAt: isoToSeoulLocalDateTime(start.toISOString()),
+    endsAt: isoToSeoulLocalDateTime(end.toISOString()),
   };
 }
 
-function dateToLocalInput(date: Date): string {
-  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
-  return local.toISOString().slice(0, 16);
-}
-
 function localInputToIso(value: string): string {
-  return new Date(value).toISOString();
+  const iso = seoulLocalDateTimeToIso(value);
+  if (!iso) throw new Error("invalid date time");
+  return iso;
 }

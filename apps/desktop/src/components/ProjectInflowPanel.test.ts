@@ -11,6 +11,11 @@ import { copy } from "../copy";
 import {
   ProjectInflowPanel,
   isExistingTaskFollowUp,
+  inflowContextScrollBehavior,
+  inflowConversationKey,
+  mergeInflowDraftValues,
+  nextInflowDraftBaseRevision,
+  projectInflowPromotionProblem,
   projectInflowAttentionCount,
   localInputToIso,
   resolvePromotionDeadline,
@@ -20,7 +25,7 @@ describe("project inflow deadline", () => {
   it("keeps a selected local deadline when promoting a Chat request", () => {
     const input = "2026-07-24T18:30";
 
-    expect(localInputToIso(input)).toBe(new Date(input).toISOString());
+    expect(localInputToIso(input)).toBe("2026-07-24T09:30:00.000Z");
   });
 
   it("does not turn an invalid deadline into an empty value", () => {
@@ -41,9 +46,113 @@ describe("project inflow deadline", () => {
     const input = "2026-07-29T18:30";
 
     expect(resolvePromotionDeadline(input, false)).toEqual({
-      dueAt: new Date(input).toISOString(),
+      dueAt: "2026-07-29T09:30:00.000Z",
       withoutDeadline: false,
     });
+  });
+
+  it("keeps UI identity on the stable conversation id", () => {
+    expect(
+      inflowConversationKey(
+        inflowItem("latest-message", { conversationId: "conversation-1" }),
+      ),
+    ).toBe("conversation-1");
+    expect(
+      inflowConversationKey(
+        inflowItem("mutation-snapshot", { conversationId: null }),
+      ),
+    ).toBe("mutation-snapshot");
+  });
+
+  it("updates AI suggestions without overwriting fields the user changed", () => {
+    const current = {
+      title: "사용자가 다듬은 제목",
+      notes: "이전 정리",
+      assigneeName: "김경주",
+      priority: "1",
+      dueAt: "2026-07-31T18:00",
+      withoutDeadline: false,
+    };
+
+    expect(
+      mergeInflowDraftValues(
+        current,
+        {
+          title: "새 답글을 반영한 제목",
+          notes: "새 답글을 반영한 상세 내용",
+          assigneeName: "주홍석",
+          priority: "2",
+          dueAt: "2026-08-01T18:00",
+          withoutDeadline: false,
+        },
+        ["title", "assigneeName"],
+      ),
+    ).toEqual({
+      title: "사용자가 다듬은 제목",
+      notes: "새 답글을 반영한 상세 내용",
+      assigneeName: "김경주",
+      priority: "2",
+      dueAt: "2026-08-01T18:00",
+      withoutDeadline: false,
+    });
+  });
+
+  it("keeps the draft revision behind while the user is editing", () => {
+    expect(nextInflowDraftBaseRevision(2, 3, true)).toBe(2);
+    expect(nextInflowDraftBaseRevision(2, 3, false)).toBe(3);
+    expect(nextInflowDraftBaseRevision(3, null, false)).toBe(3);
+  });
+
+  it("uses an immediate scroll when reduced motion is preferred", () => {
+    expect(inflowContextScrollBehavior(true)).toBe("auto");
+    expect(inflowContextScrollBehavior(false)).toBe("smooth");
+  });
+
+  it("blocks stale analysis with guidance before a promotion can start", () => {
+    const markup = renderPanel({
+      items: [
+        inflowItem("stale", {
+          sourceRevision: 3,
+          analyzedRevision: 2,
+        }),
+      ],
+    });
+
+    expect(markup).toContain(copy.projects.inflowPromotionStale);
+    expect(markup).toContain(copy.projects.inflowAnalysisRetry);
+    expect(markup).not.toContain(copy.projects.inflowPromote);
+    expect(projectInflowPromotionProblem("missing_context")).toBe(
+      copy.projects.inflowPromotionContextMissing,
+    );
+  });
+
+  it("keeps fetched reference evidence collapsed and read-only", () => {
+    const originalContent = "ITSM 요청 원문은 편집할 수 없어야 합니다.";
+    const markup = renderPanel({
+      items: [
+        inflowItem("evidence", {
+          referenceDocuments: [
+            {
+              provider: "itsm",
+              url: "https://itsm.example/issues/3876",
+              externalId: "3876",
+              title: "정산 방식 표기 요청",
+              originalContent,
+              errorCode: null,
+            },
+          ],
+        }),
+      ],
+    });
+
+    expect(markup).toContain('class="project-inflow-item__evidence"');
+    expect(markup).not.toContain(
+      'class="project-inflow-item__evidence" open=""',
+    );
+    expect(markup).toContain(copy.projects.inflowEvidenceSummary(1));
+    expect(markup).toContain("정산 방식 표기 요청");
+    expect(markup).toContain(originalContent);
+    expect(markup).not.toContain(`<textarea>${originalContent}</textarea>`);
   });
 });
 
@@ -166,6 +275,10 @@ function inflowItem(
   const receivedAt = "2026-07-30T08:00:00.000Z";
   return {
     id,
+    conversationId: `conversation-${id}`,
+    representativeItemId: `representative-${id}`,
+    sourceRevision: 1,
+    analyzedRevision: 1,
     projectId: "project-1",
     projectName: "프로젝트",
     sourceId: "source-1",
@@ -176,6 +289,7 @@ function inflowItem(
     suggestedTaskTitle: "요청 내용 확인",
     suggestedTaskNotes: "요청 내용을 확인하고 결과를 공유합니다.",
     referenceLinks: [],
+    referenceDocuments: [],
     suggestedAssigneeName: null,
     suggestedDueAt: "2026-07-31T09:00:00.000Z",
     suggestedPriority: 1,

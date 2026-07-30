@@ -9,12 +9,19 @@ import {
   RefreshCw,
   UserRound,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import type { GmailInflowCandidate } from "../api/gmailInflow";
 import { PlanningRequestError } from "../api/planning";
 import type { Project } from "../api/projects";
 import { copy } from "../copy";
+import { deadlinePickerCopy } from "../copy/deadlinePicker";
+import {
+  DeadlinePicker,
+  isoToSeoulLocalDateTime,
+  resolveOptionalSeoulDateTime,
+  seoulLocalDateTimeToIso,
+} from "./DeadlinePicker";
 
 export interface PromoteGmailInflowInput {
   title: string;
@@ -25,6 +32,16 @@ export interface PromoteGmailInflowInput {
   dueAt: string | null;
   withoutDeadline: boolean;
 }
+
+export type GmailInflowDraftValues = {
+  title: string;
+  notes: string;
+  assigneeName: string;
+  priority: number;
+  dueAt: string;
+};
+
+export type GmailInflowDraftField = keyof GmailInflowDraftValues;
 
 type GmailInflowReviewProps = {
   items: GmailInflowCandidate[];
@@ -300,19 +317,41 @@ function GmailInflowDetail({
   onRetryAnalysis,
   onOpenTask,
 }: GmailInflowDetailProps) {
-  const [title, setTitle] = useState(item.suggestedTaskTitle);
-  const [notes, setNotes] = useState(item.suggestedTaskNotes);
+  const [draft, setDraft] = useState<GmailInflowDraftValues>(() =>
+    suggestedGmailInflowDraft(item),
+  );
   const [projectId, setProjectId] = useState(
     projects.length === 1 ? (projects[0]?.id ?? "") : "",
   );
-  const [assigneeName, setAssigneeName] = useState(
-    item.suggestedAssigneeName ?? "",
-  );
-  const [priority, setPriority] = useState(item.suggestedPriority ?? 1);
-  const [dueAt, setDueAt] = useState(toLocalDateTime(item.suggestedDueAt));
   const [revisitAt, setRevisitAt] = useState(defaultRevisitAtLocal);
   const [actionError, setActionError] = useState<string>();
+  const dirtyFieldsRef = useRef(new Set<GmailInflowDraftField>());
   const analysisReady = item.analysisStatus === "ready";
+  const { title, notes, assigneeName, priority, dueAt } = draft;
+
+  useEffect(() => {
+    setDraft((current) =>
+      mergeGmailInflowDraftValues(
+        current,
+        suggestedGmailInflowDraft(item),
+        dirtyFieldsRef.current,
+      ),
+    );
+  }, [
+    item.suggestedAssigneeName,
+    item.suggestedDueAt,
+    item.suggestedPriority,
+    item.suggestedTaskNotes,
+    item.suggestedTaskTitle,
+  ]);
+
+  function changeDraft<Field extends GmailInflowDraftField>(
+    field: Field,
+    value: GmailInflowDraftValues[Field],
+  ) {
+    dirtyFieldsRef.current.add(field);
+    setDraft((current) => ({ ...current, [field]: value }));
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -326,6 +365,12 @@ function GmailInflowDetail({
       setActionError(copy.gmailInflow.invalidProject);
       return;
     }
+    const deadline = resolveOptionalSeoulDateTime(dueAt);
+    if (!deadline.valid) {
+      setActionError(deadlinePickerCopy.invalid);
+      document.getElementById(`gmail-inflow-due-at-${item.id}-date`)?.focus();
+      return;
+    }
     setActionError(undefined);
     try {
       await onPromote(item, {
@@ -334,8 +379,8 @@ function GmailInflowDetail({
         projectId,
         assigneeName: assigneeName.trim() || null,
         priority,
-        dueAt: localDateTimeToIso(dueAt),
-        withoutDeadline: !dueAt,
+        dueAt: deadline.value ?? null,
+        withoutDeadline: deadline.value === undefined,
       });
     } catch (error) {
       setActionError(actionFailureMessage(error));
@@ -470,7 +515,7 @@ function GmailInflowDetail({
               <span>{copy.gmailInflow.suggestedTitle}</span>
               <input
                 value={title}
-                onChange={(event) => setTitle(event.target.value)}
+                onChange={(event) => changeDraft("title", event.target.value)}
                 disabled={saving}
               />
             </label>
@@ -478,7 +523,7 @@ function GmailInflowDetail({
               <span>{copy.gmailInflow.suggestedNotes}</span>
               <textarea
                 value={notes}
-                onChange={(event) => setNotes(event.target.value)}
+                onChange={(event) => changeDraft("notes", event.target.value)}
                 disabled={saving}
                 rows={4}
               />
@@ -489,7 +534,9 @@ function GmailInflowDetail({
                 <input
                   value={assigneeName}
                   placeholder={copy.gmailInflow.noAssignee}
-                  onChange={(event) => setAssigneeName(event.target.value)}
+                  onChange={(event) =>
+                    changeDraft("assigneeName", event.target.value)
+                  }
                   disabled={saving}
                 />
               </label>
@@ -497,7 +544,9 @@ function GmailInflowDetail({
                 <span>{copy.gmailInflow.priority}</span>
                 <select
                   value={priority}
-                  onChange={(event) => setPriority(Number(event.target.value))}
+                  onChange={(event) =>
+                    changeDraft("priority", Number(event.target.value))
+                  }
                   disabled={saving}
                 >
                   <option value={0}>{copy.forms.priorityNormal}</option>
@@ -507,16 +556,15 @@ function GmailInflowDetail({
                 </select>
               </label>
             </div>
-            <label className="gmail-inflow__due-at">
-              <span>{copy.gmailInflow.suggestedDueAt}</span>
-              <input
-                type="datetime-local"
-                value={dueAt}
-                onChange={(event) => setDueAt(event.target.value)}
-                disabled={saving}
-              />
-              <small>{copy.gmailInflow.dueAtHint}</small>
-            </label>
+            <DeadlinePicker
+              className="gmail-inflow__due-at"
+              id={`gmail-inflow-due-at-${item.id}`}
+              label={copy.gmailInflow.suggestedDueAt}
+              value={dueAt}
+              disabled={saving}
+              showPresets
+              onChange={(value) => changeDraft("dueAt", value)}
+            />
           </>
         )}
 
@@ -565,16 +613,16 @@ function GmailInflowDetail({
           </p>
         )}
 
-        <label className="gmail-inflow__defer-at">
-          <span>{copy.gmailInflow.deferAt}</span>
-          <input
-            type="datetime-local"
-            value={revisitAt}
-            onChange={(event) => setRevisitAt(event.target.value)}
-            disabled={saving}
-          />
-          <small>{copy.gmailInflow.deferHint}</small>
-        </label>
+        <DeadlinePicker
+          className="gmail-inflow__defer-at"
+          id={`gmail-inflow-defer-at-${item.id}`}
+          label={copy.gmailInflow.deferAt}
+          value={revisitAt}
+          disabled={saving}
+          showPresets
+          allowClear={false}
+          onChange={setRevisitAt}
+        />
 
         <div className="gmail-inflow__actions">
           {!item.promotedTaskId && (
@@ -648,17 +696,40 @@ function formatReceivedAt(value: string, compact = false): string {
 }
 
 function toLocalDateTime(value: string | null): string {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  const offset = date.getTimezoneOffset() * 60_000;
-  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+  return isoToSeoulLocalDateTime(value);
+}
+
+function suggestedGmailInflowDraft(
+  item: GmailInflowCandidate,
+): GmailInflowDraftValues {
+  return {
+    title: item.suggestedTaskTitle,
+    notes: item.suggestedTaskNotes,
+    assigneeName: item.suggestedAssigneeName ?? "",
+    priority: item.suggestedPriority ?? 1,
+    dueAt: toLocalDateTime(item.suggestedDueAt),
+  };
+}
+
+export function mergeGmailInflowDraftValues(
+  current: GmailInflowDraftValues,
+  suggested: GmailInflowDraftValues,
+  dirtyFields: Iterable<GmailInflowDraftField>,
+): GmailInflowDraftValues {
+  const dirty = new Set(dirtyFields);
+  return {
+    title: dirty.has("title") ? current.title : suggested.title,
+    notes: dirty.has("notes") ? current.notes : suggested.notes,
+    assigneeName: dirty.has("assigneeName")
+      ? current.assigneeName
+      : suggested.assigneeName,
+    priority: dirty.has("priority") ? current.priority : suggested.priority,
+    dueAt: dirty.has("dueAt") ? current.dueAt : suggested.dueAt,
+  };
 }
 
 export function localDateTimeToIso(value: string): string | null {
-  if (!value) return null;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  return seoulLocalDateTimeToIso(value) ?? null;
 }
 
 export function deferDateTimeToIso(

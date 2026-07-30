@@ -76,7 +76,8 @@ use jimin_storage::{
     },
     planning::{
         DeleteTaskOutcome, NewScheduleEntry, NewTask, ScheduleEntry, ScheduleEntryUpdate,
-        ScheduleSource, ScheduleStatus, Task, TaskStatus, TaskUpdate,
+        ScheduleSource, ScheduleStatus, Task, TaskAssignmentMessageInput, TaskStatus, TaskUpdate,
+        format_task_assignment_message,
     },
     sync::SyncChange,
     webhook::{
@@ -889,6 +890,8 @@ pub struct ProjectGoogleChatSourceListResponse {
 )]
 pub struct ProjectInflowItemResponse {
     id: uuid::Uuid,
+    conversation_id: Option<uuid::Uuid>,
+    representative_item_id: Option<uuid::Uuid>,
     project_id: uuid::Uuid,
     project_name: String,
     source_id: uuid::Uuid,
@@ -899,10 +902,13 @@ pub struct ProjectInflowItemResponse {
     suggested_task_title: String,
     suggested_task_notes: String,
     reference_links: Vec<String>,
+    reference_documents: Vec<InflowReferenceDocumentResponse>,
     suggested_assignee_name: Option<String>,
     suggested_due_at: Option<String>,
     suggested_priority: Option<i16>,
     analysis_status: String,
+    source_revision: Option<i32>,
+    analyzed_revision: Option<i32>,
     analysis_classification: Option<String>,
     analysis_confidence: Option<i16>,
     analysis_summary: Option<String>,
@@ -923,6 +929,17 @@ pub struct ProjectInflowItemResponse {
     notifiable_assignee_names: Vec<String>,
     assignee_notification_available: bool,
     version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InflowReferenceDocumentResponse {
+    provider: String,
+    url: String,
+    external_id: String,
+    title: Option<String>,
+    original_content: Option<String>,
+    error_code: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
@@ -962,6 +979,10 @@ pub struct DeleteVersionedConnectionQuery {
 pub struct ProjectInflowDecisionRequest {
     decision: String,
     expected_version: i64,
+    conversation_id: Option<uuid::Uuid>,
+    representative_item_id: Option<uuid::Uuid>,
+    expected_source_revision: Option<i32>,
+    expected_analyzed_revision: Option<i32>,
     title: Option<String>,
     notes: Option<String>,
     assignee_name: Option<String>,
@@ -7079,6 +7100,10 @@ async fn decide_project_inflow_item(
                     "project.inflow_analysis_changed",
                     "분석 상태가 바뀌었어요. 새로고침한 뒤 다시 정리해 주세요.",
                 ),
+                "promote" => (
+                    "project.inflow_analysis_changed",
+                    "업무 분석이나 대표 메시지가 바뀌었어요. 새로고침한 뒤 다시 등록해 주세요.",
+                ),
                 _ => (
                     "project.inflow_changed",
                     "이 항목은 이미 처리되었어요. 들어오는 업무를 다시 불러와 주세요.",
@@ -7108,6 +7133,20 @@ async fn apply_project_inflow_decision(
             let Some(title) = request.title.as_deref() else {
                 return Err(StorageError::InvalidConfiguration);
             };
+            let (
+                Some(analysis_id),
+                Some(expected_representative_item_id),
+                Some(expected_source_revision),
+                Some(expected_analyzed_revision),
+            ) = (
+                request.conversation_id,
+                request.representative_item_id,
+                request.expected_source_revision,
+                request.expected_analyzed_revision,
+            )
+            else {
+                return Err(StorageError::InvalidConfiguration);
+            };
             let due_at = project_inflow_deadline(request)?;
             planning
                 .promote_project_inflow_item(&PromoteProjectInflowItem {
@@ -7115,6 +7154,10 @@ async fn apply_project_inflow_decision(
                     project_id,
                     item_id,
                     expected_version: request.expected_version,
+                    analysis_id,
+                    expected_representative_item_id,
+                    expected_source_revision,
+                    expected_analyzed_revision,
                     task_id: uuid::Uuid::now_v7(),
                     title: title.to_owned(),
                     notes: request
@@ -7284,14 +7327,17 @@ async fn deliver_google_chat_completions(
 }
 
 fn google_chat_completion_reply(delivery: &GoogleChatCompletionDelivery) -> String {
-    let assignee = delivery.assignee_name.as_deref().unwrap_or("정하지 않음");
-    let due_at = delivery
-        .due_at
-        .map_or_else(|| "정하지 않음".to_owned(), format_google_chat_due_at);
-    format!(
-        "✅ Jimin OS에서 할 일로 정리했어요.\n할 일: {}\n담당자: {assignee}\n마감일: {due_at}",
-        delivery.task_title
-    )
+    format_task_assignment_message(&TaskAssignmentMessageInput {
+        project_title: &delivery.project_title,
+        task_title: &delivery.task_title,
+        public_summary: delivery.public_summary.as_deref(),
+        action_items: &delivery.action_items,
+        completion_criteria: delivery.completion_criteria.as_deref(),
+        reference_links: &delivery.reference_links,
+        assignee_name: delivery.assignee_name.as_deref(),
+        priority: delivery.task_priority,
+        due_at: delivery.due_at,
+    })
 }
 
 fn google_chat_task_completion_reply(delivery: &GoogleChatTaskCompletionDelivery) -> String {
@@ -7954,9 +8000,15 @@ fn project_inflow_item_response(
         "pending"
     };
     let message_count = messages.len();
-    let analysis_status = analysis.as_ref().map_or("queued", |analysis| {
-        inflow_analysis_state_name(analysis.state)
-    });
+    let analysis_status = inflow_analysis_status(analysis.as_ref());
+    let conversation_id = analysis.as_ref().map(|analysis| analysis.id);
+    let representative_item_id = analysis
+        .as_ref()
+        .map(|analysis| analysis.representative_item_id);
+    let source_revision = analysis.as_ref().map(|analysis| analysis.source_revision);
+    let analyzed_revision = analysis
+        .as_ref()
+        .and_then(|analysis| analysis.analyzed_revision);
     let analysis_classification = analysis
         .as_ref()
         .and_then(|analysis| analysis.classification)
@@ -7977,6 +8029,21 @@ fn project_inflow_item_response(
             _ => "대화를 업무로 정리하고 있어요".to_owned(),
         });
     let reference_links = inflow_reference_links(&messages);
+    let reference_documents = analysis.as_ref().map_or_else(Vec::new, |analysis| {
+        analysis
+            .reference_documents
+            .iter()
+            .cloned()
+            .map(|document| InflowReferenceDocumentResponse {
+                provider: document.provider,
+                url: document.url,
+                external_id: document.external_id,
+                title: document.title,
+                original_content: document.original_content,
+                error_code: document.error_code,
+            })
+            .collect()
+    });
     let suggested_task_notes = analysis.as_ref().map_or_else(String::new, |analysis| {
         inflow_task_notes(analysis, &reference_links)
     });
@@ -8008,6 +8075,8 @@ fn project_inflow_item_response(
         .collect::<Result<Vec<_>, ()>>()?;
     Ok(ProjectInflowItemResponse {
         id: focus.id,
+        conversation_id,
+        representative_item_id,
         project_id: representative.project_id,
         project_name: representative.project_name,
         source_id: representative.source_id,
@@ -8020,10 +8089,13 @@ fn project_inflow_item_response(
         suggested_task_title,
         suggested_task_notes,
         reference_links,
+        reference_documents,
         suggested_assignee_name,
         suggested_due_at,
         suggested_priority,
         analysis_status: analysis_status.to_owned(),
+        source_revision,
+        analyzed_revision,
         analysis_classification,
         analysis_confidence,
         analysis_summary,
@@ -8061,6 +8133,34 @@ fn inflow_analysis_state_name(state: InflowAnalysisState) -> &'static str {
     }
 }
 
+fn inflow_analysis_status(analysis: Option<&ProjectInflowAnalysis>) -> &'static str {
+    let Some(analysis) = analysis else {
+        return "queued";
+    };
+    inflow_analysis_status_for(
+        analysis.state,
+        analysis.source_revision,
+        analysis.analyzed_revision,
+    )
+}
+
+fn inflow_analysis_status_for(
+    state: InflowAnalysisState,
+    source_revision: i32,
+    analyzed_revision: Option<i32>,
+) -> &'static str {
+    let has_stale_result = analyzed_revision.is_some_and(|revision| revision != source_revision);
+    if has_stale_result {
+        return match state {
+            InflowAnalysisState::Queued
+            | InflowAnalysisState::Claimed
+            | InflowAnalysisState::Running => "refreshing",
+            InflowAnalysisState::Ready | InflowAnalysisState::Failed => "stale",
+        };
+    }
+    inflow_analysis_state_name(state)
+}
+
 fn inflow_task_notes(analysis: &ProjectInflowAnalysis, reference_links: &[String]) -> String {
     let Some(summary) = analysis.summary.as_deref() else {
         return String::new();
@@ -8086,7 +8186,19 @@ fn inflow_task_notes(analysis: &ProjectInflowAnalysis, reference_links: &[String
         summary.trim().to_owned()
     };
     append_reference_links(&mut notes, reference_links);
-    notes
+    bounded_inflow_task_notes(&notes)
+}
+
+fn bounded_inflow_task_notes(value: &str) -> String {
+    const MAX_CHARS: usize = 10_000;
+    const SUFFIX: &str = "\n\n[내용이 길어 나머지는 관련 링크에서 확인해 주세요.]";
+    if value.chars().count() <= MAX_CHARS {
+        return value.to_owned();
+    }
+    let retained = MAX_CHARS.saturating_sub(SUFFIX.chars().count());
+    let mut result = value.chars().take(retained).collect::<String>();
+    result.push_str(SUFFIX);
+    result
 }
 
 fn inflow_reference_links(messages: &[ProjectInflowItem]) -> Vec<String> {
@@ -10544,7 +10656,7 @@ mod tests {
         clippy::too_many_lines,
         reason = "The regression test keeps task and non-task examples together to verify grouping and filtering."
     )]
-    fn inflow_candidates_use_persisted_ai_analysis_and_hide_non_tasks() {
+    fn inflow_candidates_keep_last_ready_analysis_while_refreshing_and_hide_non_tasks() {
         let project_id = Uuid::now_v7();
         let source_id = Uuid::now_v7();
         let thread_name = Some("spaces/company/threads/request-1".to_owned());
@@ -10592,6 +10704,7 @@ mod tests {
         );
         let noise_id = noise.id;
         let representative_id = owner_follow_up.id;
+        let actionable_analysis_id = Uuid::now_v7();
         let items = vec![
             make_item(
                 "관련 문서 https://docs.example.test/specs/settlement 를 확인해 주세요.",
@@ -10604,12 +10717,14 @@ mod tests {
         ];
         let analyses = vec![
             ProjectInflowAnalysis {
-                id: Uuid::now_v7(),
+                id: actionable_analysis_id,
                 project_id,
                 source_id,
                 conversation_key: "thread:spaces/company/threads/request-1".to_owned(),
                 representative_item_id: representative_id,
-                state: InflowAnalysisState::Ready,
+                source_revision: 4,
+                analyzed_revision: Some(3),
+                state: InflowAnalysisState::Queued,
                 classification: Some(InflowClassification::NewTask),
                 confidence: Some(94),
                 summary: Some("개발 범위와 예상 일정을 확인해야 한다.".to_owned()),
@@ -10622,6 +10737,7 @@ mod tests {
                 suggested_assignee_name: None,
                 suggested_due_at: None,
                 suggested_priority: Some(1),
+                reference_documents: Vec::new(),
                 linked_task_id: None,
                 error_code: None,
                 version: 1,
@@ -10632,6 +10748,8 @@ mod tests {
                 source_id,
                 conversation_key: "message:noise".to_owned(),
                 representative_item_id: noise_id,
+                source_revision: 1,
+                analyzed_revision: Some(1),
                 state: InflowAnalysisState::Ready,
                 classification: Some(InflowClassification::Noise),
                 confidence: Some(99),
@@ -10642,6 +10760,7 @@ mod tests {
                 suggested_assignee_name: None,
                 suggested_due_at: None,
                 suggested_priority: None,
+                reference_documents: Vec::new(),
                 linked_task_id: None,
                 error_code: None,
                 version: 1,
@@ -10659,6 +10778,10 @@ mod tests {
         )
         .expect("candidate should serialize");
         assert_eq!(response.id, actionable_request_id);
+        assert_eq!(response.conversation_id, Some(actionable_analysis_id));
+        assert_eq!(response.source_revision, Some(4));
+        assert_eq!(response.analyzed_revision, Some(3));
+        assert_eq!(response.analysis_status, "refreshing");
         assert_eq!(response.message_count, 3);
         assert_eq!(response.messages.len(), 3);
         assert_eq!(
@@ -10684,6 +10807,26 @@ mod tests {
     }
 
     #[test]
+    fn inflow_analysis_status_distinguishes_first_analysis_from_stale_refresh() {
+        assert_eq!(
+            inflow_analysis_status_for(InflowAnalysisState::Queued, 1, None),
+            "queued"
+        );
+        assert_eq!(
+            inflow_analysis_status_for(InflowAnalysisState::Running, 2, Some(1)),
+            "refreshing"
+        );
+        assert_eq!(
+            inflow_analysis_status_for(InflowAnalysisState::Failed, 2, Some(1)),
+            "stale"
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the regression keeps every sender and classification case together so the attention filter contract is visible"
+    )]
     fn linked_chat_attention_only_shows_external_questions_and_follow_ups() {
         let project_id = Uuid::now_v7();
         let source_id = Uuid::now_v7();
@@ -10721,6 +10864,8 @@ mod tests {
                 source_id,
                 conversation_key: format!("thread:{thread_name}"),
                 representative_item_id: item.id,
+                source_revision: 1,
+                analyzed_revision: Some(1),
                 state: InflowAnalysisState::Ready,
                 classification: Some(classification),
                 confidence: Some(95),
@@ -10731,6 +10876,7 @@ mod tests {
                 suggested_assignee_name: None,
                 suggested_due_at: None,
                 suggested_priority: None,
+                reference_documents: Vec::new(),
                 linked_task_id: Some(promoted_task_id),
                 error_code: None,
                 version: 1,
@@ -10799,6 +10945,8 @@ mod tests {
             source_id,
             conversation_key: "thread:spaces/company/threads/qr".to_owned(),
             representative_item_id: Uuid::now_v7(),
+            source_revision: 1,
+            analyzed_revision: Some(1),
             state: InflowAnalysisState::Ready,
             classification: Some(InflowClassification::NewTask),
             confidence: Some(96),
@@ -10814,6 +10962,16 @@ mod tests {
             suggested_assignee_name: None,
             suggested_due_at: None,
             suggested_priority: Some(1),
+            reference_documents: vec![jimin_storage::inflow_analysis::InflowReferenceDocument {
+                provider: "itsm".to_owned(),
+                url: "https://itsm.example.test/issues/3876".to_owned(),
+                external_id: "3876".to_owned(),
+                title: Some("QR 결제 거래·배송 정보 통지 연동".to_owned()),
+                original_content: Some(
+                    "원문 설명\n거래 통지 수신 URL을 개발한 뒤 연동처에 회신합니다.".to_owned(),
+                ),
+                error_code: None,
+            }],
             linked_task_id: None,
             error_code: None,
             version: 1,
@@ -10825,6 +10983,13 @@ mod tests {
 
         assert!(notes.contains("QR 결제 거래·배송 정보 통지 연동 범위"));
         assert!(notes.contains("거래 통지 수신 URL"));
+        assert!(!notes.contains("ITSM 원문"));
+        assert!(!notes.contains("원문 설명"));
+        assert!(!notes.contains("연동처에 회신합니다."));
+        assert_eq!(
+            analysis.reference_documents[0].original_content.as_deref(),
+            Some("원문 설명\n거래 통지 수신 URL을 개발한 뒤 연동처에 회신합니다.")
+        );
         assert!(!notes.contains("보낸 사람 정보 없음"));
         assert!(!notes.contains("dalqtest"));
         assert!(!notes.contains("1234"));
@@ -10849,7 +11014,7 @@ mod tests {
     }
 
     #[test]
-    fn google_chat_completion_reply_contains_task_owner_and_korea_deadline() {
+    fn google_chat_completion_reply_contains_assignment_context_and_details() {
         let due_at =
             OffsetDateTime::parse("2026-07-24T02:30:00Z", &Rfc3339).expect("deadline should parse");
         let reply = google_chat_completion_reply(&GoogleChatCompletionDelivery {
@@ -10859,18 +11024,27 @@ mod tests {
             provider_message_name: "spaces/company/messages/message-1.message-1".to_owned(),
             provider_thread_name: Some("spaces/company/threads/thread-1".to_owned()),
             task_id: Uuid::now_v7(),
+            project_title: "비스킷링크".to_owned(),
             task_title: "정산 오류 원인 확인".to_owned(),
+            public_summary: Some("권한 오류의 재현 조건과 영향을 확인합니다.".to_owned()),
+            action_items: vec!["재현 조건을 검증합니다.".to_owned()],
+            completion_criteria: Some("오류가 재현되지 않습니다.".to_owned()),
             assignee_name: Some("김경주".to_owned()),
+            task_priority: 1,
             due_at: Some(due_at),
+            reference_links: vec!["https://itsm.example/issues/3876".to_owned()],
             reaction_completed: false,
             reply_completed: false,
             attempt_count: 0,
         });
 
-        assert_eq!(
-            reply,
-            "✅ Jimin OS에서 할 일로 정리했어요.\n할 일: 정산 오류 원인 확인\n담당자: 김경주\n마감일: 2026년 7월 24일 11:30"
-        );
+        assert!(reply.starts_with("새 할 일이 배정됐어요."));
+        assert!(reply.contains("프로젝트: 비스킷링크"));
+        assert!(reply.contains("할 일: 정산 오류 원인 확인"));
+        assert!(reply.contains("담당자: 김경주"));
+        assert!(reply.contains("마감: 2026년 7월 24일 11:30"));
+        assert!(reply.contains("권한 오류의 재현 조건과 영향을 확인합니다."));
+        assert!(reply.contains("https://itsm.example/issues/3876"));
     }
 
     #[test]
@@ -10902,6 +11076,10 @@ mod tests {
         let missing = ProjectInflowDecisionRequest {
             decision: "promote".to_owned(),
             expected_version: 1,
+            conversation_id: None,
+            representative_item_id: None,
+            expected_source_revision: None,
+            expected_analyzed_revision: None,
             title: Some("요청 확인".to_owned()),
             notes: None,
             assignee_name: None,
@@ -10942,6 +11120,10 @@ mod tests {
         let request = ProjectInflowDecisionRequest {
             decision: "promote".to_owned(),
             expected_version: 1,
+            conversation_id: None,
+            representative_item_id: None,
+            expected_source_revision: None,
+            expected_analyzed_revision: None,
             title: Some("요청 확인".to_owned()),
             notes: None,
             assignee_name: None,

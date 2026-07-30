@@ -255,6 +255,31 @@ export const projectCopy = {
     "업무 내용을 정리하지 못했어요. 아래에서 다시 정리해 주세요.",
   inflowAnalysisRetry: "다시 정리하기",
   inflowAnalysisSummary: "AI가 정리한 요청",
+  inflowPromotionNotReady:
+    "최신 대화 정리가 끝난 뒤 할 일로 등록할 수 있어요. 잠시 후 다시 확인해 주세요.",
+  inflowPromotionNotActionable:
+    "현재 대화는 새 할 일로 분류되지 않았어요. 다시 정리하거나 업무 아님으로 닫아 주세요.",
+  inflowPromotionContextMissing:
+    "최신 분석 정보를 확인하지 못했어요. 대화를 다시 정리한 뒤 등록해 주세요.",
+  inflowPromotionStale:
+    "새 답글이 아직 정리에 반영되지 않았어요. 최신 내용으로 다시 정리해 주세요.",
+  inflowEvidenceSummary: (count: number) => `분석에 참고한 원문 ${count}개`,
+  inflowEvidenceDescription:
+    "AI가 업무를 정리할 때 참고한 원문이에요. 할 일 내용에는 원문 전체를 자동으로 넣지 않아요.",
+  inflowEvidenceUntitled: (externalId: string) => `참고 문서 ${externalId}`,
+  inflowEvidenceOpen: "원문 열기",
+  inflowEvidenceUnavailable: "원문이 없어요. ‘원문 열기’로 확인해 주세요.",
+  inflowNewRepliesTitle: (count: number) =>
+    `배정하는 동안 새 답글 ${count}개가 추가됐어요`,
+  inflowNewRepliesDescription:
+    "작성 중인 내용은 그대로 유지했어요. 새 답글을 확인하거나 다시 정리할 수 있어요.",
+  inflowNewRepliesRefreshing:
+    "작성 중인 내용은 유지한 채 새 답글을 다시 정리하고 있어요.",
+  inflowNewRepliesStale:
+    "새 답글을 다시 정리하지 못했어요. 작성 중인 내용은 유지했어요.",
+  inflowNewRepliesOpen: "새 답글 확인",
+  inflowNewRepliesApply: "새 답글 다시 정리",
+  inflowNewRepliesKeepDraft: "현재 내용으로 계속",
   inflowTaskTitleLabel: "정리된 할 일",
   inflowTaskTitleHint: "대화에서 해야 할 행동이나 완료 결과를 확인해 주세요.",
   inflowTaskNotesLabel: "정리된 업무 내용",

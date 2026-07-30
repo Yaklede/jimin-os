@@ -3,7 +3,14 @@ import { FormEvent, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { type ScheduleEntry, type Task } from "../api/planning";
 import { copy } from "../copy";
+import { deadlinePickerCopy } from "../copy/deadlinePicker";
 import { registerMobileBackHandler } from "../mobileBack";
+import {
+  DeadlinePicker,
+  isoToSeoulLocalDateTime,
+  resolveOptionalSeoulDateTime,
+  seoulLocalDateTimeToIso,
+} from "./DeadlinePicker";
 
 export type PlanningEditTarget =
   { kind: "task"; item: Task } | { kind: "schedule"; item: ScheduleEntry };
@@ -146,6 +153,30 @@ export function PlanningItemEditor({
       setError(copy.forms.titleRequired);
       return;
     }
+    let taskDueAt: string | undefined;
+    if (activeTarget.kind === "task") {
+      const deadline = resolveOptionalSeoulDateTime(dueAt);
+      if (!deadline.valid) {
+        setError(deadlinePickerCopy.invalid);
+        document.getElementById("planning-edit-due-at-date")?.focus();
+        return;
+      }
+      taskDueAt = deadline.value;
+    } else if (!startsAt || !endsAt) {
+      setError(copy.forms.scheduleTimeRequired);
+      return;
+    } else {
+      const start = seoulLocalDateTimeToIso(startsAt);
+      const end = seoulLocalDateTimeToIso(endsAt);
+      if (
+        !start ||
+        !end ||
+        new Date(end).getTime() <= new Date(start).getTime()
+      ) {
+        setError(copy.forms.scheduleTimeOrder);
+        return;
+      }
+    }
     setSaving(true);
     setError(undefined);
     try {
@@ -156,30 +187,16 @@ export function PlanningItemEditor({
           assigneeName: assigneeName.trim() || undefined,
           status: activeTarget.item.status,
           priority,
-          dueAt: dueAt ? localInputToIso(dueAt) : undefined,
+          dueAt: taskDueAt,
         });
       } else {
-        if (!startsAt || !endsAt) {
-          setError(copy.forms.scheduleTimeRequired);
-          setSaving(false);
-          return;
-        }
-        const start = new Date(startsAt);
-        const end = new Date(endsAt);
-        if (
-          Number.isNaN(start.getTime()) ||
-          Number.isNaN(end.getTime()) ||
-          end <= start
-        ) {
-          setError(copy.forms.scheduleTimeOrder);
-          setSaving(false);
-          return;
-        }
+        const start = seoulLocalDateTimeToIso(startsAt);
+        const end = seoulLocalDateTimeToIso(endsAt);
         await onSaveSchedule(activeTarget.item, {
           title: nextTitle,
           notes: notes.trim() || undefined,
-          startsAt: start.toISOString(),
-          endsAt: end.toISOString(),
+          startsAt: start!,
+          endsAt: end!,
         });
       }
       dialogRef.current?.close();
@@ -313,52 +330,45 @@ export function PlanningItemEditor({
                     <option value={3}>{copy.forms.priorityHighest}</option>
                   </select>
                 </EditorField>
-                <EditorField
+                <DeadlinePicker
+                  className="planning-editor__field"
+                  id="planning-edit-due-at"
                   label={copy.forms.dueAt}
-                  htmlFor="planning-edit-due-at"
-                  description={copy.forms.dueAtDescription}
-                >
-                  <input
-                    id="planning-edit-due-at"
-                    type="datetime-local"
-                    value={dueAt}
-                    onInput={(event) => setDueAt(event.currentTarget.value)}
-                  />
-                </EditorField>
+                  value={dueAt}
+                  disabled={saving}
+                  showPresets
+                  onChange={setDueAt}
+                />
               </div>
             </>
           ) : (
             <div className="planning-editor__field-grid">
-              <EditorField
+              <DeadlinePicker
+                className="planning-editor__field"
+                id="planning-edit-starts-at"
                 label={copy.forms.startsAt}
-                htmlFor="planning-edit-starts-at"
-              >
-                <input
-                  id="planning-edit-starts-at"
-                  type="datetime-local"
-                  required
-                  value={startsAt}
-                  onInput={(event) => {
-                    setStartsAt(event.currentTarget.value);
-                    setError(undefined);
-                  }}
-                />
-              </EditorField>
-              <EditorField
+                value={startsAt}
+                disabled={saving}
+                required
+                allowClear={false}
+                onChange={(value) => {
+                  setStartsAt(value);
+                  setError(undefined);
+                }}
+              />
+              <DeadlinePicker
+                className="planning-editor__field"
+                id="planning-edit-ends-at"
                 label={copy.forms.endsAt}
-                htmlFor="planning-edit-ends-at"
-              >
-                <input
-                  id="planning-edit-ends-at"
-                  type="datetime-local"
-                  required
-                  value={endsAt}
-                  onInput={(event) => {
-                    setEndsAt(event.currentTarget.value);
-                    setError(undefined);
-                  }}
-                />
-              </EditorField>
+                value={endsAt}
+                disabled={saving}
+                required
+                allowClear={false}
+                onChange={(value) => {
+                  setEndsAt(value);
+                  setError(undefined);
+                }}
+              />
             </div>
           )}
         </fieldset>
@@ -484,13 +494,5 @@ function EditorField({
 }
 
 function isoToLocalInput(value: string | null): string {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
-  return local.toISOString().slice(0, 16);
-}
-
-function localInputToIso(value: string): string {
-  return new Date(value).toISOString();
+  return isoToSeoulLocalDateTime(value);
 }

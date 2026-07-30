@@ -26,6 +26,7 @@ deploy/secrets/staging/
 | `google_calendar_client_secret` | Google OAuth web client secret 한 줄 | api, Calendar OAuth를 켠 경우만 |
 | `calendar_encryption_key` | Calendar refresh/PKCE token을 암호화할 32바이트 이상 무작위 값 한 줄 | api, Calendar OAuth를 켠 경우만 |
 | `firebase_service_account` | Firebase Admin SDK 서비스 계정 JSON 원본 | api, FCM을 켠 경우만 |
+| `itsm_read_credential` | ITSM의 읽기 전용 API token 한 줄 | agent, ITSM 원문 보강을 켠 경우만 |
 | `google-services.json` | `io.jimin.os` Android 앱의 Firebase 구성 파일 | Android client build |
 | `gateway_tls_cert` | PEM certificate chain; `JIMIN_TLS_MODE=files`에서만 필요 | gateway |
 | `gateway_tls_key` | PEM private key; `JIMIN_TLS_MODE=files`에서만 필요 | gateway |
@@ -43,3 +44,11 @@ Google Calendar는 `JIMIN_GOOGLE_CALENDAR_OAUTH_ENABLED=1`일 때만 위 두 파
 FCM은 `JIMIN_FIREBASE_MESSAGING_ENABLED=1`일 때만 `firebase_service_account`를
 read-only secret으로 mount한다. Firebase Console에서 내려받은 JSON을 수정하거나
 환경 변수에 펼치지 말고 파일 권한을 `0600`으로 유지한다.
+
+ITSM 원문 보강은 `deploy/compose.itsm.yaml` overlay를 함께 적용할 때만 켜진다.
+`JIMIN_ITSM_BASE_URL`에는 신뢰할 수 있는 HTTPS origin만 지정하고,
+`itsm_read_credential`에는 이슈 조회 권한만 가진 token을 넣는다. Agent는 Chat에 들어온
+URL을 직접 호출하지 않고, 설정된 origin의 숫자형 `/issues/{id}`만 API로 다시
+조합해 조회한다. `JIMIN_ITSM_ALLOWED_SOURCE_IDS`에는 이 token을 사용할 수 있는
+Google Chat source의 v7 UUID만 쉼표로 구분해 등록한다. 비어 있거나 잘못된 UUID가
+있으면 Agent는 ITSM 보강을 시작하지 않는다.

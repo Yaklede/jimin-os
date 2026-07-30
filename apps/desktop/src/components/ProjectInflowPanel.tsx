@@ -1,6 +1,7 @@
 import {
   Check,
   Eye,
+  ExternalLink,
   Inbox,
   Link2,
   LoaderCircle,
@@ -15,8 +16,16 @@ import {
   type GoogleChatSpace,
   type ProjectGoogleChatSource,
   type ProjectInflowItem,
+  type ProjectInflowPromotionBlockReason,
+  type ProjectInflowReferenceDocument,
+  projectInflowPromotionReadiness,
 } from "../api/googleChat";
 import { copy } from "../copy";
+import {
+  DeadlinePicker,
+  isoToSeoulLocalDateTime,
+  seoulLocalDateTimeToIso,
+} from "./DeadlinePicker";
 
 type ProjectInflowPanelProps = {
   accountsAvailable: boolean;
@@ -53,6 +62,24 @@ export type PromoteInflowInput = {
   dueAt: string | null;
   withoutDeadline: boolean;
 };
+
+export type InflowDraftField =
+  "title" | "notes" | "assigneeName" | "priority" | "dueAt" | "withoutDeadline";
+
+export type InflowDraftValues = {
+  title: string;
+  notes: string;
+  assigneeName: string;
+  priority: string;
+  dueAt: string;
+  withoutDeadline: boolean;
+};
+
+type PersistedInflowDraft = {
+  savedAt: number;
+  baseRevision: number;
+  dirtyFields: InflowDraftField[];
+} & InflowDraftValues;
 
 export function ProjectInflowPanel({
   accountsAvailable,
@@ -381,7 +408,7 @@ function InflowItemList({
       <ul>
         {items.map((item) => (
           <InflowItemRow
-            key={item.id}
+            key={inflowConversationKey(item)}
             item={item}
             saving={saving}
             onPromote={onPromote}
@@ -413,7 +440,12 @@ export function InflowItemRow({
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
   onOpenTask?(taskId: string): void;
 }) {
-  const [editing, setEditing] = useState(false);
+  const conversationId = inflowConversationKey(item);
+  const restoredDraft = useMemo(
+    () => readInflowDraft(conversationId),
+    [conversationId],
+  );
+  const [editing, setEditing] = useState(Boolean(restoredDraft));
   const [promoting, setPromoting] = useState(false);
   const [promotionError, setPromotionError] = useState<string>();
   const messages = item.messages ?? [
@@ -426,71 +458,185 @@ export function InflowItemRow({
   const suggestedTitle =
     item.suggestedTaskTitle || "대화를 업무로 정리하고 있어요";
   const referenceLinks = item.referenceLinks ?? [];
+  const referenceDocuments = item.referenceDocuments ?? [];
   const messageCount = item.messageCount ?? messages.length;
   const firstReceivedAt = item.firstReceivedAt ?? item.receivedAt;
-  const [title, setTitle] = useState(() => suggestedTitle);
-  const [notes, setNotes] = useState(() => item.suggestedTaskNotes);
   const assigneeOptions = useMemo(
     () => item.assigneeOptions ?? [],
     [item.assigneeOptions],
   );
-  const [assigneeName, setAssigneeName] = useState(() =>
+  const suggestedAssignee =
     item.suggestedAssigneeName &&
     assigneeOptions.includes(item.suggestedAssigneeName)
       ? item.suggestedAssigneeName
-      : "",
+      : "";
+  const sourceRevision = item.sourceRevision ?? 0;
+  const analyzedRevision = item.analyzedRevision;
+  const [title, setTitle] = useState(
+    () => restoredDraft?.title ?? suggestedTitle,
   );
-  const [dueAt, setDueAt] = useState(() =>
-    isoToLocalInput(item.suggestedDueAt),
+  const [notes, setNotes] = useState(
+    () => restoredDraft?.notes ?? item.suggestedTaskNotes,
   );
-  const [withoutDeadline, setWithoutDeadline] = useState(false);
+  const [assigneeName, setAssigneeName] = useState(
+    () => restoredDraft?.assigneeName ?? suggestedAssignee,
+  );
+  const [dueAt, setDueAt] = useState(
+    () => restoredDraft?.dueAt ?? isoToSeoulLocalDateTime(item.suggestedDueAt),
+  );
+  const [withoutDeadline, setWithoutDeadline] = useState(
+    () => restoredDraft?.withoutDeadline ?? false,
+  );
   const [dueProblem, setDueProblem] = useState(false);
-  const dueAtInputRef = useRef<HTMLInputElement>(null);
-  const [priority, setPriority] = useState(() =>
-    String(item.suggestedPriority ?? 1),
+  const [priority, setPriority] = useState(
+    () => restoredDraft?.priority ?? String(item.suggestedPriority ?? 1),
   );
+  const dirtyFieldsRef = useRef(
+    new Set<InflowDraftField>(restoredDraft?.dirtyFields ?? []),
+  );
+  const [draftBaseRevision, setDraftBaseRevision] = useState(
+    () => restoredDraft?.baseRevision ?? analyzedRevision ?? sourceRevision,
+  );
+  const [contextOpen, setContextOpen] = useState(false);
+  const contextSummaryRef = useRef<HTMLElement | null>(null);
+  const contextFocusFrameRef = useRef<number | undefined>(undefined);
   const analysisReady = item.analysisStatus === "ready";
   const analysisFailed = item.analysisStatus === "failed";
+  const analysisRefreshing = item.analysisStatus === "refreshing";
+  const analysisStale = item.analysisStatus === "stale";
+  const hasUsableAnalysis =
+    analysisReady || analysisRefreshing || analysisStale;
+  const hasNewReplies = editing && sourceRevision > draftBaseRevision;
+  const newReplyCount = Math.max(1, sourceRevision - draftBaseRevision);
   const existingTaskFollowUp = isExistingTaskFollowUp(item);
+  const promotionReadiness = projectInflowPromotionReadiness(item);
+  const promotionProblem = promotionReadiness.canPromote
+    ? undefined
+    : projectInflowPromotionProblem(promotionReadiness.reason);
   const canNotifyAssignee = Boolean(
     assigneeName && item.notifiableAssigneeNames?.includes(assigneeName),
   );
 
   useEffect(() => {
-    if (editing || !analysisReady) return;
-    setTitle(suggestedTitle);
-    setNotes(item.suggestedTaskNotes);
-    setAssigneeName(
-      item.suggestedAssigneeName &&
-        assigneeOptions.includes(item.suggestedAssigneeName)
-        ? item.suggestedAssigneeName
-        : "",
+    if (!hasUsableAnalysis) return;
+    const dirtyFields = dirtyFieldsRef.current;
+    const merged = mergeInflowDraftValues(
+      { title, notes, assigneeName, priority, dueAt, withoutDeadline },
+      {
+        title: suggestedTitle,
+        notes: item.suggestedTaskNotes,
+        assigneeName: suggestedAssignee,
+        dueAt: isoToSeoulLocalDateTime(item.suggestedDueAt),
+        withoutDeadline: false,
+        priority: String(item.suggestedPriority ?? 1),
+      },
+      editing ? dirtyFields : [],
     );
-    setDueAt(isoToLocalInput(item.suggestedDueAt));
-    setWithoutDeadline(false);
-    setPriority(String(item.suggestedPriority ?? 1));
+    setTitle(merged.title);
+    setNotes(merged.notes);
+    setAssigneeName(merged.assigneeName);
+    setDueAt(merged.dueAt);
+    setWithoutDeadline(merged.withoutDeadline);
+    setPriority(merged.priority);
+    if (!editing) dirtyFields.clear();
+    setDraftBaseRevision((current) =>
+      nextInflowDraftBaseRevision(current, analyzedRevision, editing),
+    );
   }, [
-    analysisReady,
-    assigneeOptions,
+    analyzedRevision,
     editing,
-    item.suggestedAssigneeName,
+    hasUsableAnalysis,
+    assigneeName,
+    dueAt,
     item.suggestedDueAt,
     item.suggestedPriority,
     item.suggestedTaskNotes,
+    notes,
+    priority,
+    suggestedAssignee,
     suggestedTitle,
+    title,
+    withoutDeadline,
   ]);
+
+  useEffect(() => {
+    if (item.status !== "pending" || item.promotedTaskId) {
+      clearInflowDraft(conversationId);
+      return;
+    }
+    if (!editing) return;
+    writeInflowDraft(conversationId, {
+      savedAt: Date.now(),
+      baseRevision: draftBaseRevision,
+      title,
+      notes,
+      assigneeName,
+      priority,
+      dueAt,
+      withoutDeadline,
+      dirtyFields: [...dirtyFieldsRef.current],
+    });
+  }, [
+    assigneeName,
+    conversationId,
+    draftBaseRevision,
+    dueAt,
+    editing,
+    item.promotedTaskId,
+    item.status,
+    notes,
+    priority,
+    title,
+    withoutDeadline,
+  ]);
+
+  useEffect(
+    () => () => {
+      if (contextFocusFrameRef.current !== undefined) {
+        window.cancelAnimationFrame(contextFocusFrameRef.current);
+      }
+    },
+    [],
+  );
+
+  function markDirty(field: InflowDraftField) {
+    dirtyFieldsRef.current.add(field);
+  }
+
+  function openConversationContext() {
+    setContextOpen(true);
+    if (contextFocusFrameRef.current !== undefined) {
+      window.cancelAnimationFrame(contextFocusFrameRef.current);
+    }
+    const reduceMotion =
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    contextFocusFrameRef.current = window.requestAnimationFrame(() => {
+      contextFocusFrameRef.current = undefined;
+      contextSummaryRef.current?.focus({ preventScroll: true });
+      contextSummaryRef.current?.scrollIntoView({
+        block: "nearest",
+        behavior: inflowContextScrollBehavior(reduceMotion),
+      });
+    });
+  }
+
+  async function dismissItem() {
+    await onDismiss(item);
+    clearInflowDraft(conversationId);
+  }
 
   async function submitPromotion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!title.trim() || promoting || saving) return;
-    const deadline = resolvePromotionDeadline(
-      dueAtInputRef.current?.value ?? dueAt,
-      withoutDeadline,
-    );
+    if (!promotionReadiness.canPromote) {
+      setPromotionError(promotionProblem);
+      return;
+    }
+    const deadline = resolvePromotionDeadline(dueAt, withoutDeadline);
     if (!deadline) {
       setDueProblem(true);
       setPromotionError(copy.projects.inflowDueAtProblem);
-      dueAtInputRef.current?.focus();
+      document.getElementById(`inflow-due-${item.id}-date`)?.focus();
       return;
     }
     setDueProblem(false);
@@ -505,6 +651,7 @@ export function InflowItemRow({
         ...deadline,
       });
       setEditing(false);
+      clearInflowDraft(conversationId);
     } catch {
       setPromotionError(copy.projects.inflowDecisionProblem);
     } finally {
@@ -529,7 +676,7 @@ export function InflowItemRow({
               ? copy.projects.inflowAnalysisHelp
               : copy.projects.inflowAnalyzing)}
         </p>
-        {item.analysisConfidence !== null && analysisReady && (
+        {item.analysisConfidence !== null && hasUsableAnalysis && (
           <span>
             {copy.projects.inflowAnalysisSummary} · 확신도{" "}
             {item.analysisConfidence}%
@@ -553,9 +700,18 @@ export function InflowItemRow({
           </ul>
         </div>
       )}
+      {referenceDocuments.length > 0 && (
+        <ReferenceEvidence documents={referenceDocuments} />
+      )}
       {messages.length > 0 && (
-        <details className="project-inflow-item__context">
-          <summary>원문 대화 {messages.length}개 보기</summary>
+        <details
+          className="project-inflow-item__context"
+          open={contextOpen}
+          onToggle={(event) => setContextOpen(event.currentTarget.open)}
+        >
+          <summary ref={contextSummaryRef}>
+            원문 대화 {messages.length}개 보기
+          </summary>
           <ol>
             {messages.map((message, index) => (
               <li key={`${message.receivedAt}-${index}`}>
@@ -595,7 +751,7 @@ export function InflowItemRow({
               className="secondary-button focus-visible-control"
               type="button"
               disabled={saving}
-              onClick={() => void onDismiss(item)}
+              onClick={() => void dismissItem()}
             >
               <Check aria-hidden="true" />
               {copy.projects.inflowFollowUpDone}
@@ -643,7 +799,7 @@ export function InflowItemRow({
             </>
           )}
         </div>
-      ) : analysisFailed ? (
+      ) : analysisFailed && !editing ? (
         <div className="project-inflow-item__analysis-state" role="status">
           <p>{copy.projects.inflowAnalysisHelp}</p>
           <div>
@@ -660,13 +816,13 @@ export function InflowItemRow({
               className="secondary-button focus-visible-control"
               type="button"
               disabled={saving}
-              onClick={() => void onDismiss(item)}
+              onClick={() => void dismissItem()}
             >
               <X aria-hidden="true" /> {copy.projects.inflowDismiss}
             </button>
           </div>
         </div>
-      ) : !analysisReady ? (
+      ) : !hasUsableAnalysis && !editing ? (
         <div
           className="project-inflow-item__analysis-state"
           role="status"
@@ -680,16 +836,108 @@ export function InflowItemRow({
             className="secondary-button focus-visible-control"
             type="button"
             disabled={saving}
-            onClick={() => void onDismiss(item)}
+            onClick={() => void dismissItem()}
           >
             <X aria-hidden="true" /> {copy.projects.inflowDismiss}
           </button>
+        </div>
+      ) : !promotionReadiness.canPromote && !editing ? (
+        <div className="project-inflow-item__analysis-state" role="status">
+          <p>{promotionProblem}</p>
+          <div>
+            <button
+              className="primary-button focus-visible-control"
+              type="button"
+              disabled={saving}
+              onClick={() => void onRetryAnalysis(item)}
+            >
+              <RefreshCw aria-hidden="true" />
+              {copy.projects.inflowAnalysisRetry}
+            </button>
+            <button
+              className="secondary-button focus-visible-control"
+              type="button"
+              disabled={saving}
+              onClick={() => void dismissItem()}
+            >
+              <X aria-hidden="true" /> {copy.projects.inflowDismiss}
+            </button>
+          </div>
         </div>
       ) : editing ? (
         <form
           className="project-inflow-item__promote"
           onSubmit={(event) => void submitPromotion(event)}
         >
+          {promotionProblem && (
+            <div
+              className="project-inflow-item__analysis-state"
+              id={`inflow-promotion-problem-${item.id}`}
+              role="status"
+            >
+              <p>{promotionProblem}</p>
+              <div>
+                <button
+                  className="secondary-button focus-visible-control"
+                  type="button"
+                  disabled={saving}
+                  onClick={() => void onRetryAnalysis(item)}
+                >
+                  <RefreshCw aria-hidden="true" />
+                  {copy.projects.inflowAnalysisRetry}
+                </button>
+              </div>
+            </div>
+          )}
+          {hasNewReplies && (
+            <div
+              className="project-inflow-item__revision-alert"
+              role="status"
+              aria-live="polite"
+            >
+              <div>
+                <strong>
+                  {copy.projects.inflowNewRepliesTitle(newReplyCount)}
+                </strong>
+                <p>
+                  {analysisRefreshing
+                    ? copy.projects.inflowNewRepliesRefreshing
+                    : analysisStale
+                      ? copy.projects.inflowNewRepliesStale
+                      : copy.projects.inflowNewRepliesDescription}
+                </p>
+              </div>
+              <div>
+                <button
+                  className="secondary-button focus-visible-control"
+                  type="button"
+                  disabled={saving}
+                  onClick={openConversationContext}
+                >
+                  {copy.projects.inflowNewRepliesOpen}
+                </button>
+                {!analysisRefreshing && (
+                  <button
+                    className="secondary-button focus-visible-control"
+                    type="button"
+                    disabled={saving}
+                    onClick={() => void onRetryAnalysis(item)}
+                  >
+                    <RefreshCw aria-hidden="true" />
+                    {copy.projects.inflowNewRepliesApply}
+                  </button>
+                )}
+                <button
+                  className="text-button focus-visible-control"
+                  type="button"
+                  disabled={saving}
+                  onClick={() => setDraftBaseRevision(sourceRevision)}
+                >
+                  {copy.projects.inflowNewRepliesKeepDraft}
+                </button>
+              </div>
+            </div>
+          )}
           <div className="project-inflow-item__fields">
             <label className="project-inflow-item__title-field">
               <span>{copy.projects.inflowTaskTitleLabel}</span>
@@ -698,7 +946,10 @@ export function InflowItemRow({
                 maxLength={300}
                 disabled={saving}
                 aria-describedby={`inflow-task-title-help-${item.id}`}
-                onChange={(event) => setTitle(event.target.value)}
+                onChange={(event) => {
+                  markDirty("title");
+                  setTitle(event.target.value);
+                }}
               />
               <small id={`inflow-task-title-help-${item.id}`}>
                 {copy.projects.inflowTaskTitleHint}
@@ -712,7 +963,10 @@ export function InflowItemRow({
                 rows={8}
                 disabled={saving}
                 aria-describedby={`inflow-task-notes-help-${item.id}`}
-                onChange={(event) => setNotes(event.target.value)}
+                onChange={(event) => {
+                  markDirty("notes");
+                  setNotes(event.target.value);
+                }}
               />
               <small id={`inflow-task-notes-help-${item.id}`}>
                 {copy.projects.inflowTaskNotesHint}
@@ -723,7 +977,10 @@ export function InflowItemRow({
               <select
                 value={assigneeName}
                 disabled={saving}
-                onChange={(event) => setAssigneeName(event.target.value)}
+                onChange={(event) => {
+                  markDirty("assigneeName");
+                  setAssigneeName(event.target.value);
+                }}
               >
                 <option value="">{copy.projects.inflowNoAssignee}</option>
                 {assigneeOptions.map((name) => (
@@ -733,25 +990,21 @@ export function InflowItemRow({
                 ))}
               </select>
             </label>
-            <label>
-              <span>{copy.projects.inflowDueAtLabel}</span>
-              <input
-                ref={dueAtInputRef}
-                type="datetime-local"
-                name="dueAt"
+            <div className="project-inflow-item__deadline-field">
+              <DeadlinePicker
+                id={`inflow-due-${item.id}`}
+                label={copy.projects.inflowDueAtLabel}
                 value={dueAt}
                 disabled={saving || withoutDeadline}
-                aria-invalid={dueProblem}
-                aria-describedby={
+                invalid={dueProblem}
+                describedBy={
                   dueProblem ? `inflow-due-problem-${item.id}` : undefined
                 }
-                onInput={(event) => {
-                  setDueAt(event.currentTarget.value);
-                  setDueProblem(false);
-                  setPromotionError(undefined);
-                }}
-                onChange={(event) => {
-                  setDueAt(event.currentTarget.value);
+                showPresets
+                allowClear={false}
+                onChange={(value) => {
+                  markDirty("dueAt");
+                  setDueAt(value);
                   setDueProblem(false);
                   setPromotionError(undefined);
                 }}
@@ -761,13 +1014,14 @@ export function InflowItemRow({
                   {copy.projects.inflowDueAtProblem}
                 </small>
               )}
-            </label>
+            </div>
             <label className="project-inflow-item__no-deadline">
               <input
                 type="checkbox"
                 checked={withoutDeadline}
                 disabled={saving}
                 onChange={(event) => {
+                  markDirty("withoutDeadline");
                   setWithoutDeadline(event.currentTarget.checked);
                   setDueProblem(false);
                   setPromotionError(undefined);
@@ -780,7 +1034,10 @@ export function InflowItemRow({
               <select
                 value={priority}
                 disabled={saving}
-                onChange={(event) => setPriority(event.target.value)}
+                onChange={(event) => {
+                  markDirty("priority");
+                  setPriority(event.target.value);
+                }}
               >
                 <option value="1">{copy.forms.priorityNormal}</option>
                 <option value="2">{copy.forms.priorityImportant}</option>
@@ -808,7 +1065,17 @@ export function InflowItemRow({
             <button
               className="primary-button focus-visible-control"
               type="submit"
-              disabled={!title.trim() || saving || promoting}
+              disabled={
+                !title.trim() ||
+                saving ||
+                promoting ||
+                !promotionReadiness.canPromote
+              }
+              aria-describedby={
+                promotionProblem
+                  ? `inflow-promotion-problem-${item.id}`
+                  : undefined
+              }
             >
               {promoting ? (
                 <span className="button-spinner" aria-hidden="true" />
@@ -828,6 +1095,8 @@ export function InflowItemRow({
               onClick={() => {
                 setPromotionError(undefined);
                 setEditing(false);
+                dirtyFieldsRef.current.clear();
+                clearInflowDraft(conversationId);
               }}
             >
               <X aria-hidden="true" /> 취소
@@ -842,6 +1111,7 @@ export function InflowItemRow({
             disabled={saving}
             onClick={() => {
               setPromotionError(undefined);
+              setDraftBaseRevision(analyzedRevision ?? sourceRevision);
               setEditing(true);
             }}
           >
@@ -851,7 +1121,7 @@ export function InflowItemRow({
             className="secondary-button focus-visible-control"
             type="button"
             disabled={saving}
-            onClick={() => void onDismiss(item)}
+            onClick={() => void dismissItem()}
           >
             <X aria-hidden="true" /> {copy.projects.inflowDismiss}
           </button>
@@ -875,10 +1145,117 @@ export function isExistingTaskFollowUp(item: ProjectInflowItem): boolean {
   return item.status === "pending" && Boolean(item.promotedTaskId);
 }
 
+export function inflowConversationKey(item: ProjectInflowItem): string {
+  return item.conversationId ?? item.id;
+}
+
+export function mergeInflowDraftValues(
+  current: InflowDraftValues,
+  suggested: InflowDraftValues,
+  dirtyFields: Iterable<InflowDraftField>,
+): InflowDraftValues {
+  const dirty = new Set(dirtyFields);
+  return {
+    title: dirty.has("title") ? current.title : suggested.title,
+    notes: dirty.has("notes") ? current.notes : suggested.notes,
+    assigneeName: dirty.has("assigneeName")
+      ? current.assigneeName
+      : suggested.assigneeName,
+    priority: dirty.has("priority") ? current.priority : suggested.priority,
+    dueAt: dirty.has("dueAt") ? current.dueAt : suggested.dueAt,
+    withoutDeadline: dirty.has("withoutDeadline")
+      ? current.withoutDeadline
+      : suggested.withoutDeadline,
+  };
+}
+
+function ReferenceEvidence({
+  documents,
+}: {
+  documents: ProjectInflowReferenceDocument[];
+}) {
+  return (
+    <details className="project-inflow-item__evidence">
+      <summary>{copy.projects.inflowEvidenceSummary(documents.length)}</summary>
+      <p>{copy.projects.inflowEvidenceDescription}</p>
+      <ul>
+        {documents.map((document) => {
+          const externalUrl = safeExternalUrl(document.url);
+          return (
+            <li key={`${document.provider}:${document.externalId}`}>
+              <header>
+                <div>
+                  <strong>
+                    {document.title ||
+                      copy.projects.inflowEvidenceUntitled(document.externalId)}
+                  </strong>
+                  <span>
+                    {document.provider} · {document.externalId}
+                  </span>
+                </div>
+                {externalUrl && (
+                  <a href={externalUrl} target="_blank" rel="noreferrer">
+                    {copy.projects.inflowEvidenceOpen}
+                    <ExternalLink aria-hidden="true" />
+                  </a>
+                )}
+              </header>
+              {document.originalContent ? (
+                <pre>{document.originalContent}</pre>
+              ) : (
+                <p>{copy.projects.inflowEvidenceUnavailable}</p>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </details>
+  );
+}
+
+export function projectInflowPromotionProblem(
+  reason: ProjectInflowPromotionBlockReason,
+): string {
+  switch (reason) {
+    case "not_actionable":
+      return copy.projects.inflowPromotionNotActionable;
+    case "missing_context":
+      return copy.projects.inflowPromotionContextMissing;
+    case "analysis_stale":
+      return copy.projects.inflowPromotionStale;
+    default:
+      return copy.projects.inflowPromotionNotReady;
+  }
+}
+
+function safeExternalUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:"
+      ? url.toString()
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function nextInflowDraftBaseRevision(
+  currentRevision: number,
+  analyzedRevision: number | null,
+  editing: boolean,
+): number {
+  if (editing || analyzedRevision === null) return currentRevision;
+  return Math.max(currentRevision, analyzedRevision);
+}
+
+export function inflowContextScrollBehavior(
+  reduceMotion: boolean,
+): ScrollBehavior {
+  return reduceMotion ? "auto" : "smooth";
+}
+
 export function localInputToIso(value: string): string | undefined {
-  if (!value) return undefined;
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
+  return seoulLocalDateTimeToIso(value);
 }
 
 export function resolvePromotionDeadline(
@@ -892,12 +1269,60 @@ export function resolvePromotionDeadline(
   return dueAt ? { dueAt, withoutDeadline: false } : undefined;
 }
 
-function isoToLocalInput(value: string | null): string {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
-  return local.toISOString().slice(0, 16);
+const INFLOW_DRAFT_PREFIX = "jimin-os:inflow-draft:";
+const INFLOW_DRAFT_MAX_AGE = 24 * 60 * 60 * 1_000;
+
+function readInflowDraft(
+  conversationId: string,
+): PersistedInflowDraft | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    const raw = window.sessionStorage.getItem(
+      `${INFLOW_DRAFT_PREFIX}${conversationId}`,
+    );
+    if (!raw) return undefined;
+    const value = JSON.parse(raw) as Partial<PersistedInflowDraft>;
+    if (
+      typeof value.savedAt !== "number" ||
+      Date.now() - value.savedAt > INFLOW_DRAFT_MAX_AGE ||
+      typeof value.baseRevision !== "number" ||
+      typeof value.title !== "string" ||
+      typeof value.notes !== "string" ||
+      typeof value.assigneeName !== "string" ||
+      typeof value.priority !== "string" ||
+      typeof value.dueAt !== "string" ||
+      typeof value.withoutDeadline !== "boolean" ||
+      !Array.isArray(value.dirtyFields)
+    ) {
+      clearInflowDraft(conversationId);
+      return undefined;
+    }
+    return value as PersistedInflowDraft;
+  } catch {
+    clearInflowDraft(conversationId);
+    return undefined;
+  }
+}
+
+function writeInflowDraft(conversationId: string, draft: PersistedInflowDraft) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(
+      `${INFLOW_DRAFT_PREFIX}${conversationId}`,
+      JSON.stringify(draft),
+    );
+  } catch {
+    // The active in-memory draft remains available when storage is blocked.
+  }
+}
+
+function clearInflowDraft(conversationId: string) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.removeItem(`${INFLOW_DRAFT_PREFIX}${conversationId}`);
+  } catch {
+    // Storage can be unavailable in privacy-restricted webviews.
+  }
 }
 
 function formatReceivedAt(value: string): string {

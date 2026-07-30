@@ -44,7 +44,13 @@ export type ProjectInflowStatus = "pending" | "promoted" | "dismissed";
 export type ProjectInflowCompletionStatus =
   "not_requested" | "pending" | "sent" | "failed";
 export type ProjectInflowAnalysisStatus =
-  "queued" | "claimed" | "running" | "ready" | "failed";
+  | "queued"
+  | "claimed"
+  | "running"
+  | "ready"
+  | "refreshing"
+  | "stale"
+  | "failed";
 export type ProjectInflowAnalysisClassification =
   | "new_task"
   | "follow_up"
@@ -60,8 +66,21 @@ export interface ProjectInflowMessage {
   receivedAt: string;
 }
 
+export interface ProjectInflowReferenceDocument {
+  provider: string;
+  url: string;
+  externalId: string;
+  title: string | null;
+  originalContent: string | null;
+  errorCode: string | null;
+}
+
 export interface ProjectInflowItem {
   id: string;
+  conversationId: string | null;
+  representativeItemId: string | null;
+  sourceRevision: number | null;
+  analyzedRevision: number | null;
   projectId: string;
   projectName: string;
   sourceId: string;
@@ -72,6 +91,7 @@ export interface ProjectInflowItem {
   suggestedTaskTitle: string;
   suggestedTaskNotes: string;
   referenceLinks: string[];
+  referenceDocuments: ProjectInflowReferenceDocument[];
   suggestedAssigneeName: string | null;
   suggestedDueAt: string | null;
   suggestedPriority: number | null;
@@ -98,6 +118,23 @@ export interface ProjectInflowItem {
   version: number;
 }
 
+export type ProjectInflowPromotionBlockReason =
+  | "analysis_not_ready"
+  | "not_actionable"
+  | "missing_context"
+  | "analysis_stale";
+
+export type ProjectInflowPromotionContext = {
+  conversationId: string;
+  representativeItemId: string;
+  expectedSourceRevision: number;
+  expectedAnalyzedRevision: number;
+};
+
+export type ProjectInflowPromotionReadiness =
+  | { canPromote: true; context: ProjectInflowPromotionContext }
+  | { canPromote: false; reason: ProjectInflowPromotionBlockReason };
+
 export interface GoogleChatAuthorization {
   authorizationId: string;
   authorizationUrl: string;
@@ -106,11 +143,7 @@ export interface GoogleChatAuthorization {
 
 export class GoogleChatRequestError extends Error {
   readonly code:
-    | "unauthorized"
-    | "invalid"
-    | "conflict"
-    | "forbidden"
-    | "unavailable";
+    "unauthorized" | "invalid" | "conflict" | "forbidden" | "unavailable";
   readonly serverCode: string | null;
   readonly retryable: boolean;
 
@@ -248,6 +281,10 @@ export function normalizeProjectInflowItem(
 ): ProjectInflowItem {
   return {
     ...item,
+    conversationId: item.conversationId ?? null,
+    representativeItemId: item.representativeItemId ?? null,
+    sourceRevision: item.sourceRevision ?? null,
+    analyzedRevision: item.analyzedRevision ?? null,
     projectName: item.projectName || item.sourceName,
     sentByOwner: item.sentByOwner ?? false,
     suggestedTaskTitle:
@@ -255,6 +292,9 @@ export function normalizeProjectInflowItem(
     suggestedTaskNotes: item.suggestedTaskNotes || "",
     referenceLinks: Array.isArray(item.referenceLinks)
       ? item.referenceLinks
+      : [],
+    referenceDocuments: Array.isArray(item.referenceDocuments)
+      ? item.referenceDocuments
       : [],
     suggestedAssigneeName: item.suggestedAssigneeName ?? null,
     suggestedDueAt: item.suggestedDueAt ?? null,
@@ -301,15 +341,87 @@ export async function decideProjectInflow(
         withoutDeadline: boolean;
       },
 ): Promise<ProjectInflowItem> {
+  const promotionContext =
+    input.decision === "promote"
+      ? requiredProjectInflowPromotionContext(item)
+      : undefined;
   return request<ProjectInflowItem>(
     baseUrl,
     access,
     `/v1/projects/${encodeURIComponent(item.projectId)}/inflow/${encodeURIComponent(item.id)}/decision`,
     {
       method: "POST",
-      body: JSON.stringify({ ...input, expectedVersion: item.version }),
+      body: JSON.stringify({
+        ...input,
+        ...promotionContext,
+        expectedVersion: item.version,
+      }),
     },
   );
+}
+
+export function projectInflowPromotionReadiness(
+  item: ProjectInflowItem,
+): ProjectInflowPromotionReadiness {
+  if (
+    isPositiveRevision(item.sourceRevision) &&
+    isPositiveRevision(item.analyzedRevision) &&
+    item.sourceRevision !== item.analyzedRevision
+  ) {
+    return { canPromote: false, reason: "analysis_stale" };
+  }
+  if (item.analysisStatus !== "ready") {
+    return { canPromote: false, reason: "analysis_not_ready" };
+  }
+  if (item.analysisClassification !== "new_task") {
+    return { canPromote: false, reason: "not_actionable" };
+  }
+  const {
+    conversationId,
+    representativeItemId,
+    sourceRevision,
+    analyzedRevision,
+  } = item;
+  if (
+    !conversationId ||
+    !representativeItemId ||
+    !isPositiveRevision(sourceRevision) ||
+    !isPositiveRevision(analyzedRevision) ||
+    !Number.isInteger(item.version) ||
+    item.version <= 0
+  ) {
+    return { canPromote: false, reason: "missing_context" };
+  }
+  if (sourceRevision !== analyzedRevision) {
+    return { canPromote: false, reason: "analysis_stale" };
+  }
+  return {
+    canPromote: true,
+    context: {
+      conversationId,
+      representativeItemId,
+      expectedSourceRevision: sourceRevision,
+      expectedAnalyzedRevision: analyzedRevision,
+    },
+  };
+}
+
+function requiredProjectInflowPromotionContext(
+  item: ProjectInflowItem,
+): ProjectInflowPromotionContext {
+  const readiness = projectInflowPromotionReadiness(item);
+  if (!readiness.canPromote) {
+    throw new GoogleChatRequestError(
+      "conflict",
+      "project.inflow_analysis_changed",
+      true,
+    );
+  }
+  return readiness.context;
+}
+
+function isPositiveRevision(value: number | null): value is number {
+  return value !== null && Number.isInteger(value) && value > 0;
 }
 
 async function request<T>(

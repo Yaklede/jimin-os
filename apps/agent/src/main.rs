@@ -17,6 +17,7 @@ mod config;
 mod gmail_inflow_analysis;
 mod health;
 mod inflow_analysis;
+mod itsm;
 mod meeting_analysis;
 mod meeting_transcription;
 mod worker_loop;
@@ -524,6 +525,7 @@ async fn run_agent_jobs(
         config.poll_interval(),
         &workspace,
         config.meeting_transcriber_url(),
+        config.itsm_client(),
     )
     .await
 }

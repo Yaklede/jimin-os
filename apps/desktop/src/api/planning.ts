@@ -1,5 +1,7 @@
 import { createUuidV7, isUuidV7 } from "../uuid";
 
+export const PLANNING_TIME_ZONE = "Asia/Seoul";
+
 export type SessionTokens = Record<"accessToken" | "refreshToken", string>;
 
 export interface IssuedDeviceSession {
@@ -315,8 +317,7 @@ export async function createScheduleEntry(
       notes: input.notes || null,
       startsAt: new Date(input.startsAt).toISOString(),
       endsAt: new Date(input.endsAt).toISOString(),
-      timeZone:
-        Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Seoul",
+      timeZone: PLANNING_TIME_ZONE,
     },
   );
 }
@@ -337,8 +338,7 @@ export async function updateScheduleEntry(
       notes: input.notes || null,
       startsAt: new Date(input.startsAt).toISOString(),
       endsAt: new Date(input.endsAt).toISOString(),
-      timeZone:
-        Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Seoul",
+      timeZone: PLANNING_TIME_ZONE,
       expectedVersion: entry.version,
     },
   );

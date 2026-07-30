@@ -5,6 +5,7 @@
 //! Google identities to selected company projects.
 
 use jimin_domain::{ClientPlatform, EmailAddress, GoogleSubject};
+use sqlx::types::Json;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -12,8 +13,8 @@ use crate::{
     Database, StorageError,
     auth::{append_change, append_delete_change},
     calendar::EncryptedCalendarSecret,
-    inflow_analysis::queue_inflow_analysis_in_transaction,
-    planning::queue_task_webhook_in_transaction,
+    inflow_analysis::{InflowReferenceDocument, queue_inflow_analysis_in_transaction},
+    planning::{queue_task_webhook_in_transaction, task_assignment_details},
 };
 
 const STATE_VERIFIER_BYTES: usize = 32;
@@ -193,6 +194,10 @@ pub struct PromoteProjectInflowItem {
     pub project_id: Uuid,
     pub item_id: Uuid,
     pub expected_version: i64,
+    pub analysis_id: Uuid,
+    pub expected_representative_item_id: Uuid,
+    pub expected_source_revision: i32,
+    pub expected_analyzed_revision: i32,
     pub task_id: Uuid,
     pub title: String,
     pub notes: Option<String>,
@@ -304,9 +309,15 @@ pub struct GoogleChatCompletionDelivery {
     pub provider_message_name: String,
     pub provider_thread_name: Option<String>,
     pub task_id: Uuid,
+    pub project_title: String,
     pub task_title: String,
+    pub public_summary: Option<String>,
+    pub action_items: Vec<String>,
+    pub completion_criteria: Option<String>,
     pub assignee_name: Option<String>,
+    pub task_priority: i16,
     pub due_at: Option<OffsetDateTime>,
+    pub reference_links: Vec<String>,
     pub reaction_completed: bool,
     pub reply_completed: bool,
     pub attempt_count: i32,
@@ -320,8 +331,14 @@ struct GoogleChatCompletionDeliveryRow {
     provider_message_name: String,
     provider_thread_name: Option<String>,
     task_id: Uuid,
+    project_title: String,
     task_title: String,
+    public_summary: Option<String>,
+    action_items: Vec<String>,
+    completion_criteria: Option<String>,
+    reference_links: Vec<String>,
     assignee_name: Option<String>,
+    task_priority: i16,
     due_at: Option<OffsetDateTime>,
     reaction_completed: bool,
     reply_completed: bool,
@@ -337,9 +354,15 @@ impl From<GoogleChatCompletionDeliveryRow> for GoogleChatCompletionDelivery {
             provider_message_name: row.provider_message_name,
             provider_thread_name: row.provider_thread_name,
             task_id: row.task_id,
+            project_title: row.project_title,
             task_title: row.task_title,
+            public_summary: row.public_summary,
+            action_items: row.action_items,
+            completion_criteria: row.completion_criteria,
             assignee_name: row.assignee_name,
+            task_priority: row.task_priority,
             due_at: row.due_at,
+            reference_links: row.reference_links,
             reaction_completed: row.reaction_completed,
             reply_completed: row.reply_completed,
             attempt_count: row.attempt_count,
@@ -931,6 +954,22 @@ impl Database {
             return Err(StorageError::InvalidConfiguration);
         }
         let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let source_locked = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id
+             FROM project_google_chat_sources
+             WHERE id = $1 AND user_id = $2 AND project_id = $3
+             FOR UPDATE",
+        )
+        .bind(connection.source_id)
+        .bind(connection.user_id)
+        .bind(connection.project_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        if source_locked.is_none() {
+            transaction.rollback().await.map_err(classify)?;
+            return Err(StorageError::IdentityConflict);
+        }
         let mut acknowledgements = Vec::new();
         for message in messages {
             let inflow_id = Uuid::now_v7();
@@ -1133,8 +1172,13 @@ impl Database {
         let rows = sqlx::query_as::<_, GoogleChatCompletionDeliveryRow>(
             "SELECT item.id AS inflow_id, item.user_id, item.source_id,
                 item.provider_message_name, item.provider_thread_name,
-                task.id AS task_id, task.title AS task_title,
-                task.assignee_name, task.due_at,
+                task.id AS task_id, project.title AS project_title,
+                task.title AS task_title,
+                COALESCE(details.summary, task.notes) AS public_summary,
+                COALESCE(details.action_items, ARRAY[]::TEXT[]) AS action_items,
+                details.completion_criteria,
+                COALESCE(details.reference_links, ARRAY[]::TEXT[]) AS reference_links,
+                task.assignee_name, task.priority AS task_priority, task.due_at,
                 item.completion_reaction_at IS NOT NULL AS reaction_completed,
                 item.completion_reply_at IS NOT NULL AS reply_completed,
                 item.completion_delivery_attempt_count AS attempt_count
@@ -1142,6 +1186,12 @@ impl Database {
              JOIN tasks AS task
                ON task.id = item.promoted_task_id
               AND task.user_id = item.user_id
+             JOIN projects AS project
+               ON project.id = item.project_id
+              AND project.user_id = item.user_id
+             LEFT JOIN task_assignment_public_details AS details
+               ON details.task_id = task.id
+              AND details.user_id = task.user_id
              WHERE item.source_id = $1
                AND ($2::UUID IS NULL OR item.id = $2)
                AND item.status = 'promoted'
@@ -1697,6 +1747,10 @@ impl Database {
     /// # Errors
     ///
     /// Returns a validation or persistence error when the task and decision cannot commit together.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "promotion keeps source serialization, analysis revision verification, task creation, public projection, and group mutation in one auditable transaction"
+    )]
     pub async fn promote_project_inflow_item(
         &self,
         command: &PromoteProjectInflowItem,
@@ -1705,11 +1759,15 @@ impl Database {
             command.user_id,
             command.project_id,
             command.item_id,
+            command.analysis_id,
+            command.expected_representative_item_id,
             command.task_id,
         ]
         .into_iter()
         .all(is_v7)
             || command.expected_version <= 0
+            || command.expected_source_revision <= 0
+            || command.expected_analyzed_revision <= 0
             || !valid_text(&command.title, 300, false)
             || !command
                 .notes
@@ -1724,28 +1782,23 @@ impl Database {
             return Err(StorageError::InvalidConfiguration);
         }
         let mut transaction = self.pool().begin().await.map_err(classify)?;
-        let locked = sqlx::query_as::<_, (Uuid, Option<String>)>(
-            "SELECT source_id, provider_thread_name
-             FROM project_inflow_items
-             WHERE id = $1 AND user_id = $2 AND project_id = $3
-               AND version = $4 AND status = 'pending'
-               AND promoted_task_id IS NULL
-             FOR UPDATE",
-        )
-        .bind(command.item_id)
-        .bind(command.user_id)
-        .bind(command.project_id)
-        .bind(command.expected_version)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(classify)?;
-        let Some((source_id, thread_name)) = locked else {
+        let group = lock_promotion_group(&mut transaction, command).await?;
+        let Some(group) = group else {
             transaction.rollback().await.map_err(classify)?;
             return Ok(None);
         };
-        let source_messages =
-            inflow_group_messages(&mut transaction, command, source_id, thread_name.as_deref())
-                .await?;
+        let analysis = lock_promotion_analysis(&mut transaction, command, &group).await?;
+        let Some(analysis) = analysis else {
+            transaction.rollback().await.map_err(classify)?;
+            return Ok(None);
+        };
+        let source_messages = inflow_group_messages(
+            &mut transaction,
+            command,
+            group.source_id,
+            group.thread_name(),
+        )
+        .await?;
         let task_notes = command
             .notes
             .as_deref()
@@ -1755,14 +1808,26 @@ impl Database {
                 || default_google_chat_task_notes(&command.title, &source_messages),
                 str::to_owned,
             );
-        insert_promoted_task(&mut transaction, command, &task_notes).await?;
+        let reference_links =
+            public_inflow_reference_links(&source_messages, &analysis.reference_documents.0);
+        let task = insert_promoted_task(&mut transaction, command, &task_notes).await?;
+        insert_task_assignment_public_details(
+            &mut transaction,
+            command,
+            &analysis,
+            &reference_links,
+        )
+        .await?;
+        link_promotion_analysis(&mut transaction, command).await?;
         let selected = mark_inflow_group_promoted(
             &mut transaction,
             command,
-            source_id,
-            thread_name.as_deref(),
+            group.source_id,
+            group.thread_name(),
         )
         .await?;
+        queue_task_webhook_in_transaction(&mut transaction, command.user_id, &task, "task.created")
+            .await?;
         transaction.commit().await.map_err(classify)?;
         Ok(selected)
     }
@@ -1997,6 +2062,93 @@ pub(crate) async fn cancel_google_chat_task_completion_in_transaction(
 
 type InflowMessageEvidence = (Uuid, Option<String>, String, OffsetDateTime);
 
+struct PromotionGroup {
+    source_id: Uuid,
+    provider_thread_name: Option<String>,
+    conversation_key: String,
+}
+
+impl PromotionGroup {
+    fn thread_name(&self) -> Option<&str> {
+        self.provider_thread_name.as_deref()
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct PromotionAnalysisRow {
+    summary: String,
+    suggested_action_items: Vec<String>,
+    suggested_completion_criteria: String,
+    reference_documents: Json<Vec<InflowReferenceDocument>>,
+}
+
+async fn lock_promotion_group(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    command: &PromoteProjectInflowItem,
+) -> Result<Option<PromotionGroup>, StorageError> {
+    let locked = sqlx::query_as::<_, (Uuid, Option<String>, String)>(
+        "SELECT item.source_id, item.provider_thread_name,
+            item.provider_message_name
+         FROM project_inflow_items AS item
+         JOIN project_google_chat_sources AS source
+           ON source.id = item.source_id
+          AND source.user_id = item.user_id
+          AND source.project_id = item.project_id
+         WHERE item.id = $1 AND item.user_id = $2 AND item.project_id = $3
+           AND item.version = $4 AND item.status = 'pending'
+           AND item.promoted_task_id IS NULL
+         FOR UPDATE OF source, item",
+    )
+    .bind(command.item_id)
+    .bind(command.user_id)
+    .bind(command.project_id)
+    .bind(command.expected_version)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(classify)?;
+    Ok(locked.map(
+        |(source_id, provider_thread_name, provider_message_name)| PromotionGroup {
+            source_id,
+            conversation_key: provider_thread_name.as_ref().map_or_else(
+                || format!("message:{provider_message_name}"),
+                |thread| format!("thread:{thread}"),
+            ),
+            provider_thread_name,
+        },
+    ))
+}
+
+async fn lock_promotion_analysis(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    command: &PromoteProjectInflowItem,
+    group: &PromotionGroup,
+) -> Result<Option<PromotionAnalysisRow>, StorageError> {
+    sqlx::query_as::<_, PromotionAnalysisRow>(
+        "SELECT summary, suggested_action_items,
+            suggested_completion_criteria, reference_documents
+         FROM project_inflow_analyses
+         WHERE id = $1 AND user_id = $2 AND project_id = $3
+           AND source_id = $4 AND conversation_key = $5
+           AND representative_item_id = $6
+           AND source_revision = $7 AND analyzed_revision = $8
+           AND source_revision = analyzed_revision
+           AND state = 'ready' AND classification = 'new_task'
+           AND linked_task_id IS NULL
+         FOR UPDATE",
+    )
+    .bind(command.analysis_id)
+    .bind(command.user_id)
+    .bind(command.project_id)
+    .bind(group.source_id)
+    .bind(&group.conversation_key)
+    .bind(command.expected_representative_item_id)
+    .bind(command.expected_source_revision)
+    .bind(command.expected_analyzed_revision)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(classify)
+}
+
 async fn inflow_group_messages(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     command: &PromoteProjectInflowItem,
@@ -2023,11 +2175,32 @@ async fn inflow_group_messages(
     .map_err(classify)
 }
 
+fn public_inflow_reference_links(
+    messages: &[InflowMessageEvidence],
+    documents: &[InflowReferenceDocument],
+) -> Vec<String> {
+    let mut references = related_http_links(
+        messages.iter().map(|(_, _, content, _)| content.as_str()),
+        20,
+    );
+    for document in documents {
+        if safe_public_reference_link(&document.url)
+            && !references.iter().any(|link| link == &document.url)
+        {
+            references.push(document.url.clone());
+            if references.len() == 20 {
+                break;
+            }
+        }
+    }
+    references
+}
+
 async fn insert_promoted_task(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     command: &PromoteProjectInflowItem,
     task_notes: &str,
-) -> Result<(), StorageError> {
+) -> Result<crate::planning::Task, StorageError> {
     let row = sqlx::query_as::<_, PromotedTaskRow>(
         "INSERT INTO tasks (
             id, user_id, project_id, title, notes, assignee_name,
@@ -2049,7 +2222,73 @@ async fn insert_promoted_task(
     .map_err(classify)?;
     let task = row.into_task()?;
     append_change(transaction, command.user_id, "task", task.id, task.version).await?;
-    queue_task_webhook_in_transaction(transaction, command.user_id, &task, "task.created").await
+    Ok(task)
+}
+
+async fn insert_task_assignment_public_details(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    command: &PromoteProjectInflowItem,
+    analysis: &PromotionAnalysisRow,
+    reference_links: &[String],
+) -> Result<(), StorageError> {
+    let details = task_assignment_details(
+        Some(&analysis.summary),
+        &analysis.suggested_action_items,
+        Some(&analysis.suggested_completion_criteria),
+        reference_links,
+    );
+    sqlx::query(
+        "INSERT INTO task_assignment_public_details (
+            task_id, user_id, summary, action_items,
+            completion_criteria, reference_links
+         ) VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(command.task_id)
+    .bind(command.user_id)
+    .bind(details.notes)
+    .bind(details.action_items)
+    .bind(details.completion_criteria)
+    .bind(details.reference_links)
+    .execute(&mut **transaction)
+    .await
+    .map_err(classify)?;
+    Ok(())
+}
+
+async fn link_promotion_analysis(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    command: &PromoteProjectInflowItem,
+) -> Result<(), StorageError> {
+    let version = sqlx::query_scalar::<_, i64>(
+        "UPDATE project_inflow_analyses
+         SET linked_task_id = $2
+         WHERE id = $1 AND user_id = $3 AND project_id = $4
+           AND representative_item_id = $5
+           AND source_revision = $6 AND analyzed_revision = $7
+           AND source_revision = analyzed_revision
+           AND state = 'ready' AND classification = 'new_task'
+           AND linked_task_id IS NULL
+         RETURNING version",
+    )
+    .bind(command.analysis_id)
+    .bind(command.task_id)
+    .bind(command.user_id)
+    .bind(command.project_id)
+    .bind(command.expected_representative_item_id)
+    .bind(command.expected_source_revision)
+    .bind(command.expected_analyzed_revision)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(classify)?
+    .ok_or(StorageError::PersistenceUnavailable)?;
+    append_change(
+        transaction,
+        command.user_id,
+        "project_inflow_analysis",
+        command.analysis_id,
+        version,
+    )
+    .await
 }
 
 async fn mark_inflow_group_promoted(
@@ -2418,9 +2657,7 @@ fn related_http_links<'a>(values: impl Iterator<Item = &'a str>, maximum: usize)
                 .trim_end_matches(|character: char| {
                     matches!(character, '.' | ',' | ';' | ':' | '!' | '?' | ')')
                 });
-            if candidate.len() <= 2_048
-                && (candidate.starts_with("https://") || candidate.starts_with("http://"))
-                && !links.iter().any(|link| link == candidate)
+            if safe_public_reference_link(candidate) && !links.iter().any(|link| link == candidate)
             {
                 links.push(candidate.to_owned());
                 if links.len() == maximum {
@@ -2432,6 +2669,18 @@ fn related_http_links<'a>(values: impl Iterator<Item = &'a str>, maximum: usize)
         }
     }
     links
+}
+
+fn safe_public_reference_link(candidate: &str) -> bool {
+    let authority = candidate
+        .strip_prefix("https://")
+        .or_else(|| candidate.strip_prefix("http://"))
+        .and_then(|remainder| remainder.split(['/', '?', '#']).next());
+    candidate.chars().count() <= 2_048
+        && !candidate.chars().any(char::is_control)
+        && authority.is_some_and(|value| {
+            !value.is_empty() && !value.contains('@') && !value.chars().any(char::is_whitespace)
+        })
 }
 
 fn next_http_link_index(value: &str) -> Option<usize> {
@@ -2593,5 +2842,43 @@ mod tests {
             1
         );
         assert!(notes.contains("https://docs.example.test/guide"));
+    }
+
+    #[test]
+    fn completion_delivery_keeps_task_context_for_detailed_source_reply() {
+        let public_summary = "정산방식을 표시합니다.";
+        let delivery = GoogleChatCompletionDelivery::from(GoogleChatCompletionDeliveryRow {
+            inflow_id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            source_id: Uuid::now_v7(),
+            provider_message_name: "spaces/space/messages/message".to_owned(),
+            provider_thread_name: Some("spaces/space/threads/thread".to_owned()),
+            task_id: Uuid::now_v7(),
+            project_title: "비스킷링크".to_owned(),
+            task_title: "거래내역 정산방식 표시".to_owned(),
+            public_summary: Some(public_summary.to_owned()),
+            action_items: vec!["표시 기준을 검증합니다.".to_owned()],
+            completion_criteria: Some("회귀 검증을 통과합니다.".to_owned()),
+            reference_links: vec!["https://itsm.example.test/issues/3876".to_owned()],
+            assignee_name: Some("이의현".to_owned()),
+            task_priority: 2,
+            due_at: None,
+            reaction_completed: false,
+            reply_completed: false,
+            attempt_count: 0,
+        });
+
+        assert_eq!(delivery.project_title, "비스킷링크");
+        assert_eq!(delivery.public_summary.as_deref(), Some(public_summary));
+        assert_eq!(delivery.action_items, ["표시 기준을 검증합니다."]);
+        assert_eq!(
+            delivery.completion_criteria.as_deref(),
+            Some("회귀 검증을 통과합니다.")
+        );
+        assert_eq!(delivery.task_priority, 2);
+        assert_eq!(
+            delivery.reference_links,
+            ["https://itsm.example.test/issues/3876"]
+        );
     }
 }

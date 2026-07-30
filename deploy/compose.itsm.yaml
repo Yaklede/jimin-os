@@ -1,0 +1,12 @@
+services:
+  agent:
+    environment:
+      JIMIN_ITSM_BASE_URL: ${JIMIN_ITSM_BASE_URL:?set JIMIN_ITSM_BASE_URL}
+      JIMIN_ITSM_ALLOWED_SOURCE_IDS: ${JIMIN_ITSM_ALLOWED_SOURCE_IDS:?set JIMIN_ITSM_ALLOWED_SOURCE_IDS}
+      JIMIN_ITSM_API_TOKEN_FILE: /run/secrets/itsm_read_credential
+    secrets:
+      - itsm_read_credential
+
+secrets:
+  itsm_read_credential:
+    file: ${JIMIN_SECRETS_DIR:?set JIMIN_SECRETS_DIR}/itsm_read_credential

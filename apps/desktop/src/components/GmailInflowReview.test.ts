@@ -11,6 +11,7 @@ import {
   deferDateTimeToIso,
   GmailInflowReview,
   localDateTimeToIso,
+  mergeGmailInflowDraftValues,
 } from "./GmailInflowReview";
 
 function candidate(
@@ -286,17 +287,43 @@ describe("Gmail work intake presentation", () => {
   it("keeps local deadlines when turning them into API values", () => {
     const value = "2026-07-31T18:30";
 
-    expect(localDateTimeToIso(value)).toBe(new Date(value).toISOString());
+    expect(localDateTimeToIso(value)).toBe("2026-07-31T09:30:00.000Z");
     expect(localDateTimeToIso("")).toBeNull();
+  });
+
+  it("refreshes untouched suggestions without overwriting edited fields", () => {
+    expect(
+      mergeGmailInflowDraftValues(
+        {
+          title: "사용자가 다듬은 제목",
+          notes: "이전 정리",
+          assigneeName: "김경주",
+          priority: 1,
+          dueAt: "2026-07-31T18:00",
+        },
+        {
+          title: "새 분석 제목",
+          notes: "새 답장을 반영한 정리",
+          assigneeName: "주홍석",
+          priority: 3,
+          dueAt: "2026-08-01T18:00",
+        },
+        ["title", "assigneeName"],
+      ),
+    ).toEqual({
+      title: "사용자가 다듬은 제목",
+      notes: "새 답장을 반영한 정리",
+      assigneeName: "김경주",
+      priority: 3,
+      dueAt: "2026-08-01T18:00",
+    });
   });
 
   it("accepts only a future defer time within one year", () => {
     const now = new Date("2026-07-30T02:00:00Z");
     const future = "2026-07-30T15:00";
 
-    expect(deferDateTimeToIso(future, now)).toBe(
-      new Date(future).toISOString(),
-    );
+    expect(deferDateTimeToIso(future, now)).toBe("2026-07-30T06:00:00.000Z");
     expect(deferDateTimeToIso("2026-07-30T10:00", now)).toBeNull();
     expect(deferDateTimeToIso("2027-08-01T10:00", now)).toBeNull();
   });

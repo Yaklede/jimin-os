@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   PlanningRequestError,
+  PLANNING_TIME_ZONE,
   bootstrapTrustedNetworkSession,
   clientPlatformForUserAgent,
   createScheduleEntry,
@@ -382,7 +383,7 @@ describe("schedule client", () => {
       notes: null,
       startsAt: created.startsAt,
       endsAt: created.endsAt,
-      timeZone: expect.any(String),
+      timeZone: PLANNING_TIME_ZONE,
     });
   });
 
@@ -429,6 +430,7 @@ describe("schedule client", () => {
       notes: "접수 10분 전",
       startsAt: "2026-07-14T08:00:00.000Z",
       endsAt: "2026-07-14T09:00:00.000Z",
+      timeZone: PLANNING_TIME_ZONE,
       expectedVersion: 2,
     });
   });

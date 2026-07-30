@@ -2537,6 +2537,7 @@ name = "jimin-agent"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "futures-util",
  "jimin-codex-client",
  "jimin-storage",
  "reqwest",

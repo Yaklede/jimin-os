@@ -37,7 +37,9 @@ use jimin_storage::{
         NewProjectGoogleChatSource, ProjectInflowStatus, PromoteProjectInflowItem,
         ProviderGoogleChatMessage,
     },
-    inflow_analysis::{InflowAnalysisResult, InflowAnalysisState, InflowClassification},
+    inflow_analysis::{
+        InflowAnalysisResult, InflowAnalysisState, InflowClassification, InflowReferenceDocument,
+    },
     intelligence::{
         DecideRecommendation, DecideRecommendationOutcome, NewRecommendation,
         NewScheduleRequestConflict, RecommendationDecision, RecommendationStatus,
@@ -1050,6 +1052,37 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             .await
             .expect("claimed analysis should start")
     );
+    let premature_task_id = Uuid::now_v7();
+    assert!(
+        database
+            .promote_project_inflow_item(&PromoteProjectInflowItem {
+                user_id: owner.profile.id,
+                project_id: first_project.id,
+                item_id: pending[0].id,
+                expected_version: pending[0].version,
+                analysis_id: initial_analysis.id,
+                expected_representative_item_id: initial_analysis.representative_item_id,
+                expected_source_revision: initial_analysis.source_revision,
+                expected_analyzed_revision: initial_analysis.source_revision,
+                task_id: premature_task_id,
+                title: "아직 분석 중인 요청".to_owned(),
+                notes: None,
+                assignee_name: None,
+                priority: 1,
+                due_at: None,
+            })
+            .await
+            .expect("an in-progress analysis should be rejected safely")
+            .is_none()
+    );
+    assert!(
+        database
+            .task_for_user(owner.profile.id, premature_task_id)
+            .await
+            .expect("premature task lookup should succeed")
+            .is_none(),
+        "promotion must not insert a task before analysis is ready"
+    );
     assert!(
         database
             .complete_inflow_analysis(
@@ -1070,6 +1103,17 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
                     suggested_assignee_name: None,
                     suggested_due_at: None,
                     suggested_priority: Some(1),
+                    reference_documents: vec![InflowReferenceDocument {
+                        provider: "itsm".to_owned(),
+                        url: "https://itsm.example.test/issues/3876".to_owned(),
+                        external_id: "3876".to_owned(),
+                        title: Some("회사 요청 개발 범위 확인".to_owned()),
+                        original_content: Some(
+                            "내부 원문과 비공개 저널은 외부 전송 본문에 포함되면 안 된다."
+                                .to_owned(),
+                        ),
+                        error_code: None,
+                    }],
                 },
             )
             .await
@@ -1083,9 +1127,89 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         .next()
         .expect("stored analysis should exist");
     assert_eq!(stored_initial_analysis.state, InflowAnalysisState::Ready);
+    assert_eq!(stored_initial_analysis.source_revision, 2);
+    assert_eq!(stored_initial_analysis.analyzed_revision, Some(2));
     assert_eq!(
         stored_initial_analysis.classification,
         Some(InflowClassification::NewTask)
+    );
+    let stale_task_id = Uuid::now_v7();
+    assert!(
+        database
+            .promote_project_inflow_item(&PromoteProjectInflowItem {
+                user_id: owner.profile.id,
+                project_id: first_project.id,
+                item_id: pending[0].id,
+                expected_version: pending[0].version,
+                analysis_id: stored_initial_analysis.id,
+                expected_representative_item_id: stored_initial_analysis.representative_item_id,
+                expected_source_revision: stored_initial_analysis.source_revision - 1,
+                expected_analyzed_revision: stored_initial_analysis
+                    .analyzed_revision
+                    .expect("ready analysis should have an analyzed revision"),
+                task_id: stale_task_id,
+                title: "오래된 분석 결과".to_owned(),
+                notes: None,
+                assignee_name: None,
+                priority: 1,
+                due_at: None,
+            })
+            .await
+            .expect("a stale analysis revision should be rejected safely")
+            .is_none()
+    );
+    assert!(
+        database
+            .task_for_user(owner.profile.id, stale_task_id)
+            .await
+            .expect("stale task lookup should succeed")
+            .is_none(),
+        "stale promotion must not insert a task"
+    );
+    let changed_representative_task_id = Uuid::now_v7();
+    assert!(
+        database
+            .promote_project_inflow_item(&PromoteProjectInflowItem {
+                user_id: owner.profile.id,
+                project_id: first_project.id,
+                item_id: pending[0].id,
+                expected_version: pending[0].version,
+                analysis_id: stored_initial_analysis.id,
+                expected_representative_item_id: Uuid::now_v7(),
+                expected_source_revision: stored_initial_analysis.source_revision,
+                expected_analyzed_revision: stored_initial_analysis
+                    .analyzed_revision
+                    .expect("ready analysis should have an analyzed revision"),
+                task_id: changed_representative_task_id,
+                title: "대표 메시지가 바뀐 요청".to_owned(),
+                notes: None,
+                assignee_name: None,
+                priority: 1,
+                due_at: None,
+            })
+            .await
+            .expect("a changed representative should be rejected safely")
+            .is_none()
+    );
+    assert!(
+        database
+            .task_for_user(owner.profile.id, changed_representative_task_id)
+            .await
+            .expect("changed representative task lookup should succeed")
+            .is_none(),
+        "representative mismatch must not insert a task"
+    );
+    assert_eq!(
+        database
+            .project_inflow_items(
+                owner.profile.id,
+                first_project.id,
+                Some(ProjectInflowStatus::Pending),
+            )
+            .await
+            .expect("failed promotion attempts must keep the group pending")
+            .len(),
+        2
     );
     assert!(
         database
@@ -1107,6 +1231,12 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             project_id: first_project.id,
             item_id: pending[0].id,
             expected_version: pending[0].version,
+            analysis_id: stored_initial_analysis.id,
+            expected_representative_item_id: stored_initial_analysis.representative_item_id,
+            expected_source_revision: stored_initial_analysis.source_revision,
+            expected_analyzed_revision: stored_initial_analysis
+                .analyzed_revision
+                .expect("ready analysis should have an analyzed revision"),
             task_id: Uuid::now_v7(),
             title: "회사 요청 확인".to_owned(),
             notes: Some(
@@ -1149,6 +1279,23 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         completion_deliveries[0].assignee_name.as_deref(),
         Some("개발 담당자")
     );
+    assert_eq!(
+        completion_deliveries[0].public_summary.as_deref(),
+        Some("회사 요청의 개발 범위와 예상 일정을 확인해야 한다.")
+    );
+    assert_eq!(
+        completion_deliveries[0].action_items,
+        ["요청 범위를 확인한다.", "예상 일정을 관계자에게 공유한다."]
+    );
+    assert_eq!(
+        completion_deliveries[0].completion_criteria.as_deref(),
+        Some("개발 범위와 예상 일정이 관계자에게 공유된다.")
+    );
+    assert_eq!(
+        completion_deliveries[0].reference_links,
+        ["https://itsm.example.test/issues/3876"]
+    );
+    assert!(!format!("{:?}", completion_deliveries[0]).contains("비공개 저널"));
     database
         .record_google_chat_completion_delivery(&completion_deliveries[0], true, true, None)
         .await
@@ -1286,6 +1433,27 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             .len(),
         1
     );
+    let refreshing_analysis = database
+        .project_inflow_analyses(owner.profile.id, first_project.id)
+        .await
+        .expect("refreshing analysis should load")
+        .into_iter()
+        .next()
+        .expect("refreshing analysis should exist");
+    assert_eq!(refreshing_analysis.id, stored_initial_analysis.id);
+    assert_eq!(refreshing_analysis.state, InflowAnalysisState::Queued);
+    assert_eq!(refreshing_analysis.source_revision, 3);
+    assert_eq!(refreshing_analysis.analyzed_revision, Some(2));
+    assert_eq!(
+        refreshing_analysis.classification,
+        Some(InflowClassification::NewTask),
+        "a new reply must keep the last ready classification while reanalysis is queued"
+    );
+    assert_eq!(
+        refreshing_analysis.suggested_task_title.as_deref(),
+        Some("회사 요청 개발 범위 확인"),
+        "a new reply must not blank the last ready task draft"
+    );
     let pending_follow_ups = database
         .project_inflow_items(
             owner.profile.id,
@@ -1351,6 +1519,7 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
                     suggested_assignee_name: None,
                     suggested_due_at: None,
                     suggested_priority: None,
+                    reference_documents: Vec::new(),
                 },
             )
             .await
@@ -1379,6 +1548,12 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
                 project_id: first_project.id,
                 item_id: pending_follow_ups[0].id,
                 expected_version: pending_follow_ups[0].version,
+                analysis_id: stored_follow_up_analysis.id,
+                expected_representative_item_id: stored_follow_up_analysis.representative_item_id,
+                expected_source_revision: stored_follow_up_analysis.source_revision,
+                expected_analyzed_revision: stored_follow_up_analysis
+                    .analyzed_revision
+                    .expect("ready analysis should have an analyzed revision"),
                 task_id: Uuid::now_v7(),
                 title: "중복 후속 일감".to_owned(),
                 notes: None,
@@ -1486,7 +1661,17 @@ fn assert_automatic_webhook_delivery(
     let task_keys = base_keys
         .iter()
         .copied()
-        .chain(["title", "projectTitle", "dueAt", "assigneeName", "message"])
+        .chain([
+            "title",
+            "projectTitle",
+            "dueAt",
+            "assigneeName",
+            "message",
+            "notes",
+            "actionItems",
+            "completionCriteria",
+            "referenceLinks",
+        ])
         .collect::<HashSet<_>>();
     let actual_keys = payload.keys().map(String::as_str).collect::<HashSet<_>>();
     assert!(
