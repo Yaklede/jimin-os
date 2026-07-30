@@ -284,6 +284,19 @@ export const projectCopy = {
     "Chat 공간을 연결하지 못했어요. 회사 계정과 공간을 다시 확인해 주세요.",
   inflowLoadProblem:
     "들어오는 업무를 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
+  inflowReconnectProblem:
+    "회사 Google 계정 연결이 만료됐어요. 계정을 다시 연결한 뒤 새 메시지를 확인해 주세요.",
+  inflowReconnectTitle: "회사 Google 계정을 다시 연결해 주세요",
+  inflowReconnectAction: "회사 계정 다시 연결하기",
+  inflowSyncProblem:
+    "새 메시지를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.",
+  inflowHistoryOpen: "펼쳐보기",
+  inflowHistoryClose: "접기",
+  inflowFollowUpTitle: "기존 일감에 새 답장이 왔어요",
+  inflowFollowUpDescription:
+    "새 할 일을 만들 필요 없이, 연결된 일감에서 새 내용을 확인하면 돼요.",
+  inflowFollowUpOpenTask: "기존 일감 열기",
+  inflowFollowUpDone: "확인 완료",
   inflowDecisionProblem:
     "이 항목을 처리하지 못했어요. 최신 내용을 불러온 뒤 다시 시도해 주세요.",
   titleRequired: "프로젝트 이름을 적어 주세요.",

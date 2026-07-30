@@ -18,6 +18,10 @@ import {
   VoiceCommandSheet,
 } from "./VoiceCommandSheet";
 import { registerMobileBackHandler } from "../mobileBack";
+import {
+  mobileCapabilitySnapshot,
+  type MobilePlatform,
+} from "../mobile-capabilities";
 
 export type OsDestination =
   | "home"
@@ -37,6 +41,7 @@ type OsShellProps = {
   onVoiceCommand(value: string): Promise<VoiceCommandOutcome>;
   onRefresh(): void;
   refreshing: boolean;
+  platform?: MobilePlatform;
 };
 
 export function OsShell({
@@ -47,8 +52,12 @@ export function OsShell({
   onVoiceCommand,
   onRefresh,
   refreshing,
+  platform: platformOverride,
 }: OsShellProps) {
   const [voiceSheetOpen, setVoiceSheetOpen] = useState(false);
+  const [runtimePlatform] = useState(
+    () => platformOverride ?? mobileCapabilitySnapshot().platform,
+  );
   const deferredRefreshing = useDeferredBusy(refreshing);
   const previousDestinationRef = useRef(destination);
   const routeDirection = destinationDirection(
@@ -85,7 +94,11 @@ export function OsShell({
   }
 
   return (
-    <div className="os-shell" data-destination={destination}>
+    <div
+      className="os-shell"
+      data-destination={destination}
+      data-platform={runtimePlatform}
+    >
       <aside className="os-sidebar" aria-label={copy.navigation.label}>
         <button
           className="os-brand focus-visible-control"

@@ -42,6 +42,7 @@ type ProjectInflowPanelProps = {
   onDismiss(item: ProjectInflowItem): Promise<void>;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
+  onOpenTask(taskId: string): void;
 };
 
 export type PromoteInflowInput = {
@@ -71,6 +72,7 @@ export function ProjectInflowPanel({
   onDismiss,
   onRetryAnalysis,
   onRetryCompletion,
+  onOpenTask,
 }: ProjectInflowPanelProps) {
   const activeAccounts = useMemo(
     () => accounts.filter((account) => account.status === "active"),
@@ -80,10 +82,14 @@ export function ProjectInflowPanel({
   const [spaceName, setSpaceName] = useState("");
   const [acknowledge, setAcknowledge] = useState(true);
   const [importHistory, setImportHistory] = useState(false);
-  const pendingItems = items.filter((item) => item.status === "pending");
+  const pendingItems = items.filter(isProjectInflowAttentionItem);
   const handledItems = items
     .filter((item) => item.status !== "pending")
     .slice(0, 12);
+  const reconnectRequired =
+    sources.length > 0 &&
+    accounts.some((account) => account.status === "reauth_required") &&
+    activeAccounts.length === 0;
 
   useEffect(() => {
     const next = activeAccounts.some((account) => account.id === accountId)
@@ -123,17 +129,29 @@ export function ProjectInflowPanel({
         </div>
       </header>
 
-      {problemMessage && (
+      {problemMessage && !reconnectRequired && (
         <p className="inline-alert" role="alert">
           {problemMessage}
         </p>
       )}
 
       {activeAccounts.length === 0 ? (
-        <div className="project-inflow__connect">
+        <div
+          className="project-inflow__connect"
+          data-state={reconnectRequired ? "reauth-required" : "disconnected"}
+          role={reconnectRequired ? "alert" : undefined}
+        >
           <div>
-            <strong>{copy.projects.inflowConnectAccount}</strong>
-            <p>{copy.projects.inflowConnectDescription}</p>
+            <strong>
+              {reconnectRequired
+                ? copy.projects.inflowReconnectTitle
+                : copy.projects.inflowConnectAccount}
+            </strong>
+            <p>
+              {reconnectRequired
+                ? copy.projects.inflowReconnectProblem
+                : copy.projects.inflowConnectDescription}
+            </p>
           </div>
           <button
             className="secondary-button focus-visible-control"
@@ -142,7 +160,9 @@ export function ProjectInflowPanel({
             onClick={() => void onConnectAccount()}
           >
             <Link2 aria-hidden="true" />
-            {copy.projects.inflowConnectAccount}
+            {reconnectRequired
+              ? copy.projects.inflowReconnectAction
+              : copy.projects.inflowConnectAccount}
           </button>
         </div>
       ) : (
@@ -278,6 +298,11 @@ export function ProjectInflowPanel({
             <p className="project-inflow__empty">{copy.projects.inflowEmpty}</p>
           ) : (
             <>
+              {pendingItems.length === 0 && (
+                <p className="project-inflow__empty project-inflow__empty--pending">
+                  {copy.projects.inflowEmpty}
+                </p>
+              )}
               <InflowItemList
                 title={copy.projects.inflowPendingTitle}
                 items={pendingItems}
@@ -286,16 +311,35 @@ export function ProjectInflowPanel({
                 onDismiss={onDismiss}
                 onRetryAnalysis={onRetryAnalysis}
                 onRetryCompletion={onRetryCompletion}
+                onOpenTask={onOpenTask}
               />
-              <InflowItemList
-                title={copy.projects.inflowRecentTitle}
-                items={handledItems}
-                saving={saving}
-                onPromote={onPromote}
-                onDismiss={onDismiss}
-                onRetryAnalysis={onRetryAnalysis}
-                onRetryCompletion={onRetryCompletion}
-              />
+              {handledItems.length > 0 && (
+                <details className="project-inflow__history">
+                  <summary className="focus-visible-control">
+                    <span>
+                      <strong>{copy.projects.inflowRecentTitle}</strong>
+                      <small>{handledItems.length}건</small>
+                    </span>
+                    <span className="project-inflow__history-open">
+                      {copy.projects.inflowHistoryOpen}
+                    </span>
+                    <span className="project-inflow__history-close">
+                      {copy.projects.inflowHistoryClose}
+                    </span>
+                  </summary>
+                  <InflowItemList
+                    title={copy.projects.inflowRecentTitle}
+                    items={handledItems}
+                    saving={saving}
+                    onPromote={onPromote}
+                    onDismiss={onDismiss}
+                    onRetryAnalysis={onRetryAnalysis}
+                    onRetryCompletion={onRetryCompletion}
+                    onOpenTask={onOpenTask}
+                    hideHeading
+                  />
+                </details>
+              )}
             </>
           )}
         </div>
@@ -312,6 +356,8 @@ function InflowItemList({
   onDismiss,
   onRetryAnalysis,
   onRetryCompletion,
+  onOpenTask,
+  hideHeading = false,
 }: {
   title: string;
   items: ProjectInflowItem[];
@@ -320,14 +366,18 @@ function InflowItemList({
   onDismiss(item: ProjectInflowItem): Promise<void>;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
+  onOpenTask(taskId: string): void;
+  hideHeading?: boolean;
 }) {
   if (items.length === 0) return null;
   return (
     <section
       className="project-inflow__group"
-      aria-labelledby={`inflow-${title}`}
+      {...(hideHeading
+        ? { "aria-label": title }
+        : { "aria-labelledby": `inflow-${title}` })}
     >
-      <h4 id={`inflow-${title}`}>{title}</h4>
+      {!hideHeading && <h4 id={`inflow-${title}`}>{title}</h4>}
       <ul>
         {items.map((item) => (
           <InflowItemRow
@@ -338,6 +388,7 @@ function InflowItemList({
             onDismiss={onDismiss}
             onRetryAnalysis={onRetryAnalysis}
             onRetryCompletion={onRetryCompletion}
+            onOpenTask={onOpenTask}
           />
         ))}
       </ul>
@@ -352,6 +403,7 @@ export function InflowItemRow({
   onDismiss,
   onRetryAnalysis,
   onRetryCompletion,
+  onOpenTask,
 }: {
   item: ProjectInflowItem;
   saving: boolean;
@@ -359,6 +411,7 @@ export function InflowItemRow({
   onDismiss(item: ProjectInflowItem): Promise<void>;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
+  onOpenTask?(taskId: string): void;
 }) {
   const [editing, setEditing] = useState(false);
   const [promoting, setPromoting] = useState(false);
@@ -398,6 +451,7 @@ export function InflowItemRow({
   );
   const analysisReady = item.analysisStatus === "ready";
   const analysisFailed = item.analysisStatus === "failed";
+  const existingTaskFollowUp = isExistingTaskFollowUp(item);
   const canNotifyAssignee = Boolean(
     assigneeName && item.notifiableAssigneeNames?.includes(assigneeName),
   );
@@ -519,7 +573,36 @@ export function InflowItemRow({
           </ol>
         </details>
       )}
-      {item.status !== "pending" ? (
+      {existingTaskFollowUp ? (
+        <div className="project-inflow-item__follow-up" role="group">
+          <div>
+            <strong>{copy.projects.inflowFollowUpTitle}</strong>
+            <p>{copy.projects.inflowFollowUpDescription}</p>
+          </div>
+          <div className="project-inflow-item__follow-up-actions">
+            {onOpenTask && (
+              <button
+                className="primary-button focus-visible-control"
+                type="button"
+                disabled={saving}
+                onClick={() => onOpenTask(item.promotedTaskId!)}
+              >
+                <Eye aria-hidden="true" />
+                {copy.projects.inflowFollowUpOpenTask}
+              </button>
+            )}
+            <button
+              className="secondary-button focus-visible-control"
+              type="button"
+              disabled={saving}
+              onClick={() => void onDismiss(item)}
+            >
+              <Check aria-hidden="true" />
+              {copy.projects.inflowFollowUpDone}
+            </button>
+          </div>
+        </div>
+      ) : item.status !== "pending" ? (
         <div
           className={`project-inflow-item__completion project-inflow-item__completion--${item.status}`}
           role="status"
@@ -776,6 +859,20 @@ export function InflowItemRow({
       )}
     </li>
   );
+}
+
+export function isProjectInflowAttentionItem(item: ProjectInflowItem): boolean {
+  return item.status === "pending";
+}
+
+export function projectInflowAttentionCount(
+  items: ProjectInflowItem[],
+): number {
+  return items.filter(isProjectInflowAttentionItem).length;
+}
+
+export function isExistingTaskFollowUp(item: ProjectInflowItem): boolean {
+  return item.status === "pending" && Boolean(item.promotedTaskId);
 }
 
 export function localInputToIso(value: string): string | undefined {

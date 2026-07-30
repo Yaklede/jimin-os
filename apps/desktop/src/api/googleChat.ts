@@ -104,6 +104,29 @@ export interface GoogleChatAuthorization {
   expiresAt: string;
 }
 
+export class GoogleChatRequestError extends Error {
+  readonly code:
+    | "unauthorized"
+    | "invalid"
+    | "conflict"
+    | "forbidden"
+    | "unavailable";
+  readonly serverCode: string | null;
+  readonly retryable: boolean;
+
+  constructor(
+    code: GoogleChatRequestError["code"],
+    serverCode: string | null = null,
+    retryable = false,
+  ) {
+    super(serverCode ?? code);
+    this.name = "GoogleChatRequestError";
+    this.code = code;
+    this.serverCode = serverCode;
+    this.retryable = retryable;
+  }
+}
+
 export async function fetchGoogleChatConnections(
   baseUrl: string,
   access: string,
@@ -305,10 +328,18 @@ async function request<T>(
       ...init.headers,
     },
   });
-  if (!response.ok)
-    throw new Error(`Google Chat request failed: ${response.status}`);
-  if (emptyResponse || response.status === 204) return undefined as T;
-  return (await response.json()) as T;
+  if (response.ok && response.status === 204) return undefined as T;
+  const payload = await readJson(response);
+  if (!response.ok) {
+    const providerError = errorDetails(payload);
+    throw new GoogleChatRequestError(
+      requestErrorCode(response.status),
+      providerError?.code ?? null,
+      providerError?.retryable ?? false,
+    );
+  }
+  if (emptyResponse) return undefined as T;
+  return payload as T;
 }
 
 function clientKind(): "macos" | "android" | "ios" {
@@ -316,4 +347,34 @@ function clientKind(): "macos" | "android" | "ios" {
   if (platform.includes("android")) return "android";
   if (platform.includes("iphone") || platform.includes("ipad")) return "ios";
   return "macos";
+}
+
+async function readJson(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+function requestErrorCode(status: number): GoogleChatRequestError["code"] {
+  if (status === 401) return "unauthorized";
+  if (status === 403) return "forbidden";
+  if (status === 409) return "conflict";
+  if (status >= 400 && status < 500) return "invalid";
+  return "unavailable";
+}
+
+function errorDetails(
+  value: unknown,
+): { code: string; retryable: boolean } | null {
+  if (!isRecord(value) || !isRecord(value.error)) return null;
+  return typeof value.error.code === "string" &&
+    typeof value.error.retryable === "boolean"
+    ? { code: value.error.code, retryable: value.error.retryable }
+    : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

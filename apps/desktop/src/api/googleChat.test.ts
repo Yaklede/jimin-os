@@ -3,7 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createProjectGoogleChatSource,
   decideProjectInflow,
+  GoogleChatRequestError,
   type ProjectInflowItem,
+  type ProjectGoogleChatSource,
+  syncProjectGoogleChatSource,
 } from "./googleChat";
 
 afterEach(() => {
@@ -132,5 +135,41 @@ describe("Google Chat work intake API", () => {
       decision: "retry_completion",
       expectedVersion: 7,
     });
+  });
+
+  it("keeps the server error code when Chat needs to be reconnected", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "google_chat.authorization_rejected",
+            message: "회사 Google 계정 연결을 다시 진행해 주세요.",
+            requestId: "request",
+            retryable: false,
+            details: {},
+          },
+        }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetch);
+
+    const source = {
+      id: "source",
+      projectId: "project",
+    } as ProjectGoogleChatSource;
+
+    await expect(
+      syncProjectGoogleChatSource(
+        "https://example.test",
+        "access",
+        source,
+      ),
+    ).rejects.toMatchObject({
+      name: "GoogleChatRequestError",
+      code: "invalid",
+      serverCode: "google_chat.authorization_rejected",
+      retryable: false,
+    } satisfies Partial<GoogleChatRequestError>);
   });
 });

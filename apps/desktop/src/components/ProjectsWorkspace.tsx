@@ -52,6 +52,7 @@ import { GoalsPanel } from "./GoalsPanel";
 import { ProjectWebhookPanel } from "./ProjectWebhookPanel";
 import {
   ProjectInflowPanel,
+  projectInflowAttentionCount,
   type PromoteInflowInput,
 } from "./ProjectInflowPanel";
 import { registerMobileBackHandler } from "../mobileBack";
@@ -301,6 +302,7 @@ export function ProjectsWorkspace({
   const rootTasks = tasks.filter((task) => !task.parentTaskId);
   const rootOpenTasks = openTasks.filter((task) => !task.parentTaskId);
   const openTaskRows = taskHierarchyRows(openTasks);
+  const inflowAttentionTotal = projectInflowAttentionCount(projectInflowItems);
 
   useEffect(() => {
     setTaskTitle("");
@@ -794,7 +796,7 @@ export function ProjectsWorkspace({
                   active={activeProjectTab === "inflow"}
                   label={copy.projects.detailTabs.inflow}
                   mobileLabel={copy.projects.detailTabsMobile.inflow}
-                  count={projectInflowItems.length}
+                  count={inflowAttentionTotal}
                   icon={<MessageSquareText aria-hidden="true" />}
                   onSelect={setActiveProjectTab}
                 />
@@ -1267,6 +1269,11 @@ export function ProjectsWorkspace({
                   onDismiss={onDismissInflow}
                   onRetryAnalysis={onRetryInflowAnalysis}
                   onRetryCompletion={onRetryInflowCompletion}
+                  onOpenTask={(taskId) => {
+                    setActiveProjectTab("tasks");
+                    setSelectedTaskId(taskId);
+                    onOpenGoalTask(taskId, selectedProject.id);
+                  }}
                 />
               )}
               {activeProjectTab === "integrations" && (

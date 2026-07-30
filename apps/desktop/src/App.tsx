@@ -76,6 +76,7 @@ import {
   fetchGoogleChatSpaces,
   fetchProjectGoogleChatSources,
   fetchProjectInflow,
+  GoogleChatRequestError,
   startGoogleChatAuthorization,
   syncProjectGoogleChatSource,
   type GoogleChatAccount,
@@ -3674,7 +3675,8 @@ export default function App() {
       setProjectGoogleChatSources(sources);
       await loadProjectInflow(source.projectId);
     } catch (error) {
-      setInflowError(copy.projects.inflowLoadProblem);
+      setInflowError(googleChatSyncProblem(error));
+      await loadGoogleChatAccounts();
       throw error;
     } finally {
       setInflowLoading(false);
@@ -4574,6 +4576,21 @@ function ServerConfigurationPanel() {
 function conversationTitle(value: string) {
   const title = value.trim().replace(/\s+/g, " ").slice(0, 36);
   return title || null;
+}
+
+function googleChatSyncProblem(error: unknown): string {
+  if (!(error instanceof GoogleChatRequestError)) {
+    return copy.projects.inflowSyncProblem;
+  }
+  if (
+    error.serverCode === "google_chat.authorization_rejected" ||
+    error.serverCode === "google_chat.required_scope_missing"
+  ) {
+    return copy.projects.inflowReconnectProblem;
+  }
+  return error.retryable
+    ? copy.projects.inflowSyncProblem
+    : copy.projects.inflowLoadProblem;
 }
 
 function currentLocalDayRange(now = new Date()): [Date, Date] {

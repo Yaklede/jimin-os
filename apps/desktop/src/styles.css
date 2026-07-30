@@ -4923,7 +4923,9 @@ svg {
 
 .project-inflow {
   display: grid;
+  min-width: 0;
   gap: 18px;
+  container-type: inline-size;
 }
 
 .home-inflow {
@@ -5686,8 +5688,20 @@ svg {
   padding-top: 16px;
 }
 
+.project-inflow__connect[data-state="reauth-required"] {
+  border: 1px solid color-mix(in srgb, var(--warning) 38%, var(--border));
+  border-radius: 12px;
+  padding: 14px;
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface-subtle));
+}
+
+.project-inflow__connect[data-state="reauth-required"] strong {
+  color: var(--text-strong);
+}
+
 .project-inflow__source-form {
   display: grid;
+  min-width: 0;
   grid-template-columns: minmax(150px, 0.8fr) minmax(220px, 1.2fr);
   align-items: end;
   gap: 12px;
@@ -5737,6 +5751,7 @@ svg {
 .project-inflow__source-form-actions {
   grid-column: 1 / -1;
   display: flex;
+  min-width: 0;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
@@ -5816,8 +5831,10 @@ svg {
 
 .project-inflow__source-actions {
   display: flex;
+  min-width: 0;
   flex: 0 0 auto;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
@@ -5837,14 +5854,84 @@ svg {
   border-top: 1px solid var(--border);
 }
 
+.project-inflow__empty--pending {
+  min-height: 58px;
+  justify-content: flex-start;
+  border-bottom: 1px solid var(--border);
+}
+
+.project-inflow__history {
+  min-width: 0;
+  border-top: 1px solid var(--border);
+}
+
+.project-inflow__history > summary {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  color: var(--muted);
+  cursor: pointer;
+  list-style: none;
+}
+
+.project-inflow__history > summary::-webkit-details-marker {
+  display: none;
+}
+
+.project-inflow__history > summary > span:first-child {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.project-inflow__history > summary strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-inflow__history > summary small {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: var(--surface-subtle);
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.project-inflow__history-open,
+.project-inflow__history-close {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.project-inflow__history-close,
+.project-inflow__history[open] .project-inflow__history-open {
+  display: none;
+}
+
+.project-inflow__history[open] .project-inflow__history-close {
+  display: inline;
+}
+
 .project-inflow-item {
   display: grid;
+  min-width: 0;
   gap: 12px;
   border-top: 1px solid var(--border);
   padding: 16px 0;
 }
 
 .project-inflow-item__meta {
+  min-width: 0;
   flex-wrap: wrap;
   gap: 5px 10px;
   color: var(--muted);
@@ -5858,6 +5945,7 @@ svg {
 
 .project-inflow-item__summary {
   display: grid;
+  min-width: 0;
   gap: 6px;
 }
 
@@ -6014,6 +6102,39 @@ svg {
   height: 16px;
 }
 
+.project-inflow-item__follow-up {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+  border-radius: 12px;
+  padding: 14px;
+  background: var(--accent-soft);
+}
+
+.project-inflow-item__follow-up > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.project-inflow-item__follow-up strong {
+  color: var(--text-strong);
+  font-size: 13px;
+}
+
+.project-inflow-item__follow-up p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.project-inflow-item__follow-up-actions {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .project-inflow-item__promote {
   display: grid;
   gap: 10px;
@@ -6094,6 +6215,61 @@ svg {
   padding: 10px 12px;
   background: var(--accent-soft);
   color: var(--text);
+}
+
+@container (max-width: 640px) {
+  .project-inflow__source-form,
+  .project-inflow-item__fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .project-inflow-item__title-field,
+  .project-inflow-item__notes-field {
+    grid-column: auto;
+  }
+
+  .project-inflow__source-form-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .project-inflow__source-form-actions > button,
+  .project-inflow__connect .secondary-button {
+    width: 100%;
+    min-width: 0;
+    white-space: normal;
+  }
+
+  .project-inflow__source-form-actions > button:first-of-type {
+    margin-left: 0;
+  }
+
+  .project-inflow__connect,
+  .project-inflow__sources li {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .project-inflow__source-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+@container (max-width: 440px) {
+  .project-inflow-item__actions,
+  .project-inflow-item__follow-up-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .project-inflow-item__actions button,
+  .project-inflow-item__follow-up-actions button {
+    width: 100%;
+    min-width: 0;
+    white-space: normal;
+  }
 }
 
 @media (max-width: 760px) {
@@ -11615,7 +11791,8 @@ svg {
   .project-create-form,
   .project-detail__panel,
   .project-detail__tasks,
-  .project-webhooks {
+  .project-webhooks,
+  .project-inflow {
     padding: 16px;
   }
 
@@ -13578,6 +13755,128 @@ svg {
   .settings-row__state {
     max-width: 100%;
     white-space: normal;
+  }
+}
+
+@media (max-width: 720px) {
+  /*
+   * A resizable macOS window can be narrower than a phone viewport. Keep the
+   * compact desktop rail in that case; the safe-area chrome belongs only to
+   * the native Android/iOS shells.
+   */
+  .os-shell:is([data-platform="desktop"], [data-platform="web"]) {
+    display: grid;
+    grid-template-columns: 72px minmax(0, 1fr);
+    width: 100%;
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+
+  .os-shell:is(
+      [data-platform="desktop"],
+      [data-platform="web"]
+    )[data-destination="chat"] {
+    grid-template-columns: 72px minmax(0, 1fr);
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .os-shell:is([data-platform="desktop"], [data-platform="web"])
+    .os-workspace::before {
+    display: none;
+  }
+
+  .os-shell:is([data-platform="desktop"], [data-platform="web"]) .os-sidebar {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    padding: 16px 12px;
+  }
+
+  .os-shell:is([data-platform="desktop"], [data-platform="web"]) .os-brand {
+    padding: 0;
+  }
+
+  .os-shell:is([data-platform="desktop"], [data-platform="web"])
+    .os-brand
+    > span:last-child,
+  .os-shell:is([data-platform="desktop"], [data-platform="web"])
+    .os-sidebar
+    .os-nav__button
+    > span,
+  .os-shell:is([data-platform="desktop"], [data-platform="web"])
+    .os-sidebar__assistant
+    > span {
+    display: none;
+  }
+
+  .os-shell:is([data-platform="desktop"], [data-platform="web"])
+    .os-sidebar
+    .os-nav__button,
+  .os-shell:is([data-platform="desktop"], [data-platform="web"])
+    .os-sidebar__assistant {
+    width: 44px;
+    justify-content: center;
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .os-shell:is([data-platform="desktop"], [data-platform="web"]) .os-topbar {
+    display: flex;
+    gap: 12px;
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .os-shell:is([data-platform="desktop"], [data-platform="web"])
+    .os-topbar__controls
+    time,
+  .os-shell:is([data-platform="desktop"], [data-platform="web"])
+    .os-command-launcher
+    kbd {
+    display: none;
+  }
+
+  .os-shell:is([data-platform="desktop"], [data-platform="web"]) .os-content {
+    min-height: calc(100dvh - 60px);
+    padding: 20px;
+    scroll-padding: 16px;
+  }
+
+  .os-shell:is([data-platform="desktop"], [data-platform="web"])
+    .os-content__view {
+    min-height: 100%;
+    overflow-x: visible;
+    will-change: auto;
+    animation: workspace-route-enter 140ms ease-out both;
+  }
+
+  .os-shell:is(
+      [data-platform="desktop"],
+      [data-platform="web"]
+    )[data-destination="chat"]
+    .os-content {
+    height: auto;
+    min-height: 0;
+    padding: 20px;
+    overflow: hidden;
+  }
+
+  .os-shell:is([data-platform="desktop"], [data-platform="web"])
+    .os-mobile-nav {
+    display: none;
+  }
+
+  .os-shell:is([data-platform="desktop"], [data-platform="web"])
+    .home-greeting__meetings {
+    display: inline-flex;
+  }
+
+  .os-shell:is([data-platform="desktop"], [data-platform="web"])
+    .home-greeting__decisions.home-greeting__mobile-settings {
+    display: none;
   }
 }
 
