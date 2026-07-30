@@ -84,6 +84,8 @@ pub enum GoogleAuthError {
     IdentityRejected,
     #[error("Google identity provider is temporarily unavailable")]
     ProviderUnavailable,
+    #[error("Google returned unsupported provider data")]
+    ProviderDataInvalid,
     #[error("Google Gmail history ID expired")]
     GmailHistoryIdExpired,
     #[error("Google Gmail API is not enabled for the OAuth project")]
@@ -1400,18 +1402,18 @@ impl GoogleChatAdapter {
             .await
             .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
         if !response.status().is_success() {
-            return Err(classify_provider_status(response.status().as_u16()));
+            return Err(classify_chat_auth_status(response.status().as_u16()));
         }
         if !is_json_response(&response) {
             return Err(GoogleAuthError::ProviderUnavailable);
         }
         let payload = bounded_body(response, MAX_TOKEN_RESPONSE_BYTES).await?;
         let response: GoogleRefreshTokenResponse =
-            serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
-        Ok(SecretString::from(validate_text(
-            response.access_token,
-            MAX_TOKEN_RESPONSE_BYTES,
-        )?))
+            serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderDataInvalid)?;
+        Ok(SecretString::from(
+            validate_text(response.access_token, MAX_TOKEN_RESPONSE_BYTES)
+                .map_err(|_| GoogleAuthError::ProviderDataInvalid)?,
+        ))
     }
 
     /// Best-effort revokes a linked Chat refresh credential. Local deletion
@@ -1441,7 +1443,7 @@ impl GoogleChatAdapter {
         if response.status().is_success() {
             Ok(())
         } else {
-            Err(classify_provider_status(response.status().as_u16()))
+            Err(classify_chat_auth_status(response.status().as_u16()))
         }
     }
 
@@ -1475,18 +1477,21 @@ impl GoogleChatAdapter {
                 .await
                 .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
             if !response.status().is_success() {
-                return Err(classify_provider_status(response.status().as_u16()));
+                return Err(classify_chat_read_status(response.status().as_u16()));
             }
             if !is_json_response(&response) {
                 return Err(GoogleAuthError::ProviderUnavailable);
             }
             let payload = bounded_body(response, MAX_CHAT_LIST_RESPONSE_BYTES).await?;
-            let page: GoogleChatSpacePage =
-                serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
+            let page: GoogleChatSpacePage = serde_json::from_slice(&payload)
+                .map_err(|_| GoogleAuthError::ProviderDataInvalid)?;
             for space in page.spaces {
-                spaces.push(normalize_chat_space(space)?);
+                spaces.push(
+                    normalize_chat_space(space)
+                        .map_err(|_| GoogleAuthError::ProviderDataInvalid)?,
+                );
                 if spaces.len() > MAX_CHAT_ITEMS {
-                    return Err(GoogleAuthError::ProviderRejected);
+                    return Err(GoogleAuthError::ProviderDataInvalid);
                 }
             }
             page_token = page.next_page_token;
@@ -1494,7 +1499,7 @@ impl GoogleChatAdapter {
                 return Ok(spaces);
             }
         }
-        Err(GoogleAuthError::ProviderRejected)
+        Err(GoogleAuthError::ProviderDataInvalid)
     }
 
     /// Lists newly created public messages for one validated Chat space.
@@ -1542,28 +1547,21 @@ impl GoogleChatAdapter {
                 .await
                 .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
             if !response.status().is_success() {
-                return Err(classify_provider_status(response.status().as_u16()));
+                return Err(classify_chat_read_status(response.status().as_u16()));
             }
             if !is_json_response(&response) {
                 return Err(GoogleAuthError::ProviderUnavailable);
             }
             let payload = bounded_body(response, MAX_CHAT_LIST_RESPONSE_BYTES).await?;
-            let page: GoogleChatMessagePage =
-                serde_json::from_slice(&payload).map_err(|_| GoogleAuthError::ProviderRejected)?;
-            for message in page.messages {
-                if let Some(message) = normalize_chat_message(message)? {
-                    messages.push(message);
-                }
-                if messages.len() > MAX_CHAT_ITEMS {
-                    return Err(GoogleAuthError::ProviderRejected);
-                }
-            }
+            let page: GoogleChatMessagePage = serde_json::from_slice(&payload)
+                .map_err(|_| GoogleAuthError::ProviderDataInvalid)?;
+            append_normalized_chat_messages(&mut messages, page.messages)?;
             page_token = page.next_page_token;
             if page_token.is_none() {
                 return Ok(messages);
             }
         }
-        Err(GoogleAuthError::ProviderRejected)
+        Err(GoogleAuthError::ProviderDataInvalid)
     }
 
     /// Adds the ingestion acknowledgement reaction after a message has been
@@ -2323,7 +2321,7 @@ struct GoogleChatSpaceResource {
 #[serde(rename_all = "camelCase")]
 struct GoogleChatMessagePage {
     #[serde(default)]
-    messages: Vec<GoogleChatMessageResource>,
+    messages: Vec<serde_json::Value>,
     next_page_token: Option<String>,
 }
 
@@ -2452,11 +2450,15 @@ fn normalize_chat_message(
         _ => return Ok(None),
     };
     let name = validate_text(resource.name, 1_024)?;
-    let _ = validated_chat_message_segments(&name)?;
+    let message_segments = validated_chat_message_segments(&name)?;
     let thread_name = resource
         .thread
         .and_then(|thread| thread.name)
-        .map(|value| validate_text(value, 1_024))
+        .map(|value| {
+            let value = validate_text(value, 1_024)?;
+            let _ = validated_chat_thread_segments(&value, message_segments[1])?;
+            Ok::<_, GoogleAuthError>(value)
+        })
         .transpose()?;
     let (sender_provider_name, sender_name) = resource
         .sender
@@ -2468,7 +2470,9 @@ fn normalize_chat_message(
                 .transpose()?;
             Ok::<_, GoogleAuthError>((provider_name, display_name))
         })
-        .transpose()?
+        .transpose()
+        .ok()
+        .flatten()
         .unwrap_or((None, None));
     let create_time = OffsetDateTime::parse(
         &resource.create_time,
@@ -2483,6 +2487,25 @@ fn normalize_chat_message(
         text,
         create_time,
     }))
+}
+
+fn append_normalized_chat_messages(
+    messages: &mut Vec<GoogleChatMessageEntry>,
+    resources: Vec<serde_json::Value>,
+) -> Result<(), GoogleAuthError> {
+    for resource in resources {
+        let Ok(resource) = serde_json::from_value::<GoogleChatMessageResource>(resource) else {
+            continue;
+        };
+        let Ok(Some(message)) = normalize_chat_message(resource) else {
+            continue;
+        };
+        messages.push(message);
+        if messages.len() > MAX_CHAT_ITEMS {
+            return Err(GoogleAuthError::ProviderDataInvalid);
+        }
+    }
+    Ok(())
 }
 
 fn validate_chat_user_name(value: String) -> Result<String, GoogleAuthError> {
@@ -3597,6 +3620,22 @@ fn classify_provider_status(status: u16) -> GoogleAuthError {
     }
 }
 
+const fn classify_chat_auth_status(status: u16) -> GoogleAuthError {
+    match status {
+        400 | 401 | 403 => GoogleAuthError::ProviderRejected,
+        429 | 500..=599 => GoogleAuthError::ProviderUnavailable,
+        _ => GoogleAuthError::ProviderDataInvalid,
+    }
+}
+
+const fn classify_chat_read_status(status: u16) -> GoogleAuthError {
+    match status {
+        401 | 403 => GoogleAuthError::ProviderRejected,
+        429 | 500..=599 => GoogleAuthError::ProviderUnavailable,
+        _ => GoogleAuthError::ProviderDataInvalid,
+    }
+}
+
 async fn classify_gmail_provider_response(response: Response) -> GoogleAuthError {
     let status = response.status().as_u16();
     if status != 403 || !is_json_response(&response) {
@@ -3765,6 +3804,102 @@ mod tests {
         .expect("app text message should remain");
 
         assert_eq!(message.sender_provider_name.as_deref(), Some("users/app"));
+    }
+
+    #[test]
+    fn chat_message_keeps_safe_content_when_optional_sender_metadata_is_malformed() {
+        let message = normalize_chat_message(GoogleChatMessageResource {
+            name: "spaces/AAAAAAAAAAA/messages/DDDDDDDDDDD.DDDDDDDDDDD".to_owned(),
+            text: Some("추가 확인이 필요합니다.".to_owned()),
+            create_time: "2026-07-23T00:00:00Z".to_owned(),
+            sender: Some(GoogleChatSender {
+                name: Some("unexpected-sender".to_owned()),
+                display_name: Some("업무 담당자".to_owned()),
+            }),
+            thread: None,
+        })
+        .expect("critical message fields should remain valid")
+        .expect("safe text should remain");
+
+        assert_eq!(message.text, "추가 확인이 필요합니다.");
+        assert!(message.sender_provider_name.is_none());
+        assert!(message.sender_name.is_none());
+    }
+
+    #[test]
+    fn chat_message_page_skips_malformed_items_and_keeps_valid_neighbors() {
+        let mut messages = Vec::new();
+        append_normalized_chat_messages(
+            &mut messages,
+            vec![
+                serde_json::json!(null),
+                serde_json::json!({
+                    "name": "spaces/AAAAAAAAAAA/messages/..",
+                    "text": "잘못된 메시지 이름",
+                    "createTime": "2026-07-23T00:00:00Z"
+                }),
+                serde_json::json!({
+                    "name": "spaces/AAAAAAAAAAA/messages/EEEEEEEEEEE.EEEEEEEEEEE",
+                    "text": "다른 공간의 스레드",
+                    "createTime": "2026-07-23T00:00:00Z",
+                    "thread": {"name": "spaces/OTHER/threads/thread-1"}
+                }),
+                serde_json::json!({
+                    "name": "spaces/AAAAAAAAAAA/messages/FFFFFFFFFFF.FFFFFFFFFFF",
+                    "text": "제어 문자\u{0000}",
+                    "createTime": "2026-07-23T00:00:00Z"
+                }),
+                serde_json::json!({
+                    "name": "spaces/AAAAAAAAAAA/messages/GGGGGGGGGGG.GGGGGGGGGGG",
+                    "text": "잘못된 시간",
+                    "createTime": "not-a-time"
+                }),
+                serde_json::json!({
+                    "name": "spaces/AAAAAAAAAAA/messages/HHHHHHHHHHH.HHHHHHHHHHH",
+                    "text": "확인해 주세요.",
+                    "createTime": "2026-07-23T00:00:01Z",
+                    "thread": {"name": "spaces/AAAAAAAAAAA/threads/thread-1"}
+                }),
+            ],
+        )
+        .expect("one malformed provider item must not fail the page");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, "확인해 주세요.");
+        assert_eq!(
+            messages[0].thread_name.as_deref(),
+            Some("spaces/AAAAAAAAAAA/threads/thread-1")
+        );
+    }
+
+    #[test]
+    fn chat_http_auth_failures_are_narrowly_classified() {
+        for status in [400, 401, 403] {
+            assert_eq!(
+                classify_chat_auth_status(status),
+                GoogleAuthError::ProviderRejected
+            );
+        }
+        assert_eq!(
+            classify_chat_auth_status(404),
+            GoogleAuthError::ProviderDataInvalid
+        );
+        assert_eq!(
+            classify_chat_read_status(400),
+            GoogleAuthError::ProviderDataInvalid
+        );
+        assert_eq!(
+            classify_chat_read_status(401),
+            GoogleAuthError::ProviderRejected
+        );
+        assert_eq!(
+            classify_chat_read_status(404),
+            GoogleAuthError::ProviderDataInvalid
+        );
+        assert_eq!(
+            classify_chat_read_status(429),
+            GoogleAuthError::ProviderUnavailable
+        );
     }
 
     #[test]

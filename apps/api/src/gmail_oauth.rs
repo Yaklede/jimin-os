@@ -402,9 +402,9 @@ impl GmailOAuthError {
 
     fn from_google(error: GoogleAuthError) -> Self {
         match error {
-            GoogleAuthError::ProviderUnavailable | GoogleAuthError::GmailHistoryIdExpired => {
-                Self::ProviderUnavailable
-            }
+            GoogleAuthError::ProviderUnavailable
+            | GoogleAuthError::ProviderDataInvalid
+            | GoogleAuthError::GmailHistoryIdExpired => Self::ProviderUnavailable,
             GoogleAuthError::GmailApiNotEnabled => Self::ApiNotEnabled,
             GoogleAuthError::GmailPermissionDenied => Self::PermissionDenied,
             GoogleAuthError::InvalidRequest | GoogleAuthError::ProviderRejected => {

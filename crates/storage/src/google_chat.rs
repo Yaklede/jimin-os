@@ -900,7 +900,7 @@ impl Database {
              FROM project_google_chat_sources AS source
              JOIN google_chat_accounts AS account ON account.id = source.account_id
              WHERE source.id = $1 AND source.enabled = TRUE
-               AND account.status IN ('active', 'error')",
+               AND account.status IN ('active', 'error', 'reauth_required')",
         )
         .bind(source_id)
         .fetch_optional(self.pool())
@@ -958,8 +958,7 @@ impl Database {
                     content_text, received_at, status, promoted_task_id
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    CASE WHEN $11::UUID IS NULL THEN 'pending' ELSE 'promoted' END,
-                    $11
+                    'pending', $11
                  )
                  ON CONFLICT (source_id, provider_message_name) DO NOTHING
                  RETURNING id",
@@ -1730,6 +1729,7 @@ impl Database {
              FROM project_inflow_items
              WHERE id = $1 AND user_id = $2 AND project_id = $3
                AND version = $4 AND status = 'pending'
+               AND promoted_task_id IS NULL
              FOR UPDATE",
         )
         .bind(command.item_id)

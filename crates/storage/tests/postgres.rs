@@ -1286,17 +1286,22 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             .len(),
         1
     );
-    assert!(
-        database
-            .project_inflow_items(
-                owner.profile.id,
-                first_project.id,
-                Some(ProjectInflowStatus::Pending),
-            )
-            .await
-            .expect("pending inflow should remain readable")
-            .is_empty(),
-        "a reply in an already promoted thread must not become another task candidate"
+    let pending_follow_ups = database
+        .project_inflow_items(
+            owner.profile.id,
+            first_project.id,
+            Some(ProjectInflowStatus::Pending),
+        )
+        .await
+        .expect("pending follow-up attention should remain readable");
+    assert_eq!(pending_follow_ups.len(), 1);
+    assert_eq!(
+        pending_follow_ups[0].promoted_task_id, promoted.promoted_task_id,
+        "a reply in an already promoted thread must keep the existing task link"
+    );
+    assert_eq!(
+        pending_follow_ups[0].provider_thread_name,
+        promoted.provider_thread_name
     );
     let promoted_with_follow_up = database
         .project_inflow_items(
@@ -1306,7 +1311,7 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         )
         .await
         .expect("promoted thread with its follow-up should load");
-    assert_eq!(promoted_with_follow_up.len(), 3);
+    assert_eq!(promoted_with_follow_up.len(), 2);
     assert!(promoted_with_follow_up.iter().all(|item| {
         item.promoted_task_id == promoted.promoted_task_id
             && item.provider_thread_name == promoted.provider_thread_name
@@ -1369,11 +1374,60 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
     );
     assert!(
         database
+            .promote_project_inflow_item(&PromoteProjectInflowItem {
+                user_id: owner.profile.id,
+                project_id: first_project.id,
+                item_id: pending_follow_ups[0].id,
+                expected_version: pending_follow_ups[0].version,
+                task_id: Uuid::now_v7(),
+                title: "중복 후속 일감".to_owned(),
+                notes: None,
+                assignee_name: None,
+                priority: 1,
+                due_at: None,
+            })
+            .await
+            .expect("linked follow-up promotion should be rejected safely")
+            .is_none(),
+        "linked follow-up attention must not create a duplicate task"
+    );
+    assert!(
+        database
             .recent_project_inflow_decisions_for_user(owner.profile.id)
             .await
             .expect("recent decision history should load")
             .iter()
             .any(|item| item.id == promoted.id)
+    );
+    database
+        .mark_google_chat_source_failure(source.id, "google_chat.authorization_rejected", true)
+        .await
+        .expect("reauth-required source state should persist");
+    assert!(
+        !database
+            .active_google_chat_source_ids()
+            .await
+            .expect("periodic source list should remain readable")
+            .contains(&source.id),
+        "periodic synchronization must continue to exclude reauth-required accounts"
+    );
+    let reauth_connection = database
+        .google_chat_source_sync_connection(source.id)
+        .await
+        .expect("manual retry connection should remain readable")
+        .expect("stored credential should be available for manual revalidation");
+    assert!(reauth_connection.account_needs_recovery);
+    database
+        .apply_google_chat_messages(&reauth_connection, &[])
+        .await
+        .expect("a successful manual credential check should recover the source");
+    assert!(
+        database
+            .active_google_chat_source_ids()
+            .await
+            .expect("recovered periodic source list should remain readable")
+            .contains(&source.id),
+        "a successful manual retry must restore periodic synchronization"
     );
     let pool = sqlx::PgPool::connect(&database_url)
         .await

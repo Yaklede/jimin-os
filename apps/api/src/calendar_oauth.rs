@@ -586,6 +586,7 @@ impl CalendarOAuthError {
     fn from_google(error: GoogleAuthError) -> Self {
         match error {
             GoogleAuthError::ProviderUnavailable => Self::ProviderUnavailable,
+            GoogleAuthError::ProviderDataInvalid => Self::SyncDataInvalid,
             GoogleAuthError::GmailHistoryIdExpired
             | GoogleAuthError::GmailApiNotEnabled
             | GoogleAuthError::GmailPermissionDenied
@@ -601,7 +602,8 @@ impl CalendarOAuthError {
 
     fn from_sync_google(error: GoogleAuthError) -> Self {
         match error {
-            GoogleAuthError::InvalidRequest
+            GoogleAuthError::ProviderDataInvalid
+            | GoogleAuthError::InvalidRequest
             | GoogleAuthError::ProviderRejected
             | GoogleAuthError::CalendarSyncTokenExpired => Self::SyncDataInvalid,
             other => Self::from_google(other),

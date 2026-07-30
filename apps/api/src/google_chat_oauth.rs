@@ -234,7 +234,6 @@ impl GoogleChatOAuthRuntime {
     pub async fn list_source_messages(
         &self,
         connection: &GoogleChatSourceSyncConnection,
-        reconcile_recent_senders: bool,
     ) -> Result<Vec<ProviderGoogleChatMessage>, GoogleChatOAuthError> {
         let refresh_token = self.crypto.decrypt(
             &connection.refresh_token,
@@ -247,7 +246,6 @@ impl GoogleChatOAuthRuntime {
             .map_err(GoogleChatOAuthError::from_google)?;
         let created_after = Some(source_messages_created_after(
             connection,
-            reconcile_recent_senders,
             OffsetDateTime::now_utc(),
         ));
         let messages = self
@@ -504,19 +502,11 @@ const fn completion_reply_failure_code(error: GoogleChatWriteError) -> &'static 
 
 fn source_messages_created_after(
     connection: &GoogleChatSourceSyncConnection,
-    reconcile_recent_senders: bool,
     now: OffsetDateTime,
 ) -> OffsetDateTime {
-    connection.last_provider_message_at.map_or_else(
-        || now - INITIAL_SYNC_LOOKBACK,
-        |last| {
-            if reconcile_recent_senders && connection.last_successful_sync_at.is_some() {
-                last - INITIAL_SYNC_LOOKBACK
-            } else {
-                last
-            }
-        },
-    )
+    connection
+        .last_provider_message_at
+        .unwrap_or(now - INITIAL_SYNC_LOOKBACK)
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -529,6 +519,8 @@ pub enum GoogleChatOAuthError {
     ProviderRejected,
     #[error("Google Chat is temporarily unavailable")]
     ProviderUnavailable,
+    #[error("Google Chat returned unsupported synchronization data")]
+    SyncDataInvalid,
     #[error("Google Chat did not grant required permissions")]
     RequiredScopeMissing,
     #[error("Google Chat credential encryption failed")]
@@ -543,6 +535,7 @@ impl GoogleChatOAuthError {
             Self::InvalidCallback => "google_chat.invalid_callback",
             Self::ProviderRejected => "google_chat.authorization_rejected",
             Self::ProviderUnavailable => "google_chat.provider_unavailable",
+            Self::SyncDataInvalid => "google_chat.sync_data_invalid",
             Self::RequiredScopeMissing => "google_chat.required_scope_missing",
             Self::Encryption => "google_chat.credential_encryption_failed",
         }
@@ -550,7 +543,7 @@ impl GoogleChatOAuthError {
 
     #[must_use]
     pub const fn retryable(self) -> bool {
-        matches!(self, Self::ProviderUnavailable)
+        matches!(self, Self::ProviderUnavailable | Self::SyncDataInvalid)
     }
 
     #[must_use]
@@ -562,8 +555,10 @@ impl GoogleChatOAuthError {
         match error {
             GoogleAuthError::ProviderUnavailable => Self::ProviderUnavailable,
             GoogleAuthError::IdentityRejected => Self::InvalidCallback,
-            GoogleAuthError::InvalidRequest
-            | GoogleAuthError::ProviderRejected
+            GoogleAuthError::ProviderDataInvalid | GoogleAuthError::InvalidRequest => {
+                Self::SyncDataInvalid
+            }
+            GoogleAuthError::ProviderRejected
             | GoogleAuthError::GmailHistoryIdExpired
             | GoogleAuthError::GmailApiNotEnabled
             | GoogleAuthError::GmailPermissionDenied
@@ -748,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn first_manual_sync_respects_fresh_only_connection_cursor() {
+    fn every_sync_resumes_from_the_latest_provider_cursor() {
         let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20);
         let connected_at = now - Duration::minutes(2);
         let connection = GoogleChatSourceSyncConnection {
@@ -772,14 +767,22 @@ mod tests {
         };
 
         assert_eq!(
-            source_messages_created_after(&connection, true, now),
+            source_messages_created_after(&connection, now),
             connected_at
         );
         let mut existing = connection;
         existing.last_successful_sync_at = Some(now - Duration::minutes(1));
-        assert_eq!(
-            source_messages_created_after(&existing, true, now),
-            connected_at - INITIAL_SYNC_LOOKBACK
-        );
+        assert_eq!(source_messages_created_after(&existing, now), connected_at);
+    }
+
+    #[test]
+    fn malformed_chat_payload_does_not_force_account_reauthorization() {
+        let error = GoogleChatOAuthError::from_google(GoogleAuthError::ProviderDataInvalid);
+
+        assert_eq!(error, GoogleChatOAuthError::SyncDataInvalid);
+        assert!(error.retryable());
+        assert!(!error.reauth_required());
+        assert_eq!(error.failure_code(), "google_chat.sync_data_invalid");
+        assert!(GoogleChatOAuthError::ProviderRejected.reauth_required());
     }
 }

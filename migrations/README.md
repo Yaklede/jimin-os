@@ -195,3 +195,15 @@ rollback after new replies are ingested requires the verified pre-migration
 backup so the previous image does not silently hide recent thread activity.
 
 Rollback uses the previous image together with a verified database restore. Do not edit an applied migration; add a new compatible migration instead.
+
+Migration `0048_google_chat_follow_up_attention.sql` lets a reply on an
+already-promoted Google Chat thread return to pending attention while retaining
+the existing task link. Apply it to an empty database and a restored version-47
+backup, then verify that promoted threads accept a new pending reply with the
+same `promoted_task_id` and that fresh pending candidates still have no task
+link. Confirm `jimin_schema_metadata.schema_version = 48`.
+
+Rollback uses the previous image together with a verified database restore.
+Rows containing pending or dismissed follow-up attention must be handled before
+restoring the older promotion-state constraint, so rollback should restore the
+verified pre-migration backup rather than mutate those links in place.

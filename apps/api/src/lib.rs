@@ -6917,7 +6917,16 @@ async fn sync_project_google_chat_source(
             }),
             Err(error) => storage_error_response(&error, request_id),
         },
-        Err(error) => google_chat_oauth_error_response(error, request_id),
+        Err(error) => {
+            let _ = planning
+                .mark_google_chat_source_failure(
+                    source_id,
+                    error.failure_code(),
+                    error.reauth_required(),
+                )
+                .await;
+            google_chat_oauth_error_response(error, request_id)
+        }
     }
 }
 
@@ -7184,9 +7193,7 @@ async fn synchronize_google_chat_source(
     }) {
         return Err(GoogleChatOAuthError::ProviderRejected);
     }
-    let messages = runtime
-        .list_source_messages(&connection, expected_owner.is_some())
-        .await?;
+    let messages = runtime.list_source_messages(&connection).await?;
     let acknowledgements = planning
         .apply_google_chat_messages(&connection, &messages)
         .await
@@ -7610,6 +7617,10 @@ fn google_chat_oauth_error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "Google Chat에 연결할 수 없어요. 잠시 후 다시 시도해 주세요.",
         ),
+        GoogleChatOAuthError::SyncDataInvalid => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "일부 Google Chat 메시지를 불러오지 못했어요. 잠시 후 다시 확인해 주세요.",
+        ),
         GoogleChatOAuthError::RequiredScopeMissing => (
             StatusCode::FORBIDDEN,
             "프로젝트 메시지를 확인할 권한이 부족해요. 회사 계정을 다시 연결해 주세요.",
@@ -7634,6 +7645,9 @@ fn google_chat_callback_error_page(error: GoogleChatOAuthError) -> Response {
     let message = match error {
         GoogleChatOAuthError::ProviderUnavailable => {
             "Google Chat에 연결할 수 없어요. 잠시 후 앱에서 다시 시도해 주세요."
+        }
+        GoogleChatOAuthError::SyncDataInvalid => {
+            "일부 Google Chat 메시지를 불러오지 못했어요. 앱에서 다시 확인해 주세요."
         }
         GoogleChatOAuthError::RequiredScopeMissing => {
             "Chat 공간과 메시지를 확인할 권한을 허용한 뒤 다시 연결해 주세요."
@@ -7866,10 +7880,20 @@ fn group_project_inflow_candidates(
                 .get(&(source_id, conversation_key))
                 .cloned()
                 .or_else(|| analyses_by_representative.get(&representative.id).cloned());
+            let linked_attention_is_visible = representative.promoted_task_id.is_some()
+                && !focus.sent_by_owner
+                && focus.sender_provider_name.as_deref() != Some("users/app")
+                && analysis.as_ref().is_some_and(|analysis| {
+                    matches!(
+                        analysis.classification,
+                        Some(InflowClassification::FollowUp | InflowClassification::Question)
+                    )
+                });
             if representative.status == ProjectInflowStatus::Pending
                 && analysis.as_ref().is_some_and(|analysis| {
                     analysis.state == InflowAnalysisState::Ready
                         && analysis.classification != Some(InflowClassification::NewTask)
+                        && !linked_attention_is_visible
                 })
             {
                 return None;
@@ -10657,6 +10681,112 @@ mod tests {
                 .suggested_task_notes
                 .contains("보낸 사람 정보 없음")
         );
+    }
+
+    #[test]
+    fn linked_chat_attention_only_shows_external_questions_and_follow_ups() {
+        let project_id = Uuid::now_v7();
+        let source_id = Uuid::now_v7();
+        let promoted_task_id = Uuid::now_v7();
+        let make_case = |suffix: &str,
+                         sender_provider_name: &str,
+                         sent_by_owner: bool,
+                         classification: InflowClassification| {
+            let thread_name = format!("spaces/company/threads/{suffix}");
+            let item = ProjectInflowItem {
+                id: Uuid::now_v7(),
+                project_id,
+                project_name: "비스킷링크".to_owned(),
+                source_id,
+                source_name: "PAYMENTS CS".to_owned(),
+                provider_thread_name: Some(thread_name.clone()),
+                sender_provider_name: Some(sender_provider_name.to_owned()),
+                sender_name: Some("업무 담당자".to_owned()),
+                sent_by_owner,
+                content_text: format!("{suffix} 후속 메시지"),
+                received_at: OffsetDateTime::UNIX_EPOCH,
+                status: ProjectInflowStatus::Pending,
+                promoted_task_id: Some(promoted_task_id),
+                acknowledged_at: Some(OffsetDateTime::UNIX_EPOCH),
+                completion_requested_at: None,
+                completion_reaction_at: None,
+                completion_reply_at: None,
+                completion_delivery_error_code: None,
+                completion_delivery_attempt_count: 0,
+                version: 1,
+            };
+            let analysis = ProjectInflowAnalysis {
+                id: Uuid::now_v7(),
+                project_id,
+                source_id,
+                conversation_key: format!("thread:{thread_name}"),
+                representative_item_id: item.id,
+                state: InflowAnalysisState::Ready,
+                classification: Some(classification),
+                confidence: Some(95),
+                summary: Some(format!("{suffix} 분류 결과")),
+                suggested_task_title: None,
+                suggested_action_items: Vec::new(),
+                suggested_completion_criteria: None,
+                suggested_assignee_name: None,
+                suggested_due_at: None,
+                suggested_priority: None,
+                linked_task_id: Some(promoted_task_id),
+                error_code: None,
+                version: 1,
+            };
+            (item, analysis)
+        };
+        let external_question = make_case(
+            "external-question",
+            "users/123456789012345678901",
+            false,
+            InflowClassification::Question,
+        );
+        let external_follow_up = make_case(
+            "external-follow-up",
+            "users/123456789012345678902",
+            false,
+            InflowClassification::FollowUp,
+        );
+        let external_status = make_case(
+            "external-status",
+            "users/123456789012345678903",
+            false,
+            InflowClassification::StatusUpdate,
+        );
+        let owner_question = make_case(
+            "owner-question",
+            "users/123456789012345678904",
+            true,
+            InflowClassification::Question,
+        );
+        let app_question = make_case(
+            "app-question",
+            "users/app",
+            false,
+            InflowClassification::Question,
+        );
+        let expected_ids = BTreeSet::from([external_question.0.id, external_follow_up.0.id]);
+        let cases = [
+            external_question,
+            external_follow_up,
+            external_status,
+            owner_question,
+            app_question,
+        ];
+        let (items, analyses): (Vec<_>, Vec<_>) = cases.into_iter().unzip();
+
+        let candidates = group_project_inflow_candidates(items, analyses);
+        let actual_ids = candidates
+            .iter()
+            .map(|candidate| candidate.representative.id)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(actual_ids, expected_ids);
+        assert!(candidates.iter().all(|candidate| {
+            candidate.representative.promoted_task_id == Some(promoted_task_id)
+        }));
     }
 
     #[test]
