@@ -41,6 +41,10 @@ import {
   type WebhookDestinationMode,
   type WebhookDelivery,
 } from "../api/webhooks";
+import {
+  type ProjectItsmConnection,
+  type ProjectItsmConnectionSnapshot,
+} from "../api/itsm";
 import { copy } from "../copy";
 import {
   SkeletonBlock,
@@ -50,6 +54,7 @@ import {
 import { EmptySurface } from "./HomeWorkspace";
 import { GoalsPanel } from "./GoalsPanel";
 import { ProjectWebhookPanel } from "./ProjectWebhookPanel";
+import { ProjectItsmConnectionPanel } from "./ProjectItsmConnectionPanel";
 import {
   ProjectInflowPanel,
   projectInflowAttentionCount,
@@ -76,6 +81,7 @@ type ProjectsWorkspaceProps = {
   tasks: Task[];
   webhooks: ProjectWebhook[];
   webhookDeliveries: WebhookDelivery[];
+  itsmConnection: ProjectItsmConnectionSnapshot | undefined;
   googleChatAccountsAvailable: boolean;
   googleChatAccounts: GoogleChatAccount[];
   googleChatSpaces: GoogleChatSpace[];
@@ -87,11 +93,13 @@ type ProjectsWorkspaceProps = {
   loaded: boolean;
   loading: boolean;
   webhookLoading: boolean;
+  itsmLoading: boolean;
   inflowLoading: boolean;
   saving: boolean;
   error: string | undefined;
   weeklyReportError: string | undefined;
   inflowError: string | undefined;
+  itsmError: string | undefined;
   onSelectWorkspace(workspaceId: string): void;
   onSelectProject(projectId: string): void;
   onOpenGoalTask(taskId: string, projectId: string): void;
@@ -172,6 +180,9 @@ type ProjectsWorkspaceProps = {
   onTestWebhook(webhook: ProjectWebhook): Promise<void>;
   onDeleteWebhook(webhook: ProjectWebhook): Promise<void>;
   onRetryWebhookDelivery(delivery: WebhookDelivery): Promise<void>;
+  onReloadItsmConnection(): Promise<void>;
+  onConnectItsm(itsmProjectId: string): Promise<void>;
+  onDisconnectItsm(connection: ProjectItsmConnection): Promise<void>;
   onConnectGoogleChatAccount(): Promise<void>;
   onLoadGoogleChatSpaces(accountId: string): Promise<void>;
   onCreateGoogleChatSource(input: {
@@ -201,6 +212,7 @@ export function ProjectsWorkspace({
   tasks,
   webhooks,
   webhookDeliveries,
+  itsmConnection,
   googleChatAccountsAvailable,
   googleChatAccounts,
   googleChatSpaces,
@@ -212,11 +224,13 @@ export function ProjectsWorkspace({
   loaded,
   loading,
   webhookLoading,
+  itsmLoading,
   inflowLoading,
   saving,
   error,
   weeklyReportError,
   inflowError,
+  itsmError,
   onSelectWorkspace,
   onSelectProject,
   onOpenGoalTask,
@@ -235,6 +249,9 @@ export function ProjectsWorkspace({
   onTestWebhook,
   onDeleteWebhook,
   onRetryWebhookDelivery,
+  onReloadItsmConnection,
+  onConnectItsm,
+  onDisconnectItsm,
   onConnectGoogleChatAccount,
   onLoadGoogleChatSpaces,
   onCreateGoogleChatSource,
@@ -303,6 +320,7 @@ export function ProjectsWorkspace({
   const rootOpenTasks = openTasks.filter((task) => !task.parentTaskId);
   const openTaskRows = taskHierarchyRows(openTasks);
   const inflowAttentionTotal = projectInflowAttentionCount(projectInflowItems);
+  const connectionTotal = projectConnectionCount(webhooks, itsmConnection);
 
   useEffect(() => {
     setTaskTitle("");
@@ -805,7 +823,7 @@ export function ProjectsWorkspace({
                   active={activeProjectTab === "integrations"}
                   label={copy.projects.detailTabs.integrations}
                   mobileLabel={copy.projects.detailTabsMobile.integrations}
-                  count={webhooks.length}
+                  count={connectionTotal}
                   icon={<PlugZap aria-hidden="true" />}
                   onSelect={setActiveProjectTab}
                 />
@@ -1277,18 +1295,52 @@ export function ProjectsWorkspace({
                 />
               )}
               {activeProjectTab === "integrations" && (
-                <ProjectWebhookPanel
-                  projectId={selectedProject.id}
-                  webhooks={webhooks}
-                  deliveries={webhookDeliveries}
-                  loading={webhookLoading}
-                  saving={saving}
-                  onCreate={onCreateWebhook}
-                  onUpdate={onUpdateWebhook}
-                  onTest={onTestWebhook}
-                  onDelete={onDeleteWebhook}
-                  onRetry={onRetryWebhookDelivery}
-                />
+                <div className="project-connections">
+                  <section
+                    className="project-connections__group"
+                    aria-labelledby="project-connections-input-title"
+                  >
+                    <header className="project-connections__heading">
+                      <h3 id="project-connections-input-title">
+                        {copy.projects.connectionsInputTitle}
+                      </h3>
+                      <p>{copy.projects.connectionsInputDescription}</p>
+                    </header>
+                    <ProjectItsmConnectionPanel
+                      key={selectedProject.id}
+                      snapshot={itsmConnection}
+                      loading={itsmLoading}
+                      saving={saving}
+                      problemMessage={itsmError}
+                      onReload={onReloadItsmConnection}
+                      onConnect={onConnectItsm}
+                      onDisconnect={onDisconnectItsm}
+                    />
+                  </section>
+                  <section
+                    className="project-connections__group"
+                    aria-labelledby="project-connections-output-title"
+                  >
+                    <header className="project-connections__heading">
+                      <h3 id="project-connections-output-title">
+                        {copy.projects.connectionsOutputTitle}
+                      </h3>
+                      <p>{copy.projects.connectionsOutputDescription}</p>
+                    </header>
+                    <ProjectWebhookPanel
+                      projectId={selectedProject.id}
+                      webhooks={webhooks}
+                      deliveries={webhookDeliveries}
+                      loading={webhookLoading}
+                      saving={saving}
+                      onCreate={onCreateWebhook}
+                      onUpdate={onUpdateWebhook}
+                      onTest={onTestWebhook}
+                      onDelete={onDeleteWebhook}
+                      onRetry={onRetryWebhookDelivery}
+                    />
+                  </section>
+                </div>
               )}
             </>
           ) : (
@@ -1303,6 +1355,13 @@ export function ProjectsWorkspace({
       </div>
     </section>
   );
+}
+
+export function projectConnectionCount(
+  webhooks: ProjectWebhook[],
+  itsmConnection: ProjectItsmConnectionSnapshot | undefined,
+): number {
+  return webhooks.length + (itsmConnection?.item?.enabled === true ? 1 : 0);
 }
 
 function ProjectDetailTabButton({

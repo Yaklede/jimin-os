@@ -328,6 +328,45 @@ export const projectCopy = {
   projectSaveNotice:
     "프로젝트를 저장하지 못했어요. 입력한 내용을 확인한 뒤 다시 시도해 주세요.",
   taskSaveNotice: "일을 추가하지 못했어요. 잠시 후 다시 시도해 주세요.",
+  connectionsInputTitle: "업무 자료 가져오기",
+  connectionsInputDescription:
+    "연결한 서비스의 자료를 읽어 업무 내용을 더 정확히 정리해요.",
+  connectionsOutputTitle: "프로젝트 알림 보내기",
+  connectionsOutputDescription:
+    "프로젝트와 일의 변화를 연결한 서비스로 보내요.",
+  itsmTitle: "ITSM 원문 확인",
+  itsmDescription:
+    "이 프로젝트에 들어온 대화에 ITSM 링크가 있으면 원문을 읽어 업무 내용을 정리해요.",
+  itsmAvailableDescription:
+    "ITSM 프로젝트 번호를 입력하면 새로 들어온 대화부터 적용돼요.",
+  itsmConnectedDescription: (projectId: string) =>
+    `ITSM 프로젝트 ${projectId}의 새 이슈 원문을 함께 확인하고 있어요.`,
+  itsmProjectIdLabel: "ITSM 프로젝트 번호",
+  itsmProjectIdDescription:
+    "연결할 ITSM 프로젝트의 숫자 번호예요. 인증 정보는 서버에만 보관해요.",
+  itsmProjectIdProblem: "ITSM 프로젝트 번호를 숫자로 입력해 주세요.",
+  itsmNeedsSetupTitle: "ITSM 연결 준비가 필요해요. 서버 설정을 확인해 주세요.",
+  itsmNeedsSetupDescription:
+    "서버에서 연결을 준비한 뒤 상태를 다시 확인해 주세요.",
+  itsmConnect: "ITSM 연결하기",
+  itsmConnecting: "연결하는 중",
+  itsmConnected: "연결됨",
+  itsmReload: "연결 상태 확인하기",
+  itsmReloading: "확인하는 중",
+  itsmDisconnect: "연결 해제",
+  itsmDisconnecting: "연결 해제하는 중",
+  itsmDisconnectConfirm:
+    "연결을 해제하면 새 대화의 ITSM 링크를 원문으로 확인하지 않아요. 이미 정리한 일은 그대로 남아요.",
+  itsmKeep: "계속 연결하기",
+  itsmDisconnectAction: "연결 해제하기",
+  itsmLoading: "ITSM 연결 상태를 확인하고 있어요.",
+  itsmLoadProblem:
+    "ITSM 연결 상태를 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
+  itsmConnectProblem: "ITSM을 연결하지 못했어요. 잠시 후 다시 시도해 주세요.",
+  itsmDisconnectProblem:
+    "ITSM 연결을 해제하지 못했어요. 최신 상태를 확인한 뒤 다시 시도해 주세요.",
+  itsmConnectedNotice: "이 프로젝트에 ITSM을 연결했어요.",
+  itsmDisconnectedNotice: "이 프로젝트의 ITSM 연결을 해제했어요.",
   webhookTitle: "연결된 웹훅",
   webhookDescription:
     "프로젝트와 일의 변화를 Google Chat 또는 Discord로 보내요.",

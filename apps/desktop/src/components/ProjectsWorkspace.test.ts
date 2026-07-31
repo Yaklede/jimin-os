@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { type Task } from "../api/planning";
-import { taskHierarchyRows } from "./ProjectsWorkspace";
+import { projectConnectionCount, taskHierarchyRows } from "./ProjectsWorkspace";
 
 function task(
   id: string,
@@ -42,5 +42,50 @@ describe("project task hierarchy", () => {
     expect(taskHierarchyRows([child])).toEqual([
       { task: child, depth: 0, childCount: 0 },
     ]);
+  });
+});
+
+describe("project connection count", () => {
+  it("counts active ITSM and webhook connections without counting availability", () => {
+    expect(
+      projectConnectionCount(
+        [
+          {
+            id: "webhook-1",
+            projectId: "project",
+            provider: "google_chat",
+            destinationLabel: "Google Chat",
+            mentionDirectory: { users: {} },
+            events: ["task.created"],
+            enabled: true,
+            version: 1,
+          },
+        ],
+        {
+          available: true,
+          item: {
+            id: "itsm-1",
+            projectId: "project",
+            itsmProjectId: "42",
+            enabled: true,
+            version: 1,
+          },
+        },
+      ),
+    ).toBe(2);
+
+    expect(projectConnectionCount([], { available: true, item: null })).toBe(0);
+    expect(
+      projectConnectionCount([], {
+        available: true,
+        item: {
+          id: "itsm-1",
+          projectId: "project",
+          itsmProjectId: "42",
+          enabled: false,
+          version: 1,
+        },
+      }),
+    ).toBe(0);
   });
 });

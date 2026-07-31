@@ -7286,6 +7286,274 @@ svg {
   font-weight: 600;
 }
 
+.project-connections {
+  display: grid;
+  min-width: 0;
+  gap: 18px;
+}
+
+.project-connections__group {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+}
+
+.project-connections__heading h3,
+.project-connections__heading p {
+  margin: 0;
+}
+
+.project-connections__heading h3 {
+  color: var(--text-strong);
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.project-connections__heading p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.project-itsm {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  padding: 20px;
+  background: var(--surface);
+  box-shadow: var(--shadow-panel);
+  container: project-itsm / inline-size;
+}
+
+.project-itsm__main {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.project-itsm__icon {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: var(--radius-control);
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.project-itsm__icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.project-itsm__copy {
+  min-width: 0;
+}
+
+.project-itsm__copy h4,
+.project-itsm__copy p {
+  margin: 0;
+}
+
+.project-itsm__copy h4 {
+  color: var(--text-strong);
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.project-itsm__copy p,
+.project-itsm__copy span,
+.project-itsm__unavailable p,
+.project-itsm__loading {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.project-itsm__copy p {
+  margin-top: 3px;
+}
+
+.project-itsm__copy span {
+  display: block;
+  margin-top: 6px;
+}
+
+.project-itsm__status {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.project-itsm__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.project-itsm__actions button {
+  min-height: 44px;
+}
+
+.project-itsm__actions--connect {
+  justify-content: flex-start;
+}
+
+.project-itsm__connect-form {
+  display: grid;
+  max-width: 620px;
+  gap: 7px;
+}
+
+.project-itsm__connect-form label {
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.project-itsm__connect-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.project-itsm__connect-row input {
+  min-width: 0;
+  min-height: 44px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  padding: 0 12px;
+  background: var(--surface-subtle);
+  color: var(--text-strong);
+  font: inherit;
+}
+
+.project-itsm__connect-row button {
+  min-height: 44px;
+}
+
+.project-itsm__connect-form > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.project-itsm__actions svg,
+.project-itsm__connect-row button svg,
+.project-itsm__unavailable button svg,
+.project-itsm__disconnect-confirmation button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.project-itsm__unavailable {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border-radius: var(--radius-control);
+  padding: 12px;
+  background: var(--surface-subtle);
+}
+
+.project-itsm__unavailable strong,
+.project-itsm__unavailable p {
+  margin: 0;
+}
+
+.project-itsm__unavailable strong {
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.project-itsm__unavailable p {
+  margin-top: 3px;
+}
+
+.project-itsm__loading {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.project-itsm__loading svg {
+  width: 17px;
+  height: 17px;
+}
+
+.project-itsm__disconnect-confirmation {
+  display: grid;
+  gap: 10px;
+  border-radius: var(--radius-control);
+  padding: 12px;
+  background: var(--danger-tint);
+}
+
+.project-itsm__disconnect-confirmation p {
+  margin: 0;
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.project-itsm__disconnect-confirmation > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@container project-itsm (max-width: 620px) {
+  .project-itsm {
+    padding: 16px;
+  }
+
+  .project-itsm__main {
+    grid-template-columns: 40px minmax(0, 1fr);
+  }
+
+  .project-itsm__status {
+    grid-column: 2;
+  }
+
+  .project-itsm__unavailable {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .project-itsm__actions,
+  .project-itsm__unavailable button {
+    width: 100%;
+  }
+
+  .project-itsm__actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .project-itsm__connect-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .project-itsm__actions button,
+  .project-itsm__connect-row button,
+  .project-itsm__unavailable button {
+    width: 100%;
+  }
+
+  .project-itsm__disconnect-confirmation > div {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .project-webhooks {
   display: grid;
   gap: 12px;

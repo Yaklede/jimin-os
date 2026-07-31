@@ -102,6 +102,13 @@ import {
   type WebhookDelivery,
 } from "./api/webhooks";
 import {
+  connectProjectItsm,
+  disconnectProjectItsm,
+  fetchProjectItsmConnection,
+  type ProjectItsmConnection,
+  type ProjectItsmConnectionSnapshot,
+} from "./api/itsm";
+import {
   type HomeSnapshot,
   type Recommendation,
   fetchHomeSnapshot,
@@ -305,6 +312,8 @@ export default function App() {
   const [goals, setGoals] = useState<Goal[]>([]);
   const [projectTasks, setProjectTasks] = useState<Task[]>([]);
   const [projectWebhooks, setProjectWebhooks] = useState<ProjectWebhook[]>([]);
+  const [projectItsmConnection, setProjectItsmConnection] =
+    useState<ProjectItsmConnectionSnapshot>();
   const [googleChatAccountsAvailable, setGoogleChatAccountsAvailable] =
     useState(false);
   const [googleChatAccounts, setGoogleChatAccounts] = useState<
@@ -334,6 +343,9 @@ export default function App() {
   >();
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [webhooksLoading, setWebhooksLoading] = useState(false);
+  const [itsmLoading, setItsmLoading] = useState(false);
+  const [itsmSaving, setItsmSaving] = useState(false);
+  const [itsmError, setItsmError] = useState<string>();
   const [inflowLoading, setInflowLoading] = useState(false);
   const [inflowSaving, setInflowSaving] = useState(false);
   const [inflowError, setInflowError] = useState<string>();
@@ -428,6 +440,7 @@ export default function App() {
   const conversationListRequestGateRef = useRef(new LatestRequestGate());
   const conversationMessageRequestGateRef = useRef(new LatestRequestGate());
   const gmailInflowRequestGateRef = useRef(new LatestRequestGate());
+  const projectItsmRequestGateRef = useRef(new LatestRequestGate());
   const openedAuthenticationUrl = useRef<string | undefined>(undefined);
   const activeSessionRef = useRef<SessionTokens | undefined>(undefined);
   const refreshInFlightRef = useRef<Promise<SessionTokens> | undefined>(
@@ -1466,6 +1479,35 @@ export default function App() {
     [apiBaseUrl, tokens, withAuthenticatedSession],
   );
 
+  const loadProjectItsmConnection = useCallback(
+    async (projectId: string) => {
+      if (!tokens) return undefined;
+      const requestGeneration = projectItsmRequestGateRef.current.begin();
+      setItsmLoading(true);
+      setItsmError(undefined);
+      try {
+        const snapshot = await withAuthenticatedSession((accessToken) =>
+          fetchProjectItsmConnection(apiBaseUrl, accessToken, projectId),
+        );
+        if (projectItsmRequestGateRef.current.isCurrent(requestGeneration)) {
+          setProjectItsmConnection(snapshot);
+        }
+        return snapshot;
+      } catch {
+        if (projectItsmRequestGateRef.current.isCurrent(requestGeneration)) {
+          setProjectItsmConnection(undefined);
+          setItsmError(copy.projects.itsmLoadProblem);
+        }
+        return undefined;
+      } finally {
+        if (projectItsmRequestGateRef.current.isCurrent(requestGeneration)) {
+          setItsmLoading(false);
+        }
+      }
+    },
+    [apiBaseUrl, tokens, withAuthenticatedSession],
+  );
+
   const loadProjectInflow = useCallback(
     async (projectId: string) => {
       if (!tokens) return undefined;
@@ -1644,6 +1686,8 @@ export default function App() {
         entityTypes.has("project_google_chat_source") ||
         entityTypes.has("project_inflow_item") ||
         entityTypes.has("project_inflow_analysis");
+      const affectsItsm =
+        forceFull || entityTypes.has("project_itsm_connection");
       const affectsGmail =
         forceFull ||
         entityTypes.has("gmail_account") ||
@@ -1748,6 +1792,9 @@ export default function App() {
         await loadGoogleChatAccounts();
         if (selectedProjectId) await loadProjectInflow(selectedProjectId);
       }
+      if (affectsItsm && selectedProjectId) {
+        await loadProjectItsmConnection(selectedProjectId);
+      }
       if (affectsGmail) {
         await Promise.all([loadGmailAccounts(), loadGmailInflow()]);
       }
@@ -1763,6 +1810,7 @@ export default function App() {
       loadGmailAccounts,
       loadGmailInflow,
       loadProjectInflow,
+      loadProjectItsmConnection,
       loadConversationMessages,
       withAuthenticatedSession,
     ],
@@ -1858,6 +1906,7 @@ export default function App() {
       conversationListRequestGateRef.current.invalidate();
       conversationMessageRequestGateRef.current.invalidate();
       gmailInflowRequestGateRef.current.invalidate();
+      projectItsmRequestGateRef.current.invalidate();
       await bootstrapTrustedNetworkDevice();
     }
   }
@@ -2308,13 +2357,24 @@ export default function App() {
   }, [destination, loadProjectsForWorkspace, selectedWorkspaceId]);
 
   useEffect(() => {
+    projectItsmRequestGateRef.current.invalidate();
+    setProjectItsmConnection(undefined);
+    setItsmError(undefined);
+    setItsmLoading(false);
+    setItsmSaving(false);
+  }, [selectedProjectId]);
+
+  useEffect(() => {
     if (selectedProjectId && destination === "projects") {
       void loadProjectTasks(selectedProjectId);
       void loadProjectWebhooks(selectedProjectId);
+      void loadProjectItsmConnection(selectedProjectId);
       void loadProjectInflow(selectedProjectId);
     } else if (!selectedProjectId) {
       setProjectTasks([]);
       setProjectWebhooks([]);
+      setProjectItsmConnection(undefined);
+      setItsmError(undefined);
       setWebhookDeliveries([]);
       setProjectGoogleChatSources([]);
       setProjectInflowItems([]);
@@ -2322,6 +2382,7 @@ export default function App() {
     }
   }, [
     loadProjectInflow,
+    loadProjectItsmConnection,
     loadProjectTasks,
     loadProjectWebhooks,
     destination,
@@ -3718,6 +3779,70 @@ export default function App() {
     }
   }
 
+  async function reloadWorkspaceItsm(): Promise<void> {
+    if (!selectedProjectId) return;
+    await loadProjectItsmConnection(selectedProjectId);
+  }
+
+  async function connectWorkspaceItsm(itsmProjectId: string): Promise<void> {
+    if (!selectedProjectId) throw new Error("project unavailable");
+    const requestGeneration = projectItsmRequestGateRef.current.begin();
+    setItsmSaving(true);
+    setItsmError(undefined);
+    try {
+      const connection = await withAuthenticatedSession((accessToken) =>
+        connectProjectItsm(
+          apiBaseUrl,
+          accessToken,
+          selectedProjectId,
+          itsmProjectId,
+        ),
+      );
+      if (projectItsmRequestGateRef.current.isCurrent(requestGeneration)) {
+        setProjectItsmConnection({ available: true, item: connection });
+      }
+    } catch (error) {
+      if (projectItsmRequestGateRef.current.isCurrent(requestGeneration)) {
+        setItsmError(copy.projects.itsmConnectProblem);
+      }
+      throw error;
+    } finally {
+      if (projectItsmRequestGateRef.current.isCurrent(requestGeneration)) {
+        setItsmSaving(false);
+      }
+    }
+  }
+
+  async function disconnectWorkspaceItsm(
+    connection: ProjectItsmConnection,
+  ): Promise<void> {
+    const requestGeneration = projectItsmRequestGateRef.current.begin();
+    setItsmSaving(true);
+    setItsmError(undefined);
+    try {
+      await withAuthenticatedSession((accessToken) =>
+        disconnectProjectItsm(apiBaseUrl, accessToken, connection),
+      );
+      if (projectItsmRequestGateRef.current.isCurrent(requestGeneration)) {
+        setProjectItsmConnection((current) => ({
+          available: current?.available ?? true,
+          item: null,
+        }));
+      }
+    } catch (error) {
+      if (projectItsmRequestGateRef.current.isCurrent(requestGeneration)) {
+        setItsmError(copy.projects.itsmDisconnectProblem);
+        setItsmSaving(false);
+        void loadProjectItsmConnection(connection.projectId);
+      }
+      throw error;
+    } finally {
+      if (projectItsmRequestGateRef.current.isCurrent(requestGeneration)) {
+        setItsmSaving(false);
+      }
+    }
+  }
+
   async function createWorkspaceGoogleChatSource(input: {
     accountId: string;
     spaceName: string;
@@ -4217,6 +4342,7 @@ export default function App() {
           ? Promise.all([
               loadProjectTasks(selectedProjectId),
               loadProjectWebhooks(selectedProjectId),
+              loadProjectItsmConnection(selectedProjectId),
               loadProjectInflow(selectedProjectId),
             ])
           : Promise.resolve(),
@@ -4508,6 +4634,7 @@ export default function App() {
                 tasks={projectTasks}
                 webhooks={projectWebhooks}
                 webhookDeliveries={webhookDeliveries}
+                itsmConnection={projectItsmConnection}
                 googleChatAccountsAvailable={googleChatAccountsAvailable}
                 googleChatAccounts={googleChatAccounts}
                 googleChatSpaces={googleChatSpaces}
@@ -4519,11 +4646,15 @@ export default function App() {
                 loaded={workspacesReady}
                 loading={projectsLoading || goalsLoading || mode === "loading"}
                 webhookLoading={webhooksLoading}
+                itsmLoading={itsmLoading}
                 inflowLoading={inflowLoading}
-                saving={projectsSaving || goalsSaving || inflowSaving}
+                saving={
+                  projectsSaving || goalsSaving || inflowSaving || itsmSaving
+                }
                 error={goalsError ?? projectsError}
                 weeklyReportError={weeklyReportError}
                 inflowError={inflowError}
+                itsmError={itsmError}
                 onSelectWorkspace={selectWorkspace}
                 onSelectProject={selectProject}
                 onOpenGoalTask={(taskId, projectId) =>
@@ -4534,6 +4665,8 @@ export default function App() {
                   setSelectedProjectId(undefined);
                   setProjectTasks([]);
                   setProjectWebhooks([]);
+                  setProjectItsmConnection(undefined);
+                  setItsmError(undefined);
                   setWebhookDeliveries([]);
                   setProjectGoogleChatSources([]);
                   setProjectInflowItems([]);
@@ -4553,6 +4686,9 @@ export default function App() {
                 onTestWebhook={testWorkspaceWebhook}
                 onDeleteWebhook={deleteWorkspaceWebhook}
                 onRetryWebhookDelivery={retryWorkspaceWebhookDelivery}
+                onReloadItsmConnection={reloadWorkspaceItsm}
+                onConnectItsm={connectWorkspaceItsm}
+                onDisconnectItsm={disconnectWorkspaceItsm}
                 onConnectGoogleChatAccount={beginGoogleChatConnection}
                 onLoadGoogleChatSpaces={loadGoogleChatSpaces}
                 onCreateGoogleChatSource={createWorkspaceGoogleChatSource}
