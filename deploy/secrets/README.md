@@ -31,7 +31,12 @@ deploy/secrets/staging/
 | `gateway_tls_cert` | PEM certificate chain; `JIMIN_TLS_MODE=files`에서만 필요 | gateway |
 | `gateway_tls_key` | PEM private key; `JIMIN_TLS_MODE=files`에서만 필요 | gateway |
 
-권장 권한은 디렉터리 `0700`, 파일 `0600`이다. `api_database_url` 예시 형식은 다음과 같으며 실제 값을 문서나 shell history에 남기지 않는다.
+권장 권한은 디렉터리 `0700`, 파일 `0600`이다. 운영 서버에서 ITSM token을
+배포 사용자가 아닌 root만 관리한다면 `itsm_read_credential`은 `root:root`,
+`0400`으로 만들고 Compose 배포와 사전 검증도 root 권한으로 실행한다. Token은
+환경 변수, command argument, shell history, 로그 또는 database에 복사하지 않는다.
+`api_database_url` 예시 형식은 다음과 같으며 실제 값을 문서나 shell history에
+남기지 않는다.
 
 ```text
 postgres://jimin_api:<password>@postgres:5432/jimin_os
@@ -45,10 +50,13 @@ FCM은 `JIMIN_FIREBASE_MESSAGING_ENABLED=1`일 때만 `firebase_service_account`
 read-only secret으로 mount한다. Firebase Console에서 내려받은 JSON을 수정하거나
 환경 변수에 펼치지 말고 파일 권한을 `0600`으로 유지한다.
 
-ITSM 원문 보강은 `deploy/compose.itsm.yaml` overlay를 함께 적용할 때만 켜진다.
+ITSM 원문 보강은 환경별 config에서 `JIMIN_ITSM_ENABLED=1`로 설정할 때만
+켜진다. 공통 배포 script가 `deploy/compose.itsm.yaml` overlay를 자동으로
+선택하고 Agent용 `itsm_read_credential`을 사전 검증한다. API에는 화면의
+연결 가능 상태를 표시하기 위한 non-secret enable flag만 전달한다. ITSM server
+주소와 token file은 Agent에만 전달한다.
 `JIMIN_ITSM_BASE_URL`에는 신뢰할 수 있는 HTTPS origin만 지정하고,
-`itsm_read_credential`에는 이슈 조회 권한만 가진 token을 넣는다. Agent는 Chat에 들어온
-URL을 직접 호출하지 않고, 설정된 origin의 숫자형 `/issues/{id}`만 API로 다시
-조합해 조회한다. `JIMIN_ITSM_ALLOWED_SOURCE_IDS`에는 이 token을 사용할 수 있는
-Google Chat source의 v7 UUID만 쉼표로 구분해 등록한다. 비어 있거나 잘못된 UUID가
-있으면 Agent는 ITSM 보강을 시작하지 않는다.
+`itsm_read_credential`에는 이슈 조회 권한만 가진 token을 넣는다. Agent는 Chat에
+들어온 URL을 직접 호출하지 않고 설정된 origin의 숫자형 `/issues/{id}`만 API로
+다시 조합해 조회한다. 어느 프로젝트가 ITSM 원문 보강을 사용하는지는 프로젝트
+연결 설정으로 관리하며 source UUID나 token을 환경 파일에 복사하지 않는다.

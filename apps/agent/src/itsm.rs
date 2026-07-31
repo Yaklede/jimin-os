@@ -12,7 +12,6 @@ use jimin_storage::inflow_analysis::InflowAnalysisMessage;
 use reqwest::{Client, Url, redirect::Policy};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
-use uuid::Uuid;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -25,8 +24,7 @@ const MAX_TITLE_CHARS: usize = 200;
 pub(crate) struct ItsmClient {
     base_url: Url,
     client: Client,
-    api_token: Option<SecretString>,
-    allowed_source_ids: BTreeSet<Uuid>,
+    api_token: SecretString,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +49,7 @@ struct RedmineIssueEnvelope {
 #[derive(Debug, Deserialize)]
 struct RedmineIssue {
     id: u64,
+    project: RedmineProject,
     subject: String,
     #[serde(default)]
     description: String,
@@ -65,6 +64,12 @@ struct RedmineIssue {
     journals: Vec<RedmineJournal>,
     #[serde(default)]
     attachments: Vec<RedmineAttachment>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RedmineProject {
+    id: u64,
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,22 +93,10 @@ struct RedmineAttachment {
 }
 
 impl ItsmClient {
-    pub(crate) fn new(
-        base_url: &str,
-        api_token: Option<SecretString>,
-        allowed_source_ids: BTreeSet<Uuid>,
-    ) -> Result<Self, ItsmClientError> {
-        if allowed_source_ids.is_empty()
-            || allowed_source_ids
-                .iter()
-                .any(|source_id| source_id.get_version_num() != 7)
+    pub(crate) fn new(base_url: &str, api_token: SecretString) -> Result<Self, ItsmClientError> {
+        let token = api_token.expose_secret();
+        if token.trim().is_empty() || token.len() > 16 * 1024 || token.chars().any(char::is_control)
         {
-            return Err(ItsmClientError::InvalidConfiguration);
-        }
-        if api_token.as_ref().is_some_and(|token| {
-            let value = token.expose_secret();
-            value.is_empty() || value.len() > 16 * 1024 || value.chars().any(char::is_control)
-        }) {
             return Err(ItsmClientError::InvalidConfiguration);
         }
         let mut base_url =
@@ -128,16 +121,15 @@ impl ItsmClient {
             base_url,
             client,
             api_token,
-            allowed_source_ids,
         })
     }
 
     pub(crate) async fn resolve_messages(
         &self,
-        source_id: Uuid,
+        expected_project_id: &str,
         messages: &[InflowAnalysisMessage],
     ) -> Vec<ItsmReferenceSnapshot> {
-        if !self.source_is_allowed(source_id) {
+        if !valid_expected_project_id(expected_project_id) {
             return Vec::new();
         }
         let mut issue_ids = BTreeSet::new();
@@ -158,7 +150,9 @@ impl ItsmClient {
         let mut snapshots = Vec::with_capacity(issue_ids.len());
         let deadline = tokio::time::Instant::now() + TOTAL_RESOLUTION_TIMEOUT;
         for issue_id in issue_ids {
-            let Ok(snapshot) = tokio::time::timeout_at(deadline, self.fetch_issue(issue_id)).await
+            let Ok(snapshot) =
+                tokio::time::timeout_at(deadline, self.fetch_issue(issue_id, expected_project_id))
+                    .await
             else {
                 snapshots.push(self.failed_issue_snapshot(issue_id, "itsm.unavailable"));
                 break;
@@ -166,10 +160,6 @@ impl ItsmClient {
             snapshots.push(snapshot);
         }
         snapshots
-    }
-
-    fn source_is_allowed(&self, source_id: Uuid) -> bool {
-        self.allowed_source_ids.contains(&source_id)
     }
 
     fn issue_id(&self, candidate: &str) -> Option<u64> {
@@ -214,7 +204,7 @@ impl ItsmClient {
         failed_snapshot(self.issue_page_url(issue_id), issue_id, code)
     }
 
-    async fn fetch_issue(&self, issue_id: u64) -> ItsmReferenceSnapshot {
+    async fn fetch_issue(&self, issue_id: u64, expected_project_id: &str) -> ItsmReferenceSnapshot {
         let page_url = self.issue_page_url(issue_id);
         let mut api_url = self
             .base_url
@@ -223,10 +213,10 @@ impl ItsmClient {
         api_url
             .query_pairs_mut()
             .append_pair("include", "journals,attachments");
-        let mut request = self.client.get(api_url);
-        if let Some(token) = self.api_token.as_ref() {
-            request = request.header("X-Redmine-API-Key", token.expose_secret());
-        }
+        let request = self
+            .client
+            .get(api_url)
+            .header("X-Redmine-API-Key", self.api_token.expose_secret());
         let Ok(response) = request.send().await else {
             return failed_snapshot(page_url, issue_id, "itsm.unavailable");
         };
@@ -264,18 +254,35 @@ impl ItsmClient {
             Ok(value) => value,
             Err(_) => return failed_snapshot(page_url, issue_id, "itsm.invalid_response"),
         };
-        if envelope.issue.id != issue_id || envelope.issue.subject.trim().is_empty() {
-            return failed_snapshot(page_url, issue_id, "itsm.invalid_response");
-        }
-        let original_content = render_original_content(&envelope.issue);
-        ItsmReferenceSnapshot {
-            url: page_url.into(),
-            external_id: issue_id.to_string(),
-            title: Some(bounded_title(&envelope.issue.subject)),
-            original_content: Some(original_content),
-            error_code: None,
-        }
+        snapshot_from_issue(page_url, issue_id, expected_project_id, &envelope.issue)
     }
+}
+
+fn snapshot_from_issue(
+    page_url: Url,
+    issue_id: u64,
+    expected_project_id: &str,
+    issue: &RedmineIssue,
+) -> ItsmReferenceSnapshot {
+    if issue.id != issue_id || issue.subject.trim().is_empty() {
+        return failed_snapshot(page_url, issue_id, "itsm.invalid_response");
+    }
+    if issue.project.id.to_string() != expected_project_id {
+        return failed_snapshot(page_url, issue_id, "itsm.project_mismatch");
+    }
+    ItsmReferenceSnapshot {
+        url: page_url.into(),
+        external_id: issue_id.to_string(),
+        title: Some(bounded_title(&issue.subject)),
+        original_content: Some(render_original_content(issue)),
+        error_code: None,
+    }
+}
+
+fn valid_expected_project_id(value: &str) -> bool {
+    (1..=20).contains(&value.len())
+        && value.as_bytes()[0] != b'0'
+        && value.bytes().all(|candidate| candidate.is_ascii_digit())
 }
 
 fn append_bounded_response(target: &mut Vec<u8>, chunk: &[u8]) -> bool {
@@ -306,6 +313,16 @@ fn render_original_content(issue: &RedmineIssue) -> String {
         "ITSM #{}\n제목: {}",
         issue.id,
         issue.subject.trim()
+    ));
+    let project_name = issue
+        .project
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    sections.push(project_name.map_or_else(
+        || format!("ITSM 프로젝트: {}", issue.project.id),
+        |name| format!("ITSM 프로젝트: {name} ({})", issue.project.id),
     ));
     push_named_value(&mut sections, "상태", issue.status.as_ref());
     push_named_value(&mut sections, "우선순위", issue.priority.as_ref());
@@ -437,18 +454,13 @@ mod tests {
     use super::{
         ItsmClient, MAX_ORIGINAL_CONTENT_CHARS, MAX_RESPONSE_BYTES, MAX_TITLE_CHARS,
         RedmineIssueEnvelope, append_bounded_response, bounded_title, render_original_content,
+        snapshot_from_issue,
     };
+    use reqwest::Url;
     use secrecy::SecretString;
-    use std::collections::BTreeSet;
-    use uuid::Uuid;
 
     fn client(base_url: &str) -> ItsmClient {
-        ItsmClient::new(
-            base_url,
-            Some(SecretString::from("secret")),
-            [Uuid::now_v7()].into_iter().collect(),
-        )
-        .expect("valid client")
+        ItsmClient::new(base_url, SecretString::from("secret")).expect("valid client")
     }
 
     #[test]
@@ -475,37 +487,17 @@ mod tests {
 
     #[test]
     fn rejects_unsafe_or_ambiguous_base_urls() {
-        let allowed = || [Uuid::now_v7()].into_iter().collect::<BTreeSet<_>>();
-        assert!(ItsmClient::new("http://itsm.bix.bz", None, allowed()).is_err());
-        assert!(ItsmClient::new("https://user@itsm.bix.bz", None, allowed()).is_err());
-        assert!(ItsmClient::new("https://itsm.bix.bz?redirect=1", None, allowed()).is_err());
+        let token = || SecretString::from("secret");
+        assert!(ItsmClient::new("http://itsm.bix.bz", token()).is_err());
+        assert!(ItsmClient::new("https://user@itsm.bix.bz", token()).is_err());
+        assert!(ItsmClient::new("https://itsm.bix.bz?redirect=1", token()).is_err());
         assert!(
-            ItsmClient::new(
-                "https://itsm.bix.bz",
-                Some(SecretString::from("unsafe\nsecret")),
-                allowed(),
-            )
-            .is_err()
+            ItsmClient::new("https://itsm.bix.bz", SecretString::from("unsafe\nsecret"),).is_err()
         );
         assert!(
-            ItsmClient::new("https://itsm.bix.bz", None, BTreeSet::new()).is_err(),
-            "an enabled ITSM client must never have an empty source allowlist"
+            ItsmClient::new("https://itsm.bix.bz", SecretString::from("   ")).is_err(),
+            "an enabled ITSM client must always have a nonempty read-only token"
         );
-    }
-
-    #[test]
-    fn resolves_only_explicitly_allowed_google_chat_sources() {
-        let allowed_source_id = Uuid::now_v7();
-        let denied_source_id = Uuid::now_v7();
-        let client = ItsmClient::new(
-            "https://itsm.bix.bz",
-            None,
-            [allowed_source_id].into_iter().collect(),
-        )
-        .expect("valid scoped client");
-
-        assert!(client.source_is_allowed(allowed_source_id));
-        assert!(!client.source_is_allowed(denied_source_id));
     }
 
     #[test]
@@ -514,6 +506,7 @@ mod tests {
             r#"{
               "issue": {
                 "id": 3876,
+                "project": {"id": 42, "name": "비스킷링크"},
                 "subject": "거래내역 정산방식 표기",
                 "description": "API와 화면에 정산방식을 표시합니다.",
                 "status": {"name": "신규"},
@@ -535,6 +528,67 @@ mod tests {
         assert!(content.contains("API와 화면에 정산방식을 표시합니다."));
         assert!(content.contains("대표님 요청으로 우선 처리합니다."));
         assert!(content.contains("https://itsm.bix.bz/attachments/download/1"));
+        assert!(content.contains("ITSM 프로젝트: 비스킷링크 (42)"));
+    }
+
+    #[test]
+    fn rejects_an_issue_from_another_itsm_project_without_exposing_original_content() {
+        let envelope: RedmineIssueEnvelope = serde_json::from_str(
+            r#"{
+              "issue": {
+                "id": 3876,
+                "project": {"id": 43, "name": "다른 비공개 프로젝트"},
+                "subject": "다른 프로젝트 제목",
+                "description": "노출되면 안 되는 다른 프로젝트 원문"
+              }
+            }"#,
+        )
+        .expect("numeric Redmine project fixture should parse");
+        let snapshot = snapshot_from_issue(
+            Url::parse("https://itsm.bix.bz/issues/3876").expect("fixture URL should parse"),
+            3_876,
+            "42",
+            &envelope.issue,
+        );
+
+        assert_eq!(snapshot.error_code, Some("itsm.project_mismatch"));
+        assert!(snapshot.title.is_none());
+        assert!(snapshot.original_content.is_none());
+        assert!(!format!("{snapshot:?}").contains("비공개 프로젝트"));
+
+        let matching_snapshot = snapshot_from_issue(
+            Url::parse("https://itsm.bix.bz/issues/3876").expect("fixture URL should parse"),
+            3_876,
+            "43",
+            &envelope.issue,
+        );
+        assert!(matching_snapshot.error_code.is_none());
+        assert!(
+            matching_snapshot
+                .original_content
+                .as_deref()
+                .is_some_and(|content| content.contains("다른 프로젝트 원문"))
+        );
+    }
+
+    #[test]
+    fn requires_the_numeric_project_shape_returned_by_redmine() {
+        assert!(
+            serde_json::from_str::<RedmineIssueEnvelope>(
+                r#"{"issue":{"id":3876,"project":{"id":42},"subject":"정상"}}"#,
+            )
+            .is_ok()
+        );
+        for invalid in [
+            r#"{"issue":{"id":3876,"subject":"프로젝트 없음"}}"#,
+            r#"{"issue":{"id":3876,"project":{"id":"42"},"subject":"문자열 ID"}}"#,
+            r#"{"issue":{"id":3876,"project":{"id":-1},"subject":"음수 ID"}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<RedmineIssueEnvelope>(invalid).is_err(),
+                "unexpected project shapes must fail closed"
+            );
+        }
     }
 
     #[test]
@@ -556,6 +610,7 @@ mod tests {
             r#"{{
               "issue": {{
                 "id": 3876,
+                "project": {{"id": 42}},
                 "subject": "긴 원문",
                 "description": "{}"
               }}

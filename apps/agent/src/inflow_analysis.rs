@@ -82,12 +82,17 @@ where
             return Ok(true);
         }
     };
-    let itsm_references = if let Some(itsm_client) = itsm_client {
-        itsm_client
-            .resolve_messages(job.source_id, &job.messages)
-            .await
-    } else {
-        Vec::new()
+    let itsm_references = match (
+        job.itsm_enrichment_enabled,
+        job.itsm_project_id.as_deref(),
+        itsm_client,
+    ) {
+        (true, Some(itsm_project_id), Some(itsm_client)) => {
+            itsm_client
+                .resolve_messages(itsm_project_id, &job.messages)
+                .await
+        }
+        _ => Vec::new(),
     };
     let completed = client
         .run_structured_turn_with_response_streaming_with_options(
@@ -435,6 +440,8 @@ mod tests {
             project_title: "비스킷링크".to_owned(),
             source_id: Uuid::now_v7(),
             source_name: "PAYMENTS CS".to_owned(),
+            itsm_enrichment_enabled: true,
+            itsm_project_id: Some("42".to_owned()),
             conversation_key: "thread:spaces/a/threads/b".to_owned(),
             representative_item_id: Uuid::now_v7(),
             source_revision: 1,

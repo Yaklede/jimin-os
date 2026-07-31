@@ -127,6 +127,13 @@ init_deployment() {
   if [[ "${DEPLOY_TLS_MODE}" == "files" ]]; then
     COMPOSE_ARGS+=(--file "${REPO_ROOT}/deploy/compose.tls-files.yaml")
   fi
+  itsm_enabled="$(effective_value JIMIN_ITSM_ENABLED)"
+  itsm_enabled="${itsm_enabled:-0}"
+  [[ "${itsm_enabled}" =~ ^[01]$ ]] \
+    || die "JIMIN_ITSM_ENABLED must be 0 or 1"
+  if [[ "${itsm_enabled}" == "1" ]]; then
+    COMPOSE_ARGS+=(--file "${REPO_ROOT}/deploy/compose.itsm.yaml")
+  fi
   calendar_oauth_enabled="$(effective_value JIMIN_GOOGLE_CALENDAR_OAUTH_ENABLED)"
   calendar_oauth_enabled="${calendar_oauth_enabled:-0}"
   [[ "${calendar_oauth_enabled}" =~ ^[01]$ ]] \
@@ -253,6 +260,9 @@ validate_runtime_secrets() {
     fi
     if [[ "$(effective_value JIMIN_FIREBASE_MESSAGING_ENABLED)" == "1" ]]; then
       validate_secret_file "${secrets_dir}/firebase_service_account" "Firebase service-account file"
+    fi
+    if [[ "$(effective_value JIMIN_ITSM_ENABLED)" == "1" ]]; then
+      validate_secret_file "${secrets_dir}/itsm_read_credential" "ITSM read credential file"
     fi
     if [[ "${DEPLOY_TLS_MODE}" == "files" ]]; then
       validate_secret_file "${secrets_dir}/gateway_tls_cert" "gateway certificate"

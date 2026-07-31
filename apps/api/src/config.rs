@@ -26,6 +26,7 @@ pub struct AppConfig {
     database_max_connections: u32,
     database_acquire_timeout: Duration,
     trusted_network: bool,
+    itsm_enabled: bool,
     authentication: AuthenticationSetting,
     calendar_oauth: CalendarOAuthSetting,
     firebase_service_account: SecretSetting,
@@ -81,6 +82,8 @@ pub enum ConfigError {
     InvalidDatabasePool,
     #[error("trusted-network configuration is invalid")]
     InvalidTrustedNetwork,
+    #[error("ITSM integration configuration is invalid")]
+    InvalidItsmIntegration,
     #[error("authentication configuration is invalid")]
     InvalidAuthentication,
     #[error("environment configuration contains non-Unicode data")]
@@ -95,6 +98,7 @@ impl ConfigError {
             Self::InvalidBuildSha => "config.build_sha_invalid",
             Self::InvalidDatabasePool => "config.database_pool_invalid",
             Self::InvalidTrustedNetwork => "config.trusted_network_invalid",
+            Self::InvalidItsmIntegration => "config.itsm_integration_invalid",
             Self::InvalidAuthentication => "config.authentication_invalid",
             Self::NonUnicodeEnvironment => "config.environment_non_unicode",
         }
@@ -135,6 +139,10 @@ impl AppConfig {
         )?;
         let trusted_network =
             parse_boolean(env_string("JIMIN_TRUSTED_NETWORK")?.as_deref(), false)?;
+        let itsm_enabled = parse_feature_boolean(
+            env_string("JIMIN_ITSM_ENABLED")?.as_deref(),
+            ConfigError::InvalidItsmIntegration,
+        )?;
 
         let database_url = match (env_string("DATABASE_URL"), env_string("DATABASE_URL_FILE")) {
             (Ok(direct), Ok(file)) => resolve_secret(direct, file, read_secret_file),
@@ -151,6 +159,7 @@ impl AppConfig {
             database_max_connections,
             database_acquire_timeout: Duration::from_millis(acquire_timeout_ms),
             trusted_network,
+            itsm_enabled,
             authentication,
             calendar_oauth,
             firebase_service_account,
@@ -185,6 +194,11 @@ impl AppConfig {
     #[must_use]
     pub const fn trusted_network(&self) -> bool {
         self.trusted_network
+    }
+
+    #[must_use]
+    pub const fn itsm_enabled(&self) -> bool {
+        self.itsm_enabled
     }
 
     #[must_use]
@@ -491,6 +505,17 @@ fn parse_boolean(value: Option<&str>, default: bool) -> Result<bool, ConfigError
     }
 }
 
+fn parse_feature_boolean(
+    value: Option<&str>,
+    invalid_error: ConfigError,
+) -> Result<bool, ConfigError> {
+    match value {
+        None | Some("0" | "false") => Ok(false),
+        Some("1" | "true") => Ok(true),
+        Some(_) => Err(invalid_error),
+    }
+}
+
 fn parse_bounded_u32(
     value: Option<String>,
     default: u32,
@@ -588,6 +613,26 @@ mod tests {
         assert!(matches!(
             parse_boolean(Some("yes"), false),
             Err(ConfigError::InvalidTrustedNetwork)
+        ));
+    }
+
+    #[test]
+    fn optional_feature_flag_is_disabled_by_default_and_strict_when_present() {
+        assert!(matches!(
+            parse_feature_boolean(None, ConfigError::InvalidItsmIntegration),
+            Ok(false)
+        ));
+        assert!(matches!(
+            parse_feature_boolean(Some("1"), ConfigError::InvalidItsmIntegration),
+            Ok(true)
+        ));
+        assert!(matches!(
+            parse_feature_boolean(Some("false"), ConfigError::InvalidItsmIntegration),
+            Ok(false)
+        ));
+        assert!(matches!(
+            parse_feature_boolean(Some("enabled"), ConfigError::InvalidItsmIntegration),
+            Err(ConfigError::InvalidItsmIntegration)
         ));
     }
 

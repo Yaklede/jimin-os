@@ -24,7 +24,7 @@ const MAX_REFERENCE_DOCUMENTS: usize = 4;
 const MAX_REFERENCE_URL_CHARS: usize = 2_048;
 const MAX_REFERENCE_ID_CHARS: usize = 64;
 const MAX_REFERENCE_CONTENT_CHARS: usize = 40_000;
-const ANALYSIS_VERSION: &str = "inflow-v1";
+const ANALYSIS_VERSION: &str = "inflow-v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InflowAnalysisState {
@@ -87,6 +87,8 @@ pub struct ClaimedInflowAnalysis {
     pub project_title: String,
     pub source_id: Uuid,
     pub source_name: String,
+    pub itsm_enrichment_enabled: bool,
+    pub itsm_project_id: Option<String>,
     pub conversation_key: String,
     pub representative_item_id: Uuid,
     pub source_revision: i32,
@@ -158,6 +160,8 @@ struct ClaimedInflowAnalysisRow {
     project_title: String,
     source_id: Uuid,
     source_name: String,
+    itsm_enrichment_enabled: bool,
+    itsm_project_id: Option<String>,
     conversation_key: String,
     representative_item_id: Uuid,
     source_revision: i32,
@@ -356,7 +360,11 @@ impl Database {
              )
              SELECT claimed.id, claimed.user_id, claimed.project_id,
                 project.title AS project_title, claimed.source_id,
-                source.display_name AS source_name, claimed.conversation_key,
+                source.display_name AS source_name,
+                COALESCE(itsm_connection.enabled, FALSE)
+                    AS itsm_enrichment_enabled,
+                itsm_connection.itsm_project_id,
+                claimed.conversation_key,
                 claimed.representative_item_id, claimed.source_revision,
                 linked_task.id AS linked_task_id,
                 linked_task.title AS linked_task_title,
@@ -368,6 +376,10 @@ impl Database {
              FROM claimed
              JOIN projects AS project ON project.id = claimed.project_id
              JOIN project_google_chat_sources AS source ON source.id = claimed.source_id
+             LEFT JOIN project_itsm_connections AS itsm_connection
+                ON itsm_connection.user_id = claimed.user_id
+               AND itsm_connection.project_id = claimed.project_id
+               AND itsm_connection.enabled = TRUE
              LEFT JOIN LATERAL (
                 SELECT task.id, task.title, task.notes, task.assignee_name
                 FROM project_inflow_items AS item
@@ -421,6 +433,8 @@ impl Database {
             project_title: row.project_title,
             source_id: row.source_id,
             source_name: row.source_name,
+            itsm_enrichment_enabled: row.itsm_enrichment_enabled,
+            itsm_project_id: row.itsm_project_id,
             conversation_key: row.conversation_key,
             representative_item_id: row.representative_item_id,
             source_revision: row.source_revision,

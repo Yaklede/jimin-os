@@ -111,6 +111,8 @@ core_digest="$(printf 'c%.0s' {1..64})"
   printf 'JIMIN_BUILD_SHA=%s\n' "$(printf 'd%.0s' {1..40})"
   printf 'JIMIN_GOOGLE_CALENDAR_OAUTH_ENABLED=0\n'
   printf 'JIMIN_FIREBASE_MESSAGING_ENABLED=0\n'
+  printf 'JIMIN_ITSM_ENABLED=1\n'
+  printf 'JIMIN_ITSM_BASE_URL=https://itsm.bix.bz\n'
   printf 'JIMIN_MEETING_TRANSCRIBER_ENABLED=1\n'
   printf 'JIMIN_MEETING_TRANSCRIBER_IMAGE=invalid-worker-reference\n'
 } > "${scope_config}"
@@ -119,6 +121,11 @@ JIMIN_SECRETS_DIR="${scope_secrets}"
 DEPLOY_TLS_MODE=internal
 export DEPLOY_CONFIG_FILE JIMIN_SECRETS_DIR DEPLOY_TLS_MODE
 
+if (validate_runtime_secrets core >/dev/null 2>&1); then
+  die "core secret scope accepted a missing ITSM read credential"
+fi
+printf 'audit-itsm-read-credential\n' > "${scope_secrets}/itsm_read_credential"
+chmod 600 "${scope_secrets}/itsm_read_credential"
 validate_runtime_secrets core
 validate_staging_images core
 if (validate_runtime_secrets meeting-transcriber >/dev/null 2>&1); then
@@ -135,7 +142,44 @@ printf 'JIMIN_MEETING_TRANSCRIBER_IMAGE=registry.invalid/transcriber@sha256:%s\n
 validate_runtime_secrets meeting-transcriber
 validate_staging_images meeting-transcriber
 
-info "Core and meeting transcriber preflight scopes are isolated"
+info "Core Agent and meeting transcriber preflight scopes are isolated"
+
+itsm_disabled_config="${temporary_root}/itsm-disabled.env"
+itsm_enabled_config="${temporary_root}/itsm-enabled.env"
+itsm_invalid_config="${temporary_root}/itsm-invalid.env"
+for target in \
+  "${itsm_disabled_config}" \
+  "${itsm_enabled_config}" \
+  "${itsm_invalid_config}"; do
+  {
+    printf 'JIMIN_COMPOSE_PROJECT=jimin-os-deploy-test\n'
+    printf 'JIMIN_TLS_MODE=internal\n'
+    printf 'JIMIN_SECRETS_DIR=%s\n' "${scope_secrets}"
+    printf 'JIMIN_GOOGLE_CALENDAR_OAUTH_ENABLED=0\n'
+    printf 'JIMIN_FIREBASE_MESSAGING_ENABLED=0\n'
+    printf 'JIMIN_MEETING_TRANSCRIBER_ENABLED=0\n'
+  } > "${target}"
+done
+printf 'JIMIN_ITSM_ENABLED=0\n' >> "${itsm_disabled_config}"
+{
+  printf 'JIMIN_ITSM_ENABLED=1\n'
+  printf 'JIMIN_ITSM_BASE_URL=https://itsm.bix.bz\n'
+} >> "${itsm_enabled_config}"
+printf 'JIMIN_ITSM_ENABLED=yes\n' >> "${itsm_invalid_config}"
+
+unset JIMIN_RELEASE_ENV
+init_deployment local "${itsm_disabled_config}" core
+if printf '%s\n' "${COMPOSE_ARGS[@]}" | grep -Fq 'compose.itsm.yaml'; then
+  die "disabled ITSM integration selected the Compose overlay"
+fi
+init_deployment local "${itsm_enabled_config}" core
+[[ "$(printf '%s\n' "${COMPOSE_ARGS[@]}" | grep -Fc 'compose.itsm.yaml')" == "1" ]] \
+  || die "enabled ITSM integration did not select exactly one Compose overlay"
+if (init_deployment local "${itsm_invalid_config}" core >/dev/null 2>&1); then
+  die "invalid ITSM enable flag was accepted"
+fi
+
+info "ITSM Compose overlay selection is explicit and validated"
 
 for core_script in \
   "${REPO_ROOT}/scripts/deploy-staging.sh" \

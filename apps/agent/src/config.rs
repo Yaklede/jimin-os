@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeSet,
     env::{self, VarError},
     fs,
     path::Path,
@@ -9,7 +8,6 @@ use std::{
 use jimin_storage::Database;
 use secrecy::SecretString;
 use thiserror::Error;
-use uuid::Uuid;
 
 use crate::itsm::ItsmClient;
 
@@ -102,18 +100,11 @@ impl AgentConfig {
             env_string("JIMIN_ITSM_BASE_URL")?.filter(|value| !value.trim().is_empty());
         let itsm_token_file =
             env_string("JIMIN_ITSM_API_TOKEN_FILE")?.filter(|value| !value.trim().is_empty());
-        let itsm_allowed_source_ids = env_string("JIMIN_ITSM_ALLOWED_SOURCE_IDS")?;
-        let itsm_client = match (itsm_base_url, itsm_token_file, itsm_allowed_source_ids) {
-            (None, None, None) => None,
-            (Some(base_url), token_file, Some(allowed_source_ids)) => {
-                let token = token_file
-                    .map(|path| read_secret_file(&path, ConfigError::InvalidItsm))
-                    .transpose()?;
-                let allowed_source_ids = parse_itsm_allowed_source_ids(&allowed_source_ids)?;
-                Some(
-                    ItsmClient::new(&base_url, token, allowed_source_ids)
-                        .map_err(|_| ConfigError::InvalidItsm)?,
-                )
+        let itsm_client = match (itsm_base_url, itsm_token_file) {
+            (None, None) => None,
+            (Some(base_url), Some(token_file)) => {
+                let token = read_secret_file(&token_file, ConfigError::InvalidItsm)?;
+                Some(ItsmClient::new(&base_url, token).map_err(|_| ConfigError::InvalidItsm)?)
             }
             _ => return Err(ConfigError::InvalidItsm),
         };
@@ -193,25 +184,6 @@ fn env_string(key: &str) -> Result<Option<String>, ConfigError> {
     }
 }
 
-fn parse_itsm_allowed_source_ids(value: &str) -> Result<BTreeSet<Uuid>, ConfigError> {
-    let mut source_ids = BTreeSet::new();
-    for candidate in value.split(',') {
-        let candidate = candidate.trim();
-        if candidate.is_empty() {
-            return Err(ConfigError::InvalidItsm);
-        }
-        let source_id = Uuid::parse_str(candidate).map_err(|_| ConfigError::InvalidItsm)?;
-        if source_id.get_version_num() != 7 {
-            return Err(ConfigError::InvalidItsm);
-        }
-        source_ids.insert(source_id);
-    }
-    if source_ids.is_empty() {
-        return Err(ConfigError::InvalidItsm);
-    }
-    Ok(source_ids)
-}
-
 fn parse_bounded_u32(
     value: Option<String>,
     default: u32,
@@ -252,31 +224,13 @@ fn valid_runner_id(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigError, parse_bounded_u64, parse_itsm_allowed_source_ids, valid_runner_id};
-    use uuid::Uuid;
+    use super::{ConfigError, parse_bounded_u64, valid_runner_id};
 
     #[test]
     fn runner_id_is_bounded_and_content_free() {
         assert!(valid_runner_id("agent-019f4ad1"));
         assert!(!valid_runner_id(""));
         assert!(!valid_runner_id("agent\nunsafe"));
-    }
-
-    #[test]
-    fn itsm_allowed_sources_require_nonempty_v7_uuids() {
-        let first = Uuid::now_v7();
-        let second = Uuid::now_v7();
-        let parsed = parse_itsm_allowed_source_ids(&format!("{first}, {second}"))
-            .expect("v7 source allowlist should parse");
-        assert_eq!(parsed, [first, second].into_iter().collect());
-
-        assert!(parse_itsm_allowed_source_ids("").is_err());
-        assert!(parse_itsm_allowed_source_ids(&format!("{first},")).is_err());
-        assert!(parse_itsm_allowed_source_ids("not-a-uuid").is_err());
-        assert!(
-            parse_itsm_allowed_source_ids("550e8400-e29b-41d4-a716-446655440000").is_err(),
-            "non-v7 UUIDs must not identify a Google Chat source"
-        );
     }
 
     #[test]

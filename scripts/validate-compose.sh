@@ -17,6 +17,7 @@ printf 'compose-validation-fixture\n' > "${temporary_root}/secrets/postgres_pass
 printf 'postgres://jimin_api:compose-validation-fixture@postgres:5432/jimin_os\n' > "${temporary_root}/secrets/api_database_url"
 printf 'compose-validation-certificate\n' > "${temporary_root}/secrets/gateway_tls_cert"
 printf 'compose-validation-private-key\n' > "${temporary_root}/secrets/gateway_tls_key"
+printf 'compose-validation-itsm-read-credential\n' > "${temporary_root}/secrets/itsm_read_credential"
 chmod 600 "${temporary_root}/secrets/"*
 
 export JIMIN_SECRETS_DIR="${temporary_root}/secrets"
@@ -70,6 +71,19 @@ assert_service_setting() {
     in_service && index($0, pattern) { found = 1 }
     END { exit(found ? 0 : 1) }
   ' "${rendered}" || die "service ${service} is missing setting: ${pattern}"
+}
+
+assert_service_without_setting() {
+  local service="$1"
+  local pattern="$2"
+  if awk -v service="${service}" -v pattern="${pattern}" '
+    $0 == "  " service ":" { in_service = 1; next }
+    in_service && /^  [a-zA-Z0-9_-]+:$/ { exit }
+    in_service && index($0, pattern) { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "${rendered}"; then
+    die "service ${service} must not contain setting: ${pattern}"
+  fi
 }
 
 assert_service_without_ports() {
@@ -165,6 +179,21 @@ assert_dependency_condition agent postgres service_started
 if [[ "$(effective_value JIMIN_MEETING_TRANSCRIBER_ENABLED)" == "1" ]]; then
   assert_service_setting agent 'JIMIN_MEETING_TRANSCRIBER_URL: http://meeting-transcriber:8090'
   assert_service_without_dependency agent meeting-transcriber
+fi
+if [[ "$(effective_value JIMIN_ITSM_ENABLED)" == "1" ]]; then
+  assert_service_setting api 'JIMIN_ITSM_ENABLED: "1"'
+  assert_service_without_setting api 'JIMIN_ITSM_BASE_URL:'
+  assert_service_without_setting api 'JIMIN_ITSM_API_TOKEN_FILE:'
+  assert_service_without_setting api 'source: itsm_read_credential'
+  assert_service_setting agent 'JIMIN_ITSM_BASE_URL:'
+  assert_service_setting agent 'JIMIN_ITSM_API_TOKEN_FILE: /run/secrets/itsm_read_credential'
+  assert_service_setting agent 'source: itsm_read_credential'
+  assert_service_without_setting agent 'JIMIN_ITSM_ENABLED:'
+elif grep -Eq 'JIMIN_ITSM_(ENABLED|BASE_URL|API_TOKEN_FILE)|itsm_read_credential' "${rendered}"; then
+  die "disabled ITSM integration leaked into the rendered Compose model"
+fi
+if grep -Fq 'JIMIN_ITSM_ALLOWED_SOURCE_IDS' "${rendered}"; then
+  die "ITSM deployment must not receive a global source allowlist"
 fi
 
 for dockerfile in \

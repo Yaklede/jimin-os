@@ -155,7 +155,8 @@ async fn run_server() -> Result<(), &'static str> {
         configuration_ready,
         readiness_database,
     )
-    .with_trusted_network(config.trusted_network());
+    .with_trusted_network(config.trusted_network())
+    .with_itsm_available(config.itsm_enabled());
     if let Some((authentication, pairing)) = runtime {
         state = state.with_authentication(authentication);
         state = state.with_pairing(pairing);

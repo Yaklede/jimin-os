@@ -226,3 +226,15 @@ criterion, and reference-link arrays and that
 without a projection and use their explicitly public notes as the notification
 summary. Rollback uses the previous image together with a verified version-49
 backup after new task assignment projections have been written.
+
+Migration `0051_project_itsm_connections.sql` replaces deployment-maintained
+Google Chat source UUID allowlists with an owner- and project-scoped ITSM
+connection. The table stores only connection metadata; the trusted origin and
+read-only token remain deployment secrets mounted only into the agent. Each
+connection records a non-secret positive decimal ITSM project identifier, and
+the agent rejects issue content whose `issue.project.id` does not match it.
+Apply it to an empty database and a restored version-50 backup, verify existing
+projects and inflow analyses are unchanged, and confirm
+`jimin_schema_metadata.schema_version = 51`. After project connection rows are
+written, rollback uses the verified version-50 backup so an older worker cannot
+silently ignore the owner's enrichment boundary.

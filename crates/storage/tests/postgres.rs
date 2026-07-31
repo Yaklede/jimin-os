@@ -45,6 +45,9 @@ use jimin_storage::{
         NewScheduleRequestConflict, RecommendationDecision, RecommendationStatus,
         SuggestedActionKind,
     },
+    itsm::{
+        DeleteProjectItsmConnectionOutcome, NewProjectItsmConnection, ProjectItsmConnectionUpdate,
+    },
     meetings::{
         EditedMeetingSpeaker, EditedMeetingTranscriptSegment, MeetingActionItemUpdate,
         MeetingActionKind, MeetingActionStatus, MeetingAnalysisResult, MeetingAnalysisRetryOutcome,
@@ -867,6 +870,110 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         })
         .await
         .expect("second project should persist");
+    let itsm_connection = database
+        .create_project_itsm_connection(&NewProjectItsmConnection {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            project_id: first_project.id,
+            itsm_project_id: "42".to_owned(),
+            enabled: true,
+        })
+        .await
+        .expect("owned ITSM connection should persist")
+        .expect("first project should accept one ITSM connection");
+    assert!(itsm_connection.enabled);
+    assert_eq!(itsm_connection.itsm_project_id, "42");
+    assert_eq!(
+        database
+            .project_itsm_connection(owner.profile.id, first_project.id)
+            .await
+            .expect("owned ITSM connection should load")
+            .expect("first project connection should exist"),
+        itsm_connection
+    );
+    assert!(
+        database
+            .project_itsm_connection(owner.profile.id, second_project.id)
+            .await
+            .expect("unconnected project should remain readable")
+            .is_none()
+    );
+    assert!(
+        database
+            .create_project_itsm_connection(&NewProjectItsmConnection {
+                id: Uuid::now_v7(),
+                user_id: owner.profile.id,
+                project_id: first_project.id,
+                itsm_project_id: "42".to_owned(),
+                enabled: true,
+            })
+            .await
+            .expect("duplicate connection should be handled safely")
+            .is_none(),
+        "one project must not accept duplicate deployment ITSM connections"
+    );
+    let other_owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("second fixture owner should exist");
+    assert!(
+        database
+            .project_itsm_connection(other_owner.profile.id, first_project.id)
+            .await
+            .expect("foreign connection lookup should remain opaque")
+            .is_none()
+    );
+    assert!(
+        database
+            .create_project_itsm_connection(&NewProjectItsmConnection {
+                id: Uuid::now_v7(),
+                user_id: other_owner.profile.id,
+                project_id: first_project.id,
+                itsm_project_id: "42".to_owned(),
+                enabled: true,
+            })
+            .await
+            .expect("foreign connection creation should remain opaque")
+            .is_none()
+    );
+    assert_eq!(
+        database
+            .delete_project_itsm_connection(
+                other_owner.profile.id,
+                first_project.id,
+                itsm_connection.version,
+            )
+            .await
+            .expect("foreign connection deletion should remain opaque"),
+        DeleteProjectItsmConnectionOutcome::AlreadyAbsent
+    );
+    let cascade_project = database
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            workspace_id: workspace.id,
+            title: "ITSM 연결 삭제 검증".to_owned(),
+            objective: None,
+            management_mode: ProjectManagementMode::Completion,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
+            risk_level: 0,
+            next_action: None,
+            due_at: None,
+        })
+        .await
+        .expect("cascade project should persist");
+    database
+        .create_project_itsm_connection(&NewProjectItsmConnection {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            project_id: cascade_project.id,
+            itsm_project_id: "84".to_owned(),
+            enabled: true,
+        })
+        .await
+        .expect("cascade connection should persist")
+        .expect("cascade project should accept one ITSM connection");
 
     let mut account_ids = Vec::new();
     for marker in [51_u8, 61_u8] {
@@ -1042,6 +1149,11 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
     assert_eq!(initial_analysis.messages.len(), 2);
     assert_eq!(initial_analysis.source_revision, 2);
     assert!(initial_analysis.linked_task_id.is_none());
+    assert!(
+        initial_analysis.itsm_enrichment_enabled,
+        "an opted-in project should expose ITSM enrichment to the claimed job"
+    );
+    assert_eq!(initial_analysis.itsm_project_id.as_deref(), Some("42"));
     assert!(
         database
             .start_inflow_analysis(
@@ -1490,6 +1602,8 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         .expect("follow-up analysis should be claimable")
         .expect("the updated Chat thread should requeue analysis");
     assert_eq!(follow_up_analysis.messages.len(), 3);
+    assert!(follow_up_analysis.itsm_enrichment_enabled);
+    assert_eq!(follow_up_analysis.itsm_project_id.as_deref(), Some("42"));
     assert_eq!(
         follow_up_analysis.linked_task_id, promoted.promoted_task_id,
         "the analyzer should receive the existing task as follow-up context"
@@ -1566,6 +1680,74 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             .is_none(),
         "linked follow-up attention must not create a duplicate task"
     );
+    let fresh_only_received_at = fresh_only_connection
+        .last_provider_message_at
+        .expect("fresh-only source should have a provider cursor")
+        + TimeDuration::seconds(1);
+    assert_eq!(
+        database
+            .apply_google_chat_messages(
+                &fresh_only_connection,
+                &[ProviderGoogleChatMessage {
+                    provider_message_name:
+                        "spaces/company-room/messages/fresh-only-message.fresh-only-message"
+                            .to_owned(),
+                    provider_thread_name: Some(
+                        "spaces/company-room/threads/fresh-only-thread".to_owned(),
+                    ),
+                    sender_provider_name: Some("users/323456789012345678901".to_owned()),
+                    sender_name: Some("다른 프로젝트 담당자".to_owned()),
+                    content_text: "ITSM 연결이 없는 프로젝트 요청입니다.".to_owned(),
+                    received_at: fresh_only_received_at,
+                }],
+            )
+            .await
+            .expect("fresh-only project message should ingest")
+            .len(),
+        1
+    );
+    let unconnected_analysis = database
+        .claim_next_inflow_analysis(analysis_runner, Duration::from_secs(30))
+        .await
+        .expect("unconnected project analysis should be claimable")
+        .expect("second project should queue one analysis");
+    assert_eq!(unconnected_analysis.project_id, second_project.id);
+    assert!(
+        !unconnected_analysis.itsm_enrichment_enabled,
+        "a project without an ITSM connection must not enrich its claimed job"
+    );
+    assert!(unconnected_analysis.itsm_project_id.is_none());
+    assert!(
+        database
+            .start_inflow_analysis(
+                unconnected_analysis.id,
+                analysis_runner,
+                Duration::from_secs(30),
+            )
+            .await
+            .expect("unconnected project analysis should start")
+    );
+    assert!(
+        database
+            .complete_inflow_analysis(
+                &unconnected_analysis,
+                analysis_runner,
+                &InflowAnalysisResult {
+                    classification: InflowClassification::Noise,
+                    confidence: 98,
+                    summary: "프로젝트별 ITSM 연결 경계를 확인하는 테스트 메시지다.".to_owned(),
+                    suggested_task_title: None,
+                    suggested_action_items: Vec::new(),
+                    suggested_completion_criteria: None,
+                    suggested_assignee_name: None,
+                    suggested_due_at: None,
+                    suggested_priority: None,
+                    reference_documents: Vec::new(),
+                },
+            )
+            .await
+            .expect("unconnected project analysis should complete")
+    );
     assert!(
         database
             .recent_project_inflow_decisions_for_user(owner.profile.id)
@@ -1607,6 +1789,21 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
     let pool = sqlx::PgPool::connect(&database_url)
         .await
         .expect("test database should accept direct checks");
+    assert!(
+        sqlx::query(
+            "INSERT INTO project_itsm_connections (
+                id, user_id, project_id, itsm_project_id, enabled
+             ) VALUES ($1, $2, $3, $4, TRUE)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(owner.profile.id)
+        .bind(second_project.id)
+        .bind("01")
+        .execute(&pool)
+        .await
+        .is_err(),
+        "the migration must reject non-canonical ITSM project identifiers"
+    );
     let (notes, assignee_name, stored_due_at) =
         sqlx::query_as::<_, (Option<String>, Option<String>, Option<OffsetDateTime>)>(
             "SELECT notes, assignee_name, due_at FROM tasks WHERE id = $1",
@@ -1625,6 +1822,68 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
     assert!(!notes.contains("보낸 사람 정보 없음"));
     assert_eq!(assignee_name.as_deref(), Some("개발 담당자"));
     assert_eq!(stored_due_at, Some(due_at));
+    let disabled_itsm_connection = database
+        .update_project_itsm_connection(&ProjectItsmConnectionUpdate {
+            user_id: owner.profile.id,
+            project_id: first_project.id,
+            enabled: false,
+            expected_version: itsm_connection.version,
+        })
+        .await
+        .expect("owned ITSM connection should update")
+        .expect("version-matched connection should update");
+    assert!(!disabled_itsm_connection.enabled);
+    assert_eq!(
+        database
+            .delete_project_itsm_connection(
+                owner.profile.id,
+                first_project.id,
+                itsm_connection.version,
+            )
+            .await
+            .expect("stale deletion should return a conflict"),
+        DeleteProjectItsmConnectionOutcome::VersionConflict
+    );
+    assert_eq!(
+        database
+            .delete_project_itsm_connection(
+                owner.profile.id,
+                first_project.id,
+                disabled_itsm_connection.version,
+            )
+            .await
+            .expect("version-matched connection should delete"),
+        DeleteProjectItsmConnectionOutcome::Deleted
+    );
+    assert!(
+        database
+            .project_itsm_connection(owner.profile.id, first_project.id)
+            .await
+            .expect("deleted connection lookup should succeed")
+            .is_none()
+    );
+    assert_eq!(
+        database
+            .delete_project(
+                owner.profile.id,
+                cascade_project.id,
+                cascade_project.version,
+            )
+            .await
+            .expect("cascade fixture project should delete"),
+        DeleteProjectOutcome::Deleted
+    );
+    let remaining_cascade_connections = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM project_itsm_connections WHERE project_id = $1",
+    )
+    .bind(cascade_project.id)
+    .fetch_one(&pool)
+    .await
+    .expect("cascade connection count should load");
+    assert_eq!(
+        remaining_cascade_connections, 0,
+        "deleting a project must cascade its non-secret ITSM connection metadata"
+    );
     pool.close().await;
     database.close().await;
 }

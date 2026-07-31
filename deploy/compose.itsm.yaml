@@ -1,8 +1,11 @@
 services:
+  api:
+    environment:
+      JIMIN_ITSM_ENABLED: "1"
+
   agent:
     environment:
       JIMIN_ITSM_BASE_URL: ${JIMIN_ITSM_BASE_URL:?set JIMIN_ITSM_BASE_URL}
-      JIMIN_ITSM_ALLOWED_SOURCE_IDS: ${JIMIN_ITSM_ALLOWED_SOURCE_IDS:?set JIMIN_ITSM_ALLOWED_SOURCE_IDS}
       JIMIN_ITSM_API_TOKEN_FILE: /run/secrets/itsm_read_credential
     secrets:
       - itsm_read_credential
