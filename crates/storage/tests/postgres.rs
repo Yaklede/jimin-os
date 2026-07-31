@@ -57,7 +57,8 @@ use jimin_storage::{
         NewMeetingActionItem, NewMeetingDecision,
     },
     planning::{
-        DeleteTaskOutcome, NewScheduleEntry, NewTask, ScheduleEntryUpdate, TaskStatus, TaskUpdate,
+        DeleteTaskOutcome, NewScheduleEntry, NewTask, ScheduleEntryLinkage, ScheduleEntryUpdate,
+        TaskStatus, TaskUpdate,
     },
     push::EncryptedPushToken,
     webhook::{
@@ -1477,6 +1478,17 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         stored_initial_analysis.classification,
         Some(InflowClassification::NewTask)
     );
+    let weekly_report = database
+        .weekly_report_for_workspace_at(
+            owner.profile.id,
+            workspace.id,
+            Some(first_project.id),
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .expect("weekly report should include current Chat attention");
+    assert_eq!(weekly_report.actionable_chat_inflow_count, 1);
+    assert_eq!(weekly_report.actionable_gmail_inflow_count, 0);
     let stale_task_id = Uuid::now_v7();
     assert!(
         database
@@ -3964,6 +3976,192 @@ async fn manual_schedules_are_scoped_and_version_checked() {
             .expect("stale schedule update should not fail")
             .is_none()
     );
+    database.close().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The ownership, inheritance, mismatch, compatibility, and explicit-clear invariants share one schedule linkage lifecycle."
+)]
+async fn manual_schedule_links_inherit_owned_task_project_and_reject_mismatches() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let other_owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("other fixture owner should exist");
+    let workspace = database
+        .workspaces_for_user(owner.profile.id)
+        .await
+        .expect("owner workspaces should load")
+        .into_iter()
+        .find(|workspace| workspace.scope == WorkspaceScope::Personal)
+        .expect("personal workspace should exist");
+    let project = database
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            workspace_id: workspace.id,
+            title: "일정 연결 프로젝트".to_owned(),
+            objective: None,
+            management_mode: ProjectManagementMode::Completion,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
+            risk_level: 0,
+            next_action: None,
+            due_at: None,
+        })
+        .await
+        .expect("linked project should persist");
+    let unrelated_project = database
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            workspace_id: workspace.id,
+            title: "다른 프로젝트".to_owned(),
+            objective: None,
+            management_mode: ProjectManagementMode::Completion,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
+            risk_level: 0,
+            next_action: None,
+            due_at: None,
+        })
+        .await
+        .expect("unrelated project should persist");
+    let task = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            project_id: Some(project.id),
+            parent_task_id: None,
+            title: "연결할 일".to_owned(),
+            notes: None,
+            assignee_name: None,
+            priority: 1,
+            due_at: None,
+        })
+        .await
+        .expect("linked task should persist");
+    let foreign_task = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id: other_owner.profile.id,
+            project_id: None,
+            parent_task_id: None,
+            title: "다른 소유자의 일".to_owned(),
+            notes: None,
+            assignee_name: None,
+            priority: 1,
+            due_at: None,
+        })
+        .await
+        .expect("foreign task should persist");
+    let now = OffsetDateTime::now_utc();
+    let input = NewScheduleEntry {
+        id: Uuid::now_v7(),
+        user_id: owner.profile.id,
+        title: "집중 작업".to_owned(),
+        notes: None,
+        starts_at: now + TimeDuration::hours(1),
+        ends_at: now + TimeDuration::hours(2),
+        time_zone: "Asia/Seoul".to_owned(),
+    };
+    let linked = database
+        .create_schedule_entry_with_linkage(
+            &input,
+            ScheduleEntryLinkage {
+                project_id: None,
+                task_id: Some(task.id),
+            },
+        )
+        .await
+        .expect("owned task link should inherit its project");
+    assert_eq!(linked.project_id, Some(project.id));
+    assert_eq!(linked.task_id, Some(task.id));
+    let listed = database
+        .schedule_entries_with_linkage_in_range(owner.profile.id, now, now + TimeDuration::days(1))
+        .await
+        .expect("linked schedules should list");
+    assert_eq!(listed, vec![linked.clone()]);
+
+    let update = ScheduleEntryUpdate {
+        id: linked.entry.id,
+        user_id: owner.profile.id,
+        title: linked.entry.title.clone(),
+        notes: linked.entry.notes.clone(),
+        starts_at: linked.entry.starts_at,
+        ends_at: linked.entry.ends_at,
+        time_zone: linked.entry.time_zone.clone(),
+        expected_version: linked.entry.version,
+    };
+    assert!(matches!(
+        database
+            .update_schedule_entry_with_linkage(
+                &update,
+                Some(ScheduleEntryLinkage {
+                    project_id: Some(unrelated_project.id),
+                    task_id: Some(task.id),
+                }),
+            )
+            .await,
+        Err(StorageError::InvalidConfiguration)
+    ));
+    assert!(matches!(
+        database
+            .update_schedule_entry_with_linkage(
+                &update,
+                Some(ScheduleEntryLinkage {
+                    project_id: None,
+                    task_id: Some(foreign_task.id),
+                }),
+            )
+            .await,
+        Err(StorageError::InvalidConfiguration)
+    ));
+    let preserved = database
+        .update_schedule_entry(&update)
+        .await
+        .expect("legacy update should preserve links")
+        .expect("current schedule should update");
+    let reloaded = database
+        .schedule_entry_with_linkage_by_id(owner.profile.id, preserved.id)
+        .await
+        .expect("schedule should reload")
+        .expect("linked schedule should exist");
+    assert_eq!(reloaded.project_id, Some(project.id));
+    assert_eq!(reloaded.task_id, Some(task.id));
+
+    let cleared = database
+        .update_schedule_entry_with_linkage(
+            &ScheduleEntryUpdate {
+                id: reloaded.entry.id,
+                user_id: owner.profile.id,
+                title: reloaded.entry.title.clone(),
+                notes: reloaded.entry.notes.clone(),
+                starts_at: reloaded.entry.starts_at,
+                ends_at: reloaded.entry.ends_at,
+                time_zone: reloaded.entry.time_zone.clone(),
+                expected_version: reloaded.entry.version,
+            },
+            Some(ScheduleEntryLinkage::default()),
+        )
+        .await
+        .expect("explicit null links should clear")
+        .expect("current linked schedule should update");
+    assert_eq!(cleared.project_id, None);
+    assert_eq!(cleared.task_id, None);
+
     database.close().await;
 }
 
@@ -6484,6 +6682,8 @@ async fn connected_schedules_use_one_durable_google_mutation_stream() {
                 None,
                 &[AgentActionCommand::CreateSchedule {
                     id: assistant_schedule_id,
+                    project_id: None,
+                    task_id: None,
                     title: "회의".to_owned(),
                     notes: None,
                     starts_at: now + TimeDuration::days(2),
@@ -7541,6 +7741,499 @@ async fn recommendation_decisions_are_scoped_versioned_and_idempotent() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep every allowed and forbidden failed-state transition in one regression test.
+async fn failed_recommendations_only_accept_a_fresh_analysis_request() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        1,
+        Duration::from_secs(2),
+    )
+    .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("test database should be reachable");
+    let now = OffsetDateTime::now_utc();
+
+    let mut failed_recommendations = Vec::new();
+    for suffix in ["retry", "approve", "reject", "defer"] {
+        let recommendation = database
+            .create_recommendation(&NewRecommendation {
+                id: Uuid::now_v7(),
+                user_id: owner.profile.id,
+                workspace_id: None,
+                project_id: None,
+                goal_id: None,
+                signal_id: None,
+                title: format!("실패한 제안 {suffix}"),
+                rationale: "이전 분석이 완료되지 않았습니다.".to_owned(),
+                expected_effect: "분석을 다시 요청할 수 있습니다.".to_owned(),
+                risk_summary: Some("실패 상태에서는 다른 결정을 허용하지 않습니다.".to_owned()),
+                confidence: 80,
+                urgency: 2,
+                impact: 2,
+                risk_level: 1,
+                effort_minutes: Some(10),
+                suggested_action_kind: Some(SuggestedActionKind::RequestAnalysis),
+                suggested_entity_id: None,
+                valid_until: Some(now + TimeDuration::days(1)),
+            })
+            .await
+            .expect("recommendation should persist");
+        let version = sqlx::query_scalar::<_, i64>(
+            "UPDATE recommendations
+             SET status = 'failed'
+             WHERE id = $1 AND user_id = $2
+             RETURNING version",
+        )
+        .bind(recommendation.id)
+        .bind(owner.profile.id)
+        .fetch_one(&pool)
+        .await
+        .expect("recommendation should enter failed state");
+        failed_recommendations.push((recommendation.id, version));
+    }
+
+    let (retry_id, retry_version) = failed_recommendations[0];
+    let DecideRecommendationOutcome::Applied(retried) = database
+        .decide_recommendation(&DecideRecommendation {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            recommendation_id: retry_id,
+            decision: RecommendationDecision::RequestAnalysis,
+            reason: Some("최신 상태로 다시 분석합니다.".to_owned()),
+            revisit_at: None,
+            expected_version: retry_version,
+        })
+        .await
+        .expect("failed recommendation retry should be evaluated")
+    else {
+        panic!("request_analysis should be the only allowed failed-state transition");
+    };
+    assert_eq!(
+        retried.status,
+        RecommendationStatus::AnalysisRequested,
+        "retry should return the recommendation to the analysis queue"
+    );
+
+    for ((recommendation_id, expected_version), decision) in
+        failed_recommendations.into_iter().skip(1).zip([
+            RecommendationDecision::Approve,
+            RecommendationDecision::Reject,
+            RecommendationDecision::Defer,
+        ])
+    {
+        let outcome = database
+            .decide_recommendation(&DecideRecommendation {
+                id: Uuid::now_v7(),
+                user_id: owner.profile.id,
+                recommendation_id,
+                decision,
+                reason: Some("실패 상태 전이 보호를 확인합니다.".to_owned()),
+                revisit_at: matches!(decision, RecommendationDecision::Defer)
+                    .then_some(now + TimeDuration::hours(1)),
+                expected_version,
+            })
+            .await
+            .expect("disallowed decision should be classified");
+        assert!(
+            matches!(outcome, DecideRecommendationOutcome::VersionConflict),
+            "failed recommendations must reject {decision:?}"
+        );
+        let status = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM recommendations WHERE id = $1 AND user_id = $2",
+        )
+        .bind(recommendation_id)
+        .bind(owner.profile.id)
+        .fetch_one(&pool)
+        .await
+        .expect("recommendation status should load");
+        assert_eq!(status, "failed");
+    }
+
+    pool.close().await;
+    database.close().await;
+}
+
+#[tokio::test]
+async fn approved_action_without_inline_executor_stays_in_the_active_decision_inbox() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let now = OffsetDateTime::now_utc();
+    let recommendation = database
+        .create_recommendation(&NewRecommendation {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            workspace_id: None,
+            project_id: None,
+            goal_id: None,
+            signal_id: None,
+            title: "후속 확인 일을 추가하세요".to_owned(),
+            rationale: "담당자가 정해지지 않은 업무가 있습니다.".to_owned(),
+            expected_effect: "업무 소유자를 분명히 정할 수 있습니다.".to_owned(),
+            risk_summary: Some("담당자를 확인하기 전에는 자동 생성하지 않습니다.".to_owned()),
+            confidence: 90,
+            urgency: 2,
+            impact: 2,
+            risk_level: 1,
+            effort_minutes: Some(10),
+            suggested_action_kind: Some(SuggestedActionKind::CreateTask),
+            suggested_entity_id: None,
+            valid_until: Some(now + TimeDuration::days(1)),
+        })
+        .await
+        .expect("recommendation should persist");
+
+    let DecideRecommendationOutcome::Applied(approved) = database
+        .decide_recommendation(&DecideRecommendation {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            recommendation_id: recommendation.id,
+            decision: RecommendationDecision::Approve,
+            reason: Some("실행 준비가 되면 생성합니다.".to_owned()),
+            revisit_at: None,
+            expected_version: recommendation.version,
+        })
+        .await
+        .expect("approval should persist")
+    else {
+        panic!("approval should be applied");
+    };
+    assert_eq!(approved.status, RecommendationStatus::Approved);
+
+    let active = database
+        .active_decisions_for_user(owner.profile.id, now, 10)
+        .await
+        .expect("approved action awaiting an executor should remain visible");
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].id, recommendation.id);
+    assert_eq!(active[0].status, RecommendationStatus::Approved);
+
+    database.close().await;
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Verify three owner decisions and the assistant completion audit share one transaction.
+async fn agent_recommendation_actions_commit_decisions_and_turn_audit_atomically() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        1,
+        Duration::from_secs(2),
+    )
+    .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let now = OffsetDateTime::now_utc();
+    let create_recommendation = |id, title: &str| NewRecommendation {
+        id,
+        user_id: owner.profile.id,
+        workspace_id: None,
+        project_id: None,
+        goal_id: None,
+        signal_id: None,
+        title: title.to_owned(),
+        rationale: "소유자의 명시적인 판단이 필요합니다.".to_owned(),
+        expected_effect: "다음 행동을 분명히 정할 수 있습니다.".to_owned(),
+        risk_summary: Some("결정을 미루면 후속 작업이 늦어질 수 있습니다.".to_owned()),
+        confidence: 95,
+        urgency: 2,
+        impact: 2,
+        risk_level: 1,
+        effort_minutes: Some(10),
+        suggested_action_kind: Some(SuggestedActionKind::Review),
+        suggested_entity_id: None,
+        valid_until: Some(now + TimeDuration::days(2)),
+    };
+    let approved = database
+        .create_recommendation(&create_recommendation(
+            Uuid::now_v7(),
+            "계약 검토 범위를 승인하세요",
+        ))
+        .await
+        .expect("approval recommendation should persist");
+    let rejected = database
+        .create_recommendation(&create_recommendation(
+            Uuid::now_v7(),
+            "불필요한 자동화를 검토하세요",
+        ))
+        .await
+        .expect("rejection recommendation should persist");
+    let deferred = database
+        .create_recommendation(&create_recommendation(
+            Uuid::now_v7(),
+            "다음 주 예산을 확인하세요",
+        ))
+        .await
+        .expect("defer recommendation should persist");
+
+    let conversation_id = Uuid::now_v7();
+    database
+        .create_conversation(&NewConversation {
+            id: conversation_id,
+            user_id: owner.profile.id,
+            title: Some("결정 처리".to_owned()),
+            surface: ConversationSurface::Chat,
+        })
+        .await
+        .expect("conversation should persist");
+    let queued = database
+        .enqueue_agent_turn(&NewAgentTurn {
+            job_id: Uuid::now_v7(),
+            message_id: Uuid::now_v7(),
+            client_message_id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            conversation_id,
+            content: "첫 번째는 승인하고, 두 번째는 거절하고, 세 번째는 내일 다시 보여 줘"
+                .to_owned(),
+        })
+        .await
+        .expect("turn should queue");
+    let runner_id = "recommendation-decision-agent";
+    let claim = database
+        .claim_next_agent_job(runner_id, Duration::from_secs(30))
+        .await
+        .expect("job should claim")
+        .expect("queued job should exist");
+    assert_eq!(claim.id, queued.job_id);
+    assert!(
+        database
+            .start_agent_job(
+                claim.id,
+                runner_id,
+                "thread-recommendation-decisions",
+                Duration::from_secs(30),
+            )
+            .await
+            .expect("job should start")
+    );
+
+    let approve_decision_id = Uuid::now_v7();
+    let reject_decision_id = Uuid::now_v7();
+    let defer_decision_id = Uuid::now_v7();
+    let revisit_at = now + TimeDuration::days(1);
+    let actions = [
+        AgentActionCommand::ApproveRecommendation {
+            decision_id: approve_decision_id,
+            recommendation_id: approved.id,
+            expected_version: approved.version,
+            reason: Some("계약 범위를 확인했습니다.".to_owned()),
+        },
+        AgentActionCommand::RejectRecommendation {
+            decision_id: reject_decision_id,
+            recommendation_id: rejected.id,
+            expected_version: rejected.version,
+            reason: Some("현재는 자동화하지 않습니다.".to_owned()),
+        },
+        AgentActionCommand::DeferRecommendation {
+            decision_id: defer_decision_id,
+            recommendation_id: deferred.id,
+            expected_version: deferred.version,
+            reason: Some("내일 예산을 확인합니다.".to_owned()),
+            revisit_at,
+        },
+    ];
+    let assistant_message_id = Uuid::now_v7();
+    assert!(
+        database
+            .complete_agent_job_with_actions(
+                claim.id,
+                runner_id,
+                assistant_message_id,
+                "결정 3건을 처리했어요.",
+                Some(&AssistantPresentation {
+                    kind: AssistantPresentationKind::Summary,
+                    title: "결정 3건을 처리했어요".to_owned(),
+                    items: Vec::new(),
+                    layout: AssistantPresentationLayout::Stack,
+                    sections: Vec::new(),
+                    focus_item_id: None,
+                }),
+                &actions,
+            )
+            .await
+            .expect("decisions and assistant turn should commit")
+    );
+
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("test database should be reachable");
+    let statuses: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, status
+         FROM recommendations
+         WHERE id = ANY($1)
+         ORDER BY id",
+    )
+    .bind(vec![approved.id, rejected.id, deferred.id])
+    .fetch_all(&pool)
+    .await
+    .expect("recommendation statuses should load");
+    assert_eq!(statuses.len(), 3);
+    assert!(statuses.contains(&(approved.id, "executed".to_owned())));
+    assert!(statuses.contains(&(rejected.id, "rejected".to_owned())));
+    assert!(statuses.contains(&(deferred.id, "deferred".to_owned())));
+
+    let decision_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM recommendation_decisions
+         WHERE id = ANY($1)",
+    )
+    .bind(vec![
+        approve_decision_id,
+        reject_decision_id,
+        defer_decision_id,
+    ])
+    .fetch_one(&pool)
+    .await
+    .expect("recommendation decisions should load");
+    assert_eq!(decision_count, 3);
+    let review_result_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM recommendation_action_results
+         WHERE id = $1 AND recommendation_id = $2 AND status = 'succeeded'",
+    )
+    .bind(approve_decision_id)
+    .bind(approved.id)
+    .fetch_one(&pool)
+    .await
+    .expect("approved review result should load");
+    assert_eq!(review_result_count, 1);
+
+    let action_audit: Vec<(i16, String, Uuid)> = sqlx::query_as(
+        "SELECT action_index, action_type, entity_id
+         FROM agent_job_action_executions
+         WHERE job_id = $1
+         ORDER BY action_index",
+    )
+    .bind(queued.job_id)
+    .fetch_all(&pool)
+    .await
+    .expect("agent action audit should load");
+    assert_eq!(
+        action_audit,
+        vec![
+            (0, "approve_recommendation".to_owned(), approved.id),
+            (1, "reject_recommendation".to_owned(), rejected.id),
+            (2, "defer_recommendation".to_owned(), deferred.id),
+        ]
+    );
+    let completion: (String, i16, i64) = sqlx::query_as(
+        "SELECT state, executed_action_count,
+            (SELECT COUNT(*) FROM messages
+             WHERE id = $2 AND agent_job_id = $1
+               AND role = 'assistant' AND status = 'completed')
+         FROM agent_jobs
+         WHERE id = $1",
+    )
+    .bind(queued.job_id)
+    .bind(assistant_message_id)
+    .fetch_one(&pool)
+    .await
+    .expect("completed job audit should load");
+    assert_eq!(completion, ("completed".to_owned(), 3, 1));
+
+    let stale = database
+        .create_recommendation(&create_recommendation(
+            Uuid::now_v7(),
+            "오래된 결정을 거절하세요",
+        ))
+        .await
+        .expect("stale recommendation fixture should persist");
+    let stale_queued = database
+        .enqueue_agent_turn(&NewAgentTurn {
+            job_id: Uuid::now_v7(),
+            message_id: Uuid::now_v7(),
+            client_message_id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            conversation_id,
+            content: "이 결정은 거절해 줘".to_owned(),
+        })
+        .await
+        .expect("stale turn should queue");
+    let stale_claim = database
+        .claim_next_agent_job(runner_id, Duration::from_secs(30))
+        .await
+        .expect("stale job should claim")
+        .expect("stale queued job should exist");
+    assert_eq!(stale_claim.id, stale_queued.job_id);
+    assert!(
+        database
+            .start_agent_job(
+                stale_claim.id,
+                runner_id,
+                "thread-stale-recommendation-decision",
+                Duration::from_secs(30),
+            )
+            .await
+            .expect("stale job should start")
+    );
+    let stale_decision_id = Uuid::now_v7();
+    let stale_message_id = Uuid::now_v7();
+    assert!(matches!(
+        database
+            .complete_agent_job_with_action(
+                stale_claim.id,
+                runner_id,
+                stale_message_id,
+                "결정을 거절했어요.",
+                None,
+                &AgentActionCommand::RejectRecommendation {
+                    decision_id: stale_decision_id,
+                    recommendation_id: stale.id,
+                    expected_version: stale.version + 1,
+                    reason: None,
+                },
+            )
+            .await,
+        Err(StorageError::IdentityConflict)
+    ));
+    let rolled_back: (String, i64, i64, String) = sqlx::query_as(
+        "SELECT job.state,
+            (SELECT COUNT(*) FROM messages WHERE id = $2),
+            (SELECT COUNT(*) FROM recommendation_decisions WHERE id = $3),
+            recommendation.status
+         FROM agent_jobs AS job
+         INNER JOIN recommendations AS recommendation ON recommendation.id = $4
+         WHERE job.id = $1",
+    )
+    .bind(stale_queued.job_id)
+    .bind(stale_message_id)
+    .bind(stale_decision_id)
+    .bind(stale.id)
+    .fetch_one(&pool)
+    .await
+    .expect("rolled-back decision state should load");
+    assert_eq!(
+        rolled_back,
+        ("running".to_owned(), 0, 0, "pending".to_owned())
+    );
+
+    pool.close().await;
+    database.close().await;
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // Verify conflict persistence, agent execution, and automatic inbox cleanup as one lifecycle.
 async fn resolved_conversation_schedule_conflict_leaves_the_active_decision_inbox() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
@@ -7638,6 +8331,8 @@ async fn resolved_conversation_schedule_conflict_leaves_the_active_decision_inbo
                 None,
                 &[AgentActionCommand::CreateSchedule {
                     id: Uuid::now_v7(),
+                    project_id: None,
+                    task_id: None,
                     title: "치과".to_owned(),
                     notes: None,
                     starts_at: now + TimeDuration::hours(4),
@@ -7720,13 +8415,12 @@ async fn work_brief_refresh_generates_one_actionable_recommendation_per_active_s
     assert_eq!(generated.len(), 1);
     assert_eq!(generated[0].suggested_entity_id, Some(task.id));
     assert_eq!(generated[0].status, RecommendationStatus::Pending);
-    assert!(
-        database
-            .active_decisions_for_user(owner.profile.id, now, 10)
-            .await
-            .expect("informational brief items should not enter decisions")
-            .is_empty()
-    );
+    let active_decisions = database
+        .active_decisions_for_user(owner.profile.id, now, 10)
+        .await
+        .expect("structured work risks should enter decisions");
+    assert_eq!(active_decisions.len(), 1);
+    assert_eq!(active_decisions[0].id, generated[0].id);
 
     let repeated = database
         .refresh_work_brief(owner.profile.id, now + TimeDuration::minutes(1))
@@ -7780,13 +8474,13 @@ async fn work_brief_refresh_generates_one_actionable_recommendation_per_active_s
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].id, generated[0].id);
     assert_eq!(history[0].status, RecommendationStatus::Executed);
-    assert!(
-        database
-            .decision_history_for_user(owner.profile.id, 20)
-            .await
-            .expect("review history should stay out of decisions")
-            .is_empty()
-    );
+    let decision_history = database
+        .decision_history_for_user(owner.profile.id, 20)
+        .await
+        .expect("review history should remain auditable");
+    assert_eq!(decision_history.len(), 1);
+    assert_eq!(decision_history[0].id, generated[0].id);
+    assert_eq!(decision_history[0].status, RecommendationStatus::Executed);
     assert!(
         database
             .refresh_work_brief(owner.profile.id, now + TimeDuration::minutes(2))
@@ -8450,6 +9144,27 @@ async fn gmail_inflow_preserves_workspace_revision_decisions_and_promotion_lifec
         .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
         .await
         .expect("fixture owner should exist");
+    let android = database
+        .provision_login(&provision_android_login_command(
+            owner.profile.id,
+            Uuid::now_v7(),
+        ))
+        .await
+        .expect("Android notification fixture should exist");
+    let push_token = EncryptedPushToken {
+        ciphertext: vec![71; 48],
+        nonce: vec![72; 24],
+        fingerprint: vec![73; 32],
+    };
+    database
+        .register_push_token(
+            Uuid::now_v7(),
+            owner.profile.id,
+            android.device.id,
+            &push_token,
+        )
+        .await
+        .expect("Gmail notification token should register");
     let workspaces = database
         .workspaces_for_user(owner.profile.id)
         .await
@@ -8518,6 +9233,44 @@ async fn gmail_inflow_preserves_workspace_revision_decisions_and_promotion_lifec
         .expect("analysis should complete");
     let ready =
         gmail_candidate_for_thread(&database, owner.profile.id, personal.id, &thread_id).await;
+    let weekly_report = database
+        .weekly_report_for_workspace_at(owner.profile.id, personal.id, None, now)
+        .await
+        .expect("weekly report should include current Gmail attention");
+    assert_eq!(weekly_report.actionable_chat_inflow_count, 0);
+    assert_eq!(weekly_report.actionable_gmail_inflow_count, 1);
+    assert_eq!(
+        database
+            .queue_due_push_reminders(now)
+            .await
+            .expect("ready Gmail attention should queue one notification"),
+        1
+    );
+    assert_eq!(
+        database
+            .queue_due_push_reminders(now)
+            .await
+            .expect("unchanged Gmail attention should remain idempotent"),
+        0
+    );
+    let deliveries = database
+        .claim_push_deliveries("gmail-inflow-push-test-worker", 10)
+        .await
+        .expect("Gmail attention notification should be claimable");
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].item_id, ready.id);
+    assert_eq!(deliveries[0].item_type, "gmail_inflow");
+    assert_eq!(deliveries[0].destination, "home");
+    assert_eq!(deliveries[0].device_id, android.device.id);
+    database
+        .complete_push_delivery(
+            deliveries[0].id,
+            "gmail-inflow-push-test-worker",
+            deliveries[0].attempt_count,
+            200,
+        )
+        .await
+        .expect("Gmail attention notification should complete");
     assert!(
         database
             .decide_gmail_inflow_candidate(

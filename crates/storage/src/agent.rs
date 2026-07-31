@@ -21,7 +21,11 @@ use crate::{
         cancel_google_chat_task_completion_in_transaction,
         queue_google_chat_task_completion_in_transaction,
     },
-    planning::{TaskStatus, queue_owned_task_webhook_by_id_in_transaction},
+    intelligence::{
+        DecideRecommendation, DecideRecommendationOutcome, RecommendationDecision,
+        decide_recommendation_in_transaction,
+    },
+    planning::{ScheduleEntryLinkage, TaskStatus, queue_owned_task_webhook_by_id_in_transaction},
     webhook::{project_event_payload, queue_project_event_in_transaction},
     work::ProjectStatus,
 };
@@ -137,6 +141,8 @@ pub enum AgentActionCommand {
     },
     CreateSchedule {
         id: Uuid,
+        project_id: Option<Uuid>,
+        task_id: Option<Uuid>,
         title: String,
         notes: Option<String>,
         starts_at: OffsetDateTime,
@@ -146,6 +152,8 @@ pub enum AgentActionCommand {
     },
     UpdateSchedule {
         id: Uuid,
+        project_id: Option<Uuid>,
+        task_id: Option<Uuid>,
         title: String,
         notes: Option<String>,
         starts_at: OffsetDateTime,
@@ -186,6 +194,25 @@ pub enum AgentActionCommand {
         project_id: Uuid,
         webhook_id: Uuid,
         message: String,
+    },
+    ApproveRecommendation {
+        decision_id: Uuid,
+        recommendation_id: Uuid,
+        expected_version: i64,
+        reason: Option<String>,
+    },
+    RejectRecommendation {
+        decision_id: Uuid,
+        recommendation_id: Uuid,
+        expected_version: i64,
+        reason: Option<String>,
+    },
+    DeferRecommendation {
+        decision_id: Uuid,
+        recommendation_id: Uuid,
+        expected_version: i64,
+        reason: Option<String>,
+        revisit_at: OffsetDateTime,
     },
 }
 
@@ -276,6 +303,8 @@ impl AgentActionCommand {
             }
             Self::CreateSchedule {
                 id,
+                project_id,
+                task_id,
                 title,
                 notes,
                 starts_at,
@@ -284,6 +313,8 @@ impl AgentActionCommand {
                 ..
             } => {
                 if is_v7(*id)
+                    && project_id.is_none_or(is_v7)
+                    && task_id.is_none_or(is_v7)
                     && valid_text(title, MAX_TITLE_CHARS, false)
                     && valid_optional_document(notes.as_ref(), 10_000)
                     && valid_time_zone(time_zone)
@@ -296,6 +327,8 @@ impl AgentActionCommand {
             }
             Self::UpdateSchedule {
                 id,
+                project_id,
+                task_id,
                 title,
                 notes,
                 starts_at,
@@ -305,6 +338,8 @@ impl AgentActionCommand {
                 ..
             } => {
                 if is_v7(*id)
+                    && project_id.is_none_or(is_v7)
+                    && task_id.is_none_or(is_v7)
                     && valid_text(title, MAX_TITLE_CHARS, false)
                     && valid_optional_document(notes.as_ref(), 10_000)
                     && valid_time_zone(time_zone)
@@ -374,6 +409,50 @@ impl AgentActionCommand {
                     Err(StorageError::InvalidConfiguration)
                 }
             }
+            Self::ApproveRecommendation {
+                decision_id,
+                recommendation_id,
+                expected_version,
+                reason,
+            }
+            | Self::RejectRecommendation {
+                decision_id,
+                recommendation_id,
+                expected_version,
+                reason,
+            } => {
+                if is_v7(*decision_id)
+                    && is_v7(*recommendation_id)
+                    && *expected_version > 0
+                    && reason
+                        .as_ref()
+                        .is_none_or(|value| valid_document(value, 2_000, false))
+                {
+                    Ok(())
+                } else {
+                    Err(StorageError::InvalidConfiguration)
+                }
+            }
+            Self::DeferRecommendation {
+                decision_id,
+                recommendation_id,
+                expected_version,
+                reason,
+                revisit_at,
+            } => {
+                if is_v7(*decision_id)
+                    && is_v7(*recommendation_id)
+                    && *expected_version > 0
+                    && *revisit_at > OffsetDateTime::now_utc()
+                    && reason
+                        .as_ref()
+                        .is_none_or(|value| valid_document(value, 2_000, false))
+                {
+                    Ok(())
+                } else {
+                    Err(StorageError::InvalidConfiguration)
+                }
+            }
         }
     }
 
@@ -400,6 +479,9 @@ impl AgentActionCommand {
             Self::UpdateProject { .. } => "update_project",
             Self::DeleteProject { .. } => "delete_project",
             Self::SendWebhookMessage { .. } => "send_webhook_message",
+            Self::ApproveRecommendation { .. } => "approve_recommendation",
+            Self::RejectRecommendation { .. } => "reject_recommendation",
+            Self::DeferRecommendation { .. } => "defer_recommendation",
         }
     }
 
@@ -415,6 +497,15 @@ impl AgentActionCommand {
             | Self::UpdateProject { id, .. }
             | Self::DeleteProject { id, .. }
             | Self::SendWebhookMessage { id, .. } => *id,
+            Self::ApproveRecommendation {
+                recommendation_id, ..
+            }
+            | Self::RejectRecommendation {
+                recommendation_id, ..
+            }
+            | Self::DeferRecommendation {
+                recommendation_id, ..
+            } => *recommendation_id,
         }
     }
 }
@@ -3076,6 +3167,54 @@ async fn resolve_conversation_schedule_conflicts(
     Ok(())
 }
 
+async fn resolve_agent_schedule_linkage(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    requested: ScheduleEntryLinkage,
+) -> Result<ScheduleEntryLinkage, StorageError> {
+    requested.validate()?;
+    let mut project_id = requested.project_id;
+    if let Some(requested_project_id) = requested.project_id {
+        let owned = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM projects
+                WHERE id = $1 AND user_id = $2
+            )",
+        )
+        .bind(requested_project_id)
+        .bind(user_id)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        if !owned {
+            return Err(StorageError::InvalidConfiguration);
+        }
+    }
+    if let Some(task_id) = requested.task_id {
+        let task_project_id = sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT project_id
+             FROM tasks
+             WHERE id = $1 AND user_id = $2 AND status <> 'cancelled'",
+        )
+        .bind(task_id)
+        .bind(user_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(|error| classify(&error))?
+        .ok_or(StorageError::InvalidConfiguration)?;
+        if requested.project_id.is_some() && requested.project_id != task_project_id {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        if project_id.is_none() {
+            project_id = task_project_id;
+        }
+    }
+    Ok(ScheduleEntryLinkage {
+        project_id,
+        task_id: requested.task_id,
+    })
+}
+
 #[allow(clippy::too_many_lines)] // The exhaustive match keeps each atomic SQL mutation visibly tied to its action contract.
 async fn persist_agent_action(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -3252,6 +3391,8 @@ async fn persist_agent_action(
         }
         AgentActionCommand::CreateSchedule {
             id,
+            project_id,
+            task_id,
             title,
             notes,
             starts_at,
@@ -3259,15 +3400,27 @@ async fn persist_agent_action(
             time_zone,
             ..
         } => {
+            let linkage = resolve_agent_schedule_linkage(
+                transaction,
+                user_id,
+                ScheduleEntryLinkage {
+                    project_id: *project_id,
+                    task_id: *task_id,
+                },
+            )
+            .await?;
             let version = sqlx::query_scalar::<_, i64>(
                 "\
                 INSERT INTO schedule_entries (
-                    id, user_id, title, notes, starts_at, ends_at, time_zone, source, status
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'manual', 'confirmed')
+                    id, user_id, project_id, task_id, title, notes, starts_at, ends_at,
+                    time_zone, source, status
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'manual', 'confirmed')
                 RETURNING version",
             )
             .bind(id)
             .bind(user_id)
+            .bind(linkage.project_id)
+            .bind(linkage.task_id)
             .bind(title.trim())
             .bind(trim_optional_text(notes.as_deref()))
             .bind(starts_at)
@@ -3294,6 +3447,8 @@ async fn persist_agent_action(
         }
         AgentActionCommand::UpdateSchedule {
             id,
+            project_id,
+            task_id,
             title,
             notes,
             starts_at,
@@ -3302,16 +3457,28 @@ async fn persist_agent_action(
             expected_version,
             ..
         } => {
+            let linkage = resolve_agent_schedule_linkage(
+                transaction,
+                user_id,
+                ScheduleEntryLinkage {
+                    project_id: *project_id,
+                    task_id: *task_id,
+                },
+            )
+            .await?;
             let version = sqlx::query_scalar::<_, i64>(
                 "\
                 UPDATE schedule_entries
-                SET title = $3, notes = $4, starts_at = $5, ends_at = $6, time_zone = $7
+                SET project_id = $3, task_id = $4, title = $5, notes = $6,
+                    starts_at = $7, ends_at = $8, time_zone = $9
                 WHERE id = $1 AND user_id = $2 AND source = 'manual'
-                  AND status = 'confirmed' AND version = $8
+                  AND status = 'confirmed' AND version = $10
                 RETURNING version",
             )
             .bind(id)
             .bind(user_id)
+            .bind(linkage.project_id)
+            .bind(linkage.task_id)
             .bind(title.trim())
             .bind(trim_optional_text(notes.as_deref()))
             .bind(starts_at)
@@ -3533,6 +3700,74 @@ async fn persist_agent_action(
             .ok_or(StorageError::IdentityConflict)?;
             let _ = queued;
             return Ok(());
+        }
+        AgentActionCommand::ApproveRecommendation {
+            decision_id,
+            recommendation_id,
+            expected_version,
+            reason,
+        }
+        | AgentActionCommand::RejectRecommendation {
+            decision_id,
+            recommendation_id,
+            expected_version,
+            reason,
+        } => {
+            let decision = if matches!(action, AgentActionCommand::ApproveRecommendation { .. }) {
+                RecommendationDecision::Approve
+            } else {
+                RecommendationDecision::Reject
+            };
+            let outcome = decide_recommendation_in_transaction(
+                transaction,
+                &DecideRecommendation {
+                    id: *decision_id,
+                    user_id,
+                    recommendation_id: *recommendation_id,
+                    decision,
+                    reason: reason.clone(),
+                    revisit_at: None,
+                    expected_version: *expected_version,
+                },
+            )
+            .await?;
+            return match outcome {
+                DecideRecommendationOutcome::Applied(_)
+                | DecideRecommendationOutcome::Replayed(_) => Ok(()),
+                DecideRecommendationOutcome::NotFound
+                | DecideRecommendationOutcome::VersionConflict => {
+                    Err(StorageError::IdentityConflict)
+                }
+            };
+        }
+        AgentActionCommand::DeferRecommendation {
+            decision_id,
+            recommendation_id,
+            expected_version,
+            reason,
+            revisit_at,
+        } => {
+            let outcome = decide_recommendation_in_transaction(
+                transaction,
+                &DecideRecommendation {
+                    id: *decision_id,
+                    user_id,
+                    recommendation_id: *recommendation_id,
+                    decision: RecommendationDecision::Defer,
+                    reason: reason.clone(),
+                    revisit_at: Some(*revisit_at),
+                    expected_version: *expected_version,
+                },
+            )
+            .await?;
+            return match outcome {
+                DecideRecommendationOutcome::Applied(_)
+                | DecideRecommendationOutcome::Replayed(_) => Ok(()),
+                DecideRecommendationOutcome::NotFound
+                | DecideRecommendationOutcome::VersionConflict => {
+                    Err(StorageError::IdentityConflict)
+                }
+            };
         }
     };
     queue_agent_action_webhook(transaction, user_id, action).await?;
@@ -4016,6 +4251,7 @@ mod tests {
         conversation_title_from_content,
     };
     use crate::{StorageError, planning::TaskStatus};
+    use time::{Duration as TimeDuration, OffsetDateTime};
     use uuid::Uuid;
 
     #[test]
@@ -4074,6 +4310,39 @@ mod tests {
 
         assert!(action.validate().is_ok());
         assert_eq!(action.action_type(), "update_task");
+    }
+
+    #[test]
+    fn schedule_agent_action_validates_optional_link_identifiers() {
+        let starts_at = OffsetDateTime::now_utc() + TimeDuration::hours(1);
+        let action = AgentActionCommand::CreateSchedule {
+            id: Uuid::now_v7(),
+            project_id: Some(Uuid::now_v7()),
+            task_id: Some(Uuid::now_v7()),
+            title: "프로젝트 검토".to_owned(),
+            notes: None,
+            starts_at,
+            ends_at: starts_at + TimeDuration::hours(1),
+            time_zone: "Asia/Seoul".to_owned(),
+            allow_schedule_conflict: false,
+        };
+        assert!(action.validate().is_ok());
+
+        let invalid = AgentActionCommand::CreateSchedule {
+            id: Uuid::now_v7(),
+            project_id: Some(Uuid::nil()),
+            task_id: None,
+            title: "프로젝트 검토".to_owned(),
+            notes: None,
+            starts_at,
+            ends_at: starts_at + TimeDuration::hours(1),
+            time_zone: "Asia/Seoul".to_owned(),
+            allow_schedule_conflict: false,
+        };
+        assert!(matches!(
+            invalid.validate(),
+            Err(StorageError::InvalidConfiguration)
+        ));
     }
 
     #[test]

@@ -80,9 +80,9 @@ use jimin_storage::{
         ProjectItsmConnection,
     },
     planning::{
-        DeleteTaskOutcome, NewScheduleEntry, NewTask, ScheduleEntry, ScheduleEntryUpdate,
-        ScheduleSource, ScheduleStatus, Task, TaskAssignmentMessageInput, TaskStatus, TaskUpdate,
-        format_task_assignment_message,
+        DeleteTaskOutcome, LinkedScheduleEntry, NewScheduleEntry, NewTask, ScheduleEntry,
+        ScheduleEntryLinkage, ScheduleEntryUpdate, ScheduleSource, ScheduleStatus, Task,
+        TaskAssignmentMessageInput, TaskStatus, TaskUpdate, format_task_assignment_message,
     },
     sync::SyncChange,
     webhook::{
@@ -390,6 +390,8 @@ pub struct DeviceListResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ScheduleEntryResponse {
     id: uuid::Uuid,
+    project_id: Option<uuid::Uuid>,
+    task_id: Option<uuid::Uuid>,
     title: String,
     notes: Option<String>,
     starts_at: String,
@@ -521,6 +523,8 @@ pub struct WeeklyReportResponse {
     overdue_task_count: i64,
     stale_task_count: i64,
     unassigned_task_count: i64,
+    actionable_chat_inflow_count: i64,
+    actionable_gmail_inflow_count: i64,
     projects: Vec<WeeklyProjectReportResponse>,
 }
 
@@ -1376,6 +1380,8 @@ struct DisconnectGoogleCalendarQuery {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CreateScheduleRequest {
     client_mutation_id: Option<uuid::Uuid>,
+    project_id: Option<uuid::Uuid>,
+    task_id: Option<uuid::Uuid>,
     title: String,
     notes: Option<String>,
     starts_at: String,
@@ -1385,7 +1391,17 @@ struct CreateScheduleRequest {
 
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ScheduleLinkageRequest {
+    project_id: Option<uuid::Uuid>,
+    task_id: Option<uuid::Uuid>,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct UpdateScheduleRequest {
+    /// Omit to preserve existing links. Send an object with null fields to
+    /// clear links explicitly.
+    linkage: Option<ScheduleLinkageRequest>,
     title: String,
     notes: Option<String>,
     starts_at: String,
@@ -1775,6 +1791,7 @@ pub(crate) fn error_response(
         SyncChangeListResponse,
         DeviceRegistrationRequest,
         CreateScheduleRequest,
+        ScheduleLinkageRequest,
         ScheduleEntryResponse,
         ScheduleListResponse,
         GoogleCalendarConnectionResponse,
@@ -2814,12 +2831,12 @@ async fn list_schedule_entries(
         return unavailable_response(request_id);
     };
     match planning
-        .schedule_entries_in_range(principal.identity().user_id(), from, to)
+        .schedule_entries_with_linkage_in_range(principal.identity().user_id(), from, to)
         .await
     {
         Ok(entries) => match entries
             .into_iter()
-            .map(schedule_entry_response)
+            .map(linked_schedule_entry_response)
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(items) => Json(ScheduleListResponse {
@@ -2845,7 +2862,7 @@ async fn create_google_schedule_entry(
     request_id: RequestId,
 ) -> Response {
     match planning
-        .create_schedule_entry_with_calendar_outbox(
+        .create_schedule_entry_with_calendar_outbox_and_linkage(
             &NewScheduleEntry {
                 id: body.client_mutation_id.unwrap_or_else(uuid::Uuid::now_v7),
                 user_id,
@@ -2856,10 +2873,14 @@ async fn create_google_schedule_entry(
                 time_zone: body.time_zone.clone(),
             },
             &target,
+            ScheduleEntryLinkage {
+                project_id: body.project_id,
+                task_id: body.task_id,
+            },
         )
         .await
     {
-        Ok(entry) => match schedule_entry_response(entry) {
+        Ok(entry) => match linked_schedule_entry_response(entry) {
             Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
             Err(()) => unavailable_response(request_id),
         },
@@ -2907,10 +2928,10 @@ async fn get_home_snapshot(
         webhooks,
         workspaces,
     ) = match tokio::try_join!(
-        planning.schedule_entries_in_range(user_id, from, to),
+        planning.schedule_entries_with_linkage_in_range(user_id, from, to),
         planning.home_tasks_for_user(user_id, to),
         planning.deadline_tasks_for_user(user_id, deadline_boundary),
-        planning.active_recommendations_for_user(user_id, OffsetDateTime::now_utc(), 5),
+        planning.active_decisions_for_user(user_id, OffsetDateTime::now_utc(), 5),
         planning.pending_project_inflow_for_user(user_id),
         planning.project_inflow_analyses_for_user(user_id),
         planning.user_project_webhooks(user_id),
@@ -2931,7 +2952,7 @@ async fn get_home_snapshot(
     }
     let Ok(schedule) = schedule
         .into_iter()
-        .map(schedule_entry_response)
+        .map(linked_schedule_entry_response)
         .collect::<Result<Vec<_>, _>>()
     else {
         return unavailable_response(request_id);
@@ -3149,18 +3170,24 @@ async fn create_schedule_entry(
         Err(error) => return storage_error_response(&error, request_id),
     }
     match planning
-        .create_schedule_entry(&NewScheduleEntry {
-            id: body.client_mutation_id.unwrap_or_else(uuid::Uuid::now_v7),
-            user_id: principal.identity().user_id(),
-            title: body.title,
-            notes: body.notes,
-            starts_at,
-            ends_at,
-            time_zone: body.time_zone,
-        })
+        .create_schedule_entry_with_linkage(
+            &NewScheduleEntry {
+                id: body.client_mutation_id.unwrap_or_else(uuid::Uuid::now_v7),
+                user_id: principal.identity().user_id(),
+                title: body.title,
+                notes: body.notes,
+                starts_at,
+                ends_at,
+                time_zone: body.time_zone,
+            },
+            ScheduleEntryLinkage {
+                project_id: body.project_id,
+                task_id: body.task_id,
+            },
+        )
         .await
     {
-        Ok(entry) => match schedule_entry_response(entry) {
+        Ok(entry) => match linked_schedule_entry_response(entry) {
             Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
             Err(()) => unavailable_response(request_id),
         },
@@ -3197,22 +3224,44 @@ async fn update_schedule_entry(
         return unavailable_response(request_id);
     };
     match planning
-        .update_schedule_entry(&ScheduleEntryUpdate {
-            id: schedule_entry_id,
-            user_id: principal.identity().user_id(),
-            title: body.title.clone(),
-            notes: body.notes.clone(),
-            starts_at,
-            ends_at,
-            time_zone: body.time_zone.clone(),
-            expected_version: body.expected_version,
-        })
+        .update_schedule_entry_with_linkage(
+            &ScheduleEntryUpdate {
+                id: schedule_entry_id,
+                user_id: principal.identity().user_id(),
+                title: body.title.clone(),
+                notes: body.notes.clone(),
+                starts_at,
+                ends_at,
+                time_zone: body.time_zone.clone(),
+                expected_version: body.expected_version,
+            },
+            body.linkage.as_ref().map(|linkage| ScheduleEntryLinkage {
+                project_id: linkage.project_id,
+                task_id: linkage.task_id,
+            }),
+        )
         .await
     {
-        Ok(Some(entry)) => match schedule_entry_response(entry) {
+        Ok(Some(entry)) => match linked_schedule_entry_response(entry) {
             Ok(response) => Json(response).into_response(),
             Err(()) => unavailable_response(request_id),
         },
+        Ok(None) if body.linkage.is_some() => {
+            match planning
+                .schedule_entry_with_linkage_by_id(
+                    principal.identity().user_id(),
+                    schedule_entry_id,
+                )
+                .await
+            {
+                Ok(Some(entry)) if entry.entry.source == ScheduleSource::Manual => {
+                    schedule_conflict_response(request_id)
+                }
+                Ok(Some(_)) => invalid_request_response(request_id),
+                Ok(None) => schedule_conflict_response(request_id),
+                Err(error) => storage_error_response(&error, request_id),
+            }
+        }
         Ok(None) => {
             update_google_schedule_entry(
                 &state,
@@ -8875,8 +8924,24 @@ fn storage_error_response(error: &StorageError, request_id: RequestId) -> Respon
 }
 
 fn schedule_entry_response(entry: ScheduleEntry) -> Result<ScheduleEntryResponse, ()> {
+    schedule_entry_response_with_linkage(entry, None, None)
+}
+
+fn linked_schedule_entry_response(
+    linked: LinkedScheduleEntry,
+) -> Result<ScheduleEntryResponse, ()> {
+    schedule_entry_response_with_linkage(linked.entry, linked.project_id, linked.task_id)
+}
+
+fn schedule_entry_response_with_linkage(
+    entry: ScheduleEntry,
+    project_id: Option<uuid::Uuid>,
+    task_id: Option<uuid::Uuid>,
+) -> Result<ScheduleEntryResponse, ()> {
     Ok(ScheduleEntryResponse {
         id: entry.id,
+        project_id,
+        task_id,
         title: entry.title,
         notes: entry.notes,
         starts_at: entry.starts_at.format(&Rfc3339).map_err(|_| ())?,
@@ -9345,6 +9410,8 @@ fn weekly_report_response(report: WeeklyWorkspaceReport) -> WeeklyReportResponse
         overdue_task_count: sum(|project| project.overdue_task_count),
         stale_task_count: sum(|project| project.stale_task_count),
         unassigned_task_count: sum(|project| project.unassigned_task_count),
+        actionable_chat_inflow_count: report.actionable_chat_inflow_count,
+        actionable_gmail_inflow_count: report.actionable_gmail_inflow_count,
         projects,
     }
 }
@@ -10004,6 +10071,8 @@ mod tests {
             workspace_id,
             period_start: OffsetDateTime::from_unix_timestamp(1_769_958_000).expect("period start"),
             period_end: OffsetDateTime::from_unix_timestamp(1_770_303_600).expect("period end"),
+            actionable_chat_inflow_count: 3,
+            actionable_gmail_inflow_count: 2,
             projects: vec![WeeklyProjectReport {
                 project_id: Uuid::now_v7(),
                 title: "상시 CS 운영".to_owned(),
@@ -10023,7 +10092,38 @@ mod tests {
         assert_eq!(report.created_task_count, 6);
         assert_eq!(report.completed_task_count, 4);
         assert_eq!(report.backlog_delta, 2);
+        assert_eq!(report.actionable_chat_inflow_count, 3);
+        assert_eq!(report.actionable_gmail_inflow_count, 2);
         assert_eq!(report.projects[0].health, "at_risk");
+    }
+
+    #[test]
+    fn linked_schedule_contract_exposes_project_and_task_context_directly() {
+        let project_id = Uuid::now_v7();
+        let task_id = Uuid::now_v7();
+        let starts_at = OffsetDateTime::from_unix_timestamp(1_770_001_200).expect("schedule start");
+        let response = linked_schedule_entry_response(LinkedScheduleEntry {
+            entry: ScheduleEntry {
+                id: Uuid::now_v7(),
+                title: "계약 검토 집중 시간".to_owned(),
+                notes: None,
+                starts_at,
+                ends_at: starts_at + TimeDuration::hours(1),
+                time_zone: "Asia/Seoul".to_owned(),
+                status: ScheduleStatus::Confirmed,
+                source: ScheduleSource::Manual,
+                editable: true,
+                version: 1,
+            },
+            project_id: Some(project_id),
+            task_id: Some(task_id),
+        })
+        .expect("linked schedule response should render");
+        let serialized =
+            serde_json::to_value(response).expect("linked schedule response should serialize");
+
+        assert_eq!(serialized["projectId"], project_id.to_string());
+        assert_eq!(serialized["taskId"], task_id.to_string());
     }
 
     #[test]

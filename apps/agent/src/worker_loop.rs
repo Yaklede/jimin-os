@@ -12,8 +12,12 @@ use jimin_storage::{
     device_signals::{DeviceSignalState, MissedCallSignal},
     gmail::GmailMessage,
     goals::{GoalHealth, GoalOverview, GoalStatus},
-    intelligence::NewScheduleRequestConflict,
-    planning::{ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus},
+    intelligence::{
+        NewScheduleRequestConflict, Recommendation, RecommendationStatus, SuggestedActionKind,
+    },
+    planning::{
+        LinkedScheduleEntry, ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus,
+    },
     webhook::ProjectWebhook,
     work::{Project, ProjectStatus, Workspace, WorkspaceScope},
 };
@@ -36,6 +40,7 @@ const CONTEXT_TASK_LIMIT: usize = 128;
 const CONTEXT_PROJECT_LIMIT: usize = 32;
 const CONTEXT_GOAL_LIMIT: usize = 16;
 const CONTEXT_INBOX_LIMIT: usize = 16;
+const CONTEXT_RECOMMENDATION_LIMIT: i64 = 50;
 const CONTEXT_MENTION_NAME_LIMIT: usize = 64;
 const CONTEXT_MISSED_CALL_LIMIT: i64 = 50;
 const CONTEXT_MAX_BYTES: usize = 160 * 1024;
@@ -55,6 +60,7 @@ struct TurnContext {
     daily_tasks: Vec<Task>,
     workspaces: Vec<Workspace>,
     projects: Vec<Project>,
+    recommendations: Vec<Recommendation>,
     requires_daily_task_coverage: bool,
     bulk_schedule_cancellation_ids: Vec<Uuid>,
 }
@@ -96,6 +102,7 @@ struct StructuredAssistantAction {
     entity_id: String,
     workspace_id: String,
     project_id: String,
+    task_id: String,
     parent_task_id: String,
     title: String,
     notes: String,
@@ -111,6 +118,8 @@ struct StructuredAssistantAction {
     objective: String,
     next_action: String,
     message: String,
+    reason: String,
+    revisit_at: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -130,6 +139,9 @@ enum StructuredAssistantActionKind {
     UpdateProject,
     DeleteProject,
     SendWebhookMessage,
+    ApproveRecommendation,
+    RejectRecommendation,
+    DeferRecommendation,
 }
 
 #[derive(Debug, Deserialize)]
@@ -962,11 +974,12 @@ async fn contextualized_turn_context(
     let now = OffsetDateTime::now_utc();
     let daily_task_cutoff = korea_day_end(now)?;
     let (
-        schedule,
+        linked_schedule,
         mut tasks,
         completed_tasks,
         workspaces,
         projects,
+        recommendations,
         goals,
         inbox,
         webhooks,
@@ -974,7 +987,7 @@ async fn contextualized_turn_context(
         device_signal_states,
         conversation_messages,
     ) = tokio::try_join!(
-        database.schedule_entries_in_range(
+        database.schedule_entries_with_linkage_in_range(
             job.user_id,
             now - TimeDuration::days(1),
             now + TimeDuration::days(14),
@@ -983,6 +996,7 @@ async fn contextualized_turn_context(
         database.completed_tasks_for_user(job.user_id),
         database.workspaces_for_user(job.user_id),
         database.projects_for_user(job.user_id),
+        database.active_decisions_for_user(job.user_id, now, CONTEXT_RECOMMENDATION_LIMIT),
         database.goal_overviews_for_user(job.user_id, now),
         database.recent_gmail_messages_for_user(job.user_id),
         database.user_project_webhooks(job.user_id),
@@ -994,6 +1008,10 @@ async fn contextualized_turn_context(
         database.device_signal_states_for_user(job.user_id),
         database.conversation_messages_for_user(job.user_id, job.conversation_id),
     )?;
+    let schedule = linked_schedule
+        .iter()
+        .map(|linked| linked.entry.clone())
+        .collect::<Vec<_>>();
     let conversation_messages = conversation_messages
         .unwrap_or_default()
         .into_iter()
@@ -1016,11 +1034,12 @@ async fn contextualized_turn_context(
         requested_bulk_schedule_cancellation_ids(&job.input_content, &schedule, now);
     let prompt = render_contextualized_turn(
         &job.input_content,
-        &schedule,
+        &linked_schedule,
         &tasks,
         &completed_tasks,
         &workspaces,
         &projects,
+        &recommendations,
         &goals,
         &inbox,
         &webhooks,
@@ -1038,6 +1057,7 @@ async fn contextualized_turn_context(
         daily_tasks,
         workspaces,
         projects,
+        recommendations,
         requires_daily_task_coverage: is_daily_overview_request(&job.input_content),
         bulk_schedule_cancellation_ids,
     })
@@ -1077,11 +1097,12 @@ fn sort_tasks_for_execution(tasks: &mut [Task], goals: &[GoalOverview], now: Off
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // The prompt builder names every bounded authenticated context collection explicitly.
 fn render_contextualized_turn(
     input: &str,
-    schedule: &[ScheduleEntry],
+    schedule: &[LinkedScheduleEntry],
     tasks: &[Task],
     completed_tasks: &[Task],
     workspaces: &[Workspace],
     projects: &[Project],
+    recommendations: &[Recommendation],
     goals: &[GoalOverview],
     inbox: &[GmailMessage],
     webhooks: &[ProjectWebhook],
@@ -1119,7 +1140,7 @@ fn render_contextualized_turn(
          and status checks; mutate only when the user semantically asks to change stored state; clarify when the target \
          or requested change is ambiguous; conversation for general discussion. intent.confidence is an integer from 0 \
          to 100. A mutate intent below 80 confidence must become clarify and must not contain actions. \
-         You may select up to 32 local planning actions in the actions array. Use an empty array for questions or ambiguous requests. \
+         You may select up to 32 local planning or recommendation decision actions in the actions array. Use an empty array for questions or ambiguous requests. \
          When the user asks to complete, cancel, or update several records, include one action for every matched record. \
          For create_task and update_task, set assigneeName to the explicitly requested owner. For updates, preserve the \
          current assigneeName unless the user asks to assign, reassign, or clear it. When task notes unambiguously name an \
@@ -1134,6 +1155,10 @@ fn render_contextualized_turn(
          When the user asks to reopen a completed task and also change its fields, use one update_task action with status open, \
          preserving every unchanged replacement field. Do not emit a separate reopen_task for the same entity. \
          For updates, copy every replacement field from server context and change only what the user requested. \
+         For create_schedule and update_schedule, projectId and taskId are optional authenticated work links. Use only exact \
+         IDs from projects and open_tasks or completed_tasks. When taskId is set, projectId must be that task's project; the \
+         server inherits the task's project when projectId is empty. For update_schedule, preserve both current schedule links \
+         on unrelated edits and use empty strings only when the user explicitly asks to clear the work context. \
          For create_task, act like a chief of staff instead of copying the request. Rewrite the user's speech into one concise, \
          action-oriented title that states the outcome, keeps proper nouns and numbers, and removes dates, filler, request verbs, \
          honorifics, and repeated wording. Put useful context, requested deliverables, and the completion condition into notes as \
@@ -1144,6 +1169,13 @@ fn render_contextualized_turn(
          Set allowScheduleConflict to false by default. Set it to true only when the user's current message explicitly says \
          to keep or add the schedule despite a conflict that recent_conversation says was already disclosed. Never infer consent. \
          When the user explicitly asks to delete or remove an existing project, use delete_project; its linked tasks become unassigned. \
+         active_recommendations is authenticated, server-owned decision context. When the user explicitly asks to approve, \
+         reject, or defer one or more listed decisions, emit approve_recommendation, reject_recommendation, or \
+         defer_recommendation with the exact recommendation entityId. Never invent a recommendation ID. The server binds \
+         the optimistic-concurrency version from this authenticated context; do not put versions in another field. Only \
+         pending, deferred, or analysis_requested recommendations can be decided. Approved or executing entries are visible \
+         for status questions but must not be decided again. A defer_recommendation must include a future revisitAt. Do not \
+         combine recommendation decision actions with unrelated task, schedule, project, or webhook mutations in one turn. \
          When the user explicitly asks to post or send a message to a configured project channel, use one \
          send_webhook_message action with that webhook ID, its project ID, and a concise message. It may be combined with \
          local task or project actions in the same atomic batch when the user requests them together. Include the referenced \
@@ -1180,15 +1212,22 @@ fn render_contextualized_turn(
     if schedule.is_empty() {
         prompt.push_str("(no schedule entries in the next 14 days)\n");
     } else {
-        for entry in schedule.iter().take(CONTEXT_SCHEDULE_LIMIT) {
+        for linked in schedule.iter().take(CONTEXT_SCHEDULE_LIMIT) {
+            let entry = &linked.entry;
             let source = match entry.source {
                 ScheduleSource::Manual => "Jimin OS",
                 ScheduleSource::GoogleCalendar => "Google Calendar",
             };
             let _ = writeln!(
                 prompt,
-                "- [id {} | {source} | version {}] {} | {} to {} ({}) | notes: {}",
+                "- [id {} | {source} | project {} | task {} | version {}] {} | {} to {} ({}) | notes: {}",
                 entry.id,
+                linked
+                    .project_id
+                    .map_or_else(|| "none".to_owned(), |id| id.to_string()),
+                linked
+                    .task_id
+                    .map_or_else(|| "none".to_owned(), |id| id.to_string()),
                 entry.version,
                 entry.title,
                 korea_timestamp(entry.starts_at),
@@ -1300,7 +1339,37 @@ fn render_contextualized_turn(
             );
         }
     }
-    prompt.push_str("</projects>\n<goals>\n");
+    prompt.push_str("</projects>\n<active_recommendations>\n");
+    if recommendations.is_empty() {
+        prompt.push_str("(no active recommendations)\n");
+    } else {
+        for recommendation in recommendations {
+            let status = recommendation_status_name(recommendation.status);
+            let action_kind = recommendation
+                .suggested_action_kind
+                .map_or("none", suggested_action_kind_name);
+            let valid_until = recommendation
+                .valid_until
+                .map_or_else(|| "none".to_owned(), korea_timestamp);
+            let revisit_at = recommendation
+                .revisit_at
+                .map_or_else(|| "none".to_owned(), korea_timestamp);
+            let _ = writeln!(
+                prompt,
+                "- [id {} | version {} | status {status} | action {action_kind} | valid_until {valid_until} | revisit_at {revisit_at}] {} | rationale: {} | expected: {} | risk: {}",
+                recommendation.id,
+                recommendation.version,
+                recommendation.title,
+                truncate_chars(&recommendation.rationale, 1_200),
+                truncate_chars(&recommendation.expected_effect, 800),
+                recommendation
+                    .risk_summary
+                    .as_deref()
+                    .map_or_else(|| "none".to_owned(), |value| truncate_chars(value, 800)),
+            );
+        }
+    }
+    prompt.push_str("</active_recommendations>\n<goals>\n");
     if goals.is_empty() {
         prompt.push_str("(no goals)\n");
     } else {
@@ -1444,6 +1513,32 @@ fn render_contextualized_turn(
     append_bounded(&mut prompt, input.trim(), CONTEXT_MAX_BYTES);
     prompt.push_str("\n</user_request>");
     prompt
+}
+
+const fn recommendation_status_name(status: RecommendationStatus) -> &'static str {
+    match status {
+        RecommendationStatus::Pending => "pending",
+        RecommendationStatus::Approved => "approved",
+        RecommendationStatus::Rejected => "rejected",
+        RecommendationStatus::Deferred => "deferred",
+        RecommendationStatus::AnalysisRequested => "analysis_requested",
+        RecommendationStatus::Executing => "executing",
+        RecommendationStatus::Executed => "executed",
+        RecommendationStatus::Failed => "failed",
+        RecommendationStatus::Expired => "expired",
+    }
+}
+
+const fn suggested_action_kind_name(kind: SuggestedActionKind) -> &'static str {
+    match kind {
+        SuggestedActionKind::Review => "review",
+        SuggestedActionKind::CreateTask => "create_task",
+        SuggestedActionKind::UpdateTask => "update_task",
+        SuggestedActionKind::CreateSchedule => "create_schedule",
+        SuggestedActionKind::UpdateProject => "update_project",
+        SuggestedActionKind::RunWebhook => "run_webhook",
+        SuggestedActionKind::RequestAnalysis => "request_analysis",
+    }
 }
 
 fn korea_timestamp(value: OffsetDateTime) -> String {
@@ -1722,12 +1817,19 @@ fn assistant_output_schema() -> Value {
                                 "create_project",
                                 "update_project",
                                 "delete_project",
-                                "send_webhook_message"
+                                "send_webhook_message",
+                                "approve_recommendation",
+                                "reject_recommendation",
+                                "defer_recommendation"
                             ]
                         },
                         "entityId": { "type": "string" },
                         "workspaceId": { "type": "string" },
                         "projectId": { "type": "string" },
+                        "taskId": {
+                            "type": "string",
+                            "description": "For create_schedule or update_schedule, the exact owned task link. Preserve it on unrelated schedule updates and use an empty string only to clear it."
+                        },
                         "parentTaskId": {
                             "type": "string",
                             "description": "For child tasks, the exact open root task ID. Preserve it on unrelated updates and use an empty string only to remove an existing parent."
@@ -1768,6 +1870,15 @@ fn assistant_output_schema() -> Value {
                             "type": "string",
                             "description": "For send_webhook_message, the concise message to post to the selected configured channel.",
                             "maxLength": 1800
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Optional concise owner reason for a recommendation decision.",
+                            "maxLength": 2000
+                        },
+                        "revisitAt": {
+                            "type": "string",
+                            "description": "For defer_recommendation, a future RFC3339 timestamp. Empty for every other action."
                         }
                     },
                     "required": [
@@ -1775,6 +1886,7 @@ fn assistant_output_schema() -> Value {
                         "entityId",
                         "workspaceId",
                         "projectId",
+                        "taskId",
                         "parentTaskId",
                         "title",
                         "notes",
@@ -1789,7 +1901,9 @@ fn assistant_output_schema() -> Value {
                         "riskLevel",
                         "objective",
                         "nextAction",
-                        "message"
+                        "message",
+                        "reason",
+                        "revisitAt"
                     ],
                     "additionalProperties": false
                 }
@@ -1991,6 +2105,13 @@ fn validated_agent_actions(
     {
         return Err(());
     }
+    let recommendation_action_count = actions
+        .iter()
+        .filter(|action| is_recommendation_action(action))
+        .count();
+    if recommendation_action_count > 0 && recommendation_action_count != actions.len() {
+        return Err(());
+    }
     reconcile_bulk_schedule_cancellations(&mut actions, context)?;
     let mut action_entity_ids = HashSet::with_capacity(actions.len());
     if actions
@@ -2000,6 +2121,15 @@ fn validated_agent_actions(
         return Err(());
     }
     Ok(actions)
+}
+
+const fn is_recommendation_action(action: &AgentActionCommand) -> bool {
+    matches!(
+        action,
+        AgentActionCommand::ApproveRecommendation { .. }
+            | AgentActionCommand::RejectRecommendation { .. }
+            | AgentActionCommand::DeferRecommendation { .. }
+    )
 }
 
 fn reconcile_bulk_schedule_cancellations(
@@ -2106,6 +2236,8 @@ fn validated_agent_action(
                 };
                 AgentActionCommand::CreateSchedule {
                     id: Uuid::now_v7(),
+                    project_id,
+                    task_id: None,
                     title,
                     notes,
                     starts_at,
@@ -2192,6 +2324,11 @@ fn validated_agent_action(
             }
         }
         StructuredAssistantActionKind::CreateSchedule => {
+            let (project_id, task_id) = validated_structured_schedule_linkage(
+                context,
+                &action.project_id,
+                &action.task_id,
+            )?;
             let starts_at = parse_optional_timestamp(&action.starts_at)?
                 .or(parse_optional_timestamp(&action.due_at)?)
                 .ok_or(())?;
@@ -2208,6 +2345,8 @@ fn validated_agent_action(
             };
             AgentActionCommand::CreateSchedule {
                 id: Uuid::now_v7(),
+                project_id,
+                task_id,
                 title: required_action_text(&action.title, 200)?,
                 notes: optional_action_document(&action.notes, 10_000)?,
                 starts_at,
@@ -2223,6 +2362,11 @@ fn validated_agent_action(
                 .iter()
                 .find(|entry| entry.id == id && entry.source == ScheduleSource::Manual)
                 .ok_or(())?;
+            let (project_id, task_id) = validated_structured_schedule_linkage(
+                context,
+                &action.project_id,
+                &action.task_id,
+            )?;
             let starts_at = parse_timestamp(&action.starts_at)?;
             let ends_at = parse_timestamp(&action.ends_at)?;
             if ends_at <= starts_at {
@@ -2230,6 +2374,8 @@ fn validated_agent_action(
             }
             AgentActionCommand::UpdateSchedule {
                 id,
+                project_id,
+                task_id,
                 title: required_action_text(&action.title, 200)?,
                 notes: optional_action_document(&action.notes, 10_000)?,
                 starts_at,
@@ -2316,6 +2462,58 @@ fn validated_agent_action(
                 project_id,
                 webhook_id,
                 message: required_action_document(&action.message, 1_800)?,
+            }
+        }
+        StructuredAssistantActionKind::ApproveRecommendation
+        | StructuredAssistantActionKind::RejectRecommendation
+        | StructuredAssistantActionKind::DeferRecommendation => {
+            let recommendation_id = parse_existing_id(&action.entity_id)?;
+            let recommendation = context
+                .recommendations
+                .iter()
+                .find(|recommendation| recommendation.id == recommendation_id)
+                .ok_or(())?;
+            if !matches!(
+                recommendation.status,
+                RecommendationStatus::Pending
+                    | RecommendationStatus::Deferred
+                    | RecommendationStatus::AnalysisRequested
+            ) {
+                return Err(());
+            }
+            let decision_id = Uuid::now_v7();
+            let reason = optional_action_document(&action.reason, 2_000)?;
+            match action.kind {
+                StructuredAssistantActionKind::ApproveRecommendation => {
+                    AgentActionCommand::ApproveRecommendation {
+                        decision_id,
+                        recommendation_id,
+                        expected_version: recommendation.version,
+                        reason,
+                    }
+                }
+                StructuredAssistantActionKind::RejectRecommendation => {
+                    AgentActionCommand::RejectRecommendation {
+                        decision_id,
+                        recommendation_id,
+                        expected_version: recommendation.version,
+                        reason,
+                    }
+                }
+                StructuredAssistantActionKind::DeferRecommendation => {
+                    let revisit_at = parse_timestamp(&action.revisit_at)?;
+                    if revisit_at <= OffsetDateTime::now_utc() {
+                        return Err(());
+                    }
+                    AgentActionCommand::DeferRecommendation {
+                        decision_id,
+                        recommendation_id,
+                        expected_version: recommendation.version,
+                        reason,
+                        revisit_at,
+                    }
+                }
+                _ => return Err(()),
             }
         }
     };
@@ -2511,6 +2709,40 @@ fn validate_structured_task_parent(
     Ok(())
 }
 
+fn validated_structured_schedule_linkage(
+    context: &TurnContext,
+    project_id: &str,
+    task_id: &str,
+) -> Result<(Option<Uuid>, Option<Uuid>), ()> {
+    let parse_optional_id = |value: &str| {
+        let value = value.trim();
+        if value.is_empty() {
+            Ok(None)
+        } else {
+            value.parse::<Uuid>().map(Some).map_err(|_| ())
+        }
+    };
+    let requested_project_id = parse_optional_id(project_id)?;
+    let task_id = parse_optional_id(task_id)?;
+    if requested_project_id
+        .is_some_and(|id| !context.projects.iter().any(|project| project.id == id))
+    {
+        return Err(());
+    }
+    let Some(task_id) = task_id else {
+        return Ok((requested_project_id, None));
+    };
+    let task = context
+        .tasks
+        .iter()
+        .find(|task| task.id == task_id && task.status != TaskStatus::Cancelled)
+        .ok_or(())?;
+    if requested_project_id.is_some() && requested_project_id != task.project_id {
+        return Err(());
+    }
+    Ok((requested_project_id.or(task.project_id), Some(task_id)))
+}
+
 const fn agent_action_entity_id(action: &AgentActionCommand) -> Uuid {
     match action {
         AgentActionCommand::CreateTask { id, .. }
@@ -2523,6 +2755,15 @@ const fn agent_action_entity_id(action: &AgentActionCommand) -> Uuid {
         | AgentActionCommand::UpdateProject { id, .. }
         | AgentActionCommand::DeleteProject { id, .. }
         | AgentActionCommand::SendWebhookMessage { id, .. } => *id,
+        AgentActionCommand::ApproveRecommendation {
+            recommendation_id, ..
+        }
+        | AgentActionCommand::RejectRecommendation {
+            recommendation_id, ..
+        }
+        | AgentActionCommand::DeferRecommendation {
+            recommendation_id, ..
+        } => *recommendation_id,
     }
 }
 
@@ -2533,6 +2774,16 @@ fn agent_action_results(
 ) -> Result<(String, AssistantPresentation), ()> {
     if actions.is_empty() || actions.len() > MAX_AGENT_ACTIONS {
         return Err(());
+    }
+    let recommendation_action_count = actions
+        .iter()
+        .filter(|action| is_recommendation_action(action))
+        .count();
+    if recommendation_action_count > 0 {
+        if recommendation_action_count != actions.len() {
+            return Err(());
+        }
+        return recommendation_action_results(actions, context);
     }
     let webhook_count = actions
         .iter()
@@ -2807,6 +3058,95 @@ fn agent_action_results(
     };
     presentation.validate().map_err(|_| ())?;
     Ok((answer, presentation))
+}
+
+fn recommendation_action_results(
+    actions: &[AgentActionCommand],
+    context: &TurnContext,
+) -> Result<(String, AssistantPresentation), ()> {
+    if actions.is_empty()
+        || actions
+            .iter()
+            .any(|action| !is_recommendation_action(action))
+    {
+        return Err(());
+    }
+    let mut approved = 0_usize;
+    let mut rejected = 0_usize;
+    let mut deferred = 0_usize;
+    let mut first_title = None;
+    let mut first_deferred_until = None;
+    for action in actions {
+        let recommendation_id = agent_action_entity_id(action);
+        let recommendation = context
+            .recommendations
+            .iter()
+            .find(|recommendation| recommendation.id == recommendation_id)
+            .ok_or(())?;
+        first_title.get_or_insert_with(|| recommendation.title.clone());
+        match action {
+            AgentActionCommand::ApproveRecommendation { .. } => approved += 1,
+            AgentActionCommand::RejectRecommendation { .. } => rejected += 1,
+            AgentActionCommand::DeferRecommendation { revisit_at, .. } => {
+                deferred += 1;
+                first_deferred_until.get_or_insert(*revisit_at);
+            }
+            _ => return Err(()),
+        }
+    }
+    let (answer, presentation_title) = if actions.len() == 1 {
+        let title = first_title.ok_or(())?;
+        if approved == 1 {
+            (
+                format!("‘{title}’ 결정을 승인했어요."),
+                "결정을 승인했어요".to_owned(),
+            )
+        } else if rejected == 1 {
+            (
+                format!("‘{title}’ 제안을 거절했어요."),
+                "제안을 거절했어요".to_owned(),
+            )
+        } else {
+            let revisit_at = first_deferred_until.ok_or(())?;
+            (
+                format!(
+                    "‘{title}’ 확인을 {}까지 미뤘어요.",
+                    korean_schedule_time(revisit_at)
+                ),
+                "확인을 나중으로 미뤘어요".to_owned(),
+            )
+        }
+    } else {
+        let mut parts = Vec::new();
+        if approved > 0 {
+            parts.push(format!("승인 {approved}개"));
+        }
+        if rejected > 0 {
+            parts.push(format!("거절 {rejected}개"));
+        }
+        if deferred > 0 {
+            parts.push(format!("보류 {deferred}개"));
+        }
+        (
+            format!(
+                "결정 {}건을 처리했어요: {}.",
+                actions.len(),
+                parts.join(", ")
+            ),
+            format!("결정 {}건을 처리했어요", actions.len()),
+        )
+    };
+    Ok((
+        answer.clone(),
+        AssistantPresentation {
+            kind: AssistantPresentationKind::Summary,
+            title: presentation_title,
+            items: Vec::new(),
+            layout: AssistantPresentationLayout::Stack,
+            sections: Vec::new(),
+            focus_item_id: None,
+        },
+    ))
 }
 
 #[allow(clippy::too_many_lines)] // Each persisted action owns a deterministic completion message and focused presentation in the same exhaustive map.
@@ -3085,6 +3425,11 @@ fn agent_action_result(
             )
         }
         AgentActionCommand::SendWebhookMessage { .. } => return Err(()),
+        AgentActionCommand::ApproveRecommendation { .. }
+        | AgentActionCommand::RejectRecommendation { .. }
+        | AgentActionCommand::DeferRecommendation { .. } => {
+            return recommendation_action_results(std::slice::from_ref(action), context);
+        }
     };
     let item_id = presentation_item_id(&item);
     let presentation = AssistantPresentation {
@@ -3762,7 +4107,10 @@ mod tests {
         device_signals::{DeviceSignalState, MissedCallSignal},
         gmail::GmailMessage,
         goals::{Goal, GoalHealth, GoalOverview, GoalStatus},
-        planning::{ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus},
+        intelligence::{Recommendation, RecommendationStatus, SuggestedActionKind},
+        planning::{
+            LinkedScheduleEntry, ScheduleEntry, ScheduleSource, ScheduleStatus, Task, TaskStatus,
+        },
         webhook::{GoogleChatMentionDirectory, ProjectWebhook, WebhookProvider},
         work::{Project, ProjectManagementMode, ProjectStatus, Workspace, WorkspaceScope},
     };
@@ -3779,6 +4127,63 @@ mod tests {
         sort_tasks_for_execution, validate_turn_intent, validated_agent_action,
         validated_assistant_response,
     };
+
+    fn recommendation_fixture(status: RecommendationStatus) -> Recommendation {
+        let now = OffsetDateTime::now_utc();
+        Recommendation {
+            id: Uuid::now_v7(),
+            workspace_id: None,
+            project_id: None,
+            goal_id: None,
+            signal_id: None,
+            title: "계약 검토 범위를 결정하세요".to_owned(),
+            rationale: "누락 조항이 있어 검토 범위를 먼저 확정해야 해요.".to_owned(),
+            expected_effect: "재검토 비용을 줄일 수 있어요.".to_owned(),
+            risk_summary: Some("확정이 늦어지면 계약 일정이 밀릴 수 있어요.".to_owned()),
+            confidence: 95,
+            urgency: 2,
+            impact: 3,
+            risk_level: 2,
+            effort_minutes: Some(10),
+            suggested_action_kind: Some(SuggestedActionKind::Review),
+            suggested_entity_id: None,
+            status,
+            valid_until: Some(now + Duration::days(2)),
+            revisit_at: None,
+            created_at: now,
+            updated_at: now,
+            version: 7,
+        }
+    }
+
+    fn project_fixture(id: Uuid) -> Project {
+        Project {
+            id,
+            workspace_id: Uuid::now_v7(),
+            title: "일정 연결 프로젝트".to_owned(),
+            objective: None,
+            status: ProjectStatus::Active,
+            management_mode: ProjectManagementMode::Completion,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
+            risk_level: 1,
+            next_action: None,
+            due_at: None,
+            open_task_count: 1,
+            total_task_count: 1,
+            completed_task_count: 0,
+            overdue_task_count: 0,
+            unassigned_task_count: 0,
+            progress_percent: 0,
+            weekly_created_task_count: 0,
+            weekly_completed_task_count: 0,
+            backlog_delta: 0,
+            stale_task_count: 0,
+            average_cycle_time_hours: 0,
+            on_time_completion_percent: None,
+            version: 1,
+        }
+    }
 
     #[test]
     fn restarts_only_for_transport_or_protocol_faults() {
@@ -3903,6 +4308,11 @@ mod tests {
             version: 1,
         };
         let project_id = project.id;
+        let schedule = LinkedScheduleEntry {
+            entry: schedule,
+            project_id: None,
+            task_id: None,
+        };
         let prompt = render_contextualized_turn(
             "내일 일정 알려줘",
             &[schedule],
@@ -3910,6 +4320,7 @@ mod tests {
             &[completed_task],
             &[workspace],
             &[project],
+            &[],
             &[],
             &[inbox],
             &[],
@@ -3921,7 +4332,7 @@ mod tests {
         );
 
         assert!(prompt.contains("read-only personal data"));
-        assert!(prompt.contains("Google Calendar | version 1] 회의"));
+        assert!(prompt.contains("Google Calendar | project none | task none | version 1] 회의"));
         assert!(prompt.contains(&schedule_id.to_string()));
         assert!(prompt.contains("장보기"));
         assert!(prompt.contains(&task_id.to_string()));
@@ -3964,6 +4375,7 @@ mod tests {
 
         let prompt = render_contextualized_turn(
             "내가 놓친 전화 뭐 있어?",
+            &[],
             &[],
             &[],
             &[],
@@ -4020,6 +4432,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             now,
             korea_day_end(now).expect("Korea day boundary"),
         );
@@ -4066,6 +4479,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             &[webhook],
             &[],
             &[],
@@ -4078,6 +4492,132 @@ mod tests {
         assert!(prompt.contains("include exactly @{Name}"));
         assert!(!prompt.contains("users/123456789012345678901"));
         assert!(!prompt.contains("users/987654321098765432109"));
+    }
+
+    #[test]
+    fn context_prompt_exposes_authenticated_recommendation_identity_and_reasoning() {
+        let now = OffsetDateTime::now_utc();
+        let recommendation = recommendation_fixture(RecommendationStatus::Pending);
+        let prompt = render_contextualized_turn(
+            "이 결정 승인해 줘",
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            std::slice::from_ref(&recommendation),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            now,
+            korea_day_end(now).expect("Korea day boundary"),
+        );
+
+        assert!(prompt.contains("<active_recommendations>"));
+        assert!(prompt.contains(&format!(
+            "id {} | version 7 | status pending | action review",
+            recommendation.id
+        )));
+        assert!(prompt.contains("누락 조항이 있어"));
+        assert!(prompt.contains("Never invent a recommendation ID"));
+    }
+
+    #[test]
+    fn recommendation_action_uses_authenticated_version_and_rejects_stale_targets() {
+        let recommendation = recommendation_fixture(RecommendationStatus::Pending);
+        let context = TurnContext {
+            prompt: String::new(),
+            schedule: Vec::new(),
+            tasks: Vec::new(),
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            recommendations: vec![recommendation.clone()],
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
+        };
+        let action = StructuredAssistantAction {
+            kind: StructuredAssistantActionKind::ApproveRecommendation,
+            entity_id: recommendation.id.to_string(),
+            reason: "범위를 확인했어요.".to_owned(),
+            ..StructuredAssistantAction::default()
+        };
+
+        let command = validated_agent_action(&action, &context)
+            .expect("valid recommendation action")
+            .expect("recommendation command");
+        assert!(matches!(
+            command,
+            AgentActionCommand::ApproveRecommendation {
+                recommendation_id,
+                expected_version: 7,
+                reason: Some(reason),
+                ..
+            } if recommendation_id == recommendation.id && reason == "범위를 확인했어요."
+        ));
+
+        let unknown = StructuredAssistantAction {
+            entity_id: Uuid::now_v7().to_string(),
+            ..action
+        };
+        assert!(validated_agent_action(&unknown, &context).is_err());
+
+        let mut approved = recommendation;
+        approved.status = RecommendationStatus::Approved;
+        let approved_context = TurnContext {
+            recommendations: vec![approved.clone()],
+            ..context
+        };
+        let already_decided = StructuredAssistantAction {
+            kind: StructuredAssistantActionKind::RejectRecommendation,
+            entity_id: approved.id.to_string(),
+            ..StructuredAssistantAction::default()
+        };
+        assert!(validated_agent_action(&already_decided, &approved_context).is_err());
+    }
+
+    #[test]
+    fn deferred_recommendation_requires_a_future_revisit_time() {
+        let recommendation = recommendation_fixture(RecommendationStatus::Pending);
+        let context = TurnContext {
+            prompt: String::new(),
+            schedule: Vec::new(),
+            tasks: Vec::new(),
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            recommendations: vec![recommendation.clone()],
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
+        };
+        let past = StructuredAssistantAction {
+            kind: StructuredAssistantActionKind::DeferRecommendation,
+            entity_id: recommendation.id.to_string(),
+            revisit_at: "2020-01-01T00:00:00Z".to_owned(),
+            ..StructuredAssistantAction::default()
+        };
+        assert!(validated_agent_action(&past, &context).is_err());
+
+        let future_at = OffsetDateTime::now_utc() + Duration::days(1);
+        let future = StructuredAssistantAction {
+            revisit_at: future_at
+                .format(&Rfc3339)
+                .expect("future timestamp should format"),
+            ..past
+        };
+        assert!(matches!(
+            validated_agent_action(&future, &context)
+                .expect("future defer action")
+                .expect("defer command"),
+            AgentActionCommand::DeferRecommendation {
+                recommendation_id,
+                expected_version: 7,
+                ..
+            } if recommendation_id == recommendation.id
+        ));
     }
 
     #[test]
@@ -4175,6 +4715,7 @@ mod tests {
             daily_tasks: Vec::new(),
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -4208,6 +4749,7 @@ mod tests {
             daily_tasks: Vec::new(),
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -4263,6 +4805,7 @@ mod tests {
             daily_tasks: vec![task.clone()],
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -4325,6 +4868,7 @@ mod tests {
             daily_tasks: vec![task.clone()],
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -4413,6 +4957,7 @@ mod tests {
             daily_tasks: Vec::new(),
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -4471,6 +5016,7 @@ mod tests {
             daily_tasks: vec![task.clone()],
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: true,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -4521,6 +5067,7 @@ mod tests {
             daily_tasks: Vec::new(),
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -4585,6 +5132,7 @@ mod tests {
             daily_tasks: Vec::new(),
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -4652,6 +5200,7 @@ mod tests {
             daily_tasks: vec![today.clone()],
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: true,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -4695,6 +5244,7 @@ mod tests {
             daily_tasks: Vec::new(),
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -4746,6 +5296,7 @@ mod tests {
             daily_tasks: Vec::new(),
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -4799,6 +5350,7 @@ mod tests {
             daily_tasks: Vec::new(),
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -4835,6 +5387,7 @@ mod tests {
             daily_tasks: Vec::new(),
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -4884,6 +5437,7 @@ mod tests {
             daily_tasks: Vec::new(),
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -4910,6 +5464,167 @@ mod tests {
                 && ends_at == starts_at + Duration::hours(1)
                 && time_zone == "Asia/Seoul"
         ));
+    }
+
+    #[test]
+    fn schedule_context_exposes_authenticated_work_links() {
+        let now = OffsetDateTime::now_utc();
+        let project_id = Uuid::now_v7();
+        let task_id = Uuid::now_v7();
+        let task = Task {
+            id: task_id,
+            project_id: Some(project_id),
+            parent_task_id: None,
+            title: "계약 검토".to_owned(),
+            notes: None,
+            assignee_name: None,
+            status: TaskStatus::Open,
+            priority: 1,
+            due_at: None,
+            completed_at: None,
+            version: 1,
+        };
+        let schedule = LinkedScheduleEntry {
+            entry: ScheduleEntry {
+                id: Uuid::now_v7(),
+                title: "계약 검토 회의".to_owned(),
+                notes: None,
+                starts_at: now + Duration::hours(1),
+                ends_at: now + Duration::hours(2),
+                time_zone: "Asia/Seoul".to_owned(),
+                status: ScheduleStatus::Confirmed,
+                source: ScheduleSource::Manual,
+                editable: true,
+                version: 3,
+            },
+            project_id: Some(project_id),
+            task_id: Some(task_id),
+        };
+        let prompt = render_contextualized_turn(
+            "회의를 한 시간 미뤄 줘",
+            &[schedule],
+            &[task],
+            &[],
+            &[],
+            &[project_fixture(project_id)],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            now,
+            korea_day_end(now).expect("Korea day boundary"),
+        );
+
+        assert!(prompt.contains(&format!(
+            "project {project_id} | task {task_id} | version 3"
+        )));
+        assert!(prompt.contains("preserve both current schedule links"));
+    }
+
+    #[test]
+    fn schedule_actions_bind_owned_task_and_project_links() {
+        let starts_at = OffsetDateTime::now_utc() + Duration::hours(1);
+        let project_id = Uuid::now_v7();
+        let other_project_id = Uuid::now_v7();
+        let task_id = Uuid::now_v7();
+        let schedule_id = Uuid::now_v7();
+        let task = Task {
+            id: task_id,
+            project_id: Some(project_id),
+            parent_task_id: None,
+            title: "계약 검토".to_owned(),
+            notes: None,
+            assignee_name: None,
+            status: TaskStatus::Open,
+            priority: 1,
+            due_at: None,
+            completed_at: None,
+            version: 1,
+        };
+        let context = TurnContext {
+            prompt: String::new(),
+            schedule: vec![ScheduleEntry {
+                id: schedule_id,
+                title: "계약 검토 회의".to_owned(),
+                notes: None,
+                starts_at,
+                ends_at: starts_at + Duration::hours(1),
+                time_zone: "Asia/Seoul".to_owned(),
+                status: ScheduleStatus::Confirmed,
+                source: ScheduleSource::Manual,
+                editable: true,
+                version: 3,
+            }],
+            tasks: vec![task],
+            daily_tasks: Vec::new(),
+            workspaces: Vec::new(),
+            projects: vec![
+                project_fixture(project_id),
+                project_fixture(other_project_id),
+            ],
+            recommendations: Vec::new(),
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
+        };
+        let create = StructuredAssistantAction {
+            kind: StructuredAssistantActionKind::CreateSchedule,
+            task_id: task_id.to_string(),
+            title: "계약 검토 회의".to_owned(),
+            starts_at: starts_at
+                .format(&Rfc3339)
+                .expect("start timestamp should format"),
+            ends_at: (starts_at + Duration::hours(1))
+                .format(&Rfc3339)
+                .expect("end timestamp should format"),
+            time_zone: "Asia/Seoul".to_owned(),
+            ..StructuredAssistantAction::default()
+        };
+        assert!(matches!(
+            validated_agent_action(&create, &context)
+                .expect("owned task link")
+                .expect("create command"),
+            AgentActionCommand::CreateSchedule {
+                project_id: Some(actual_project_id),
+                task_id: Some(actual_task_id),
+                ..
+            } if actual_project_id == project_id && actual_task_id == task_id
+        ));
+
+        let update = StructuredAssistantAction {
+            kind: StructuredAssistantActionKind::UpdateSchedule,
+            entity_id: schedule_id.to_string(),
+            project_id: project_id.to_string(),
+            task_id: task_id.to_string(),
+            title: "계약 검토 회의".to_owned(),
+            starts_at: (starts_at + Duration::hours(1))
+                .format(&Rfc3339)
+                .expect("updated start should format"),
+            ends_at: (starts_at + Duration::hours(2))
+                .format(&Rfc3339)
+                .expect("updated end should format"),
+            time_zone: "Asia/Seoul".to_owned(),
+            ..StructuredAssistantAction::default()
+        };
+        assert!(matches!(
+            validated_agent_action(&update, &context)
+                .expect("owned update link")
+                .expect("update command"),
+            AgentActionCommand::UpdateSchedule {
+                project_id: Some(actual_project_id),
+                task_id: Some(actual_task_id),
+                expected_version: 3,
+                ..
+            } if actual_project_id == project_id && actual_task_id == task_id
+        ));
+
+        let mismatched = StructuredAssistantAction {
+            project_id: other_project_id.to_string(),
+            ..update
+        };
+        assert!(validated_agent_action(&mismatched, &context).is_err());
     }
 
     #[test]
@@ -4953,6 +5668,7 @@ mod tests {
             daily_tasks: Vec::new(),
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -5082,6 +5798,7 @@ mod tests {
                 version: 1,
             }],
             projects: vec![project.clone()],
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -5144,6 +5861,7 @@ mod tests {
             daily_tasks: Vec::new(),
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -5207,6 +5925,7 @@ mod tests {
             daily_tasks: vec![task.clone()],
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -5300,6 +6019,7 @@ mod tests {
             daily_tasks: Vec::new(),
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: requested_ids,
         };
@@ -5381,6 +6101,7 @@ mod tests {
             daily_tasks: Vec::new(),
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -5460,6 +6181,7 @@ mod tests {
             daily_tasks: vec![first.clone(), second.clone()],
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -5532,6 +6254,7 @@ mod tests {
             daily_tasks: Vec::new(),
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -5557,6 +6280,7 @@ mod tests {
             daily_tasks: Vec::new(),
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -5643,6 +6367,7 @@ mod tests {
             daily_tasks: Vec::new(),
             workspaces: Vec::new(),
             projects: vec![project],
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };
@@ -5818,6 +6543,7 @@ mod tests {
             daily_tasks: Vec::new(),
             workspaces: Vec::new(),
             projects: Vec::new(),
+            recommendations: Vec::new(),
             requires_daily_task_coverage: false,
             bulk_schedule_cancellation_ids: Vec::new(),
         };

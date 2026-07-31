@@ -212,6 +212,10 @@ impl Database {
     /// # Errors
     ///
     /// Returns a persistence error when reconciliation cannot complete.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The single candidate union is kept together so every durable push source shares one ordering and limit boundary."
+    )]
     pub async fn queue_due_push_reminders(
         &self,
         now: OffsetDateTime,
@@ -257,6 +261,52 @@ impl Database {
                    recommendation.valid_until IS NULL
                    OR recommendation.valid_until > $1
                )
+             UNION ALL
+             SELECT analysis.user_id, 'google_chat_inflow'::TEXT AS item_type,
+                    analysis.id AS item_id, analysis.version AS item_version,
+                    analysis.project_id,
+                    COALESCE(
+                        analysis.suggested_task_title,
+                        analysis.summary,
+                        project.title
+                    ) AS raw_title,
+                    analysis.summary AS raw_body,
+                    $1 + INTERVAL '1 day' AS target_at,
+                    $1 AS notify_at
+             FROM project_inflow_analyses AS analysis
+             INNER JOIN projects AS project
+                ON project.id = analysis.project_id
+               AND project.user_id = analysis.user_id
+             WHERE analysis.state = 'ready'
+               AND analysis.classification IN ('new_task', 'follow_up', 'question')
+               AND analysis.analyzed_revision = analysis.source_revision
+               AND EXISTS (
+                   SELECT 1
+                   FROM project_inflow_items AS item
+                   WHERE item.source_id = analysis.source_id
+                     AND item.status = 'pending'
+                     AND COALESCE(
+                         'thread:' || item.provider_thread_name,
+                         'message:' || item.provider_message_name
+                     ) = analysis.conversation_key
+               )
+             UNION ALL
+             SELECT candidate.user_id, 'gmail_inflow'::TEXT AS item_type,
+                    candidate.id AS item_id, candidate.version AS item_version,
+                    candidate.promoted_project_id AS project_id,
+                    COALESCE(
+                        candidate.suggested_task_title,
+                        candidate.summary,
+                        '새 메일'
+                    ) AS raw_title,
+                    candidate.summary AS raw_body,
+                    $1 + INTERVAL '1 day' AS target_at,
+                    $1 AS notify_at
+             FROM gmail_inflow_candidates AS candidate
+             WHERE candidate.analysis_state = 'ready'
+               AND candidate.classification IN ('new_task', 'follow_up', 'question')
+               AND candidate.analyzed_revision = candidate.source_revision
+               AND candidate.decision_status = 'pending'
              UNION ALL
              SELECT snapshot.user_id, 'weekly_report'::TEXT AS item_type,
                     snapshot.id AS item_id, snapshot.version AS item_version,
@@ -509,6 +559,10 @@ impl Database {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "All delivery source invariants stay in one atomic stale-delivery predicate."
+    )]
     async fn cancel_stale_push_deliveries(&self) -> Result<(), StorageError> {
         sqlx::query(
             "UPDATE push_deliveries AS delivery
@@ -565,6 +619,49 @@ impl Database {
                              AND snapshot.period_start + INTERVAL '7 days' = delivery.target_at
                              AND snapshot.period_start + INTERVAL '7 days' > NOW()
                        ))
+                       OR
+                       (delivery.item_type = 'google_chat_inflow'
+                        AND delivery.target_at > NOW()
+                        AND EXISTS (
+                            SELECT 1
+                            FROM project_inflow_analyses AS analysis
+                            WHERE analysis.id = delivery.item_id
+                              AND analysis.user_id = delivery.user_id
+                              AND analysis.version = delivery.item_version
+                              AND analysis.state = 'ready'
+                              AND analysis.classification IN (
+                                  'new_task', 'follow_up', 'question'
+                              )
+                              AND analysis.analyzed_revision =
+                                  analysis.source_revision
+                              AND EXISTS (
+                                  SELECT 1
+                                  FROM project_inflow_items AS item
+                                  WHERE item.source_id = analysis.source_id
+                                    AND item.status = 'pending'
+                                    AND COALESCE(
+                                        'thread:' || item.provider_thread_name,
+                                        'message:' || item.provider_message_name
+                                    ) = analysis.conversation_key
+                              )
+                        ))
+                       OR
+                       (delivery.item_type = 'gmail_inflow'
+                        AND delivery.target_at > NOW()
+                        AND EXISTS (
+                            SELECT 1
+                            FROM gmail_inflow_candidates AS candidate
+                            WHERE candidate.id = delivery.item_id
+                              AND candidate.user_id = delivery.user_id
+                              AND candidate.version = delivery.item_version
+                              AND candidate.analysis_state = 'ready'
+                              AND candidate.classification IN (
+                                  'new_task', 'follow_up', 'question'
+                              )
+                              AND candidate.analyzed_revision =
+                                  candidate.source_revision
+                              AND candidate.decision_status = 'pending'
+                        ))
                    )
                )",
         )
@@ -624,6 +721,8 @@ fn reminder_copy(candidate: &ReminderCandidate) -> (&'static str, String, String
         "task" => format!("곧 마감해요 · {raw_title}"),
         "schedule" => format!("곧 시작해요 · {raw_title}"),
         "weekly_report" => format!("주간 운영 리포트 · {raw_title}"),
+        "google_chat_inflow" => format!("새 Chat 업무 · {raw_title}"),
+        "gmail_inflow" => format!("새 메일 업무 · {raw_title}"),
         _ => format!("확인이 필요해요 · {raw_title}"),
     };
     let title = title.chars().take(120).collect();
@@ -648,6 +747,39 @@ fn reminder_copy(candidate: &ReminderCandidate) -> (&'static str, String, String
                 .raw_body
                 .as_deref()
                 .unwrap_or("이번 주 운영 흐름과 먼저 확인할 일을 정리했어요.")
+                .trim()
+                .chars()
+                .take(240)
+                .collect();
+            ("home", title, body)
+        }
+        ("google_chat_inflow", Some(_)) => {
+            let body = candidate
+                .raw_body
+                .as_deref()
+                .unwrap_or("프로젝트에 새로 확인할 대화가 들어왔어요.")
+                .trim()
+                .chars()
+                .take(240)
+                .collect();
+            ("projects", title, body)
+        }
+        ("gmail_inflow", Some(_)) => {
+            let body = candidate
+                .raw_body
+                .as_deref()
+                .unwrap_or("연결된 프로젝트에서 확인할 메일이 들어왔어요.")
+                .trim()
+                .chars()
+                .take(240)
+                .collect();
+            ("projects", title, body)
+        }
+        ("gmail_inflow", None) => {
+            let body = candidate
+                .raw_body
+                .as_deref()
+                .unwrap_or("확인하고 분류할 새 메일이 들어왔어요.")
                 .trim()
                 .chars()
                 .take(240)
@@ -757,6 +889,38 @@ mod tests {
         assert_eq!(destination, "home");
         assert_eq!(title, "주간 운영 리포트 · 회사");
         assert_eq!(body, "새 일 8개 중 6개를 마쳤고, 열린 일이 2개 늘었어요.");
+    }
+
+    #[test]
+    fn actionable_inflow_copy_opens_the_relevant_attention_surface() {
+        let now = OffsetDateTime::now_utc();
+        let chat = ReminderCandidate {
+            user_id: Uuid::now_v7(),
+            item_type: "google_chat_inflow".to_owned(),
+            item_id: Uuid::now_v7(),
+            item_version: 2,
+            project_id: Some(Uuid::now_v7()),
+            raw_title: "정산 오류 확인".to_owned(),
+            raw_body: Some("정산 결과가 예상과 달라 확인이 필요해요.".to_owned()),
+            target_at: now + Duration::days(1),
+            notify_at: now,
+        };
+        let (destination, title, body) = reminder_copy(&chat);
+        assert_eq!(destination, "projects");
+        assert_eq!(title, "새 Chat 업무 · 정산 오류 확인");
+        assert_eq!(body, "정산 결과가 예상과 달라 확인이 필요해요.");
+
+        let gmail = ReminderCandidate {
+            item_type: "gmail_inflow".to_owned(),
+            project_id: None,
+            raw_title: "계약 검토 요청".to_owned(),
+            raw_body: Some("답변 전에 계약 조건을 확인해 주세요.".to_owned()),
+            ..chat
+        };
+        let (destination, title, body) = reminder_copy(&gmail);
+        assert_eq!(destination, "home");
+        assert_eq!(title, "새 메일 업무 · 계약 검토 요청");
+        assert_eq!(body, "답변 전에 계약 조건을 확인해 주세요.");
     }
 
     #[test]

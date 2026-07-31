@@ -254,3 +254,27 @@ confirmation clears the candidate columns while preserving the confirmed
 boundary. Confirm `jimin_schema_metadata.schema_version = 52`. After candidate
 or confirmed state is written, rollback uses the verified version-51 backup so
 an older worker cannot silently ignore the owner-confirmation boundary.
+
+Migration `0053_schedule_context_and_attention_sources.sql` attaches optional
+owner-scoped project and task context to manual schedules, persists actionable
+Google Chat and Gmail inflow counts in weekly report snapshots, and extends the
+durable push queue with analyzed inflow sources. Apply it to an empty database
+and a restored version-52 backup. Verify a task-only schedule inherits the
+task's project, mismatched or cross-owner links are rejected, legacy schedule
+updates preserve links, explicit null links clear them, existing weekly
+snapshots read zero source counts, and unchanged inflow revisions enqueue no
+duplicate device delivery. Confirm
+`jimin_schema_metadata.schema_version = 53`. After linked schedules or inflow
+deliveries are written, rollback uses the verified version-52 backup because an
+older image cannot preserve that context or delivery idempotency boundary.
+
+Migration `0054_agent_recommendation_actions.sql` lets the authenticated
+assistant record recommendation approval, rejection, and defer actions in the
+same audited transaction as its final response. Apply it to an empty database
+and a restored version-53 backup. Verify direct and assistant decisions both
+honor owner scope, optimistic versions, and idempotent mutation IDs; a safe
+review approval reaches `executed`, while actions that need a separate domain
+executor remain `approved` or `executing` in the active decision inbox. Confirm
+`jimin_schema_metadata.schema_version = 54`. After recommendation action audits
+are written, rollback uses the verified version-53 backup because the previous
+schema rejects the new action types and cannot preserve their execution audit.

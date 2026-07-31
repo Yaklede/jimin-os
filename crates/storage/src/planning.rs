@@ -87,6 +87,13 @@ pub struct ScheduleEntryUpdate {
     pub expected_version: i64,
 }
 
+/// Optional work context attached to a manual schedule entry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScheduleEntryLinkage {
+    pub project_id: Option<Uuid>,
+    pub task_id: Option<Uuid>,
+}
+
 impl NewScheduleEntry {
     /// Validates a bounded personal schedule entry before it reaches SQL.
     ///
@@ -102,6 +109,22 @@ impl NewScheduleEntry {
                 .is_none_or(|value| valid_text(value, MAX_NOTES_CHARS, true))
             || !valid_time_zone(&self.time_zone)
             || self.ends_at <= self.starts_at
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
+impl ScheduleEntryLinkage {
+    /// Rejects malformed identifiers before checking ownership in storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for non-v7 identifiers.
+    pub fn validate(self) -> Result<(), StorageError> {
+        if self.project_id.is_some_and(|value| !is_v7(value))
+            || self.task_id.is_some_and(|value| !is_v7(value))
         {
             return Err(StorageError::InvalidConfiguration);
         }
@@ -236,6 +259,14 @@ pub struct ScheduleEntry {
     pub version: i64,
 }
 
+/// A schedule entry together with its optional project and task context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedScheduleEntry {
+    pub entry: ScheduleEntry,
+    pub project_id: Option<Uuid>,
+    pub task_id: Option<Uuid>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScheduleStatus {
     Confirmed,
@@ -298,6 +329,22 @@ struct ScheduleRow {
 }
 
 #[derive(sqlx::FromRow)]
+struct LinkedScheduleRow {
+    id: Uuid,
+    title: String,
+    notes: Option<String>,
+    starts_at: OffsetDateTime,
+    ends_at: OffsetDateTime,
+    time_zone: String,
+    status: String,
+    source: String,
+    editable: bool,
+    version: i64,
+    project_id: Option<Uuid>,
+    task_id: Option<Uuid>,
+}
+
+#[derive(sqlx::FromRow)]
 struct TaskRow {
     id: Uuid,
     project_id: Option<Uuid>,
@@ -337,6 +384,30 @@ impl TryFrom<ScheduleRow> for ScheduleEntry {
             source,
             editable: row.editable,
             version: row.version,
+        })
+    }
+}
+
+impl TryFrom<LinkedScheduleRow> for LinkedScheduleEntry {
+    type Error = StorageError;
+
+    fn try_from(row: LinkedScheduleRow) -> Result<Self, Self::Error> {
+        let entry = ScheduleEntry::try_from(ScheduleRow {
+            id: row.id,
+            title: row.title,
+            notes: row.notes,
+            starts_at: row.starts_at,
+            ends_at: row.ends_at,
+            time_zone: row.time_zone,
+            status: row.status,
+            source: row.source,
+            editable: row.editable,
+            version: row.version,
+        })?;
+        Ok(Self {
+            entry,
+            project_id: row.project_id,
+            task_id: row.task_id,
         })
     }
 }
@@ -382,19 +453,49 @@ impl Database {
         &self,
         entry: &NewScheduleEntry,
     ) -> Result<ScheduleEntry, StorageError> {
+        Ok(self
+            .create_schedule_entry_with_linkage(entry, ScheduleEntryLinkage::default())
+            .await?
+            .entry)
+    }
+
+    /// Creates a manual schedule with optional owned project and task links.
+    ///
+    /// A task link inherits its project when the caller omits `project_id`.
+    /// Supplying a different project from the task's project is rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-configuration error for malformed or cross-owner
+    /// links, an identity conflict for a non-identical idempotent retry, or a
+    /// classified persistence error.
+    pub async fn create_schedule_entry_with_linkage(
+        &self,
+        entry: &NewScheduleEntry,
+        linkage: ScheduleEntryLinkage,
+    ) -> Result<LinkedScheduleEntry, StorageError> {
         entry.validate()?;
+        linkage.validate()?;
         let mut transaction = self.pool().begin().await.map_err(classify)?;
-        let row = sqlx::query_as::<_, ScheduleRow>(
+        let linkage =
+            resolve_schedule_linkage_in_transaction(&mut transaction, entry.user_id, linkage)
+                .await?;
+        let row = sqlx::query_as::<_, LinkedScheduleRow>(
             "\
             INSERT INTO schedule_entries (
-                id, user_id, title, notes, starts_at, ends_at, time_zone, source, status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'manual', 'confirmed')
+                id, user_id, project_id, task_id, title, notes, starts_at, ends_at,
+                time_zone, source, status
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, 'manual', 'confirmed'
+            )
             ON CONFLICT (id) DO NOTHING
             RETURNING id, title, notes, starts_at, ends_at, time_zone, status, source,
-                TRUE AS editable, version",
+                TRUE AS editable, version, project_id, task_id",
         )
         .bind(entry.id)
         .bind(entry.user_id)
+        .bind(linkage.project_id)
+        .bind(linkage.task_id)
         .bind(entry.title.trim())
         .bind(
             entry
@@ -410,10 +511,10 @@ impl Database {
         .await
         .map_err(classify)?;
         let Some(row) = row else {
-            let existing = sqlx::query_as::<_, ScheduleRow>(
+            let existing = sqlx::query_as::<_, LinkedScheduleRow>(
                 "\
                 SELECT id, title, notes, starts_at, ends_at, time_zone, status, source,
-                    TRUE AS editable, version
+                    TRUE AS editable, version, project_id, task_id
                 FROM schedule_entries
                 WHERE id = $1
                   AND user_id = $2
@@ -426,20 +527,24 @@ impl Database {
             .await
             .map_err(classify)?;
             let existing = existing
-                .map(ScheduleEntry::try_from)
+                .map(LinkedScheduleEntry::try_from)
                 .transpose()?
-                .filter(|existing| schedule_matches_new(existing, entry))
+                .filter(|existing| {
+                    schedule_matches_new(&existing.entry, entry)
+                        && existing.project_id == linkage.project_id
+                        && existing.task_id == linkage.task_id
+                })
                 .ok_or(StorageError::IdentityConflict)?;
             transaction.commit().await.map_err(classify)?;
             return Ok(existing);
         };
-        let created = ScheduleEntry::try_from(row)?;
+        let created = LinkedScheduleEntry::try_from(row)?;
         append_change(
             &mut transaction,
             entry.user_id,
             "schedule_entry",
-            created.id,
-            created.version,
+            created.entry.id,
+            created.entry.version,
         )
         .await?;
         transaction.commit().await.map_err(classify)?;
@@ -460,19 +565,52 @@ impl Database {
         entry: &NewScheduleEntry,
         target: &PrimaryCalendarMutationTarget,
     ) -> Result<ScheduleEntry, StorageError> {
+        Ok(self
+            .create_schedule_entry_with_calendar_outbox_and_linkage(
+                entry,
+                target,
+                ScheduleEntryLinkage::default(),
+            )
+            .await?
+            .entry)
+    }
+
+    /// Creates a linked manual schedule and atomically queues its Google
+    /// Calendar projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-configuration error for malformed or cross-owner
+    /// links, an identity conflict for a non-identical retry, or a classified
+    /// persistence error.
+    pub async fn create_schedule_entry_with_calendar_outbox_and_linkage(
+        &self,
+        entry: &NewScheduleEntry,
+        target: &PrimaryCalendarMutationTarget,
+        linkage: ScheduleEntryLinkage,
+    ) -> Result<LinkedScheduleEntry, StorageError> {
         entry.validate()?;
+        linkage.validate()?;
         let mut transaction = self.pool().begin().await.map_err(classify)?;
-        let row = sqlx::query_as::<_, ScheduleRow>(
+        let linkage =
+            resolve_schedule_linkage_in_transaction(&mut transaction, entry.user_id, linkage)
+                .await?;
+        let row = sqlx::query_as::<_, LinkedScheduleRow>(
             "\
             INSERT INTO schedule_entries (
-                id, user_id, title, notes, starts_at, ends_at, time_zone, source, status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'manual', 'confirmed')
+                id, user_id, project_id, task_id, title, notes, starts_at, ends_at,
+                time_zone, source, status
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, 'manual', 'confirmed'
+            )
             ON CONFLICT (id) DO NOTHING
             RETURNING id, title, notes, starts_at, ends_at, time_zone, status, source,
-                TRUE AS editable, version",
+                TRUE AS editable, version, project_id, task_id",
         )
         .bind(entry.id)
         .bind(entry.user_id)
+        .bind(linkage.project_id)
+        .bind(linkage.task_id)
         .bind(entry.title.trim())
         .bind(
             entry
@@ -488,11 +626,11 @@ impl Database {
         .await
         .map_err(classify)?;
         let Some(row) = row else {
-            let existing = sqlx::query_as::<_, ScheduleRow>(
+            let existing = sqlx::query_as::<_, LinkedScheduleRow>(
                 "\
                 SELECT schedule.id, schedule.title, schedule.notes, schedule.starts_at,
                     schedule.ends_at, schedule.time_zone, schedule.status, schedule.source,
-                    TRUE AS editable, schedule.version
+                    TRUE AS editable, schedule.version, schedule.project_id, schedule.task_id
                 FROM schedule_entries AS schedule
                 INNER JOIN schedule_calendar_links AS link
                     ON link.schedule_entry_id = schedule.id
@@ -517,20 +655,24 @@ impl Database {
             .await
             .map_err(classify)?;
             let existing = existing
-                .map(ScheduleEntry::try_from)
+                .map(LinkedScheduleEntry::try_from)
                 .transpose()?
-                .filter(|existing| schedule_matches_new(existing, entry))
+                .filter(|existing| {
+                    schedule_matches_new(&existing.entry, entry)
+                        && existing.project_id == linkage.project_id
+                        && existing.task_id == linkage.task_id
+                })
                 .ok_or(StorageError::IdentityConflict)?;
             transaction.commit().await.map_err(classify)?;
             return Ok(existing);
         };
-        let created = ScheduleEntry::try_from(row)?;
-        let payload = calendar_payload(&created);
+        let created = LinkedScheduleEntry::try_from(row)?;
+        let payload = calendar_payload(&created.entry);
         attach_schedule_and_queue_create(
             &mut transaction,
             entry.user_id,
-            created.id,
-            created.version,
+            created.entry.id,
+            created.entry.version,
             target,
             &payload,
         )
@@ -539,8 +681,8 @@ impl Database {
             &mut transaction,
             entry.user_id,
             "schedule_entry",
-            created.id,
-            created.version,
+            created.entry.id,
+            created.entry.version,
         )
         .await?;
         transaction.commit().await.map_err(classify)?;
@@ -560,15 +702,36 @@ impl Database {
         range_start: OffsetDateTime,
         range_end: OffsetDateTime,
     ) -> Result<Vec<ScheduleEntry>, StorageError> {
+        Ok(self
+            .schedule_entries_with_linkage_in_range(user_id, range_start, range_end)
+            .await?
+            .into_iter()
+            .map(|linked| linked.entry)
+            .collect())
+    }
+
+    /// Lists visible schedule entries and returns work links for manual rows.
+    /// Provider-only rows remain compatible and return null links.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfiguration`] for an invalid range or a
+    /// classified persistence error for unavailable storage.
+    pub async fn schedule_entries_with_linkage_in_range(
+        &self,
+        user_id: Uuid,
+        range_start: OffsetDateTime,
+        range_end: OffsetDateTime,
+    ) -> Result<Vec<LinkedScheduleEntry>, StorageError> {
         if range_end <= range_start {
             return Err(StorageError::InvalidConfiguration);
         }
-        let rows = sqlx::query_as::<_, ScheduleRow>(
+        let rows = sqlx::query_as::<_, LinkedScheduleRow>(
             "\
             SELECT *
             FROM (
                 SELECT id, title, notes, starts_at, ends_at, time_zone, status, source,
-                    TRUE AS editable, version
+                    TRUE AS editable, version, project_id, task_id
                 FROM schedule_entries
                 WHERE user_id = $1
                   AND status = 'confirmed'
@@ -582,7 +745,8 @@ impl Database {
                         SELECT 1 FROM calendars
                         WHERE calendars.id = calendar_events.calendar_id
                           AND calendars.access_role IN ('owner', 'writer')
-                    ) AS editable, version
+                    ) AS editable, version, NULL::UUID AS project_id,
+                    NULL::UUID AS task_id
                 FROM calendar_events
                 WHERE user_id = $1
                   AND provider_deleted_at IS NULL
@@ -600,7 +764,8 @@ impl Database {
                     (start_date::timestamp AT TIME ZONE 'UTC') AS starts_at,
                     (end_date::timestamp AT TIME ZONE 'UTC') AS ends_at,
                     'UTC'::TEXT AS time_zone, 'confirmed'::TEXT AS status,
-                    'google_calendar'::TEXT AS source, FALSE AS editable, version
+                    'google_calendar'::TEXT AS source, FALSE AS editable, version,
+                    NULL::UUID AS project_id, NULL::UUID AS task_id
                 FROM calendar_events
                 WHERE user_id = $1
                   AND provider_deleted_at IS NULL
@@ -624,7 +789,9 @@ impl Database {
         .fetch_all(self.pool())
         .await
         .map_err(classify)?;
-        rows.into_iter().map(ScheduleEntry::try_from).collect()
+        rows.into_iter()
+            .map(LinkedScheduleEntry::try_from)
+            .collect()
     }
 
     /// Returns one visible schedule entry from either the manual or connected
@@ -639,14 +806,30 @@ impl Database {
         user_id: Uuid,
         schedule_entry_id: Uuid,
     ) -> Result<Option<ScheduleEntry>, StorageError> {
+        Ok(self
+            .schedule_entry_with_linkage_by_id(user_id, schedule_entry_id)
+            .await?
+            .map(|linked| linked.entry))
+    }
+
+    /// Loads one visible schedule entry with its optional work context.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified persistence error or invalid-input error.
+    pub async fn schedule_entry_with_linkage_by_id(
+        &self,
+        user_id: Uuid,
+        schedule_entry_id: Uuid,
+    ) -> Result<Option<LinkedScheduleEntry>, StorageError> {
         if !is_v7(user_id) || !is_v7(schedule_entry_id) {
             return Err(StorageError::InvalidConfiguration);
         }
-        let row = sqlx::query_as::<_, ScheduleRow>(
+        let row = sqlx::query_as::<_, LinkedScheduleRow>(
             "\
             SELECT * FROM (
                 SELECT id, title, notes, starts_at, ends_at, time_zone, status, source,
-                    TRUE AS editable, version
+                    TRUE AS editable, version, project_id, task_id
                 FROM schedule_entries
                 WHERE id = $1 AND user_id = $2 AND status = 'confirmed'
                 UNION ALL
@@ -657,7 +840,8 @@ impl Database {
                         SELECT 1 FROM calendars
                         WHERE calendars.id = calendar_events.calendar_id
                           AND calendars.access_role IN ('owner', 'writer')
-                    ) AS editable, version
+                    ) AS editable, version, NULL::UUID AS project_id,
+                    NULL::UUID AS task_id
                 FROM calendar_events
                 WHERE id = $1 AND user_id = $2
                   AND provider_deleted_at IS NULL
@@ -676,7 +860,7 @@ impl Database {
         .fetch_optional(self.pool())
         .await
         .map_err(classify)?;
-        row.map(ScheduleEntry::try_from).transpose()
+        row.map(LinkedScheduleEntry::try_from).transpose()
     }
 
     /// Replaces the editable fields of one owned manual schedule entry when
@@ -691,23 +875,57 @@ impl Database {
         &self,
         update: &ScheduleEntryUpdate,
     ) -> Result<Option<ScheduleEntry>, StorageError> {
+        Ok(self
+            .update_schedule_entry_with_linkage(update, None)
+            .await?
+            .map(|linked| linked.entry))
+    }
+
+    /// Replaces an owned schedule and optionally replaces its work links.
+    ///
+    /// Passing `None` preserves existing links for backward-compatible
+    /// clients. Passing `Some` applies the supplied links, including clearing
+    /// both links with [`ScheduleEntryLinkage::default`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-configuration error for malformed or cross-owner
+    /// links and a classified persistence error when storage is unavailable.
+    pub async fn update_schedule_entry_with_linkage(
+        &self,
+        update: &ScheduleEntryUpdate,
+        linkage: Option<ScheduleEntryLinkage>,
+    ) -> Result<Option<LinkedScheduleEntry>, StorageError> {
         update.validate()?;
+        if let Some(linkage) = linkage {
+            linkage.validate()?;
+        }
         let mut transaction = self.pool().begin().await.map_err(classify)?;
-        let row = sqlx::query_as::<_, ScheduleRow>(
+        let replace_linkage = linkage.is_some();
+        let linkage = match linkage {
+            Some(linkage) => {
+                resolve_schedule_linkage_in_transaction(&mut transaction, update.user_id, linkage)
+                    .await?
+            }
+            None => ScheduleEntryLinkage::default(),
+        };
+        let row = sqlx::query_as::<_, LinkedScheduleRow>(
             "\
             UPDATE schedule_entries
             SET title = $4,
                 notes = $5,
                 starts_at = $6,
                 ends_at = $7,
-                time_zone = $8
+                time_zone = $8,
+                project_id = CASE WHEN $9 THEN $10 ELSE project_id END,
+                task_id = CASE WHEN $9 THEN $11 ELSE task_id END
             WHERE id = $1
               AND user_id = $2
               AND version = $3
               AND source = 'manual'
               AND status = 'confirmed'
             RETURNING id, title, notes, starts_at, ends_at, time_zone, status, source,
-                TRUE AS editable, version",
+                TRUE AS editable, version, project_id, task_id",
         )
         .bind(update.id)
         .bind(update.user_id)
@@ -723,6 +941,9 @@ impl Database {
         .bind(update.starts_at)
         .bind(update.ends_at)
         .bind(update.time_zone.trim())
+        .bind(replace_linkage)
+        .bind(linkage.project_id)
+        .bind(linkage.task_id)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(classify)?;
@@ -730,22 +951,22 @@ impl Database {
             transaction.commit().await.map_err(classify)?;
             return Ok(None);
         };
-        let entry = ScheduleEntry::try_from(row)?;
+        let entry = LinkedScheduleEntry::try_from(row)?;
         append_change(
             &mut transaction,
             update.user_id,
             "schedule_entry",
-            entry.id,
-            entry.version,
+            entry.entry.id,
+            entry.entry.version,
         )
         .await?;
         queue_linked_schedule_mutation(
             &mut transaction,
             update.user_id,
-            entry.id,
-            entry.version,
+            entry.entry.id,
+            entry.entry.version,
             ScheduleCalendarMutationOperation::Update,
-            &calendar_payload(&entry),
+            &calendar_payload(&entry.entry),
         )
         .await?;
         transaction.commit().await.map_err(classify)?;
@@ -1558,6 +1779,53 @@ fn valid_text(value: &str, maximum: usize, allow_empty: bool) -> bool {
 
 fn valid_time_zone(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= 80 && !value.chars().any(char::is_control)
+}
+
+async fn resolve_schedule_linkage_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    requested: ScheduleEntryLinkage,
+) -> Result<ScheduleEntryLinkage, StorageError> {
+    let mut project_id = requested.project_id;
+    if let Some(requested_project_id) = requested.project_id {
+        let owned = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM projects
+                WHERE id = $1 AND user_id = $2
+            )",
+        )
+        .bind(requested_project_id)
+        .bind(user_id)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(classify)?;
+        if !owned {
+            return Err(StorageError::InvalidConfiguration);
+        }
+    }
+    if let Some(task_id) = requested.task_id {
+        let task = sqlx::query_as::<_, (Option<Uuid>,)>(
+            "SELECT project_id
+             FROM tasks
+             WHERE id = $1 AND user_id = $2 AND status <> 'cancelled'",
+        )
+        .bind(task_id)
+        .bind(user_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(classify)?
+        .ok_or(StorageError::InvalidConfiguration)?;
+        if requested.project_id.is_some() && requested.project_id != task.0 {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        if project_id.is_none() {
+            project_id = task.0;
+        }
+    }
+    Ok(ScheduleEntryLinkage {
+        project_id,
+        task_id: requested.task_id,
+    })
 }
 
 fn calendar_payload(entry: &ScheduleEntry) -> ScheduleCalendarMutationPayload {

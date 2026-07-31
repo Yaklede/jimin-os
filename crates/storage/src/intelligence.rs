@@ -78,9 +78,8 @@ const SELECT_ACTIVE_DECISIONS_SQL: &str = "
     FROM recommendations
     WHERE user_id = $1
       AND suggested_action_kind IS NOT NULL
-      AND suggested_action_kind <> 'review'
       AND (
-          status IN ('pending', 'analysis_requested')
+          status IN ('pending', 'analysis_requested', 'approved', 'executing')
           OR (status = 'deferred' AND revisit_at <= $2)
       )
       AND (valid_until IS NULL OR valid_until > $2)
@@ -96,14 +95,16 @@ const SELECT_DECISION_HISTORY_SQL: &str = "
     FROM recommendations
     WHERE user_id = $1
       AND suggested_action_kind IS NOT NULL
-      AND suggested_action_kind <> 'review'
     ORDER BY updated_at DESC, created_at DESC, id DESC
     LIMIT $2";
 const UPDATE_RECOMMENDATION_DECISION_SQL: &str = "
     UPDATE recommendations
     SET status = $4, revisit_at = $5
     WHERE id = $1 AND user_id = $2 AND version = $3
-      AND status IN ('pending', 'deferred', 'analysis_requested')
+      AND (
+          status IN ('pending', 'deferred', 'analysis_requested')
+          OR (status = 'failed' AND $4 = 'analysis_requested')
+      )
     RETURNING
         id, workspace_id, project_id, goal_id, signal_id,
         title, rationale, expected_effect, risk_summary,
@@ -638,9 +639,11 @@ impl Database {
         rows.into_iter().map(Recommendation::try_from).collect()
     }
 
-    /// Returns only recommendations that require an owner choice or can lead
-    /// to a concrete action. Informational review cards stay in the work brief
-    /// instead of occupying the decision inbox.
+    /// Returns unresolved recommendations that require an owner choice.
+    /// Review recommendations are decisions too: they explain a detected
+    /// risk, delay, or ownership gap and remain visible until the owner
+    /// explicitly handles them. Approved actions also remain visible while a
+    /// dedicated executor has not completed them.
     ///
     /// # Errors
     ///
@@ -665,8 +668,8 @@ impl Database {
         rows.into_iter().map(Recommendation::try_from).collect()
     }
 
-    /// Returns recent actionable decisions and their outcomes without the
-    /// informational review history shown in the work brief.
+    /// Returns recent decisions and their outcomes, including review
+    /// recommendations generated from structured work risks.
     ///
     /// # Errors
     ///
@@ -690,8 +693,9 @@ impl Database {
     }
 
     /// Applies or idempotently replays one explicit owner decision. A safe
-    /// review action is completed and audited in the same transaction; actions
-    /// that mutate another domain remain approved for their dedicated executor.
+    /// review action is completed and audited in the same transaction. Actions
+    /// that mutate another domain remain `approved` and continue to appear in
+    /// the active decision inbox until a dedicated executor completes them.
     ///
     /// # Errors
     ///
@@ -703,89 +707,13 @@ impl Database {
     ) -> Result<DecideRecommendationOutcome, StorageError> {
         command.validate()?;
         let mut transaction = self.pool().begin().await.map_err(classify)?;
-        if let Some(existing) = decision_replay(&mut transaction, command).await? {
-            let outcome = replayed_decision(&mut transaction, command, existing).await?;
+        let outcome = decide_recommendation_in_transaction(&mut transaction, command).await?;
+        if matches!(outcome, DecideRecommendationOutcome::Applied(_)) {
+            transaction.commit().await.map_err(classify)?;
+        } else {
             transaction.rollback().await.map_err(classify)?;
-            return Ok(outcome);
         }
-
-        let target_status = decision_target_status(command.decision);
-        let row = sqlx::query_as::<_, RecommendationRow>(UPDATE_RECOMMENDATION_DECISION_SQL)
-            .bind(command.recommendation_id)
-            .bind(command.user_id)
-            .bind(command.expected_version)
-            .bind(target_status)
-            .bind(command.revisit_at)
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(classify)?;
-        let Some(mut row) = row else {
-            let exists = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(
-                    SELECT 1 FROM recommendations WHERE id = $1 AND user_id = $2
-                 )",
-            )
-            .bind(command.recommendation_id)
-            .bind(command.user_id)
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(classify)?;
-            transaction.rollback().await.map_err(classify)?;
-            return Ok(if exists {
-                DecideRecommendationOutcome::VersionConflict
-            } else {
-                DecideRecommendationOutcome::NotFound
-            });
-        };
-
-        sqlx::query(
-            "INSERT INTO recommendation_decisions (
-                id, user_id, recommendation_id, decision, reason, revisit_at,
-                recommendation_version
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        )
-        .bind(command.id)
-        .bind(command.user_id)
-        .bind(command.recommendation_id)
-        .bind(decision_value(command.decision))
-        .bind(trim_optional(command.reason.as_deref()))
-        .bind(command.revisit_at)
-        .bind(command.expected_version)
-        .execute(&mut *transaction)
-        .await
-        .map_err(classify)?;
-        let action_result_id =
-            execute_safe_approved_action(&mut transaction, command, &mut row).await?;
-        append_change(
-            &mut transaction,
-            command.user_id,
-            "recommendation",
-            command.recommendation_id,
-            row.version,
-        )
-        .await?;
-        if let Some(result_id) = action_result_id {
-            append_change(
-                &mut transaction,
-                command.user_id,
-                "recommendation_action_result",
-                result_id,
-                1,
-            )
-            .await?;
-        }
-        append_change(
-            &mut transaction,
-            command.user_id,
-            "recommendation_decision",
-            command.id,
-            1,
-        )
-        .await?;
-        transaction.commit().await.map_err(classify)?;
-        Ok(DecideRecommendationOutcome::Applied(
-            Recommendation::try_from(row)?,
-        ))
+        Ok(outcome)
     }
 
     /// Re-evaluates structured work state and refreshes the owner's active
@@ -869,6 +797,96 @@ impl Database {
         transaction.commit().await.map_err(classify)?;
         rows.into_iter().map(Recommendation::try_from).collect()
     }
+}
+
+/// Applies one recommendation decision inside a caller-owned transaction.
+///
+/// Agent turns use this boundary so the recommendation mutation, its decision
+/// and action-result audit, and the final assistant message either all commit
+/// or all roll back together.
+pub(crate) async fn decide_recommendation_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &DecideRecommendation,
+) -> Result<DecideRecommendationOutcome, StorageError> {
+    command.validate()?;
+    if let Some(existing) = decision_replay(transaction, command).await? {
+        return replayed_decision(transaction, command, existing).await;
+    }
+
+    let target_status = decision_target_status(command.decision);
+    let row = sqlx::query_as::<_, RecommendationRow>(UPDATE_RECOMMENDATION_DECISION_SQL)
+        .bind(command.recommendation_id)
+        .bind(command.user_id)
+        .bind(command.expected_version)
+        .bind(target_status)
+        .bind(command.revisit_at)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(classify)?;
+    let Some(mut row) = row else {
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                SELECT 1 FROM recommendations WHERE id = $1 AND user_id = $2
+             )",
+        )
+        .bind(command.recommendation_id)
+        .bind(command.user_id)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(classify)?;
+        return Ok(if exists {
+            DecideRecommendationOutcome::VersionConflict
+        } else {
+            DecideRecommendationOutcome::NotFound
+        });
+    };
+
+    sqlx::query(
+        "INSERT INTO recommendation_decisions (
+            id, user_id, recommendation_id, decision, reason, revisit_at,
+            recommendation_version
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(command.id)
+    .bind(command.user_id)
+    .bind(command.recommendation_id)
+    .bind(decision_value(command.decision))
+    .bind(trim_optional(command.reason.as_deref()))
+    .bind(command.revisit_at)
+    .bind(command.expected_version)
+    .execute(&mut **transaction)
+    .await
+    .map_err(classify)?;
+    let action_result_id = execute_safe_approved_action(transaction, command, &mut row).await?;
+    append_change(
+        transaction,
+        command.user_id,
+        "recommendation",
+        command.recommendation_id,
+        row.version,
+    )
+    .await?;
+    if let Some(result_id) = action_result_id {
+        append_change(
+            transaction,
+            command.user_id,
+            "recommendation_action_result",
+            result_id,
+            1,
+        )
+        .await?;
+    }
+    append_change(
+        transaction,
+        command.user_id,
+        "recommendation_decision",
+        command.id,
+        1,
+    )
+    .await?;
+    Ok(DecideRecommendationOutcome::Applied(
+        Recommendation::try_from(row)?,
+    ))
 }
 
 async fn mark_review_recommendation_executed(
