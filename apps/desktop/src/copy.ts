@@ -44,9 +44,8 @@ export const copy = {
   scope: "개인 서버",
   launch: {
     loading: "개인 비서를 준비하고 있어요.",
-    routeLoadFailedTitle: "화면을 불러오지 못했어요.",
-    routeLoadFailedBody:
-      "앱을 다시 불러오면 하던 작업을 이어서 확인할 수 있어요.",
+    routeLoadFailedTitle: "화면을 불러오지 못했어요. 다시 불러와 주세요.",
+    routeLoadFailedBody: "앱을 다시 불러온 뒤 다시 시도해 주세요.",
     retryRouteLoad: "다시 불러오기",
   },
   actions: {
@@ -378,14 +377,34 @@ export const copy = {
   decisions: {
     eyebrow: "선택과 실행 이력",
     title: "결정할 일",
-    description:
-      "선택이 필요한 일과 내가 내린 결정, 처리 결과를 한곳에서 확인해요.",
+    description: "비서가 혼자 정하면 안 되는 예외와 새 업무만 모아 보여드려요.",
+    inflowTitle: "새 업무에서 정할 일",
+    inflowStatus: "확인 필요",
+    project: "들어온 곳",
+    needsDecision: "직접 정할 내용",
+    promoteDecision: "업무로 등록할지",
+    assignee: "담당자",
+    deadline: "마감",
+    openInProject: "프로젝트에서 정하기",
+    openInflowProblem:
+      "해당 업무를 열지 못했어요. 프로젝트에서 새 업무를 다시 확인해 주세요.",
+    itsmTitle: "ITSM 연결 확인",
+    itsmCandidateTitle: (projectName: string) =>
+      `‘${projectName}’ 원문을 확인할까요?`,
+    itsmCandidateDescription:
+      "처음 발견한 프로젝트가 맞는지 확인하면 이 프로젝트의 이슈 원문만 업무 정리에 사용해요.",
+    confirmItsm: "확인하고 연결하기",
+    confirmItsmProblem:
+      "ITSM 연결 상태가 바뀌었어요. 최신 상태를 불러왔으니 다시 확인해 주세요.",
+    emptyInflowTitle: "정리할 새 업무가 없어요",
+    emptyInflowDescription:
+      "Chat이나 ITSM에서 선택이 필요한 업무가 들어오면 여기에 먼저 모아둘게요.",
     pendingTitle: "지금 결정할 일",
     historyTitle: "결정 기록",
     count: (count: number) => `${count}개`,
     emptyPendingTitle: "지금 결정할 일이 없어요",
     emptyPendingDescription:
-      "선택이 필요한 상황이 생기면 이유와 선택지를 정리해 둘게요.",
+      "일정 충돌처럼 바로 실행할 수 없는 예외가 생기면 이유와 선택지를 정리해 둘게요.",
     emptyHistoryTitle: "아직 결정 기록이 없어요",
     emptyHistoryDescription: "결정하거나 미룬 내용은 여기에 기록해 둘게요.",
     expectedEffect: "기대 효과",
@@ -406,6 +425,8 @@ export const copy = {
       expired: "기간 만료 · 다시 확인해 주세요",
     },
     loadNotice: "결정할 일을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
+    partialLoadNotice:
+      "일부 연결을 확인하지 못했어요. 불러온 결정은 먼저 확인할 수 있어요.",
     decisionNotice: "결정을 반영하지 못했어요. 다시 시도해 주세요.",
   },
   meetings: {

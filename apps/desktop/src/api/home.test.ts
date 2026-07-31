@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { fetchHomeSnapshot } from "./home";
+import { fetchHomeSnapshot, requireDecisionInflow } from "./home";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -8,6 +8,12 @@ afterEach(() => {
 });
 
 describe("home snapshot API", () => {
+  it("does not turn a failed home load into an empty decision inbox", () => {
+    expect(() => requireDecisionInflow(undefined)).toThrow(
+      "home snapshot unavailable",
+    );
+  });
+
   it("loads the daily server snapshot with the requested local-day range", async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(

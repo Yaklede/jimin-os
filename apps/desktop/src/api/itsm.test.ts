@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  confirmProjectItsm,
   connectProjectItsm,
   disconnectProjectItsm,
   fetchProjectItsmConnection,
@@ -16,8 +17,9 @@ describe("project ITSM connection client", () => {
   const connection: ProjectItsmConnection = {
     id: "019f68cb-9400-7000-8000-000000000091",
     projectId: "019f68cb-9400-7000-8000-000000000001",
-    itsmProjectId: "42",
     enabled: true,
+    confirmationStatus: "discovering",
+    candidateProjectName: null,
     version: 3,
   };
 
@@ -68,7 +70,6 @@ describe("project ITSM connection client", () => {
         "https://jimin-os.example",
         "access",
         connection.projectId,
-        connection.itsmProjectId,
       ),
     ).resolves.toEqual(connection);
 
@@ -76,7 +77,6 @@ describe("project ITSM connection client", () => {
     expect(request?.method).toBe("POST");
     expect(JSON.parse(String(request?.body))).toEqual({
       enabled: true,
-      itsmProjectId: "42",
     });
     expect(String(request?.body)).not.toContain(["to", "ken"].join(""));
     expect(String(request?.body)).not.toContain(["base", "Url"].join(""));
@@ -96,8 +96,45 @@ describe("project ITSM connection client", () => {
     expect(requestedUrl.pathname).toBe(
       `/v1/projects/${connection.projectId}/itsm-connection`,
     );
+    expect(requestedUrl.searchParams.get("expectedConnectionId")).toBe(
+      connection.id,
+    );
     expect(requestedUrl.searchParams.get("expectedVersion")).toBe("3");
     expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("DELETE");
+  });
+
+  it("confirms the discovered project by version without exposing its identifier", async () => {
+    const confirmed = {
+      ...connection,
+      confirmationStatus: "confirmed" as const,
+      candidateProjectName: null,
+      version: 4,
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(confirmed), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      confirmProjectItsm("https://jimin-os.example", "access", connection),
+    ).resolves.toEqual(confirmed);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `https://jimin-os.example/v1/projects/${connection.projectId}/itsm-connection/confirm`,
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          expectedConnectionId: connection.id,
+          expectedVersion: 3,
+        }),
+      }),
+    );
+    expect(String(fetchMock.mock.calls[0]?.[1]?.body)).not.toContain(
+      "candidateProject",
+    );
   });
 
   it("keeps server readiness failures as a recoverable unavailable error", async () => {
@@ -115,7 +152,6 @@ describe("project ITSM connection client", () => {
         "https://jimin-os.example",
         "access",
         connection.projectId,
-        connection.itsmProjectId,
       ),
     ).rejects.toMatchObject({
       name: "ItsmRequestError",

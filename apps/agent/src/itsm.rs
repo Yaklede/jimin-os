@@ -20,6 +20,7 @@ const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 const MAX_REFERENCE_DOCUMENTS: usize = 4;
 const MAX_ORIGINAL_CONTENT_CHARS: usize = 40_000;
 const MAX_TITLE_CHARS: usize = 200;
+const MAX_PROJECT_NAME_CHARS: usize = 160;
 
 pub(crate) struct ItsmClient {
     base_url: Url,
@@ -34,6 +35,22 @@ pub(crate) struct ItsmReferenceSnapshot {
     pub title: Option<String>,
     pub original_content: Option<String>,
     pub error_code: Option<&'static str>,
+}
+
+pub(crate) struct ItsmResolution {
+    pub references: Vec<ItsmReferenceSnapshot>,
+    pub detected_project: Option<DetectedItsmProject>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct DetectedItsmProject {
+    pub id: String,
+    pub name: String,
+}
+
+struct FetchedItsmReference {
+    snapshot: ItsmReferenceSnapshot,
+    project: Option<DetectedItsmProject>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,11 +143,14 @@ impl ItsmClient {
 
     pub(crate) async fn resolve_messages(
         &self,
-        expected_project_id: &str,
+        expected_project_id: Option<&str>,
         messages: &[InflowAnalysisMessage],
-    ) -> Vec<ItsmReferenceSnapshot> {
-        if !valid_expected_project_id(expected_project_id) {
-            return Vec::new();
+    ) -> ItsmResolution {
+        if expected_project_id.is_some_and(|project_id| !valid_project_id(project_id)) {
+            return ItsmResolution {
+                references: Vec::new(),
+                detected_project: None,
+            };
         }
         let mut issue_ids = BTreeSet::new();
         for message in messages {
@@ -147,19 +167,20 @@ impl ItsmClient {
             }
         }
 
-        let mut snapshots = Vec::with_capacity(issue_ids.len());
+        let mut fetched_references = Vec::with_capacity(issue_ids.len());
         let deadline = tokio::time::Instant::now() + TOTAL_RESOLUTION_TIMEOUT;
         for issue_id in issue_ids {
-            let Ok(snapshot) =
-                tokio::time::timeout_at(deadline, self.fetch_issue(issue_id, expected_project_id))
-                    .await
+            let Ok(reference) = tokio::time::timeout_at(deadline, self.fetch_issue(issue_id)).await
             else {
-                snapshots.push(self.failed_issue_snapshot(issue_id, "itsm.unavailable"));
+                fetched_references.push(FetchedItsmReference {
+                    snapshot: self.failed_issue_snapshot(issue_id, "itsm.unavailable"),
+                    project: None,
+                });
                 break;
             };
-            snapshots.push(snapshot);
+            fetched_references.push(reference);
         }
-        snapshots
+        scope_checked_resolution(expected_project_id, fetched_references)
     }
 
     fn issue_id(&self, candidate: &str) -> Option<u64> {
@@ -204,7 +225,7 @@ impl ItsmClient {
         failed_snapshot(self.issue_page_url(issue_id), issue_id, code)
     }
 
-    async fn fetch_issue(&self, issue_id: u64, expected_project_id: &str) -> ItsmReferenceSnapshot {
+    async fn fetch_issue(&self, issue_id: u64) -> FetchedItsmReference {
         let page_url = self.issue_page_url(issue_id);
         let mut api_url = self
             .base_url
@@ -218,7 +239,7 @@ impl ItsmClient {
             .get(api_url)
             .header("X-Redmine-API-Key", self.api_token.expose_secret());
         let Ok(response) = request.send().await else {
-            return failed_snapshot(page_url, issue_id, "itsm.unavailable");
+            return failed_reference(page_url, issue_id, "itsm.unavailable");
         };
         if !response.status().is_success() {
             let code = match response.status().as_u16() {
@@ -226,13 +247,13 @@ impl ItsmClient {
                 404 => "itsm.issue_not_found",
                 _ => "itsm.request_rejected",
             };
-            return failed_snapshot(page_url, issue_id, code);
+            return failed_reference(page_url, issue_id, code);
         }
         if response
             .content_length()
             .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
         {
-            return failed_snapshot(page_url, issue_id, "itsm.response_too_large");
+            return failed_reference(page_url, issue_id, "itsm.response_too_large");
         }
         let mut body = Vec::with_capacity(
             response
@@ -244,45 +265,104 @@ impl ItsmClient {
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let Ok(chunk) = chunk else {
-                return failed_snapshot(page_url, issue_id, "itsm.unavailable");
+                return failed_reference(page_url, issue_id, "itsm.unavailable");
             };
             if !append_bounded_response(&mut body, &chunk) {
-                return failed_snapshot(page_url, issue_id, "itsm.response_too_large");
+                return failed_reference(page_url, issue_id, "itsm.response_too_large");
             }
         }
         let envelope: RedmineIssueEnvelope = match serde_json::from_slice(&body) {
             Ok(value) => value,
-            Err(_) => return failed_snapshot(page_url, issue_id, "itsm.invalid_response"),
+            Err(_) => return failed_reference(page_url, issue_id, "itsm.invalid_response"),
         };
-        snapshot_from_issue(page_url, issue_id, expected_project_id, &envelope.issue)
+        snapshot_from_issue(page_url, issue_id, &envelope.issue)
     }
 }
 
-fn snapshot_from_issue(
-    page_url: Url,
-    issue_id: u64,
-    expected_project_id: &str,
-    issue: &RedmineIssue,
-) -> ItsmReferenceSnapshot {
+fn snapshot_from_issue(page_url: Url, issue_id: u64, issue: &RedmineIssue) -> FetchedItsmReference {
     if issue.id != issue_id || issue.subject.trim().is_empty() {
-        return failed_snapshot(page_url, issue_id, "itsm.invalid_response");
+        return failed_reference(page_url, issue_id, "itsm.invalid_response");
     }
-    if issue.project.id.to_string() != expected_project_id {
-        return failed_snapshot(page_url, issue_id, "itsm.project_mismatch");
+    let project_id = issue.project.id.to_string();
+    let Some(project_name) = issue
+        .project
+        .name
+        .as_deref()
+        .and_then(sanitized_project_name)
+    else {
+        return failed_reference(page_url, issue_id, "itsm.invalid_response");
+    };
+    if !valid_project_id(&project_id) {
+        return failed_reference(page_url, issue_id, "itsm.invalid_response");
     }
-    ItsmReferenceSnapshot {
-        url: page_url.into(),
-        external_id: issue_id.to_string(),
-        title: Some(bounded_title(&issue.subject)),
-        original_content: Some(render_original_content(issue)),
-        error_code: None,
+    FetchedItsmReference {
+        snapshot: ItsmReferenceSnapshot {
+            url: page_url.into(),
+            external_id: issue_id.to_string(),
+            title: Some(bounded_title(&issue.subject)),
+            original_content: Some(render_original_content(issue)),
+            error_code: None,
+        },
+        project: Some(DetectedItsmProject {
+            id: project_id,
+            name: project_name,
+        }),
     }
 }
 
-fn valid_expected_project_id(value: &str) -> bool {
+fn valid_project_id(value: &str) -> bool {
     (1..=20).contains(&value.len())
         && value.as_bytes()[0] != b'0'
         && value.bytes().all(|candidate| candidate.is_ascii_digit())
+}
+
+fn sanitized_project_name(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return None;
+    }
+    Some(bounded_chars(value, MAX_PROJECT_NAME_CHARS, "…"))
+}
+
+fn scope_checked_resolution(
+    expected_project_id: Option<&str>,
+    fetched_references: Vec<FetchedItsmReference>,
+) -> ItsmResolution {
+    let projects = fetched_references
+        .iter()
+        .filter_map(|reference| reference.project.as_ref())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let scope_mismatch = projects.len() > 1
+        || expected_project_id.is_some_and(|expected| {
+            projects
+                .iter()
+                .any(|project| project.id.as_str() != expected)
+        });
+    let detected_project = (!scope_mismatch && projects.len() == 1)
+        .then(|| projects.first().expect("one project").clone());
+    let mut resolution = ItsmResolution {
+        references: fetched_references
+            .into_iter()
+            .map(|reference| reference.snapshot)
+            .collect(),
+        detected_project,
+    };
+    if scope_mismatch {
+        resolution.redact("itsm.project_mismatch");
+    }
+    resolution
+}
+
+impl ItsmResolution {
+    pub(crate) fn redact(&mut self, error_code: &'static str) {
+        self.detected_project = None;
+        for reference in &mut self.references {
+            reference.title = None;
+            reference.original_content = None;
+            reference.error_code = Some(error_code);
+        }
+    }
 }
 
 fn append_bounded_response(target: &mut Vec<u8>, chunk: &[u8]) -> bool {
@@ -304,6 +384,13 @@ fn failed_snapshot(url: Url, issue_id: u64, code: &'static str) -> ItsmReference
         title: None,
         original_content: None,
         error_code: Some(code),
+    }
+}
+
+fn failed_reference(url: Url, issue_id: u64, code: &'static str) -> FetchedItsmReference {
+    FetchedItsmReference {
+        snapshot: failed_snapshot(url, issue_id, code),
+        project: None,
     }
 }
 
@@ -454,7 +541,7 @@ mod tests {
     use super::{
         ItsmClient, MAX_ORIGINAL_CONTENT_CHARS, MAX_RESPONSE_BYTES, MAX_TITLE_CHARS,
         RedmineIssueEnvelope, append_bounded_response, bounded_title, render_original_content,
-        snapshot_from_issue,
+        scope_checked_resolution, snapshot_from_issue,
     };
     use reqwest::Url;
     use secrecy::SecretString;
@@ -532,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_issue_from_another_itsm_project_without_exposing_original_content() {
+    fn bound_project_rejects_another_project_without_exposing_original_content() {
         let envelope: RedmineIssueEnvelope = serde_json::from_str(
             r#"{
               "issue": {
@@ -544,24 +631,30 @@ mod tests {
             }"#,
         )
         .expect("numeric Redmine project fixture should parse");
-        let snapshot = snapshot_from_issue(
-            Url::parse("https://itsm.bix.bz/issues/3876").expect("fixture URL should parse"),
-            3_876,
-            "42",
-            &envelope.issue,
+        let resolution = scope_checked_resolution(
+            Some("42"),
+            vec![snapshot_from_issue(
+                Url::parse("https://itsm.bix.bz/issues/3876").expect("fixture URL should parse"),
+                3_876,
+                &envelope.issue,
+            )],
         );
+        let snapshot = &resolution.references[0];
 
         assert_eq!(snapshot.error_code, Some("itsm.project_mismatch"));
         assert!(snapshot.title.is_none());
         assert!(snapshot.original_content.is_none());
         assert!(!format!("{snapshot:?}").contains("비공개 프로젝트"));
 
-        let matching_snapshot = snapshot_from_issue(
-            Url::parse("https://itsm.bix.bz/issues/3876").expect("fixture URL should parse"),
-            3_876,
-            "43",
-            &envelope.issue,
+        let matching_resolution = scope_checked_resolution(
+            Some("43"),
+            vec![snapshot_from_issue(
+                Url::parse("https://itsm.bix.bz/issues/3876").expect("fixture URL should parse"),
+                3_876,
+                &envelope.issue,
+            )],
         );
+        let matching_snapshot = &matching_resolution.references[0];
         assert!(matching_snapshot.error_code.is_none());
         assert!(
             matching_snapshot
@@ -569,6 +662,84 @@ mod tests {
                 .as_deref()
                 .is_some_and(|content| content.contains("다른 프로젝트 원문"))
         );
+    }
+
+    #[test]
+    fn unbound_project_detects_one_scope_and_redacts_mixed_scopes() {
+        let first: RedmineIssueEnvelope = serde_json::from_str(
+            r#"{"issue":{"id":3876,"project":{"id":42,"name":"비스킷링크"},"subject":"첫 이슈","description":"첫 원문"}}"#,
+        )
+        .expect("first fixture should parse");
+        let second: RedmineIssueEnvelope = serde_json::from_str(
+            r#"{"issue":{"id":3877,"project":{"id":43,"name":"다른 프로젝트"},"subject":"다른 이슈","description":"다른 원문"}}"#,
+        )
+        .expect("second fixture should parse");
+        let single = scope_checked_resolution(
+            None,
+            vec![snapshot_from_issue(
+                Url::parse("https://itsm.bix.bz/issues/3876").expect("fixture URL should parse"),
+                3_876,
+                &first.issue,
+            )],
+        );
+        assert_eq!(
+            single.detected_project.as_ref(),
+            Some(&super::DetectedItsmProject {
+                id: "42".to_owned(),
+                name: "비스킷링크".to_owned(),
+            })
+        );
+        assert!(single.references[0].original_content.is_some());
+
+        let mixed = scope_checked_resolution(
+            None,
+            vec![
+                snapshot_from_issue(
+                    Url::parse("https://itsm.bix.bz/issues/3876")
+                        .expect("fixture URL should parse"),
+                    3_876,
+                    &first.issue,
+                ),
+                snapshot_from_issue(
+                    Url::parse("https://itsm.bix.bz/issues/3877")
+                        .expect("fixture URL should parse"),
+                    3_877,
+                    &second.issue,
+                ),
+            ],
+        );
+        assert!(mixed.detected_project.is_none());
+        assert!(mixed.references.iter().all(|reference| {
+            reference.title.is_none()
+                && reference.original_content.is_none()
+                && reference.error_code == Some("itsm.project_mismatch")
+        }));
+        assert!(!format!("{:?}", mixed.references).contains("첫 원문"));
+        assert!(!format!("{:?}", mixed.references).contains("다른 원문"));
+    }
+
+    #[test]
+    fn unbound_candidate_requires_a_bounded_project_name() {
+        let missing_name: RedmineIssueEnvelope = serde_json::from_str(
+            r#"{"issue":{"id":3876,"project":{"id":42},"subject":"원문 제목","description":"원문 내용"}}"#,
+        )
+        .expect("missing Redmine project name should deserialize as optional");
+        let resolution = scope_checked_resolution(
+            None,
+            vec![snapshot_from_issue(
+                Url::parse("https://itsm.bix.bz/issues/3876").expect("fixture URL should parse"),
+                3_876,
+                &missing_name.issue,
+            )],
+        );
+
+        assert!(resolution.detected_project.is_none());
+        assert_eq!(
+            resolution.references[0].error_code,
+            Some("itsm.invalid_response")
+        );
+        assert!(resolution.references[0].title.is_none());
+        assert!(resolution.references[0].original_content.is_none());
     }
 
     #[test]

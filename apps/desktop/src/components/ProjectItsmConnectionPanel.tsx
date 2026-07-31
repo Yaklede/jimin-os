@@ -8,13 +8,13 @@ import {
 import { useEffect, useRef, useState } from "react";
 
 import {
-  isItsmProjectId,
   type ProjectItsmConnection,
   type ProjectItsmConnectionSnapshot,
 } from "../api/itsm";
 import { copy } from "../copy";
 
-type PendingAction = "connecting" | "reloading" | "disconnecting";
+type PendingAction =
+  "connecting" | "confirming" | "reloading" | "disconnecting";
 
 type ProjectItsmConnectionPanelProps = {
   snapshot: ProjectItsmConnectionSnapshot | undefined;
@@ -22,7 +22,8 @@ type ProjectItsmConnectionPanelProps = {
   saving: boolean;
   problemMessage?: string;
   onReload(): Promise<void>;
-  onConnect(itsmProjectId: string): Promise<void>;
+  onConnect(): Promise<void>;
+  onConfirm(connection: ProjectItsmConnection): Promise<void>;
   onDisconnect(connection: ProjectItsmConnection): Promise<void>;
 };
 
@@ -33,18 +34,22 @@ export function ProjectItsmConnectionPanel({
   problemMessage,
   onReload,
   onConnect,
+  onConfirm,
   onDisconnect,
 }: ProjectItsmConnectionPanelProps) {
   const [pendingAction, setPendingAction] = useState<PendingAction>();
   const [disconnectOpen, setDisconnectOpen] = useState(false);
   const [notice, setNotice] = useState<string>();
   const [localProblem, setLocalProblem] = useState<string>();
-  const [itsmProjectId, setItsmProjectId] = useState("");
   const disconnectTriggerRef = useRef<HTMLButtonElement>(null);
   const disconnectSafeActionRef = useRef<HTMLButtonElement>(null);
   const restoreDisconnectFocusRef = useRef(false);
   const connection = snapshot?.item;
-  const connected = Boolean(connection?.enabled);
+  const enabled = Boolean(connection?.enabled);
+  const connected = connection?.confirmationStatus === "confirmed";
+  const confirmationRequired =
+    connection?.confirmationStatus === "confirmation_required";
+  const discovering = connection?.confirmationStatus === "discovering";
   const busy = loading || saving || pendingAction !== undefined;
   const problem = localProblem ?? problemMessage;
 
@@ -53,7 +58,6 @@ export function ProjectItsmConnectionPanel({
     setNotice(undefined);
     setLocalProblem(undefined);
     setPendingAction(undefined);
-    setItsmProjectId("");
     restoreDisconnectFocusRef.current = false;
   }, [connection?.projectId]);
 
@@ -87,16 +91,11 @@ export function ProjectItsmConnectionPanel({
 
   async function connect() {
     if (busy) return;
-    const normalizedProjectId = itsmProjectId.trim();
-    if (!isItsmProjectId(normalizedProjectId)) {
-      setLocalProblem(copy.projects.itsmProjectIdProblem);
-      return;
-    }
     setPendingAction("connecting");
     setLocalProblem(undefined);
     setNotice(undefined);
     try {
-      await onConnect(normalizedProjectId);
+      await onConnect();
       setNotice(copy.projects.itsmConnectedNotice);
     } catch {
       setLocalProblem(copy.projects.itsmConnectProblem);
@@ -116,6 +115,21 @@ export function ProjectItsmConnectionPanel({
       setNotice(copy.projects.itsmDisconnectedNotice);
     } catch {
       setLocalProblem(copy.projects.itsmDisconnectProblem);
+    } finally {
+      setPendingAction(undefined);
+    }
+  }
+
+  async function confirm() {
+    if (!connection || busy || !confirmationRequired) return;
+    setPendingAction("confirming");
+    setLocalProblem(undefined);
+    setNotice(undefined);
+    try {
+      await onConfirm(connection);
+      setNotice(copy.projects.itsmConfirmedNotice);
+    } catch {
+      setLocalProblem(copy.projects.itsmConfirmProblem);
     } finally {
       setPendingAction(undefined);
     }
@@ -143,16 +157,25 @@ export function ProjectItsmConnectionPanel({
           {!loading && snapshot?.available && (
             <span>
               {connected
-                ? copy.projects.itsmConnectedDescription(
-                    connection?.itsmProjectId ?? "",
-                  )
-                : copy.projects.itsmAvailableDescription}
+                ? copy.projects.itsmConnectedDescription
+                : confirmationRequired
+                  ? copy.projects.itsmConfirmationDescription
+                  : discovering
+                    ? copy.projects.itsmDiscoveringDescription
+                    : copy.projects.itsmAvailableDescription}
             </span>
           )}
         </div>
-        {connected && (
-          <span className="project-itsm__status">
-            {copy.projects.itsmConnected}
+        {enabled && (
+          <span
+            className="project-itsm__status"
+            data-status={connection?.confirmationStatus}
+          >
+            {connected
+              ? copy.projects.itsmConnected
+              : confirmationRequired
+                ? copy.projects.itsmConfirmationRequired
+                : copy.projects.itsmDiscovering}
           </span>
         )}
       </div>
@@ -195,8 +218,41 @@ export function ProjectItsmConnectionPanel({
               : copy.projects.itsmReload}
           </button>
         </div>
-      ) : connected && connection ? (
+      ) : enabled && connection ? (
         <>
+          {confirmationRequired && connection.candidateProjectName && (
+            <div className="project-itsm__confirmation">
+              <div>
+                <strong>
+                  {copy.projects.itsmCandidateTitle(
+                    connection.candidateProjectName,
+                  )}
+                </strong>
+                <p>{copy.projects.itsmCandidateDescription}</p>
+              </div>
+              <button
+                className="primary-button focus-visible-control"
+                type="button"
+                disabled={busy}
+                onClick={() => void confirm()}
+              >
+                {pendingAction === "confirming" ? (
+                  <LoaderCircle className="spin" aria-hidden="true" />
+                ) : (
+                  <CheckCircle2 aria-hidden="true" />
+                )}
+                {pendingAction === "confirming"
+                  ? copy.projects.itsmConfirming
+                  : copy.projects.itsmConfirm}
+              </button>
+            </div>
+          )}
+          {discovering && (
+            <p className="project-itsm__discovering" role="status">
+              <LoaderCircle className="spin" aria-hidden="true" />
+              {copy.projects.itsmDiscoveringHelp}
+            </p>
+          )}
           <div className="project-itsm__actions">
             <button
               className="secondary-button focus-visible-control"
@@ -267,48 +323,22 @@ export function ProjectItsmConnectionPanel({
           )}
         </>
       ) : snapshot?.available ? (
-        <div className="project-itsm__connect-form">
-          <label htmlFor="project-itsm-project-id">
-            {copy.projects.itsmProjectIdLabel}
-          </label>
-          <div className="project-itsm__connect-row">
-            <input
-              id="project-itsm-project-id"
-              className="focus-visible-control"
-              type="text"
-              inputMode="numeric"
-              pattern="[1-9][0-9]{0,19}"
-              maxLength={20}
-              autoComplete="off"
-              spellCheck={false}
-              value={itsmProjectId}
-              aria-describedby="project-itsm-project-id-help"
-              onChange={(event) => {
-                setItsmProjectId(
-                  event.currentTarget.value.replace(/\D/g, "").slice(0, 20),
-                );
-                setLocalProblem(undefined);
-              }}
-            />
-            <button
-              className="primary-button focus-visible-control"
-              type="button"
-              disabled={busy}
-              onClick={() => void connect()}
-            >
-              {pendingAction === "connecting" ? (
-                <LoaderCircle className="spin" aria-hidden="true" />
-              ) : (
-                <Database aria-hidden="true" />
-              )}
-              {pendingAction === "connecting"
-                ? copy.projects.itsmConnecting
-                : copy.projects.itsmConnect}
-            </button>
-          </div>
-          <p id="project-itsm-project-id-help">
-            {copy.projects.itsmProjectIdDescription}
-          </p>
+        <div className="project-itsm__actions project-itsm__actions--connect">
+          <button
+            className="primary-button focus-visible-control"
+            type="button"
+            disabled={busy}
+            onClick={() => void connect()}
+          >
+            {pendingAction === "connecting" ? (
+              <LoaderCircle className="spin" aria-hidden="true" />
+            ) : (
+              <Database aria-hidden="true" />
+            )}
+            {pendingAction === "connecting"
+              ? copy.projects.itsmConnecting
+              : copy.projects.itsmConnect}
+          </button>
         </div>
       ) : problem ? (
         <div className="project-itsm__actions project-itsm__actions--connect">

@@ -90,6 +90,7 @@ type ProjectsWorkspaceProps = {
   selectedWorkspaceId: string | undefined;
   selectedProjectId: string | undefined;
   highlightedTaskId: string | undefined;
+  highlightedInflowId: string | undefined;
   loaded: boolean;
   loading: boolean;
   webhookLoading: boolean;
@@ -181,7 +182,8 @@ type ProjectsWorkspaceProps = {
   onDeleteWebhook(webhook: ProjectWebhook): Promise<void>;
   onRetryWebhookDelivery(delivery: WebhookDelivery): Promise<void>;
   onReloadItsmConnection(): Promise<void>;
-  onConnectItsm(itsmProjectId: string): Promise<void>;
+  onConnectItsm(): Promise<void>;
+  onConfirmItsm(connection: ProjectItsmConnection): Promise<void>;
   onDisconnectItsm(connection: ProjectItsmConnection): Promise<void>;
   onConnectGoogleChatAccount(): Promise<void>;
   onLoadGoogleChatSpaces(accountId: string): Promise<void>;
@@ -221,6 +223,7 @@ export function ProjectsWorkspace({
   selectedWorkspaceId,
   selectedProjectId,
   highlightedTaskId,
+  highlightedInflowId,
   loaded,
   loading,
   webhookLoading,
@@ -251,6 +254,7 @@ export function ProjectsWorkspace({
   onRetryWebhookDelivery,
   onReloadItsmConnection,
   onConnectItsm,
+  onConfirmItsm,
   onDisconnectItsm,
   onConnectGoogleChatAccount,
   onLoadGoogleChatSpaces,
@@ -349,6 +353,23 @@ export function ProjectsWorkspace({
     });
     element.focus({ preventScroll: true });
   }, [highlightedTaskId, tasks]);
+
+  useEffect(() => {
+    if (!highlightedInflowId) return;
+    setActiveProjectTab("inflow");
+    const frame = window.requestAnimationFrame(() => {
+      const target = document.getElementById(
+        `project-inflow-item-${highlightedInflowId}`,
+      );
+      if (!target) return;
+      target.scrollIntoView({
+        block: "center",
+        behavior: preferredScrollBehavior(),
+      });
+      target.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [highlightedInflowId, projectInflowItems]);
 
   useEffect(() => {
     if (!formOpen && !editingTaskId && !selectedTaskId) return;
@@ -1314,6 +1335,7 @@ export function ProjectsWorkspace({
                       problemMessage={itsmError}
                       onReload={onReloadItsmConnection}
                       onConnect={onConnectItsm}
+                      onConfirm={onConfirmItsm}
                       onDisconnect={onDisconnectItsm}
                     />
                   </section>

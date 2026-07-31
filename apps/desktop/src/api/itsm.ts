@@ -1,14 +1,21 @@
 export interface ProjectItsmConnection {
   id: string;
   projectId: string;
-  itsmProjectId: string;
   enabled: boolean;
+  confirmationStatus:
+    "discovering" | "confirmation_required" | "confirmed" | "disabled";
+  candidateProjectName: string | null;
   version: number;
 }
 
 export interface ProjectItsmConnectionSnapshot {
   available: boolean;
   item: ProjectItsmConnection | null;
+}
+
+export interface ProjectItsmDecisionCandidate {
+  projectName: string;
+  connection: ProjectItsmConnection;
 }
 
 export class ItsmRequestError extends Error {
@@ -45,14 +52,13 @@ export async function connectProjectItsm(
   baseUrl: string,
   access: string,
   projectId: string,
-  itsmProjectId: string,
 ): Promise<ProjectItsmConnection> {
   const response = await fetch(
     `${normalizeBaseUrl(baseUrl)}/v1/projects/${encodeURIComponent(projectId)}/itsm-connection`,
     {
       method: "POST",
       headers: headers(access, true),
-      body: JSON.stringify({ enabled: true, itsmProjectId }),
+      body: JSON.stringify({ enabled: true }),
     },
   );
   const payload = await readJson(response);
@@ -71,6 +77,7 @@ export async function disconnectProjectItsm(
     `${normalizeBaseUrl(baseUrl)}/v1/projects/${encodeURIComponent(connection.projectId)}/itsm-connection`,
     browserOrigin(),
   );
+  url.searchParams.set("expectedConnectionId", connection.id);
   url.searchParams.set("expectedVersion", String(connection.version));
   const response = await fetch(url, {
     method: "DELETE",
@@ -79,12 +86,36 @@ export async function disconnectProjectItsm(
   if (!response.ok) throw errorFromStatus(response.status);
 }
 
+export async function confirmProjectItsm(
+  baseUrl: string,
+  access: string,
+  connection: ProjectItsmConnection,
+): Promise<ProjectItsmConnection> {
+  const response = await fetch(
+    `${normalizeBaseUrl(baseUrl)}/v1/projects/${encodeURIComponent(connection.projectId)}/itsm-connection/confirm`,
+    {
+      method: "POST",
+      headers: headers(access, true),
+      body: JSON.stringify({
+        expectedConnectionId: connection.id,
+        expectedVersion: connection.version,
+      }),
+    },
+  );
+  const payload = await readJson(response);
+  if (!response.ok || !isConnection(payload)) {
+    throw errorFromStatus(response.status);
+  }
+  return safeConnection(payload);
+}
+
 function safeConnection(value: ProjectItsmConnection): ProjectItsmConnection {
   return {
     id: value.id,
     projectId: value.projectId,
-    itsmProjectId: value.itsmProjectId,
     enabled: value.enabled,
+    confirmationStatus: value.confirmationStatus,
+    candidateProjectName: value.candidateProjectName,
     version: value.version,
   };
 }
@@ -104,15 +135,24 @@ function isConnection(value: unknown): value is ProjectItsmConnection {
     value.id.length > 0 &&
     typeof value.projectId === "string" &&
     value.projectId.length > 0 &&
-    isItsmProjectId(value.itsmProjectId) &&
     typeof value.enabled === "boolean" &&
+    isConfirmationStatus(value.confirmationStatus) &&
+    (value.candidateProjectName === null ||
+      typeof value.candidateProjectName === "string") &&
     Number.isSafeInteger(value.version) &&
     Number(value.version) > 0
   );
 }
 
-export function isItsmProjectId(value: unknown): value is string {
-  return typeof value === "string" && /^[1-9][0-9]{0,19}$/.test(value);
+function isConfirmationStatus(
+  value: unknown,
+): value is ProjectItsmConnection["confirmationStatus"] {
+  return (
+    value === "discovering" ||
+    value === "confirmation_required" ||
+    value === "confirmed" ||
+    value === "disabled"
+  );
 }
 
 function headers(access: string, json = false): HeadersInit {

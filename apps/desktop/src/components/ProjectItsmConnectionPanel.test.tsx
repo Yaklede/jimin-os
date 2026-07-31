@@ -13,7 +13,8 @@ describe("project ITSM connection panel", () => {
 
     expect(markup).toContain(copy.projects.itsmConnect);
     expect(markup).toContain(copy.projects.itsmAvailableDescription);
-    expect(markup).toContain(copy.projects.itsmProjectIdLabel);
+    expect(markup).not.toContain("ITSM 프로젝트 번호");
+    expect(markup).not.toContain("<input");
     expect(markup).not.toContain(["to", "ken"].join(""));
     expect(markup).not.toContain(["base", "Url"].join(""));
     expect(markup).not.toContain("https://");
@@ -26,8 +27,9 @@ describe("project ITSM connection panel", () => {
         item: {
           id: "connection-1",
           projectId: "project-1",
-          itsmProjectId: "42",
           enabled: true,
+          confirmationStatus: "confirmed",
+          candidateProjectName: null,
           version: 2,
         },
       },
@@ -38,6 +40,46 @@ describe("project ITSM connection panel", () => {
     expect(markup).toContain(copy.projects.itsmDisconnect);
     expect(markup).not.toContain("connection-1");
     expect(markup).not.toContain("project-1");
+  });
+
+  it("asks the owner to confirm the detected project by name", () => {
+    const markup = renderPanel({
+      snapshot: {
+        available: true,
+        item: {
+          id: "connection-1",
+          projectId: "project-1",
+          enabled: true,
+          confirmationStatus: "confirmation_required",
+          candidateProjectName: "비스킷링크",
+          version: 2,
+        },
+      },
+    });
+
+    expect(markup).toContain(copy.projects.itsmCandidateTitle("비스킷링크"));
+    expect(markup).toContain(copy.projects.itsmConfirm);
+    expect(markup).toContain(copy.projects.itsmDisconnect);
+    expect(markup).not.toContain("project-1");
+  });
+
+  it("explains the automatic discovery state after opt-in", () => {
+    const markup = renderPanel({
+      snapshot: {
+        available: true,
+        item: {
+          id: "connection-1",
+          projectId: "project-1",
+          enabled: true,
+          confirmationStatus: "discovering",
+          candidateProjectName: null,
+          version: 1,
+        },
+      },
+    });
+
+    expect(markup).toContain(copy.projects.itsmDiscoveringHelp);
+    expect(markup).toContain(copy.projects.itsmDisconnect);
   });
 
   it("explains that server preparation is needed without internal terms", () => {
@@ -73,6 +115,7 @@ function renderPanel(
     problemMessage: undefined,
     onReload: async () => undefined,
     onConnect: async () => undefined,
+    onConfirm: async () => undefined,
     onDisconnect: async () => undefined,
     ...overrides,
   };

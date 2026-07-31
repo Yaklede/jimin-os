@@ -660,7 +660,11 @@ export function InflowItemRow({
   }
 
   return (
-    <li className="project-inflow-item">
+    <li
+      className="project-inflow-item"
+      id={`project-inflow-item-${item.id}`}
+      tabIndex={-1}
+    >
       <div className="project-inflow-item__meta">
         <span>{item.projectName}</span>
         <span>{item.sourceName}</span>

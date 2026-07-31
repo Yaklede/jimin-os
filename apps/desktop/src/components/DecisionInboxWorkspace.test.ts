@@ -1,9 +1,16 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
+import { type ProjectInflowItem } from "../api/googleChat";
 import { type Recommendation } from "../api/home";
+import { copy } from "../copy";
 import {
+  DecisionInboxWorkspace,
+  inflowDecisionSummary,
   isConversationDecision,
   isDecisionActionableNow,
+  isProjectInflowDecisionItem,
 } from "./DecisionInboxWorkspace";
 
 function recommendation(
@@ -36,7 +43,53 @@ function recommendation(
   };
 }
 
+function promotableInflow(): ProjectInflowItem {
+  return {
+    status: "pending",
+    promotedTaskId: null,
+    analysisStatus: "ready",
+    analysisClassification: "new_task",
+    conversationId: "019f68cb-9400-7000-8000-000000000031",
+    representativeItemId: "019f68cb-9400-7000-8000-000000000032",
+    sourceRevision: 2,
+    analyzedRevision: 2,
+    version: 1,
+  } as ProjectInflowItem;
+}
+
 describe("decision inbox actions", () => {
+  it("surfaces a discovered ITSM project as an explicit owner decision", () => {
+    const markup = renderToStaticMarkup(
+      createElement(DecisionInboxWorkspace, {
+        recommendations: [],
+        inflowItems: [],
+        itsmCandidates: [
+          {
+            projectName: "비스킷링크",
+            connection: {
+              id: "019f68cb-9400-7000-8000-000000000041",
+              projectId: "019f68cb-9400-7000-8000-000000000042",
+              enabled: true,
+              confirmationStatus: "confirmation_required",
+              candidateProjectName: "비스킷링크 ITSM",
+              version: 2,
+            },
+          },
+        ],
+        loading: false,
+        error: undefined,
+        onOpenConversation: () => undefined,
+        onOpenProjectInflow: async () => undefined,
+        onConfirmItsm: async () => undefined,
+        onDecide: async () => true,
+      }),
+    );
+
+    expect(markup).toContain(copy.decisions.itsmTitle);
+    expect(markup).toContain("비스킷링크 ITSM");
+    expect(markup).toContain(copy.decisions.confirmItsm);
+  });
+
   it("routes schedule conflict decisions back to their conversation", () => {
     expect(
       isConversationDecision(
@@ -80,6 +133,46 @@ describe("decision inbox actions", () => {
     ).toBe(false);
     expect(
       isConversationDecision(recommendation("request_analysis", null)),
+    ).toBe(false);
+  });
+
+  it("summarizes the choices still missing from a new work item", () => {
+    const item = {
+      suggestedAssigneeName: null,
+      suggestedDueAt: null,
+    } as ProjectInflowItem;
+
+    expect(inflowDecisionSummary(item)).toBe("업무로 등록할지 · 담당자 · 마감");
+    expect(
+      inflowDecisionSummary({
+        ...item,
+        suggestedAssigneeName: "김경주",
+        suggestedDueAt: "2026-08-01T09:00:00Z",
+      }),
+    ).toBe("업무로 등록할지");
+  });
+
+  it("only treats ready new tasks as inflow decisions", () => {
+    const item = promotableInflow();
+
+    expect(isProjectInflowDecisionItem(item)).toBe(true);
+    expect(
+      isProjectInflowDecisionItem({
+        ...item,
+        analysisStatus: "refreshing",
+      }),
+    ).toBe(false);
+    expect(
+      isProjectInflowDecisionItem({
+        ...item,
+        analysisClassification: "question",
+      }),
+    ).toBe(false);
+    expect(
+      isProjectInflowDecisionItem({
+        ...item,
+        promotedTaskId: "019f68cb-9400-7000-8000-000000000033",
+      }),
     ).toBe(false);
   });
 });

@@ -74,7 +74,11 @@ use jimin_storage::{
         DecideRecommendation, DecideRecommendationOutcome, Recommendation, RecommendationDecision,
         RecommendationStatus, SuggestedActionKind,
     },
-    itsm::{DeleteProjectItsmConnectionOutcome, NewProjectItsmConnection, ProjectItsmConnection},
+    itsm::{
+        ConfirmProjectItsmConnection, ConfirmProjectItsmConnectionOutcome,
+        DeleteProjectItsmConnection, DeleteProjectItsmConnectionOutcome, NewProjectItsmConnection,
+        ProjectItsmConnection,
+    },
     planning::{
         DeleteTaskOutcome, NewScheduleEntry, NewTask, ScheduleEntry, ScheduleEntryUpdate,
         ScheduleSource, ScheduleStatus, Task, TaskAssignmentMessageInput, TaskStatus, TaskUpdate,
@@ -901,9 +905,19 @@ pub struct ProjectGoogleChatSourceListResponse {
 pub struct ProjectItsmConnectionResponse {
     id: uuid::Uuid,
     project_id: uuid::Uuid,
-    itsm_project_id: String,
     enabled: bool,
+    confirmation_status: ProjectItsmConfirmationStatus,
+    candidate_project_name: Option<String>,
     version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectItsmConfirmationStatus {
+    Discovering,
+    ConfirmationRequired,
+    Confirmed,
+    Disabled,
 }
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
@@ -917,7 +931,13 @@ pub struct ProjectItsmConnectionEnvelope {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CreateProjectItsmConnectionRequest {
     enabled: bool,
-    itsm_project_id: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ConfirmProjectItsmConnectionRequest {
+    expected_connection_id: uuid::Uuid,
+    expected_version: i64,
 }
 
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
@@ -1009,6 +1029,13 @@ pub struct CreateProjectGoogleChatSourceRequest {
 #[derive(Debug, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DeleteVersionedConnectionQuery {
+    expected_version: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DeleteProjectItsmConnectionQuery {
+    expected_connection_id: uuid::Uuid,
     expected_version: i64,
 }
 
@@ -1670,6 +1697,7 @@ pub(crate) fn error_response(
         delete_project,
         get_project_itsm_connection,
         create_project_itsm_connection,
+        confirm_project_itsm_connection,
         delete_project_itsm_connection,
         list_project_webhooks,
         create_project_webhook,
@@ -1769,13 +1797,16 @@ pub(crate) fn error_response(
         ProjectGoogleChatSourceResponse,
         ProjectGoogleChatSourceListResponse,
         ProjectItsmConnectionResponse,
+        ProjectItsmConfirmationStatus,
         ProjectItsmConnectionEnvelope,
         CreateProjectItsmConnectionRequest,
+        ConfirmProjectItsmConnectionRequest,
         ProjectInflowMessageResponse,
         ProjectInflowItemResponse,
         ProjectInflowItemListResponse,
         CreateProjectGoogleChatSourceRequest,
         DeleteVersionedConnectionQuery,
+        DeleteProjectItsmConnectionQuery,
         ProjectInflowDecisionRequest,
         ProjectInflowListQuery,
         TaskResponse,
@@ -2035,12 +2066,17 @@ fn webhook_router() -> Router<ApiState> {
 }
 
 fn itsm_router() -> Router<ApiState> {
-    Router::new().route(
-        "/v1/projects/{project_id}/itsm-connection",
-        get(get_project_itsm_connection)
-            .post(create_project_itsm_connection)
-            .delete(delete_project_itsm_connection),
-    )
+    Router::new()
+        .route(
+            "/v1/projects/{project_id}/itsm-connection",
+            get(get_project_itsm_connection)
+                .post(create_project_itsm_connection)
+                .delete(delete_project_itsm_connection),
+        )
+        .route(
+            "/v1/projects/{project_id}/itsm-connection/confirm",
+            post(confirm_project_itsm_connection),
+        )
 }
 
 fn push_router() -> Router<ApiState> {
@@ -3904,7 +3940,7 @@ async fn get_project_itsm_connection(
     {
         Ok(item) => no_store_json(ProjectItsmConnectionEnvelope {
             available: state.itsm_available(),
-            item: item.map(project_itsm_connection_response),
+            item: item.as_ref().map(project_itsm_connection_response),
         }),
         Err(error) => storage_error_response(&error, request_id),
     }
@@ -3944,7 +3980,7 @@ async fn create_project_itsm_connection(
             false,
         );
     }
-    if !body.enabled || !valid_itsm_project_id(&body.itsm_project_id) {
+    if !body.enabled {
         return invalid_request_response(request_id);
     }
     let Some(planning) = state.planning() else {
@@ -3955,14 +3991,13 @@ async fn create_project_itsm_connection(
             id: uuid::Uuid::now_v7(),
             user_id: principal.identity().user_id(),
             project_id,
-            itsm_project_id: body.itsm_project_id,
             enabled: true,
         })
         .await
     {
         Ok(Some(item)) => (
             StatusCode::CREATED,
-            Json(project_itsm_connection_response(item)),
+            Json(project_itsm_connection_response(&item)),
         )
             .into_response(),
         Ok(None) | Err(StorageError::InvalidConfiguration | StorageError::IdentityConflict) => {
@@ -3979,11 +4014,80 @@ async fn create_project_itsm_connection(
 }
 
 #[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/itsm-connection/confirm",
+    tag = "work",
+    params(("project_id" = String, Path)),
+    request_body = ConfirmProjectItsmConnectionRequest,
+    responses(
+        (status = 200, body = ProjectItsmConnectionResponse),
+        (status = 400),
+        (status = 401),
+        (status = 409),
+        (status = 503)
+    )
+)]
+async fn confirm_project_itsm_connection(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(project_id): Path<uuid::Uuid>,
+    Json(body): Json<ConfirmProjectItsmConnectionRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    if body.expected_connection_id.get_version_num() != 7 || body.expected_version <= 0 {
+        return invalid_request_response(request_id);
+    }
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .confirm_project_itsm_connection(&ConfirmProjectItsmConnection {
+            user_id: principal.identity().user_id(),
+            project_id,
+            expected_connection_id: body.expected_connection_id,
+            expected_version: body.expected_version,
+        })
+        .await
+    {
+        Ok(ConfirmProjectItsmConnectionOutcome::Confirmed(item)) => {
+            no_store_json(project_itsm_connection_response(&item))
+        }
+        Ok(ConfirmProjectItsmConnectionOutcome::CandidateMissing) => error_response(
+            StatusCode::CONFLICT,
+            "itsm.candidate_missing",
+            "확인할 ITSM 프로젝트를 아직 찾지 못했어요. 새 ITSM 링크가 들어온 뒤 다시 확인해 주세요.",
+            request_id,
+            false,
+        ),
+        Ok(ConfirmProjectItsmConnectionOutcome::ConnectionUnavailable) => error_response(
+            StatusCode::CONFLICT,
+            "itsm.connection_unavailable",
+            "ITSM 연결이 해제되었거나 꺼져 있어요. 최신 상태를 확인해 주세요.",
+            request_id,
+            false,
+        ),
+        Ok(ConfirmProjectItsmConnectionOutcome::VersionConflict) => error_response(
+            StatusCode::CONFLICT,
+            "itsm.connection_version_conflict",
+            "ITSM 연결 상태가 달라졌어요. 다시 불러온 뒤 확인해 주세요.",
+            request_id,
+            false,
+        ),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
     delete,
     path = "/v1/projects/{project_id}/itsm-connection",
     tag = "work",
     params(
         ("project_id" = String, Path),
+        ("expectedConnectionId" = uuid::Uuid, Query),
         ("expectedVersion" = i64, Query)
     ),
     responses((status = 204), (status = 400), (status = 401), (status = 409), (status = 503))
@@ -3993,24 +4097,25 @@ async fn delete_project_itsm_connection(
     Extension(request_id): Extension<RequestId>,
     headers: HeaderMap,
     Path(project_id): Path<uuid::Uuid>,
-    Query(query): Query<DeleteVersionedConnectionQuery>,
+    Query(query): Query<DeleteProjectItsmConnectionQuery>,
 ) -> Response {
     let principal = match auth::authenticate(&state, &headers).await {
         Ok(principal) => principal,
         Err(failure) => return failure.into_response(request_id),
     };
-    if query.expected_version <= 0 {
+    if query.expected_connection_id.get_version_num() != 7 || query.expected_version <= 0 {
         return invalid_request_response(request_id);
     }
     let Some(planning) = state.planning() else {
         return unavailable_response(request_id);
     };
     match planning
-        .delete_project_itsm_connection(
-            principal.identity().user_id(),
+        .delete_project_itsm_connection(&DeleteProjectItsmConnection {
+            user_id: principal.identity().user_id(),
             project_id,
-            query.expected_version,
-        )
+            expected_connection_id: query.expected_connection_id,
+            expected_version: query.expected_version,
+        })
         .await
     {
         Ok(
@@ -9336,21 +9441,25 @@ fn project_management_mode(value: &str) -> Option<ProjectManagementMode> {
 }
 
 fn project_itsm_connection_response(
-    connection: ProjectItsmConnection,
+    connection: &ProjectItsmConnection,
 ) -> ProjectItsmConnectionResponse {
+    let confirmation_status = if !connection.enabled {
+        ProjectItsmConfirmationStatus::Disabled
+    } else if connection.itsm_project_id.is_some() {
+        ProjectItsmConfirmationStatus::Confirmed
+    } else if connection.candidate_itsm_project_name.is_some() {
+        ProjectItsmConfirmationStatus::ConfirmationRequired
+    } else {
+        ProjectItsmConfirmationStatus::Discovering
+    };
     ProjectItsmConnectionResponse {
         id: connection.id,
         project_id: connection.project_id,
-        itsm_project_id: connection.itsm_project_id,
         enabled: connection.enabled,
+        confirmation_status,
+        candidate_project_name: connection.candidate_itsm_project_name.clone(),
         version: connection.version,
     }
-}
-
-fn valid_itsm_project_id(value: &str) -> bool {
-    (1..=20).contains(&value.len())
-        && value.as_bytes()[0] != b'0'
-        && value.bytes().all(|candidate| candidate.is_ascii_digit())
 }
 
 fn project_webhook_response(webhook: ProjectWebhook) -> ProjectWebhookResponse {
@@ -9793,8 +9902,9 @@ mod tests {
             item: Some(ProjectItsmConnectionResponse {
                 id: Uuid::now_v7(),
                 project_id: Uuid::now_v7(),
-                itsm_project_id: "42".to_owned(),
                 enabled: true,
+                confirmation_status: ProjectItsmConfirmationStatus::ConfirmationRequired,
+                candidate_project_name: Some("비스킷링크".to_owned()),
                 version: 1,
             }),
         };
@@ -9808,7 +9918,13 @@ mod tests {
                 .as_bool()
                 .is_some_and(|value| value)
         );
-        assert_eq!(serialized["item"]["itsmProjectId"], "42");
+        assert!(serialized["item"].get("itsmProjectId").is_none());
+        assert_eq!(
+            serialized["item"]["confirmationStatus"],
+            "confirmation_required"
+        );
+        assert_eq!(serialized["item"]["candidateProjectName"], "비스킷링크");
+        assert!(serialized["item"].get("candidateItsmProjectId").is_none());
         for forbidden in ["token", "credential", "baseUrl", "header", "secret"] {
             assert!(
                 !text
@@ -9816,15 +9932,6 @@ mod tests {
                     .contains(&forbidden.to_ascii_lowercase()),
                 "public connection responses must not expose {forbidden}",
             );
-        }
-    }
-
-    #[test]
-    fn itsm_project_identifier_is_a_bounded_positive_decimal_string() {
-        assert!(valid_itsm_project_id("1"));
-        assert!(valid_itsm_project_id("12345678901234567890"));
-        for invalid in ["", "0", "01", "-1", "project-42", "123456789012345678901"] {
-            assert!(!valid_itsm_project_id(invalid));
         }
     }
 
@@ -10241,6 +10348,7 @@ mod tests {
                 "/v1/projects/{project_id}/inflow",
                 "/v1/projects/{project_id}/inflow/{item_id}/decision",
                 "/v1/projects/{project_id}/itsm-connection",
+                "/v1/projects/{project_id}/itsm-connection/confirm",
                 "/v1/projects/{project_id}/webhook-deliveries",
                 "/v1/projects/{project_id}/webhook-deliveries/{delivery_id}/retry",
                 "/v1/projects/{project_id}/webhooks",
@@ -10297,6 +10405,7 @@ mod tests {
             "/v1/projects/{project_id}/google-chat-sources",
             "/v1/projects/{project_id}/inflow/{item_id}/decision",
             "/v1/projects/{project_id}/itsm-connection",
+            "/v1/projects/{project_id}/itsm-connection/confirm",
         ] {
             assert!(
                 document.paths.paths[path]
@@ -10322,6 +10431,14 @@ mod tests {
             delete_parameters
                 .as_array()
                 .is_some_and(|parameters| parameters.iter().any(|parameter| {
+                    parameter["in"] == "query" && parameter["name"] == "expectedConnectionId"
+                })),
+            "ITSM disconnect must publish the connection generation identifier",
+        );
+        assert!(
+            delete_parameters
+                .as_array()
+                .is_some_and(|parameters| parameters.iter().any(|parameter| {
                     parameter["in"] == "query" && parameter["name"] == "expectedVersion"
                 })),
             "ITSM disconnect must publish the camelCase query parameter used by the runtime",
@@ -10334,6 +10451,24 @@ mod tests {
                     .all(|parameter| parameter["name"] != "expected_version")),
             "ITSM disconnect must not publish a query name the runtime rejects",
         );
+        let connection_schema =
+            &document["components"]["schemas"]["ProjectItsmConnectionResponse"]["properties"];
+        assert!(connection_schema.get("confirmationStatus").is_some());
+        assert!(connection_schema.get("candidateProjectName").is_some());
+        assert!(connection_schema.get("itsmProjectId").is_none());
+        assert!(connection_schema.get("candidateItsmProjectId").is_none());
+        let confirm_request = &document["paths"]["/v1/projects/{project_id}/itsm-connection/confirm"]
+            ["post"]["requestBody"]["content"]["application/json"]["schema"]["$ref"];
+        assert_eq!(
+            confirm_request,
+            "#/components/schemas/ConfirmProjectItsmConnectionRequest"
+        );
+        let confirm_schema =
+            &document["components"]["schemas"]["ConfirmProjectItsmConnectionRequest"]["properties"];
+        assert!(confirm_schema.get("expectedConnectionId").is_some());
+        assert!(confirm_schema.get("expectedVersion").is_some());
+        assert!(confirm_schema.get("expected_connection_id").is_none());
+        assert!(confirm_schema.get("expected_version").is_none());
     }
 
     #[test]
@@ -11545,12 +11680,20 @@ mod tests {
                 .method("POST")
                 .uri(format!("/v1/projects/{project_id}/itsm-connection"))
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"enabled":true,"itsmProjectId":"42"}"#))
+                .body(Body::from(r#"{"enabled":true}"#))
+                .expect("request should be valid"),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/projects/{project_id}/itsm-connection/confirm"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"expectedConnectionId":"019f68cb-9400-7000-8000-000000000013","expectedVersion":1}"#,
+                ))
                 .expect("request should be valid"),
             Request::builder()
                 .method("DELETE")
                 .uri(format!(
-                    "/v1/projects/{project_id}/itsm-connection?expectedVersion=1"
+                    "/v1/projects/{project_id}/itsm-connection?expectedConnectionId=019f68cb-9400-7000-8000-000000000013&expectedVersion=1"
                 ))
                 .body(Body::empty())
                 .expect("request should be valid"),
@@ -11561,6 +11704,28 @@ mod tests {
                 .expect("handler should respond");
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
+    }
+
+    #[tokio::test]
+    async fn project_itsm_confirmation_rejects_a_non_positive_version_before_storage() {
+        let (state, token, _) = signed_auth_state(true);
+        let project_id = "019f68cb-9400-7000-8000-000000000012";
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/projects/{project_id}/itsm-connection/confirm"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"expectedConnectionId":"019f68cb-9400-7000-8000-000000000013","expectedVersion":0}"#,
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

@@ -46,7 +46,9 @@ use jimin_storage::{
         SuggestedActionKind,
     },
     itsm::{
-        DeleteProjectItsmConnectionOutcome, NewProjectItsmConnection, ProjectItsmConnectionUpdate,
+        ConfirmProjectItsmConnection, ConfirmProjectItsmConnectionOutcome,
+        DeleteProjectItsmConnection, DeleteProjectItsmConnectionOutcome, NewProjectItsmConnection,
+        ProjectItsmCandidateOutcome, ProjectItsmConnectionUpdate,
     },
     meetings::{
         EditedMeetingSpeaker, EditedMeetingTranscriptSegment, MeetingActionItemUpdate,
@@ -875,14 +877,27 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             id: Uuid::now_v7(),
             user_id: owner.profile.id,
             project_id: first_project.id,
-            itsm_project_id: "42".to_owned(),
             enabled: true,
         })
         .await
         .expect("owned ITSM connection should persist")
         .expect("first project should accept one ITSM connection");
     assert!(itsm_connection.enabled);
-    assert_eq!(itsm_connection.itsm_project_id, "42");
+    assert!(itsm_connection.itsm_project_id.is_none());
+    assert!(itsm_connection.candidate_itsm_project_id.is_none());
+    assert!(itsm_connection.candidate_itsm_project_name.is_none());
+    assert_eq!(
+        database
+            .confirm_project_itsm_connection(&ConfirmProjectItsmConnection {
+                user_id: owner.profile.id,
+                project_id: first_project.id,
+                expected_connection_id: itsm_connection.id,
+                expected_version: itsm_connection.version,
+            })
+            .await
+            .expect("an empty candidate confirmation should be handled"),
+        ConfirmProjectItsmConnectionOutcome::CandidateMissing
+    );
     assert_eq!(
         database
             .project_itsm_connection(owner.profile.id, first_project.id)
@@ -904,7 +919,6 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
                 id: Uuid::now_v7(),
                 user_id: owner.profile.id,
                 project_id: first_project.id,
-                itsm_project_id: "42".to_owned(),
                 enabled: true,
             })
             .await
@@ -929,7 +943,6 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
                 id: Uuid::now_v7(),
                 user_id: other_owner.profile.id,
                 project_id: first_project.id,
-                itsm_project_id: "42".to_owned(),
                 enabled: true,
             })
             .await
@@ -938,11 +951,12 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
     );
     assert_eq!(
         database
-            .delete_project_itsm_connection(
-                other_owner.profile.id,
-                first_project.id,
-                itsm_connection.version,
-            )
+            .delete_project_itsm_connection(&DeleteProjectItsmConnection {
+                user_id: other_owner.profile.id,
+                project_id: first_project.id,
+                expected_connection_id: itsm_connection.id,
+                expected_version: itsm_connection.version,
+            })
             .await
             .expect("foreign connection deletion should remain opaque"),
         DeleteProjectItsmConnectionOutcome::AlreadyAbsent
@@ -968,12 +982,45 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             id: Uuid::now_v7(),
             user_id: owner.profile.id,
             project_id: cascade_project.id,
-            itsm_project_id: "84".to_owned(),
             enabled: true,
         })
         .await
         .expect("cascade connection should persist")
         .expect("cascade project should accept one ITSM connection");
+    let (first_candidate, second_candidate) = tokio::join!(
+        database.propose_project_itsm_candidate(
+            owner.profile.id,
+            cascade_project.id,
+            "84",
+            "첫 프로젝트",
+        ),
+        database.propose_project_itsm_candidate(
+            owner.profile.id,
+            cascade_project.id,
+            "85",
+            "두 번째 프로젝트",
+        )
+    );
+    let concurrent_outcomes = [
+        first_candidate.expect("first concurrent candidate should complete"),
+        second_candidate.expect("second concurrent candidate should complete"),
+    ];
+    assert_eq!(
+        concurrent_outcomes
+            .iter()
+            .filter(|outcome| **outcome == ProjectItsmCandidateOutcome::ConfirmationRequired)
+            .count(),
+        1,
+        "exactly one first-seen candidate must win the row lock"
+    );
+    assert_eq!(
+        concurrent_outcomes
+            .iter()
+            .filter(|outcome| **outcome == ProjectItsmCandidateOutcome::CandidateMismatch)
+            .count(),
+        1,
+        "the competing candidate must fail closed"
+    );
 
     let mut account_ids = Vec::new();
     for marker in [51_u8, 61_u8] {
@@ -1153,7 +1200,10 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         initial_analysis.itsm_enrichment_enabled,
         "an opted-in project should expose ITSM enrichment to the claimed job"
     );
-    assert_eq!(initial_analysis.itsm_project_id.as_deref(), Some("42"));
+    assert!(
+        initial_analysis.itsm_project_id.is_none(),
+        "a newly connected project must wait for its first trusted issue"
+    );
     assert!(
         database
             .start_inflow_analysis(
@@ -1163,6 +1213,130 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             )
             .await
             .expect("claimed analysis should start")
+    );
+    assert_eq!(
+        database
+            .propose_project_itsm_candidate(owner.profile.id, first_project.id, "42", "비스킷링크",)
+            .await
+            .expect("first trusted ITSM issue should propose a candidate"),
+        ProjectItsmCandidateOutcome::ConfirmationRequired
+    );
+    assert_eq!(
+        database
+            .propose_project_itsm_candidate(owner.profile.id, first_project.id, "42", "비스킷링크",)
+            .await
+            .expect("the same candidate proposal should remain idempotent"),
+        ProjectItsmCandidateOutcome::ConfirmationRequired
+    );
+    assert_eq!(
+        database
+            .propose_project_itsm_candidate(
+                owner.profile.id,
+                first_project.id,
+                "43",
+                "다른 프로젝트",
+            )
+            .await
+            .expect("a conflicting candidate should be rejected"),
+        ProjectItsmCandidateOutcome::CandidateMismatch
+    );
+    let pending_itsm_connection = database
+        .project_itsm_connection(owner.profile.id, first_project.id)
+        .await
+        .expect("pending ITSM connection should load")
+        .expect("first project connection should remain present");
+    assert!(pending_itsm_connection.itsm_project_id.is_none());
+    assert_eq!(
+        pending_itsm_connection.candidate_itsm_project_id.as_deref(),
+        Some("42")
+    );
+    assert_eq!(
+        pending_itsm_connection
+            .candidate_itsm_project_name
+            .as_deref(),
+        Some("비스킷링크")
+    );
+    assert_eq!(
+        database
+            .confirm_project_itsm_connection(&ConfirmProjectItsmConnection {
+                user_id: owner.profile.id,
+                project_id: first_project.id,
+                expected_connection_id: pending_itsm_connection.id,
+                expected_version: itsm_connection.version,
+            })
+            .await
+            .expect("stale candidate confirmation should be handled"),
+        ConfirmProjectItsmConnectionOutcome::VersionConflict
+    );
+    assert_eq!(
+        database
+            .confirm_project_itsm_connection(&ConfirmProjectItsmConnection {
+                user_id: other_owner.profile.id,
+                project_id: first_project.id,
+                expected_connection_id: pending_itsm_connection.id,
+                expected_version: pending_itsm_connection.version,
+            })
+            .await
+            .expect("foreign candidate confirmation should remain opaque"),
+        ConfirmProjectItsmConnectionOutcome::ConnectionUnavailable
+    );
+    assert_eq!(
+        database
+            .confirm_project_itsm_connection(&ConfirmProjectItsmConnection {
+                user_id: owner.profile.id,
+                project_id: first_project.id,
+                expected_connection_id: Uuid::now_v7(),
+                expected_version: pending_itsm_connection.version,
+            })
+            .await
+            .expect("another connection generation should be rejected"),
+        ConfirmProjectItsmConnectionOutcome::VersionConflict
+    );
+    let itsm_connection = match database
+        .confirm_project_itsm_connection(&ConfirmProjectItsmConnection {
+            user_id: owner.profile.id,
+            project_id: first_project.id,
+            expected_connection_id: pending_itsm_connection.id,
+            expected_version: pending_itsm_connection.version,
+        })
+        .await
+        .expect("owner should confirm the current candidate")
+    {
+        ConfirmProjectItsmConnectionOutcome::Confirmed(connection) => connection,
+        outcome => panic!("unexpected confirmation outcome: {outcome:?}"),
+    };
+    assert_eq!(itsm_connection.itsm_project_id.as_deref(), Some("42"));
+    assert!(itsm_connection.candidate_itsm_project_id.is_none());
+    assert!(itsm_connection.candidate_itsm_project_name.is_none());
+    assert!(
+        !database
+            .requeue_inflow_analysis_after_itsm_confirmation(
+                owner.profile.id,
+                first_project.id,
+                initial_analysis.id,
+            )
+            .await
+            .expect("a running analysis must keep its lease"),
+        "confirmation must not steal a running analysis lease"
+    );
+    assert_eq!(
+        database
+            .propose_project_itsm_candidate(owner.profile.id, first_project.id, "42", "비스킷링크",)
+            .await
+            .expect("the confirmed boundary should remain idempotent"),
+        ProjectItsmCandidateOutcome::Confirmed
+    );
+    assert_eq!(
+        database
+            .propose_project_itsm_candidate(
+                owner.profile.id,
+                first_project.id,
+                "43",
+                "다른 프로젝트",
+            )
+            .await
+            .expect("a conflicting confirmed project should be rejected"),
+        ProjectItsmCandidateOutcome::ProjectMismatch
     );
     let premature_task_id = Uuid::now_v7();
     assert!(
@@ -1199,6 +1373,64 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         database
             .complete_inflow_analysis(
                 &initial_analysis,
+                analysis_runner,
+                &InflowAnalysisResult {
+                    classification: InflowClassification::NewTask,
+                    confidence: 96,
+                    summary: "회사 요청의 개발 범위와 예상 일정을 확인해야 한다.".to_owned(),
+                    suggested_task_title: Some("회사 요청 개발 범위 확인".to_owned()),
+                    suggested_action_items: vec!["요청 범위를 확인한다.".to_owned()],
+                    suggested_completion_criteria: Some(
+                        "개발 범위가 관계자에게 공유된다.".to_owned(),
+                    ),
+                    suggested_assignee_name: None,
+                    suggested_due_at: None,
+                    suggested_priority: Some(1),
+                    reference_documents: vec![InflowReferenceDocument {
+                        provider: "itsm".to_owned(),
+                        url: "https://itsm.example.test/issues/3876".to_owned(),
+                        external_id: "3876".to_owned(),
+                        title: None,
+                        original_content: None,
+                        error_code: Some("itsm.confirmation_required".to_owned()),
+                    }],
+                },
+            )
+            .await
+            .expect("the in-flight redacted analysis should finish")
+    );
+    assert!(
+        database
+            .requeue_inflow_analysis_after_itsm_confirmation(
+                owner.profile.id,
+                first_project.id,
+                initial_analysis.id,
+            )
+            .await
+            .expect("the completed redacted analysis should be requeued"),
+        "confirmation that wins the race must cause one fresh analysis"
+    );
+    let confirmed_analysis = database
+        .claim_next_inflow_analysis(analysis_runner, Duration::from_secs(30))
+        .await
+        .expect("confirmed analysis should be claimable")
+        .expect("the redacted result should queue one fresh analysis");
+    assert_eq!(confirmed_analysis.id, initial_analysis.id);
+    assert_eq!(confirmed_analysis.itsm_project_id.as_deref(), Some("42"));
+    assert!(
+        database
+            .start_inflow_analysis(
+                confirmed_analysis.id,
+                analysis_runner,
+                Duration::from_secs(30),
+            )
+            .await
+            .expect("confirmed analysis should start")
+    );
+    assert!(
+        database
+            .complete_inflow_analysis(
+                &confirmed_analysis,
                 analysis_runner,
                 &InflowAnalysisResult {
                     classification: InflowClassification::NewTask,
@@ -1835,22 +2067,36 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
     assert!(!disabled_itsm_connection.enabled);
     assert_eq!(
         database
-            .delete_project_itsm_connection(
-                owner.profile.id,
-                first_project.id,
-                itsm_connection.version,
-            )
+            .delete_project_itsm_connection(&DeleteProjectItsmConnection {
+                user_id: owner.profile.id,
+                project_id: first_project.id,
+                expected_connection_id: Uuid::now_v7(),
+                expected_version: disabled_itsm_connection.version,
+            })
+            .await
+            .expect("another connection generation should return a conflict"),
+        DeleteProjectItsmConnectionOutcome::VersionConflict
+    );
+    assert_eq!(
+        database
+            .delete_project_itsm_connection(&DeleteProjectItsmConnection {
+                user_id: owner.profile.id,
+                project_id: first_project.id,
+                expected_connection_id: itsm_connection.id,
+                expected_version: itsm_connection.version,
+            })
             .await
             .expect("stale deletion should return a conflict"),
         DeleteProjectItsmConnectionOutcome::VersionConflict
     );
     assert_eq!(
         database
-            .delete_project_itsm_connection(
-                owner.profile.id,
-                first_project.id,
-                disabled_itsm_connection.version,
-            )
+            .delete_project_itsm_connection(&DeleteProjectItsmConnection {
+                user_id: owner.profile.id,
+                project_id: first_project.id,
+                expected_connection_id: disabled_itsm_connection.id,
+                expected_version: disabled_itsm_connection.version,
+            })
             .await
             .expect("version-matched connection should delete"),
         DeleteProjectItsmConnectionOutcome::Deleted

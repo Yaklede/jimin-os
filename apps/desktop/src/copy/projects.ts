@@ -338,19 +338,29 @@ export const projectCopy = {
   itsmDescription:
     "이 프로젝트에 들어온 대화에 ITSM 링크가 있으면 원문을 읽어 업무 내용을 정리해요.",
   itsmAvailableDescription:
-    "ITSM 프로젝트 번호를 입력하면 새로 들어온 대화부터 적용돼요.",
-  itsmConnectedDescription: (projectId: string) =>
-    `ITSM 프로젝트 ${projectId}의 새 이슈 원문을 함께 확인하고 있어요.`,
-  itsmProjectIdLabel: "ITSM 프로젝트 번호",
-  itsmProjectIdDescription:
-    "연결할 ITSM 프로젝트의 숫자 번호예요. 인증 정보는 서버에만 보관해요.",
-  itsmProjectIdProblem: "ITSM 프로젝트 번호를 숫자로 입력해 주세요.",
+    "자동 확인을 켜면 이 프로젝트에 들어오는 ITSM 이슈 링크부터 원문을 확인해요.",
+  itsmConnectedDescription:
+    "이 프로젝트에 새로 들어온 ITSM 이슈 링크의 원문을 확인하고 있어요.",
+  itsmDiscoveringDescription:
+    "새 대화에 ITSM 링크가 들어오면 연결할 프로젝트 이름을 먼저 확인해 드려요.",
+  itsmConfirmationDescription:
+    "찾은 프로젝트 이름을 확인하면 해당 프로젝트의 원문만 읽기 시작해요.",
   itsmNeedsSetupTitle: "ITSM 연결 준비가 필요해요. 서버 설정을 확인해 주세요.",
   itsmNeedsSetupDescription:
     "서버에서 연결을 준비한 뒤 상태를 다시 확인해 주세요.",
-  itsmConnect: "ITSM 연결하기",
-  itsmConnecting: "연결하는 중",
+  itsmConnect: "자동 확인 켜기",
+  itsmConnecting: "자동 확인을 켜는 중",
   itsmConnected: "연결됨",
+  itsmDiscovering: "링크 기다리는 중",
+  itsmDiscoveringHelp:
+    "자동 확인을 켰어요. 새 ITSM 링크가 들어오면 프로젝트 이름을 알려드릴게요.",
+  itsmConfirmationRequired: "확인 필요",
+  itsmCandidateTitle: (projectName: string) =>
+    `‘${projectName}’ 프로젝트를 찾았어요`,
+  itsmCandidateDescription:
+    "이 프로젝트가 맞는지 확인해 주세요. 확인 전에는 이슈 원문을 업무 정리에 사용하지 않아요.",
+  itsmConfirm: "이 프로젝트로 연결하기",
+  itsmConfirming: "프로젝트를 연결하는 중",
   itsmReload: "연결 상태 확인하기",
   itsmReloading: "확인하는 중",
   itsmDisconnect: "연결 해제",
@@ -363,9 +373,12 @@ export const projectCopy = {
   itsmLoadProblem:
     "ITSM 연결 상태를 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
   itsmConnectProblem: "ITSM을 연결하지 못했어요. 잠시 후 다시 시도해 주세요.",
+  itsmConfirmProblem:
+    "ITSM 프로젝트를 확인하지 못했어요. 최신 상태를 확인한 뒤 다시 시도해 주세요.",
   itsmDisconnectProblem:
     "ITSM 연결을 해제하지 못했어요. 최신 상태를 확인한 뒤 다시 시도해 주세요.",
-  itsmConnectedNotice: "이 프로젝트에 ITSM을 연결했어요.",
+  itsmConnectedNotice: "이 프로젝트의 ITSM 원문 자동 확인을 켰어요.",
+  itsmConfirmedNotice: "확인한 ITSM 프로젝트의 원문을 읽기 시작했어요.",
   itsmDisconnectedNotice: "이 프로젝트의 ITSM 연결을 해제했어요.",
   webhookTitle: "연결된 웹훅",
   webhookDescription:

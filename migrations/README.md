@@ -238,3 +238,19 @@ projects and inflow analyses are unchanged, and confirm
 `jimin_schema_metadata.schema_version = 51`. After project connection rows are
 written, rollback uses the verified version-50 backup so an older worker cannot
 silently ignore the owner's enrichment boundary.
+
+Migration `0052_automatic_project_itsm_binding.sql` makes the non-secret
+upstream project identifier optional at connection time and adds a bounded
+candidate identifier/name pair. A newly connected local project starts
+unbound. The agent may store one candidate after an exact trusted-origin issue
+lookup, but redacts the issue title and original content from AI analysis until
+the owner confirms that candidate with the current connection version. The
+public API exposes only the confirmation status and bounded candidate name,
+never either upstream identifier. Existing version-51 identifiers remain
+confirmed and continue to reject mismatched issue content. Apply it to an empty
+database and a restored version-51 backup, verify existing identifiers are
+preserved, new connections start without a candidate, and candidate
+confirmation clears the candidate columns while preserving the confirmed
+boundary. Confirm `jimin_schema_metadata.schema_version = 52`. After candidate
+or confirmed state is written, rollback uses the verified version-51 backup so
+an older worker cannot silently ignore the owner-confirmation boundary.

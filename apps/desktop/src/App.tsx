@@ -102,16 +102,19 @@ import {
   type WebhookDelivery,
 } from "./api/webhooks";
 import {
+  confirmProjectItsm,
   connectProjectItsm,
   disconnectProjectItsm,
   fetchProjectItsmConnection,
   type ProjectItsmConnection,
+  type ProjectItsmDecisionCandidate,
   type ProjectItsmConnectionSnapshot,
 } from "./api/itsm";
 import {
   type HomeSnapshot,
   type Recommendation,
   fetchHomeSnapshot,
+  requireDecisionInflow,
 } from "./api/home";
 import {
   decideRecommendation,
@@ -293,6 +296,12 @@ export default function App() {
   const [decisionRecommendations, setDecisionRecommendations] = useState<
     Recommendation[]
   >([]);
+  const [decisionInflowItems, setDecisionInflowItems] = useState<
+    ProjectInflowItem[]
+  >([]);
+  const [decisionItsmCandidates, setDecisionItsmCandidates] = useState<
+    ProjectItsmDecisionCandidate[]
+  >([]);
   const [decisionsLoading, setDecisionsLoading] = useState(false);
   const [decisionsError, setDecisionsError] = useState<string>();
   const [planningSnapshot, setPlanningSnapshot] = useState<
@@ -334,6 +343,8 @@ export default function App() {
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>();
   const [selectedProjectId, setSelectedProjectId] = useState<string>();
   const [highlightedProjectTaskId, setHighlightedProjectTaskId] =
+    useState<string>();
+  const [highlightedProjectInflowId, setHighlightedProjectInflowId] =
     useState<string>();
   const [highlightedScheduleId, setHighlightedScheduleId] = useState<string>();
   const [highlightedPlanningTaskId, setHighlightedPlanningTaskId] =
@@ -441,6 +452,7 @@ export default function App() {
   const conversationMessageRequestGateRef = useRef(new LatestRequestGate());
   const gmailInflowRequestGateRef = useRef(new LatestRequestGate());
   const projectItsmRequestGateRef = useRef(new LatestRequestGate());
+  const decisionInboxRequestGateRef = useRef(new LatestRequestGate());
   const openedAuthenticationUrl = useRef<string | undefined>(undefined);
   const activeSessionRef = useRef<SessionTokens | undefined>(undefined);
   const refreshInFlightRef = useRef<Promise<SessionTokens> | undefined>(
@@ -591,21 +603,113 @@ export default function App() {
     }
   }, [apiBaseUrl, tokens, withAuthenticatedSession]);
 
+  const loadDecisionItsmCandidates = useCallback(async () => {
+    if (!tokens) return { items: [], partialFailure: false };
+    return withAuthenticatedSession(async (accessToken) => {
+      const ownedWorkspaces = await fetchWorkspaces(apiBaseUrl, accessToken);
+      const projectGroups = await Promise.allSettled(
+        ownedWorkspaces.map((workspace) =>
+          fetchProjects(apiBaseUrl, accessToken, workspace.id),
+        ),
+      );
+      const ownedProjects = projectGroups.flatMap((result) =>
+        result.status === "fulfilled" ? result.value : [],
+      );
+      const candidates = await Promise.allSettled(
+        ownedProjects.map(async (project) => {
+          const snapshot = await fetchProjectItsmConnection(
+            apiBaseUrl,
+            accessToken,
+            project.id,
+          );
+          const connection = snapshot.item;
+          if (
+            connection?.enabled !== true ||
+            connection.confirmationStatus !== "confirmation_required" ||
+            !connection.candidateProjectName
+          ) {
+            return undefined;
+          }
+          return {
+            projectName: project.title,
+            connection,
+          } satisfies ProjectItsmDecisionCandidate;
+        }),
+      );
+      return {
+        items: candidates.flatMap((result) =>
+          result.status === "fulfilled" && result.value ? [result.value] : [],
+        ),
+        partialFailure:
+          projectGroups.some((result) => result.status === "rejected") ||
+          candidates.some((result) => result.status === "rejected"),
+      };
+    });
+  }, [apiBaseUrl, tokens, withAuthenticatedSession]);
+
   const loadDecisionInbox = useCallback(async () => {
     if (!tokens) return;
+    const requestGeneration = decisionInboxRequestGateRef.current.begin();
     setDecisionsLoading(true);
     setDecisionsError(undefined);
     try {
-      const items = await withAuthenticatedSession((accessToken) =>
-        fetchRecommendationHistory(apiBaseUrl, accessToken),
-      );
+      const [itemsResult, snapshotResult, itsmResult] =
+        await Promise.allSettled([
+          withAuthenticatedSession((accessToken) =>
+            fetchRecommendationHistory(apiBaseUrl, accessToken),
+          ),
+          loadHomeSnapshot(),
+          loadDecisionItsmCandidates(),
+        ]);
+      if (!decisionInboxRequestGateRef.current.isCurrent(requestGeneration)) {
+        return;
+      }
+
+      const items = itemsResult.status === "fulfilled" ? itemsResult.value : [];
+      const snapshot =
+        snapshotResult.status === "fulfilled"
+          ? snapshotResult.value
+          : undefined;
+      const itsm =
+        itsmResult.status === "fulfilled"
+          ? itsmResult.value
+          : { items: [], partialFailure: true };
+
       setDecisionRecommendations(items);
+      setDecisionInflowItems(snapshot ? requireDecisionInflow(snapshot) : []);
+      setDecisionItsmCandidates(itsm.items);
+
+      const failedSourceCount = [
+        itemsResult.status === "rejected",
+        !snapshot,
+        itsmResult.status === "rejected" || itsm.partialFailure,
+      ].filter(Boolean).length;
+      if (failedSourceCount > 0) {
+        setDecisionsError(
+          failedSourceCount === 3
+            ? copy.decisions.loadNotice
+            : copy.decisions.partialLoadNotice,
+        );
+      }
     } catch {
-      setDecisionsError(copy.decisions.loadNotice);
+      if (decisionInboxRequestGateRef.current.isCurrent(requestGeneration)) {
+        setDecisionRecommendations([]);
+        setDecisionInflowItems([]);
+        setDecisionItsmCandidates([]);
+        setDecisionsError(copy.decisions.loadNotice);
+      }
     } finally {
-      setDecisionsLoading(false);
+      if (decisionInboxRequestGateRef.current.isCurrent(requestGeneration)) {
+        setDecisionsLoading(false);
+      }
     }
-  }, [apiBaseUrl, tokens, withAuthenticatedSession]);
+  }, [
+    apiBaseUrl,
+    loadDecisionItsmCandidates,
+    loadHomeSnapshot,
+    tokens,
+    withAuthenticatedSession,
+  ]);
 
   const loadPlanningSnapshot = useCallback(
     async (targetStartsAt?: string, requestedRange?: PlanningViewRange) => {
@@ -1732,6 +1836,9 @@ export default function App() {
           },
         );
         setHomeSnapshot(synchronized.home);
+        decisionInboxRequestGateRef.current.invalidate();
+        setDecisionsLoading(false);
+        setDecisionInflowItems(synchronized.home.inflow);
         setPlanningSnapshot(synchronized.planning);
         setGoals(synchronized.synchronizedGoals);
         if (synchronized.synchronizedProjects) {
@@ -1792,8 +1899,19 @@ export default function App() {
         await loadGoogleChatAccounts();
         if (selectedProjectId) await loadProjectInflow(selectedProjectId);
       }
-      if (affectsItsm && selectedProjectId) {
-        await loadProjectItsmConnection(selectedProjectId);
+      if (affectsItsm) {
+        const itsmCandidates = await loadDecisionItsmCandidates();
+        decisionInboxRequestGateRef.current.invalidate();
+        setDecisionsLoading(false);
+        setDecisionItsmCandidates(itsmCandidates.items);
+        setDecisionsError(
+          itsmCandidates.partialFailure
+            ? copy.decisions.partialLoadNotice
+            : undefined,
+        );
+        if (selectedProjectId) {
+          await loadProjectItsmConnection(selectedProjectId);
+        }
       }
       if (affectsGmail) {
         await Promise.all([loadGmailAccounts(), loadGmailInflow()]);
@@ -1811,6 +1929,7 @@ export default function App() {
       loadGmailInflow,
       loadProjectInflow,
       loadProjectItsmConnection,
+      loadDecisionItsmCandidates,
       loadConversationMessages,
       withAuthenticatedSession,
     ],
@@ -1855,6 +1974,11 @@ export default function App() {
       setConversations([]);
       setHomeSnapshot(undefined);
       setHomeError(undefined);
+      decisionInboxRequestGateRef.current.invalidate();
+      setDecisionRecommendations([]);
+      setDecisionInflowItems([]);
+      setDecisionItsmCandidates([]);
+      setDecisionsError(undefined);
       setPlanningSnapshot(undefined);
       setPlanningError(undefined);
       setWorkspaces([]);
@@ -1867,6 +1991,7 @@ export default function App() {
       setSelectedWorkspaceId(undefined);
       setSelectedProjectId(undefined);
       setHighlightedProjectTaskId(undefined);
+      setHighlightedProjectInflowId(undefined);
       setHighlightedScheduleId(undefined);
       setHighlightedPlanningTaskId(undefined);
       setPlanningEditTarget(undefined);
@@ -3169,6 +3294,7 @@ export default function App() {
   function selectWorkspace(workspaceId: string) {
     if (workspaceId === selectedWorkspaceId) return;
     setHighlightedProjectTaskId(undefined);
+    setHighlightedProjectInflowId(undefined);
     setSelectedWorkspaceId(workspaceId);
     setSelectedProjectId(undefined);
     setProjectTasks([]);
@@ -3176,6 +3302,7 @@ export default function App() {
 
   function selectProject(projectId: string) {
     setHighlightedProjectTaskId(undefined);
+    setHighlightedProjectInflowId(undefined);
     setSelectedProjectId(projectId);
   }
 
@@ -3191,6 +3318,7 @@ export default function App() {
       throw new Error("project destination unavailable");
     }
     setHighlightedProjectTaskId(undefined);
+    setHighlightedProjectInflowId(undefined);
     setSelectedWorkspaceId(project.workspaceId);
     setSelectedProjectId(project.id);
     navigate("projects", { projectDataReady: true });
@@ -3220,6 +3348,7 @@ export default function App() {
         throw new Error("task destination unavailable");
       }
       setHighlightedProjectTaskId(task.id);
+      setHighlightedProjectInflowId(undefined);
       setSelectedProjectId(currentProject.id);
       navigate("projects", { projectDataReady: true });
       return;
@@ -3240,6 +3369,7 @@ export default function App() {
         setSelectedWorkspaceId(workspace.id);
         setSelectedProjectId(project.id);
         setHighlightedProjectTaskId(task.id);
+        setHighlightedProjectInflowId(undefined);
         navigate("projects", { projectDataReady: true });
         return;
       } catch {
@@ -3249,6 +3379,46 @@ export default function App() {
 
     setHomeError(copy.home.taskDestinationNotice);
     throw new Error("task destination unavailable");
+  }
+
+  async function openProjectInflowFromDecision(
+    item: ProjectInflowItem,
+  ): Promise<void> {
+    const availableWorkspaces =
+      workspaces.length > 0
+        ? workspaces
+        : await withAuthenticatedSession((accessToken) =>
+            fetchWorkspaces(apiBaseUrl, accessToken),
+          );
+    if (workspaces.length === 0) {
+      setWorkspaces(availableWorkspaces);
+      setWorkspacesReady(true);
+    }
+
+    for (const workspace of availableWorkspaces) {
+      const workspaceProjects =
+        workspace.id === selectedWorkspaceId && projects.length > 0
+          ? projects
+          : await withAuthenticatedSession((accessToken) =>
+              fetchProjects(apiBaseUrl, accessToken, workspace.id),
+            );
+      const project = workspaceProjects.find(
+        (candidate) => candidate.id === item.projectId,
+      );
+      if (!project) continue;
+      const inflow = await loadProjectInflow(project.id);
+      if (!inflow?.items.some((candidate) => candidate.id === item.id)) {
+        throw new Error("project inflow unavailable");
+      }
+      setProjects(workspaceProjects);
+      setSelectedWorkspaceId(workspace.id);
+      setSelectedProjectId(project.id);
+      setHighlightedProjectTaskId(undefined);
+      setHighlightedProjectInflowId(item.id);
+      navigate("projects", { projectDataReady: true });
+      return;
+    }
+    throw new Error("project inflow unavailable");
   }
 
   async function openScheduleFromAssistant(
@@ -3412,6 +3582,7 @@ export default function App() {
       );
       setSelectedProjectId(undefined);
       setHighlightedProjectTaskId(undefined);
+      setHighlightedProjectInflowId(undefined);
       setProjectTasks([]);
       setProjectWebhooks([]);
       setWebhookDeliveries([]);
@@ -3784,19 +3955,14 @@ export default function App() {
     await loadProjectItsmConnection(selectedProjectId);
   }
 
-  async function connectWorkspaceItsm(itsmProjectId: string): Promise<void> {
+  async function connectWorkspaceItsm(): Promise<void> {
     if (!selectedProjectId) throw new Error("project unavailable");
     const requestGeneration = projectItsmRequestGateRef.current.begin();
     setItsmSaving(true);
     setItsmError(undefined);
     try {
       const connection = await withAuthenticatedSession((accessToken) =>
-        connectProjectItsm(
-          apiBaseUrl,
-          accessToken,
-          selectedProjectId,
-          itsmProjectId,
-        ),
+        connectProjectItsm(apiBaseUrl, accessToken, selectedProjectId),
       );
       if (projectItsmRequestGateRef.current.isCurrent(requestGeneration)) {
         setProjectItsmConnection({ available: true, item: connection });
@@ -3841,6 +4007,60 @@ export default function App() {
         setItsmSaving(false);
       }
     }
+  }
+
+  async function confirmWorkspaceItsm(
+    connection: ProjectItsmConnection,
+  ): Promise<void> {
+    const requestGeneration = projectItsmRequestGateRef.current.begin();
+    setItsmSaving(true);
+    setItsmError(undefined);
+    try {
+      const confirmed = await withAuthenticatedSession((accessToken) =>
+        confirmProjectItsm(apiBaseUrl, accessToken, connection),
+      );
+      if (
+        projectItsmRequestGateRef.current.isCurrent(requestGeneration) &&
+        connection.projectId === selectedProjectId
+      ) {
+        setProjectItsmConnection({ available: true, item: confirmed });
+      }
+    } catch (error) {
+      if (projectItsmRequestGateRef.current.isCurrent(requestGeneration)) {
+        setItsmSaving(false);
+        if (connection.projectId === selectedProjectId) {
+          setItsmError(copy.projects.itsmConfirmProblem);
+          void loadProjectItsmConnection(connection.projectId);
+        }
+      }
+      throw error;
+    } finally {
+      if (projectItsmRequestGateRef.current.isCurrent(requestGeneration)) {
+        setItsmSaving(false);
+      }
+    }
+  }
+
+  async function confirmDecisionItsm(
+    candidate: ProjectItsmDecisionCandidate,
+  ): Promise<void> {
+    let confirmed: ProjectItsmConnection;
+    try {
+      confirmed = await withAuthenticatedSession((accessToken) =>
+        confirmProjectItsm(apiBaseUrl, accessToken, candidate.connection),
+      );
+    } catch (error) {
+      await loadDecisionInbox();
+      throw error;
+    }
+    decisionInboxRequestGateRef.current.invalidate();
+    setDecisionsLoading(false);
+    if (candidate.connection.projectId === selectedProjectId) {
+      setProjectItsmConnection({ available: true, item: confirmed });
+    }
+    setDecisionItsmCandidates((current) =>
+      current.filter((item) => item.connection.id !== candidate.connection.id),
+    );
   }
 
   async function createWorkspaceGoogleChatSource(input: {
@@ -4450,6 +4670,7 @@ export default function App() {
         }
         if (destination === "projects" && selectedProjectId) {
           setHighlightedProjectTaskId(undefined);
+          setHighlightedProjectInflowId(undefined);
           setSelectedProjectId(undefined);
           setProjectTasks([]);
           setProjectWebhooks([]);
@@ -4643,6 +4864,7 @@ export default function App() {
                 selectedWorkspaceId={selectedWorkspaceId}
                 selectedProjectId={selectedProjectId}
                 highlightedTaskId={highlightedProjectTaskId}
+                highlightedInflowId={highlightedProjectInflowId}
                 loaded={workspacesReady}
                 loading={projectsLoading || goalsLoading || mode === "loading"}
                 webhookLoading={webhooksLoading}
@@ -4662,6 +4884,7 @@ export default function App() {
                 }
                 onClearProject={() => {
                   setHighlightedProjectTaskId(undefined);
+                  setHighlightedProjectInflowId(undefined);
                   setSelectedProjectId(undefined);
                   setProjectTasks([]);
                   setProjectWebhooks([]);
@@ -4688,6 +4911,7 @@ export default function App() {
                 onRetryWebhookDelivery={retryWorkspaceWebhookDelivery}
                 onReloadItsmConnection={reloadWorkspaceItsm}
                 onConnectItsm={connectWorkspaceItsm}
+                onConfirmItsm={confirmWorkspaceItsm}
                 onDisconnectItsm={disconnectWorkspaceItsm}
                 onConnectGoogleChatAccount={beginGoogleChatConnection}
                 onLoadGoogleChatSpaces={loadGoogleChatSpaces}
@@ -4703,9 +4927,13 @@ export default function App() {
             {destination === "decisions" && (
               <DecisionInboxWorkspace
                 recommendations={decisionRecommendations}
+                inflowItems={decisionInflowItems}
+                itsmCandidates={decisionItsmCandidates}
                 loading={decisionsLoading || mode === "loading"}
                 error={decisionsError}
                 onOpenConversation={selectConversation}
+                onOpenProjectInflow={openProjectInflowFromDecision}
+                onConfirmItsm={confirmDecisionItsm}
                 onDecide={decideHomeRecommendation}
               />
             )}

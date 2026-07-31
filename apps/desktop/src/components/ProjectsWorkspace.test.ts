@@ -66,8 +66,9 @@ describe("project connection count", () => {
           item: {
             id: "itsm-1",
             projectId: "project",
-            itsmProjectId: "42",
             enabled: true,
+            confirmationStatus: "confirmed",
+            candidateProjectName: null,
             version: 1,
           },
         },
@@ -81,8 +82,9 @@ describe("project connection count", () => {
         item: {
           id: "itsm-1",
           projectId: "project",
-          itsmProjectId: "42",
           enabled: false,
+          confirmationStatus: "disabled",
+          candidateProjectName: null,
           version: 1,
         },
       }),

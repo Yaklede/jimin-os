@@ -1,22 +1,33 @@
 import {
+  ArrowRight,
   CheckCircle2,
   Clock3,
   Inbox,
+  MessagesSquare,
   ShieldAlert,
   XCircle,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { type Recommendation } from "../api/home";
+import {
+  projectInflowPromotionReadiness,
+  type ProjectInflowItem,
+} from "../api/googleChat";
 import { type RecommendationDecision } from "../api/intelligence";
+import { type ProjectItsmDecisionCandidate } from "../api/itsm";
 import { copy } from "../copy";
 import { EmptySurface } from "./HomeWorkspace";
 
 type DecisionInboxWorkspaceProps = {
   recommendations: Recommendation[];
+  inflowItems: ProjectInflowItem[];
+  itsmCandidates: ProjectItsmDecisionCandidate[];
   loading: boolean;
   error: string | undefined;
   onOpenConversation(conversationId: string): void;
+  onOpenProjectInflow(item: ProjectInflowItem): Promise<void>;
+  onConfirmItsm(candidate: ProjectItsmDecisionCandidate): Promise<void>;
   onDecide(
     recommendation: Recommendation,
     decision: RecommendationDecision,
@@ -25,12 +36,18 @@ type DecisionInboxWorkspaceProps = {
 
 export function DecisionInboxWorkspace({
   recommendations,
+  inflowItems,
+  itsmCandidates,
   loading,
   error,
   onOpenConversation,
+  onOpenProjectInflow,
+  onConfirmItsm,
   onDecide,
 }: DecisionInboxWorkspaceProps) {
   const [pendingId, setPendingId] = useState<string>();
+  const [openingInflowId, setOpeningInflowId] = useState<string>();
+  const [confirmingItsmId, setConfirmingItsmId] = useState<string>();
   const [decisionError, setDecisionError] = useState<string>();
   const pending = useMemo(
     () => recommendations.filter((item) => isDecisionActionableNow(item)),
@@ -39,6 +56,10 @@ export function DecisionInboxWorkspace({
   const history = useMemo(
     () => recommendations.filter((item) => !isDecisionActionableNow(item)),
     [recommendations],
+  );
+  const pendingInflow = useMemo(
+    () => inflowItems.filter(isProjectInflowDecisionItem),
+    [inflowItems],
   );
 
   async function decide(
@@ -52,6 +73,32 @@ export function DecisionInboxWorkspace({
     setPendingId(undefined);
     if (!succeeded) {
       setDecisionError(copy.decisions.decisionNotice);
+    }
+  }
+
+  async function openProjectInflow(item: ProjectInflowItem) {
+    if (openingInflowId) return;
+    setOpeningInflowId(item.id);
+    setDecisionError(undefined);
+    try {
+      await onOpenProjectInflow(item);
+    } catch {
+      setDecisionError(copy.decisions.openInflowProblem);
+    } finally {
+      setOpeningInflowId(undefined);
+    }
+  }
+
+  async function confirmItsm(candidate: ProjectItsmDecisionCandidate) {
+    if (confirmingItsmId) return;
+    setConfirmingItsmId(candidate.connection.id);
+    setDecisionError(undefined);
+    try {
+      await onConfirmItsm(candidate);
+    } catch {
+      setDecisionError(copy.decisions.confirmItsmProblem);
+    } finally {
+      setConfirmingItsmId(undefined);
     }
   }
 
@@ -74,10 +121,23 @@ export function DecisionInboxWorkspace({
         </p>
       )}
 
-      {loading && recommendations.length === 0 ? (
+      {loading &&
+      recommendations.length === 0 &&
+      pendingInflow.length === 0 &&
+      itsmCandidates.length === 0 ? (
         <DecisionInboxSkeleton />
       ) : (
         <>
+          <ItsmConfirmationSection
+            items={itsmCandidates}
+            confirmingId={confirmingItsmId}
+            onConfirm={confirmItsm}
+          />
+          <InflowDecisionSection
+            items={pendingInflow}
+            openingId={openingInflowId}
+            onOpen={openProjectInflow}
+          />
           <DecisionSection
             id="pending-decisions"
             title={copy.decisions.pendingTitle}
@@ -102,6 +162,169 @@ export function DecisionInboxWorkspace({
       )}
     </section>
   );
+}
+
+function ItsmConfirmationSection({
+  items,
+  confirmingId,
+  onConfirm,
+}: {
+  items: ProjectItsmDecisionCandidate[];
+  confirmingId: string | undefined;
+  onConfirm(candidate: ProjectItsmDecisionCandidate): Promise<void>;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <section className="decision-section" aria-labelledby="itsm-decisions">
+      <header>
+        <h2 id="itsm-decisions">{copy.decisions.itsmTitle}</h2>
+        <span>{copy.decisions.count(items.length)}</span>
+      </header>
+      <ol>
+        {items.map((candidate) => (
+          <li
+            className="decision-card decision-card--itsm"
+            data-status="pending"
+            key={candidate.connection.id}
+          >
+            <span className="decision-card__icon" aria-hidden="true">
+              <ShieldAlert />
+            </span>
+            <div className="decision-card__body">
+              <div className="decision-card__title-row">
+                <h3>
+                  {copy.decisions.itsmCandidateTitle(
+                    candidate.connection.candidateProjectName ??
+                      candidate.projectName,
+                  )}
+                </h3>
+                <span>{copy.decisions.inflowStatus}</span>
+              </div>
+              <p>{copy.decisions.itsmCandidateDescription}</p>
+              <dl>
+                <div>
+                  <dt>{copy.decisions.project}</dt>
+                  <dd>{candidate.projectName}</dd>
+                </div>
+              </dl>
+            </div>
+            <div className="decision-card__actions">
+              <button
+                className="primary-button focus-visible-control"
+                type="button"
+                disabled={Boolean(confirmingId)}
+                onClick={() => void onConfirm(candidate)}
+              >
+                {confirmingId === candidate.connection.id && (
+                  <span className="button-spinner" aria-hidden="true" />
+                )}
+                {copy.decisions.confirmItsm}
+              </button>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function InflowDecisionSection({
+  items,
+  openingId,
+  onOpen,
+}: {
+  items: ProjectInflowItem[];
+  openingId: string | undefined;
+  onOpen(item: ProjectInflowItem): Promise<void>;
+}) {
+  return (
+    <section className="decision-section" aria-labelledby="inflow-decisions">
+      <header>
+        <h2 id="inflow-decisions">{copy.decisions.inflowTitle}</h2>
+        <span>{copy.decisions.count(items.length)}</span>
+      </header>
+      {items.length === 0 ? (
+        <EmptySurface
+          title={copy.decisions.emptyInflowTitle}
+          description={copy.decisions.emptyInflowDescription}
+        />
+      ) : (
+        <ol>
+          {items.map((item) => (
+            <li
+              className="decision-card decision-card--inflow"
+              data-status="pending"
+              key={item.id}
+            >
+              <span className="decision-card__icon" aria-hidden="true">
+                <MessagesSquare />
+              </span>
+              <div className="decision-card__body">
+                <div className="decision-card__title-row">
+                  <h3>{item.suggestedTaskTitle}</h3>
+                  <span>{copy.decisions.inflowStatus}</span>
+                </div>
+                <p>
+                  {item.analysisSummary?.trim() ||
+                    compactInflowContent(item.contentText)}
+                </p>
+                <dl>
+                  <div>
+                    <dt>{copy.decisions.project}</dt>
+                    <dd>
+                      {item.projectName} · {item.sourceName}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{copy.decisions.needsDecision}</dt>
+                    <dd>{inflowDecisionSummary(item)}</dd>
+                  </div>
+                </dl>
+                <time dateTime={item.receivedAt}>
+                  {formatDecisionTime(item.receivedAt)}
+                </time>
+              </div>
+              <div className="decision-card__actions">
+                <button
+                  className="primary-button focus-visible-control"
+                  type="button"
+                  disabled={Boolean(openingId)}
+                  onClick={() => void onOpen(item)}
+                >
+                  {openingId === item.id && (
+                    <span className="button-spinner" aria-hidden="true" />
+                  )}
+                  {copy.decisions.openInProject}
+                  <ArrowRight aria-hidden="true" />
+                </button>
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
+export function inflowDecisionSummary(item: ProjectInflowItem): string {
+  const decisions: string[] = [copy.decisions.promoteDecision];
+  if (!item.suggestedAssigneeName) decisions.push(copy.decisions.assignee);
+  if (!item.suggestedDueAt) decisions.push(copy.decisions.deadline);
+  return decisions.join(" · ");
+}
+
+export function isProjectInflowDecisionItem(item: ProjectInflowItem): boolean {
+  return (
+    item.status === "pending" &&
+    !item.promotedTaskId &&
+    projectInflowPromotionReadiness(item).canPromote
+  );
+}
+
+function compactInflowContent(value: string): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (compact.length <= 180) return compact;
+  return `${compact.slice(0, 179)}…`;
 }
 
 function DecisionSection({

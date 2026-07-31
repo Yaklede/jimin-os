@@ -65,6 +65,15 @@ export interface HomeSnapshot {
   weeklyReports: WeeklyReport[];
 }
 
+export function requireDecisionInflow(
+  snapshot: HomeSnapshot | undefined,
+): ProjectInflowItem[] {
+  if (!snapshot) {
+    throw new Error("home snapshot unavailable");
+  }
+  return snapshot.inflow;
+}
+
 export async function fetchHomeSnapshot(
   baseUrl: string,
   access: string,
