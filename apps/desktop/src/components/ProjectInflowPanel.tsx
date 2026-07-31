@@ -26,6 +26,7 @@ import {
   isoToSeoulLocalDateTime,
   seoulLocalDateTimeToIso,
 } from "./DeadlinePicker";
+import { LinkifiedText, SafeExternalLink } from "./ExternalTextLink";
 
 type ProjectInflowPanelProps = {
   accountsAvailable: boolean;
@@ -675,10 +676,14 @@ export function InflowItemRow({
       <div className="project-inflow-item__summary">
         <strong>{suggestedTitle}</strong>
         <p>
-          {item.analysisSummary ??
-            (analysisFailed
-              ? copy.projects.inflowAnalysisHelp
-              : copy.projects.inflowAnalyzing)}
+          <LinkifiedText
+            text={
+              item.analysisSummary ??
+              (analysisFailed
+                ? copy.projects.inflowAnalysisHelp
+                : copy.projects.inflowAnalyzing)
+            }
+          />
         </p>
         {item.analysisConfidence !== null && hasUsableAnalysis && (
           <span>
@@ -696,9 +701,7 @@ export function InflowItemRow({
           <ul>
             {referenceLinks.map((link) => (
               <li key={link}>
-                <a href={link} target="_blank" rel="noreferrer">
-                  {link}
-                </a>
+                <SafeExternalLink href={link}>{link}</SafeExternalLink>
               </li>
             ))}
           </ul>
@@ -727,7 +730,9 @@ export function InflowItemRow({
                     {formatReceivedAt(message.receivedAt)}
                   </time>
                 </div>
-                <p>{message.contentText}</p>
+                <p>
+                  <LinkifiedText text={message.contentText} />
+                </p>
               </li>
             ))}
           </ol>
@@ -1198,14 +1203,16 @@ function ReferenceEvidence({
                   </span>
                 </div>
                 {externalUrl && (
-                  <a href={externalUrl} target="_blank" rel="noreferrer">
+                  <SafeExternalLink href={externalUrl}>
                     {copy.projects.inflowEvidenceOpen}
                     <ExternalLink aria-hidden="true" />
-                  </a>
+                  </SafeExternalLink>
                 )}
               </header>
               {document.originalContent ? (
-                <pre>{document.originalContent}</pre>
+                <pre>
+                  <LinkifiedText text={document.originalContent} />
+                </pre>
               ) : (
                 <p>{copy.projects.inflowEvidenceUnavailable}</p>
               )}

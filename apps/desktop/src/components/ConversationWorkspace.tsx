@@ -32,6 +32,7 @@ import {
   useDelayedSkeleton,
 } from "./ContentSkeleton";
 import { assistantResponseAfterLatestRequest } from "./conversationResponse";
+import { LinkifiedText } from "./ExternalTextLink";
 
 export { assistantResponseAfterLatestRequest } from "./conversationResponse";
 
@@ -470,7 +471,7 @@ function ConversationThread({
                     </time>
                   </div>
                   <p className="assistant-message__content">
-                    {message.content}
+                    <LinkifiedText text={message.content} />
                     {streaming && (
                       <span
                         className="assistant-message__caret"

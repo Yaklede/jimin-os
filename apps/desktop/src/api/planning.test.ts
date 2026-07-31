@@ -371,6 +371,8 @@ describe("schedule client", () => {
         title: created.title,
         startsAt: created.startsAt,
         endsAt: created.endsAt,
+        projectId: "019f68cb-9400-7000-8000-000000000021",
+        taskId: "019f68cb-9400-7000-8000-000000000022",
       }),
     ).resolves.toEqual(created);
 
@@ -379,6 +381,8 @@ describe("schedule client", () => {
       clientMutationId: expect.stringMatching(
         /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
       ),
+      projectId: "019f68cb-9400-7000-8000-000000000021",
+      taskId: "019f68cb-9400-7000-8000-000000000022",
       title: created.title,
       notes: null,
       startsAt: created.startsAt,
@@ -417,6 +421,10 @@ describe("schedule client", () => {
         notes: updated.notes,
         startsAt: updated.startsAt,
         endsAt: updated.endsAt,
+        linkage: {
+          projectId: "019f68cb-9400-7000-8000-000000000021",
+          taskId: "019f68cb-9400-7000-8000-000000000022",
+        },
       },
     );
 
@@ -432,6 +440,10 @@ describe("schedule client", () => {
       endsAt: "2026-07-14T09:00:00.000Z",
       timeZone: PLANNING_TIME_ZONE,
       expectedVersion: 2,
+      linkage: {
+        projectId: "019f68cb-9400-7000-8000-000000000021",
+        taskId: "019f68cb-9400-7000-8000-000000000022",
+      },
     });
   });
 

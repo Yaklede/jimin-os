@@ -1,9 +1,8 @@
 import {
-  ArrowRight,
   CheckCircle2,
+  ChevronDown,
   Clock3,
   Inbox,
-  MessagesSquare,
   ShieldAlert,
   XCircle,
 } from "lucide-react";
@@ -18,6 +17,15 @@ import { type RecommendationDecision } from "../api/intelligence";
 import { type ProjectItsmDecisionCandidate } from "../api/itsm";
 import { copy } from "../copy";
 import { EmptySurface } from "./HomeWorkspace";
+import {
+  GmailInflowReview,
+  type GmailInflowReviewProps,
+} from "./GmailInflowReview";
+import {
+  InflowItemRow,
+  inflowConversationKey,
+  type PromoteInflowInput,
+} from "./ProjectInflowPanel";
 
 type DecisionInboxWorkspaceProps = {
   recommendations: Recommendation[];
@@ -25,13 +33,23 @@ type DecisionInboxWorkspaceProps = {
   itsmCandidates: ProjectItsmDecisionCandidate[];
   loading: boolean;
   error: string | undefined;
+  inflowSaving: boolean;
+  gmailReview: GmailInflowReviewProps;
   onOpenConversation(conversationId: string): void;
-  onOpenProjectInflow(item: ProjectInflowItem): Promise<void>;
+  onOpenTask(taskId: string): Promise<void>;
+  onPromoteInflow(
+    item: ProjectInflowItem,
+    input: PromoteInflowInput,
+  ): Promise<void>;
+  onDismissInflow(item: ProjectInflowItem): Promise<void>;
+  onRetryInflowAnalysis(item: ProjectInflowItem): Promise<void>;
+  onRetryInflowCompletion(item: ProjectInflowItem): Promise<void>;
   onConfirmItsm(candidate: ProjectItsmDecisionCandidate): Promise<void>;
   onDecide(
     recommendation: Recommendation,
     decision: RecommendationDecision,
   ): Promise<boolean>;
+  onRetryAnalysis(recommendation: Recommendation): Promise<boolean>;
 };
 
 export function DecisionInboxWorkspace({
@@ -40,21 +58,41 @@ export function DecisionInboxWorkspace({
   itsmCandidates,
   loading,
   error,
+  inflowSaving,
+  gmailReview,
   onOpenConversation,
-  onOpenProjectInflow,
+  onOpenTask,
+  onPromoteInflow,
+  onDismissInflow,
+  onRetryInflowAnalysis,
+  onRetryInflowCompletion,
   onConfirmItsm,
   onDecide,
+  onRetryAnalysis,
 }: DecisionInboxWorkspaceProps) {
   const [pendingId, setPendingId] = useState<string>();
-  const [openingInflowId, setOpeningInflowId] = useState<string>();
   const [confirmingItsmId, setConfirmingItsmId] = useState<string>();
   const [decisionError, setDecisionError] = useState<string>();
   const pending = useMemo(
     () => recommendations.filter((item) => isDecisionActionableNow(item)),
     [recommendations],
   );
+  const inProgress = useMemo(
+    () => recommendations.filter((item) => isDecisionInProgress(item)),
+    [recommendations],
+  );
+  const retryable = useMemo(
+    () => recommendations.filter((item) => item.status === "failed"),
+    [recommendations],
+  );
   const history = useMemo(
-    () => recommendations.filter((item) => !isDecisionActionableNow(item)),
+    () =>
+      recommendations.filter(
+        (item) =>
+          !isDecisionActionableNow(item) &&
+          !isDecisionInProgress(item) &&
+          item.status !== "failed",
+      ),
     [recommendations],
   );
   const pendingInflow = useMemo(
@@ -76,19 +114,6 @@ export function DecisionInboxWorkspace({
     }
   }
 
-  async function openProjectInflow(item: ProjectInflowItem) {
-    if (openingInflowId) return;
-    setOpeningInflowId(item.id);
-    setDecisionError(undefined);
-    try {
-      await onOpenProjectInflow(item);
-    } catch {
-      setDecisionError(copy.decisions.openInflowProblem);
-    } finally {
-      setOpeningInflowId(undefined);
-    }
-  }
-
   async function confirmItsm(candidate: ProjectItsmDecisionCandidate) {
     if (confirmingItsmId) return;
     setConfirmingItsmId(candidate.connection.id);
@@ -99,6 +124,17 @@ export function DecisionInboxWorkspace({
       setDecisionError(copy.decisions.confirmItsmProblem);
     } finally {
       setConfirmingItsmId(undefined);
+    }
+  }
+
+  async function retryAnalysis(recommendation: Recommendation) {
+    if (pendingId) return;
+    setPendingId(recommendation.id);
+    setDecisionError(undefined);
+    const succeeded = await onRetryAnalysis(recommendation);
+    setPendingId(undefined);
+    if (!succeeded) {
+      setDecisionError(copy.decisions.retryAnalysisProblem);
     }
   }
 
@@ -124,7 +160,8 @@ export function DecisionInboxWorkspace({
       {loading &&
       recommendations.length === 0 &&
       pendingInflow.length === 0 &&
-      itsmCandidates.length === 0 ? (
+      itsmCandidates.length === 0 &&
+      gmailReview.items.length === 0 ? (
         <DecisionInboxSkeleton />
       ) : (
         <>
@@ -135,9 +172,14 @@ export function DecisionInboxWorkspace({
           />
           <InflowDecisionSection
             items={pendingInflow}
-            openingId={openingInflowId}
-            onOpen={openProjectInflow}
+            saving={inflowSaving}
+            onPromote={onPromoteInflow}
+            onDismiss={onDismissInflow}
+            onRetryAnalysis={onRetryInflowAnalysis}
+            onRetryCompletion={onRetryInflowCompletion}
+            onOpenTask={onOpenTask}
           />
+          <GmailInflowReview {...gmailReview} />
           <DecisionSection
             id="pending-decisions"
             title={copy.decisions.pendingTitle}
@@ -147,16 +189,40 @@ export function DecisionInboxWorkspace({
             emptyDescription={copy.decisions.emptyPendingDescription}
             onOpenConversation={onOpenConversation}
             onDecide={decide}
+            onRetryAnalysis={retryAnalysis}
           />
-          <DecisionSection
-            id="decision-history"
-            title={copy.decisions.historyTitle}
+          {inProgress.length > 0 && (
+            <DecisionSection
+              id="in-progress-decisions"
+              title={copy.decisions.inProgressTitle}
+              items={inProgress}
+              pendingId={pendingId}
+              emptyTitle=""
+              emptyDescription=""
+              onOpenConversation={onOpenConversation}
+              onDecide={decide}
+              onRetryAnalysis={retryAnalysis}
+            />
+          )}
+          {retryable.length > 0 && (
+            <DecisionSection
+              id="retry-decisions"
+              title={copy.decisions.retryTitle}
+              items={retryable}
+              pendingId={pendingId}
+              emptyTitle=""
+              emptyDescription=""
+              onOpenConversation={onOpenConversation}
+              onDecide={decide}
+              onRetryAnalysis={retryAnalysis}
+            />
+          )}
+          <DecisionHistory
             items={history}
             pendingId={pendingId}
-            emptyTitle={copy.decisions.emptyHistoryTitle}
-            emptyDescription={copy.decisions.emptyHistoryDescription}
             onOpenConversation={onOpenConversation}
             onDecide={decide}
+            onRetryAnalysis={retryAnalysis}
           />
         </>
       )}
@@ -230,12 +296,20 @@ function ItsmConfirmationSection({
 
 function InflowDecisionSection({
   items,
-  openingId,
-  onOpen,
+  saving,
+  onPromote,
+  onDismiss,
+  onRetryAnalysis,
+  onRetryCompletion,
+  onOpenTask,
 }: {
   items: ProjectInflowItem[];
-  openingId: string | undefined;
-  onOpen(item: ProjectInflowItem): Promise<void>;
+  saving: boolean;
+  onPromote(item: ProjectInflowItem, input: PromoteInflowInput): Promise<void>;
+  onDismiss(item: ProjectInflowItem): Promise<void>;
+  onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
+  onRetryCompletion(item: ProjectInflowItem): Promise<void>;
+  onOpenTask(taskId: string): Promise<void>;
 }) {
   return (
     <section className="decision-section" aria-labelledby="inflow-decisions">
@@ -249,58 +323,20 @@ function InflowDecisionSection({
           description={copy.decisions.emptyInflowDescription}
         />
       ) : (
-        <ol>
+        <ul className="decision-section__inflow-list">
           {items.map((item) => (
-            <li
-              className="decision-card decision-card--inflow"
-              data-status="pending"
-              key={item.id}
-            >
-              <span className="decision-card__icon" aria-hidden="true">
-                <MessagesSquare />
-              </span>
-              <div className="decision-card__body">
-                <div className="decision-card__title-row">
-                  <h3>{item.suggestedTaskTitle}</h3>
-                  <span>{copy.decisions.inflowStatus}</span>
-                </div>
-                <p>
-                  {item.analysisSummary?.trim() ||
-                    compactInflowContent(item.contentText)}
-                </p>
-                <dl>
-                  <div>
-                    <dt>{copy.decisions.project}</dt>
-                    <dd>
-                      {item.projectName} · {item.sourceName}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>{copy.decisions.needsDecision}</dt>
-                    <dd>{inflowDecisionSummary(item)}</dd>
-                  </div>
-                </dl>
-                <time dateTime={item.receivedAt}>
-                  {formatDecisionTime(item.receivedAt)}
-                </time>
-              </div>
-              <div className="decision-card__actions">
-                <button
-                  className="primary-button focus-visible-control"
-                  type="button"
-                  disabled={Boolean(openingId)}
-                  onClick={() => void onOpen(item)}
-                >
-                  {openingId === item.id && (
-                    <span className="button-spinner" aria-hidden="true" />
-                  )}
-                  {copy.decisions.openInProject}
-                  <ArrowRight aria-hidden="true" />
-                </button>
-              </div>
-            </li>
+            <InflowItemRow
+              key={inflowConversationKey(item)}
+              item={item}
+              saving={saving}
+              onPromote={onPromote}
+              onDismiss={onDismiss}
+              onRetryAnalysis={onRetryAnalysis}
+              onRetryCompletion={onRetryCompletion}
+              onOpenTask={(taskId) => void onOpenTask(taskId)}
+            />
           ))}
-        </ol>
+        </ul>
       )}
     </section>
   );
@@ -314,17 +350,13 @@ export function inflowDecisionSummary(item: ProjectInflowItem): string {
 }
 
 export function isProjectInflowDecisionItem(item: ProjectInflowItem): boolean {
-  return (
-    item.status === "pending" &&
-    !item.promotedTaskId &&
-    projectInflowPromotionReadiness(item).canPromote
-  );
-}
-
-function compactInflowContent(value: string): string {
-  const compact = value.replace(/\s+/g, " ").trim();
-  if (compact.length <= 180) return compact;
-  return `${compact.slice(0, 179)}…`;
+  if (item.status === "promoted") return item.completionStatus === "failed";
+  if (item.status !== "pending") return false;
+  if (item.promotedTaskId) return true;
+  if (item.analysisStatus === "failed" || item.analysisStatus === "stale") {
+    return true;
+  }
+  return projectInflowPromotionReadiness(item).canPromote;
 }
 
 function DecisionSection({
@@ -336,6 +368,7 @@ function DecisionSection({
   emptyDescription,
   onOpenConversation,
   onDecide,
+  onRetryAnalysis,
 }: {
   id: string;
   title: string;
@@ -348,6 +381,7 @@ function DecisionSection({
     recommendation: Recommendation,
     decision: RecommendationDecision,
   ): Promise<void>;
+  onRetryAnalysis(recommendation: Recommendation): Promise<void>;
 }) {
   return (
     <section className="decision-section" aria-labelledby={id}>
@@ -367,11 +401,53 @@ function DecisionSection({
               interactionLocked={Boolean(pendingId)}
               onOpenConversation={onOpenConversation}
               onDecide={onDecide}
+              onRetryAnalysis={onRetryAnalysis}
             />
           ))}
         </ol>
       )}
     </section>
+  );
+}
+
+function DecisionHistory({
+  items,
+  pendingId,
+  onOpenConversation,
+  onDecide,
+  onRetryAnalysis,
+}: {
+  items: Recommendation[];
+  pendingId: string | undefined;
+  onOpenConversation(conversationId: string): void;
+  onDecide(
+    recommendation: Recommendation,
+    decision: RecommendationDecision,
+  ): Promise<void>;
+  onRetryAnalysis(recommendation: Recommendation): Promise<void>;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <details className="decision-history">
+      <summary className="focus-visible-control">
+        <span>{copy.decisions.historyTitle}</span>
+        <small>{copy.decisions.count(items.length)}</small>
+        <ChevronDown aria-hidden="true" />
+      </summary>
+      <ol>
+        {items.map((recommendation) => (
+          <DecisionCard
+            key={recommendation.id}
+            recommendation={recommendation}
+            pending={pendingId === recommendation.id}
+            interactionLocked={Boolean(pendingId)}
+            onOpenConversation={onOpenConversation}
+            onDecide={onDecide}
+            onRetryAnalysis={onRetryAnalysis}
+          />
+        ))}
+      </ol>
+    </details>
   );
 }
 
@@ -381,6 +457,7 @@ function DecisionCard({
   interactionLocked,
   onOpenConversation,
   onDecide,
+  onRetryAnalysis,
 }: {
   recommendation: Recommendation;
   pending: boolean;
@@ -390,8 +467,10 @@ function DecisionCard({
     recommendation: Recommendation,
     decision: RecommendationDecision,
   ): Promise<void>;
+  onRetryAnalysis(recommendation: Recommendation): Promise<void>;
 }) {
   const actionable = isDecisionActionableNow(recommendation);
+  const retryable = recommendation.status === "failed";
   const conversationDecision = isConversationDecision(recommendation);
   return (
     <li className="decision-card" data-status={recommendation.status}>
@@ -457,6 +536,19 @@ function DecisionCard({
           </button>
         </div>
       )}
+      {retryable && (
+        <div className="decision-card__actions">
+          <button
+            className="primary-button focus-visible-control"
+            type="button"
+            disabled={interactionLocked}
+            onClick={() => void onRetryAnalysis(recommendation)}
+          >
+            {pending && <span className="button-spinner" aria-hidden="true" />}
+            {copy.decisions.retryAnalysis}
+          </button>
+        </div>
+      )}
     </li>
   );
 }
@@ -476,6 +568,13 @@ export function isDecisionActionableNow(
   }
   const revisitAt = new Date(recommendation.revisitAt).getTime();
   return Number.isFinite(revisitAt) && revisitAt <= now;
+}
+
+export function isDecisionInProgress(recommendation: Recommendation): boolean {
+  return (
+    recommendation.status === "approved" ||
+    recommendation.status === "executing"
+  );
 }
 
 export function isConversationDecision(

@@ -51,6 +51,7 @@ import {
   SkeletonGroup,
   useDelayedSkeleton,
 } from "./ContentSkeleton";
+import { LinkifiedText } from "./ExternalTextLink";
 import { EmptySurface } from "./HomeWorkspace";
 import { GoalsPanel } from "./GoalsPanel";
 import { ProjectWebhookPanel } from "./ProjectWebhookPanel";
@@ -1550,6 +1551,16 @@ function WeeklyWorkspaceOverview({
             value={`${report.unassignedTaskCount}`}
             attention={report.unassignedTaskCount > 0}
           />
+          <WeeklyMetric
+            label={copy.projects.operationMetrics.chatAttention}
+            value={`${report.actionableChatInflowCount ?? 0}`}
+            attention={(report.actionableChatInflowCount ?? 0) > 0}
+          />
+          <WeeklyMetric
+            label={copy.projects.operationMetrics.gmailAttention}
+            value={`${report.actionableGmailInflowCount ?? 0}`}
+            attention={(report.actionableGmailInflowCount ?? 0) > 0}
+          />
         </dl>
         <div className="project-weekly-overview__projects">
           {report.projects.map((project) => (
@@ -2205,7 +2216,11 @@ function TaskDetail({ task, parentTask }: { task: Task; parentTask?: Task }) {
     >
       <div>
         <span>{copy.projects.workItemNotesLabel}</span>
-        <p>{task.notes || copy.projects.workItemNotesEmpty}</p>
+        <p>
+          <LinkifiedText
+            text={task.notes || copy.projects.workItemNotesEmpty}
+          />
+        </p>
       </div>
       <dl>
         {parentTask && (

@@ -79,6 +79,8 @@ export const projectCopy = {
     overdue: "기한 지난 일",
     stale: "정체된 일",
     unassigned: "담당자 없는 일",
+    chatAttention: "확인할 Chat",
+    gmailAttention: "확인할 메일",
     cycleTime: "평균 처리 시간",
     onTime: "기한 내 완료",
   },
@@ -225,6 +227,8 @@ export const projectCopy = {
     senderName ? `${senderName}님의 요청` : "보낸 사람을 확인하고 있어요",
   inflowHomeOpen: (count: number) => `업무 요청 ${count}건 확인하기`,
   inflowHomeCollapse: "업무 요청 간단히 보기",
+  inflowHomeShowAll: (count: number) => `업무 요청 ${count}건 모두 보기`,
+  inflowHomeShowLess: "최근 5건만 보기",
   inflowConnectAccount: "회사 Google 계정 연결",
   inflowConnectAnotherAccount: "다른 회사 계정 연결",
   inflowConnectDescription:

@@ -71,6 +71,8 @@ export interface WeeklyReport {
   overdueTaskCount: number;
   staleTaskCount: number;
   unassignedTaskCount: number;
+  actionableChatInflowCount?: number;
+  actionableGmailInflowCount?: number;
   projects: WeeklyProjectReport[];
 }
 

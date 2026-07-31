@@ -274,6 +274,8 @@ export const copy = {
     weeklyCompletedWork: "완료한 일",
     weeklyOverdueWork: "기한이 지난 일",
     weeklyStaleWork: "정체된 일",
+    weeklyChatAttention: "확인할 Chat",
+    weeklyGmailAttention: "확인할 메일",
     weeklyMetricCount: (count: number) => `${count}개`,
     weeklyOperationsClear:
       "기한이 지난 일이나 정체된 일이 없어요. 현재 흐름을 유지해 보세요.",
@@ -377,7 +379,8 @@ export const copy = {
   decisions: {
     eyebrow: "선택과 실행 이력",
     title: "결정할 일",
-    description: "비서가 혼자 정하면 안 되는 예외와 새 업무만 모아 보여드려요.",
+    description:
+      "Chat·Gmail·ITSM에서 사람이 확인해야 할 업무만 모아, 등록 여부와 담당자·마감을 바로 정해요.",
     inflowTitle: "새 업무에서 정할 일",
     inflowStatus: "확인 필요",
     project: "들어온 곳",
@@ -396,10 +399,12 @@ export const copy = {
     confirmItsm: "확인하고 연결하기",
     confirmItsmProblem:
       "ITSM 연결 상태가 바뀌었어요. 최신 상태를 불러왔으니 다시 확인해 주세요.",
-    emptyInflowTitle: "정리할 새 업무가 없어요",
+    emptyInflowTitle: "새 업무에서 정할 내용이 없어요",
     emptyInflowDescription:
-      "Chat이나 ITSM에서 선택이 필요한 업무가 들어오면 여기에 먼저 모아둘게요.",
+      "Chat이나 ITSM에서 선택이 필요한 업무가 들어오면 바로 결정할 수 있게 모아둘게요.",
     pendingTitle: "지금 결정할 일",
+    inProgressTitle: "처리 중인 일",
+    retryTitle: "다시 확인할 일",
     historyTitle: "결정 기록",
     count: (count: number) => `${count}개`,
     emptyPendingTitle: "지금 결정할 일이 없어요",
@@ -411,6 +416,11 @@ export const copy = {
     risk: "주의할 점",
     openConversation: "대화에서 시간 정하기",
     approve: "제안대로 실행하기",
+    retryAnalysis: "다시 분석하기",
+    retryAnalysisRequest: (title: string, rationale: string) =>
+      `‘${title}’ 제안을 다시 검토해 줘. 현재 근거는 “${rationale}”야. 최신 일정, 할 일, 프로젝트 상태를 확인해서 실행 가능한 다음 행동과 그 근거를 알려 줘.`,
+    retryAnalysisProblem:
+      "다시 분석을 시작하지 못했어요. ChatGPT 연결을 확인한 뒤 다시 시도해 주세요.",
     defer: "나중에 결정하기",
     reject: "이번에는 바꾸지 않기",
     status: {
@@ -704,6 +714,7 @@ export const copy = {
     todayLabel: "오늘",
     tomorrowLabel: "내일",
     editSchedule: (title: string) => `${title} 일정 수정하기`,
+    linkedTask: (title: string) => `할 일 · ${title}`,
     connectedCalendar: "연결된 캘린더",
     connectedCalendarEdit: "연결된 캘린더에서 수정해 주세요.",
     readOnlyCalendar: "보기 전용 캘린더",
@@ -1067,7 +1078,14 @@ export const copy = {
     assignee: "담당자",
     assigneePlaceholder: "이 일을 맡을 사람의 이름",
     editScheduleTitle: "일정 수정",
-    editScheduleDescription: "일정 이름과 시간을 바로 바꿀 수 있어요.",
+    editScheduleDescription:
+      "일정 이름과 시간을 바꾸고, 관련된 할 일을 연결할 수 있어요.",
+    linkedTask: "연결할 할 일 (선택)",
+    linkedTaskNone: "연결하지 않음",
+    linkedTaskNoProject: "프로젝트 없음",
+    linkedTaskUnknownProject: "프로젝트를 확인할 수 없음",
+    linkedTaskDescription:
+      "어떤 일을 위한 시간인지 연결하면 일정과 프로젝트에서 함께 확인할 수 있어요.",
     title: "제목",
     notes: "설명 (선택)",
     priority: "우선순위",

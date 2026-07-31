@@ -2,7 +2,8 @@ import { createUuidV7 } from "../uuid";
 import { type Recommendation } from "./home";
 import { PlanningRequestError } from "./planning";
 
-export type RecommendationDecision = "approve" | "reject" | "defer";
+export type RecommendationDecision =
+  "approve" | "reject" | "defer" | "request_analysis";
 
 interface RecommendationListResponse {
   items: Recommendation[];

@@ -265,7 +265,6 @@ export function SettingsWorkspace({
     return () => window.cancelAnimationFrame(frame);
   }, [gmailDisconnectConfirmation]);
 
-
   useEffect(() => {
     if (!localNotificationsSupported()) return;
     let active = true;

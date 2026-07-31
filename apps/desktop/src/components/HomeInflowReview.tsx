@@ -1,5 +1,5 @@
 import { ChevronDown, MessageCircleMore } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { type ProjectInflowItem } from "../api/googleChat";
 import { copy } from "../copy";
@@ -16,6 +16,7 @@ type HomeInflowReviewProps = {
   onDismiss(item: ProjectInflowItem): Promise<void>;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
+  onOpenTask(taskId: string): Promise<void>;
 };
 
 export function HomeInflowReview({
@@ -25,18 +26,33 @@ export function HomeInflowReview({
   onDismiss,
   onRetryAnalysis,
   onRetryCompletion,
+  onOpenTask,
 }: HomeInflowReviewProps) {
-  const visibleItems = useMemo(() => items.slice(0, 5), [items]);
+  const pendingItems = useMemo(() => homeInflowPendingItems(items), [items]);
+  const [showAll, setShowAll] = useState(false);
+  const visibleItems = useMemo(
+    () => visibleHomeInflowItems(pendingItems, showAll),
+    [pendingItems, showAll],
+  );
   const [selectedConversationId, setSelectedConversationId] = useState(
     visibleItems[0] ? inflowConversationKey(visibleItems[0]) : undefined,
   );
   const [mobileExpanded, setMobileExpanded] = useState(false);
-  const selectedItem =
-    visibleItems.find(
-      (item) => inflowConversationKey(item) === selectedConversationId,
-    ) ?? visibleItems[0];
+  const selectedItem = resolveHomeInflowSelection(
+    visibleItems,
+    selectedConversationId,
+  );
 
-  if (!selectedItem) return <></>;
+  useEffect(() => {
+    const nextSelection = selectedItem
+      ? inflowConversationKey(selectedItem)
+      : undefined;
+    if (selectedConversationId !== nextSelection) {
+      setSelectedConversationId(nextSelection);
+    }
+  }, [selectedConversationId, selectedItem]);
+
+  if (!selectedItem) return null;
 
   return (
     <section
@@ -50,8 +66,8 @@ export function HomeInflowReview({
           <h2 id="home-inflow-title">{copy.projects.inflowHomeTitle}</h2>
           <p>{copy.projects.inflowHomeDescription}</p>
         </div>
-        <strong aria-label={`${items.length}개의 업무 요청`}>
-          {items.length}
+        <strong aria-label={`${pendingItems.length}개의 업무 요청`}>
+          {pendingItems.length}
         </strong>
       </header>
 
@@ -65,7 +81,7 @@ export function HomeInflowReview({
         <span>
           {mobileExpanded
             ? copy.projects.inflowHomeCollapse
-            : copy.projects.inflowHomeOpen(items.length)}
+            : copy.projects.inflowHomeOpen(pendingItems.length)}
         </span>
         <ChevronDown aria-hidden="true" />
       </button>
@@ -113,6 +129,21 @@ export function HomeInflowReview({
               );
             })}
           </ol>
+          {pendingItems.length > 5 && (
+            <button
+              className="home-inflow-review__show-all focus-visible-control"
+              type="button"
+              aria-expanded={showAll}
+              onClick={() => setShowAll((current) => !current)}
+            >
+              <span>
+                {showAll
+                  ? copy.projects.inflowHomeShowLess
+                  : copy.projects.inflowHomeShowAll(pendingItems.length)}
+              </span>
+              <ChevronDown aria-hidden="true" />
+            </button>
+          )}
         </aside>
 
         <section
@@ -136,11 +167,36 @@ export function HomeInflowReview({
               onDismiss={onDismiss}
               onRetryAnalysis={onRetryAnalysis}
               onRetryCompletion={onRetryCompletion}
+              onOpenTask={(taskId) => void onOpenTask(taskId)}
             />
           </ul>
         </section>
       </div>
     </section>
+  );
+}
+
+export function homeInflowPendingItems(
+  items: ProjectInflowItem[],
+): ProjectInflowItem[] {
+  return items.filter((item) => item.status === "pending");
+}
+
+export function visibleHomeInflowItems(
+  items: ProjectInflowItem[],
+  showAll: boolean,
+): ProjectInflowItem[] {
+  return showAll ? items : items.slice(0, 5);
+}
+
+export function resolveHomeInflowSelection(
+  items: ProjectInflowItem[],
+  selectedConversationId: string | undefined,
+): ProjectInflowItem | undefined {
+  return (
+    items.find(
+      (item) => inflowConversationKey(item) === selectedConversationId,
+    ) ?? items[0]
   );
 }
 

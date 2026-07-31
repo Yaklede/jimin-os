@@ -1785,7 +1785,7 @@ svg {
 
 .home-weekly-operations__metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   margin: 0;
   border-bottom: 1px solid var(--border);
 }
@@ -2102,6 +2102,77 @@ svg {
   list-style: none;
 }
 
+.decision-section__inflow-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.decision-section__inflow-list .project-inflow-item {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.decision-section__inflow-list .project-inflow-item + .project-inflow-item {
+  border-top: 1px solid var(--border);
+}
+
+.decision-history {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  box-shadow: var(--shadow-panel);
+}
+
+.decision-history > summary {
+  display: grid;
+  min-height: 54px;
+  grid-template-columns: minmax(0, 1fr) auto 18px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 18px;
+  color: var(--text-strong);
+  cursor: pointer;
+  list-style: none;
+}
+
+.decision-history > summary::-webkit-details-marker {
+  display: none;
+}
+
+.decision-history > summary span {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.decision-history > summary small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.decision-history > summary svg {
+  width: 17px;
+  height: 17px;
+  color: var(--muted);
+  transition: transform 160ms ease;
+}
+
+.decision-history[open] > summary {
+  border-bottom: 1px solid var(--border);
+}
+
+.decision-history[open] > summary svg {
+  transform: rotate(180deg);
+}
+
+.decision-history > ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
 .decision-card {
   display: grid;
   grid-template-columns: 40px minmax(0, 1fr) auto;
@@ -2255,6 +2326,18 @@ svg {
   border-radius: var(--radius-panel);
   background: var(--surface-subtle);
   animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+.external-text-link {
+  color: var(--accent);
+  overflow-wrap: anywhere;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
+  text-underline-offset: 0.18em;
+}
+
+.external-text-link:hover {
+  text-decoration-color: currentColor;
 }
 
 .project-inflow-item:focus {
@@ -3563,6 +3646,18 @@ svg {
   width: 44px;
   height: 44px;
   padding: 0;
+}
+
+.planning-row-context {
+  display: block;
+  max-width: 100%;
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--accent-text);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .planning-row-source {
@@ -5291,6 +5386,34 @@ svg {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.home-inflow-review__show-all {
+  display: flex;
+  width: calc(100% - 24px);
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 10px 12px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: 0 12px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.home-inflow-review__show-all svg {
+  width: 16px;
+  height: 16px;
+  transition: transform 160ms ease;
+}
+
+.home-inflow-review__show-all[aria-expanded="true"] svg {
+  transform: rotate(180deg);
 }
 
 .home-inflow-review__detail {
@@ -7054,22 +7177,6 @@ svg {
 
 .project-weekly-metrics > div:nth-last-child(-n + 4) {
   border-bottom: 0;
-}
-
-.project-weekly-overview .project-weekly-metrics {
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-}
-
-.project-weekly-overview .project-weekly-metrics > div {
-  border-bottom: 0;
-}
-
-.project-weekly-overview .project-weekly-metrics > div:nth-child(4n) {
-  border-right: 1px solid var(--border);
-}
-
-.project-weekly-overview .project-weekly-metrics > div:last-child {
-  border-right: 0;
 }
 
 .project-weekly-metrics dt {
@@ -11975,8 +12082,12 @@ svg {
     padding: 12px;
   }
 
-  .home-weekly-operations__metrics > div:nth-child(4) {
-    display: none;
+  .home-weekly-operations__metrics > div:nth-child(3n + 1) {
+    border-left: 0;
+  }
+
+  .home-weekly-operations__metrics > div:nth-child(n + 4) {
+    border-top: 1px solid var(--border);
   }
 
   .home-weekly-operations__projects {
@@ -14296,6 +14407,22 @@ svg {
   .home-greeting h1,
   .page-heading h1 {
     font-size: 20px;
+  }
+
+  .home-weekly-operations__metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .home-weekly-operations__metrics > div:nth-child(3n + 1) {
+    border-left: 1px solid var(--border);
+  }
+
+  .home-weekly-operations__metrics > div:nth-child(2n + 1) {
+    border-left: 0;
+  }
+
+  .home-weekly-operations__metrics > div:nth-child(n + 3) {
+    border-top: 1px solid var(--border);
   }
 
   .home-briefing__copy strong,

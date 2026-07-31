@@ -27,6 +27,7 @@ import {
   type TaskGroupView,
 } from "../assistantTaskGrouping";
 import { copy } from "../copy";
+import { LinkifiedText } from "./ExternalTextLink";
 
 type AssistantInteractiveCanvasProps = {
   presentation: AssistantPresentation;
@@ -285,7 +286,7 @@ export function AssistantInteractiveCanvas({
         </div>
       </header>
       <p className="assistant-canvas__summary" aria-live="polite">
-        {presentation.summary}
+        <LinkifiedText text={presentation.summary} />
       </p>
 
       {!presentation.sections.length ? (
@@ -680,7 +681,9 @@ function ItemDetail({
           {taskDetail?.notes && (
             <div className="assistant-canvas__task-notes">
               <strong>{copy.home.resultTaskNotesLabel}</strong>
-              <p>{taskDetail.notes}</p>
+              <p>
+                <LinkifiedText text={taskDetail.notes} />
+              </p>
             </div>
           )}
           {taskDetailError && (

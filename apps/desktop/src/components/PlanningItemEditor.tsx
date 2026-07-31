@@ -11,6 +11,11 @@ import {
   resolveOptionalSeoulDateTime,
   seoulLocalDateTimeToIso,
 } from "./DeadlinePicker";
+import {
+  scheduleLinkageForTask,
+  scheduleTaskOptionLabel,
+  type ScheduleProjectReference,
+} from "./scheduleLinkage";
 
 export type PlanningEditTarget =
   { kind: "task"; item: Task } | { kind: "schedule"; item: ScheduleEntry };
@@ -24,15 +29,21 @@ type TaskEditInput = {
   dueAt?: string;
 };
 
-type ScheduleEditInput = {
+export type ScheduleEditInput = {
   title: string;
   notes?: string;
   startsAt: string;
   endsAt: string;
+  linkage?: {
+    projectId: string | null;
+    taskId: string | null;
+  };
 };
 
 type PlanningItemEditorProps = {
   target: PlanningEditTarget | undefined;
+  linkableTasks?: Task[];
+  projects?: ScheduleProjectReference[];
   onClose(): void;
   onSaveTask(task: Task, input: TaskEditInput): Promise<void>;
   onSaveSchedule(entry: ScheduleEntry, input: ScheduleEditInput): Promise<void>;
@@ -42,6 +53,8 @@ type PlanningItemEditorProps = {
 
 export function PlanningItemEditor({
   target,
+  linkableTasks = [],
+  projects = [],
   onClose,
   onSaveTask,
   onSaveSchedule,
@@ -61,6 +74,7 @@ export function PlanningItemEditor({
   const [dueAt, setDueAt] = useState("");
   const [startsAt, setStartsAt] = useState("");
   const [endsAt, setEndsAt] = useState("");
+  const [linkedTaskId, setLinkedTaskId] = useState("");
   const [saving, setSaving] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [error, setError] = useState<string>();
@@ -84,6 +98,9 @@ export function PlanningItemEditor({
     );
     setEndsAt(
       target.kind === "schedule" ? isoToLocalInput(target.item.endsAt) : "",
+    );
+    setLinkedTaskId(
+      target.kind === "schedule" ? (target.item.taskId ?? "") : "",
     );
     setSaving(false);
     setConfirmingDelete(false);
@@ -192,11 +209,17 @@ export function PlanningItemEditor({
       } else {
         const start = seoulLocalDateTimeToIso(startsAt);
         const end = seoulLocalDateTimeToIso(endsAt);
+        const originalTaskId = activeTarget.item.taskId ?? "";
         await onSaveSchedule(activeTarget.item, {
           title: nextTitle,
           notes: notes.trim() || undefined,
           startsAt: start!,
           endsAt: end!,
+          ...(linkedTaskId === originalTaskId
+            ? {}
+            : {
+                linkage: scheduleLinkageForTask(linkableTasks, linkedTaskId),
+              }),
         });
       }
       dialogRef.current?.close();
@@ -342,34 +365,62 @@ export function PlanningItemEditor({
               </div>
             </>
           ) : (
-            <div className="planning-editor__field-grid">
-              <DeadlinePicker
-                className="planning-editor__field"
-                id="planning-edit-starts-at"
-                label={copy.forms.startsAt}
-                value={startsAt}
-                disabled={saving}
-                required
-                allowClear={false}
-                onChange={(value) => {
-                  setStartsAt(value);
-                  setError(undefined);
-                }}
-              />
-              <DeadlinePicker
-                className="planning-editor__field"
-                id="planning-edit-ends-at"
-                label={copy.forms.endsAt}
-                value={endsAt}
-                disabled={saving}
-                required
-                allowClear={false}
-                onChange={(value) => {
-                  setEndsAt(value);
-                  setError(undefined);
-                }}
-              />
-            </div>
+            <>
+              <div className="planning-editor__field-grid">
+                <DeadlinePicker
+                  className="planning-editor__field"
+                  id="planning-edit-starts-at"
+                  label={copy.forms.startsAt}
+                  value={startsAt}
+                  disabled={saving}
+                  required
+                  allowClear={false}
+                  onChange={(value) => {
+                    setStartsAt(value);
+                    setError(undefined);
+                  }}
+                />
+                <DeadlinePicker
+                  className="planning-editor__field"
+                  id="planning-edit-ends-at"
+                  label={copy.forms.endsAt}
+                  value={endsAt}
+                  disabled={saving}
+                  required
+                  allowClear={false}
+                  onChange={(value) => {
+                    setEndsAt(value);
+                    setError(undefined);
+                  }}
+                />
+              </div>
+              {activeTarget.item.source === "manual" && (
+                <EditorField
+                  label={copy.forms.linkedTask}
+                  htmlFor="planning-edit-linked-task"
+                  description={copy.forms.linkedTaskDescription}
+                >
+                  <select
+                    id="planning-edit-linked-task"
+                    aria-describedby="planning-edit-linked-task-description"
+                    value={linkedTaskId}
+                    onChange={(event) => setLinkedTaskId(event.target.value)}
+                  >
+                    <option value="">{copy.forms.linkedTaskNone}</option>
+                    {linkableTasks.map((task) => (
+                      <option key={task.id} value={task.id}>
+                        {scheduleTaskOptionLabel(task, projects, {
+                          noProject: copy.forms.linkedTaskNoProject,
+                          unknownProject: copy.forms.linkedTaskUnknownProject,
+                          unassigned: copy.home.unassignedTaskGroup,
+                          noDueDate: copy.home.noDueDateTaskGroup,
+                        })}
+                      </option>
+                    ))}
+                  </select>
+                </EditorField>
+              )}
+            </>
           )}
         </fieldset>
 
@@ -488,7 +539,7 @@ function EditorField({
     <div className="planning-editor__field">
       <label htmlFor={htmlFor}>{label}</label>
       {children}
-      {description && <p>{description}</p>}
+      {description && <p id={`${htmlFor}-description`}>{description}</p>}
     </div>
   );
 }

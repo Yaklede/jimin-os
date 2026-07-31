@@ -35,7 +35,9 @@ import {
   SkeletonGroup,
   useDelayedSkeleton,
 } from "./ContentSkeleton";
+import { LinkifiedText } from "./ExternalTextLink";
 import { EmptySurface } from "./HomeWorkspace";
+import { type ScheduleProjectReference } from "./scheduleLinkage";
 import {
   PlanningCreateDialog,
   type PlanningCreateKind,
@@ -45,6 +47,7 @@ import {
 
 type PlanningWorkspaceProps = {
   snapshot: PlanningSnapshot | undefined;
+  projects: ScheduleProjectReference[];
   range: PlanningViewRange;
   calendarConnection?: GoogleCalendarConnection;
   loading: boolean;
@@ -63,6 +66,7 @@ type PlanningWorkspaceProps = {
 
 export function PlanningWorkspace({
   snapshot,
+  projects,
   range,
   calendarConnection,
   loading,
@@ -100,6 +104,11 @@ export function PlanningWorkspace({
       (entry) => new Date(entry.endsAt).getTime() < now,
     ) ?? []),
   ].reverse();
+  const tasksById = new Map(
+    [...(snapshot?.tasks ?? []), ...(snapshot?.completedTasks ?? [])].map(
+      (task) => [task.id, task],
+    ),
+  );
 
   useEffect(() => {
     if (!highlightedScheduleId) return;
@@ -333,7 +342,11 @@ export function PlanningWorkspace({
                   </button>
                   <div>
                     <strong>{task.title}</strong>
-                    {task.notes && <p>{task.notes}</p>}
+                    {task.notes && (
+                      <p>
+                        <LinkifiedText text={task.notes} />
+                      </p>
+                    )}
                   </div>
                   {task.dueAt && (
                     <time
@@ -392,6 +405,9 @@ export function PlanningWorkspace({
               {upcomingSchedule.map((entry) => (
                 <ScheduleRow
                   entry={entry}
+                  linkedTask={
+                    entry.taskId ? tasksById.get(entry.taskId) : undefined
+                  }
                   highlighted={entry.id === highlightedScheduleId}
                   elementRef={
                     entry.id === highlightedScheduleId
@@ -449,6 +465,9 @@ export function PlanningWorkspace({
                 {pastSchedule.map((entry) => (
                   <ScheduleRow
                     entry={entry}
+                    linkedTask={
+                      entry.taskId ? tasksById.get(entry.taskId) : undefined
+                    }
                     highlighted={entry.id === highlightedScheduleId}
                     elementRef={
                       entry.id === highlightedScheduleId
@@ -531,7 +550,11 @@ export function PlanningWorkspace({
                     </button>
                     <div>
                       <strong>{task.title}</strong>
-                      {task.notes && <p>{task.notes}</p>}
+                      {task.notes && (
+                        <p>
+                          <LinkifiedText text={task.notes} />
+                        </p>
+                      )}
                     </div>
                     {task.completedAt && (
                       <time dateTime={task.completedAt}>
@@ -554,6 +577,8 @@ export function PlanningWorkspace({
       </div>
       <PlanningCreateDialog
         kind={createKind}
+        linkableTasks={snapshot?.tasks ?? []}
+        projects={projects}
         onClose={() => setCreateKind(undefined)}
         onCreateTask={onCreateTask}
         onCreateSchedule={onCreateSchedule}
@@ -635,11 +660,13 @@ function PlanningTaskSkeleton({
 
 function ScheduleRow({
   entry,
+  linkedTask,
   highlighted,
   elementRef,
   onEdit,
 }: {
   entry: ScheduleEntry;
+  linkedTask?: Task;
   highlighted: boolean;
   elementRef?: RefObject<HTMLLIElement | null>;
   onEdit(entry: ScheduleEntry): void;
@@ -662,6 +689,11 @@ function ScheduleRow({
           {entry.notes ||
             `${formatTime(entry.startsAt)}–${formatTime(entry.endsAt)}`}
         </p>
+        {linkedTask && (
+          <span className="planning-row-context">
+            {copy.schedule.linkedTask(linkedTask.title)}
+          </span>
+        )}
       </div>
       {entry.editable ? (
         <button

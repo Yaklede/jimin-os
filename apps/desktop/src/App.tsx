@@ -165,6 +165,7 @@ import {
   type PromoteInflowInput,
 } from "./components/ProjectInflowPanel";
 import { type PlanningEditTarget } from "./components/PlanningItemEditor";
+import { type ScheduleProjectReference } from "./components/scheduleLinkage";
 import { type VoiceCommandOutcome } from "./components/VoiceCommandSheet";
 import { copy } from "./copy";
 import {
@@ -312,6 +313,9 @@ export default function App() {
   const [planningRange, setPlanningRange] = useState<PlanningViewRange>(() =>
     planningViewRange("month"),
   );
+  const [planningProjectReferences, setPlanningProjectReferences] = useState<
+    ScheduleProjectReference[]
+  >([]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [weeklyReport, setWeeklyReport] = useState<WeeklyReport>();
@@ -1263,6 +1267,60 @@ export default function App() {
     }
   }, [apiBaseUrl, tokens, withAuthenticatedSession]);
 
+  const loadPlanningProjectReferences = useCallback(async () => {
+    if (!tokens || !workspacesReady) return;
+    try {
+      const results = await withAuthenticatedSession((accessToken) =>
+        Promise.allSettled(
+          workspaces.map(async (workspace) => ({
+            workspace,
+            projects: await fetchProjects(
+              apiBaseUrl,
+              accessToken,
+              workspace.id,
+            ),
+          })),
+        ),
+      );
+      const failedWorkspaceIds = new Set(
+        results.flatMap((result, index) => {
+          const workspaceId = workspaces[index]?.id;
+          return result.status === "rejected" && workspaceId
+            ? [workspaceId]
+            : [];
+        }),
+      );
+      setPlanningProjectReferences((current) => {
+        const references = [
+          ...current.filter((item) => failedWorkspaceIds.has(item.workspaceId)),
+          ...results.flatMap((result) =>
+            result.status === "fulfilled"
+              ? result.value.projects.map((project) => ({
+                  id: project.id,
+                  title: project.title,
+                  workspaceId: result.value.workspace.id,
+                  workspaceName: result.value.workspace.name,
+                }))
+              : [],
+          ),
+        ];
+        return Array.from(
+          new Map(
+            references.map((reference) => [reference.id, reference]),
+          ).values(),
+        );
+      });
+    } catch {
+      // Keep the last complete project index so schedule editing stays usable.
+    }
+  }, [
+    apiBaseUrl,
+    tokens,
+    workspaces,
+    workspacesReady,
+    withAuthenticatedSession,
+  ]);
+
   const loadGmailInflow = useCallback(async (): Promise<void> => {
     if (!tokens) return;
     if (workspaces.length === 0) {
@@ -1981,6 +2039,7 @@ export default function App() {
       setDecisionsError(undefined);
       setPlanningSnapshot(undefined);
       setPlanningError(undefined);
+      setPlanningProjectReferences([]);
       setWorkspaces([]);
       setWorkspacesReady(false);
       setProjects([]);
@@ -2433,7 +2492,14 @@ export default function App() {
       mode !== "ready" ||
       workspacesReady ||
       projectsLoading ||
-      !["home", "projects", "meetings", "settings"].includes(destination)
+      ![
+        "home",
+        "calendar",
+        "projects",
+        "decisions",
+        "meetings",
+        "settings",
+      ].includes(destination)
     ) {
       return;
     }
@@ -2454,7 +2520,28 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    if (!tokens || !workspacesReady || destination !== "home") return;
+    if (
+      !workspacesReady ||
+      (destination !== "calendar" && planningEditTarget?.kind !== "schedule")
+    ) {
+      return;
+    }
+    void loadPlanningProjectReferences();
+  }, [
+    destination,
+    loadPlanningProjectReferences,
+    planningEditTarget?.kind,
+    workspacesReady,
+  ]);
+
+  useEffect(() => {
+    if (
+      !tokens ||
+      !workspacesReady ||
+      !["home", "decisions"].includes(destination)
+    ) {
+      return;
+    }
     void loadGmailInflow();
   }, [destination, loadGmailInflow, tokens, workspacesReady]);
 
@@ -2847,6 +2934,38 @@ export default function App() {
     }
   }
 
+  async function retryHomeRecommendationAnalysis(
+    recommendation: Recommendation,
+  ): Promise<boolean> {
+    if (!tokens || agentAuthentication?.state !== "ready") {
+      setConversationError(copy.messages.authenticationRequired);
+      return false;
+    }
+    const queued = await sendConversationRequest(
+      copy.decisions.retryAnalysisRequest(
+        recommendation.title,
+        recommendation.rationale,
+      ),
+      createUuidV7(),
+      {
+        startFresh: !homeConversationId,
+        targetConversationId: homeConversationId,
+        rememberForHome: true,
+      },
+    );
+    if (!queued) return false;
+
+    const statusUpdated = await decideHomeRecommendation(
+      recommendation,
+      "request_analysis",
+    );
+    if (!statusUpdated) {
+      void loadDecisionInbox();
+    }
+    navigate("chat");
+    return true;
+  }
+
   async function completeHomeTask(task: Task): Promise<void> {
     if (!tokens) return;
     setHomeError(undefined);
@@ -3091,6 +3210,8 @@ export default function App() {
     notes?: string;
     startsAt: string;
     endsAt: string;
+    projectId?: string | null;
+    taskId?: string | null;
   }): Promise<void> {
     setPlanningError(undefined);
     const clientMutationId = createUuidV7();
@@ -3250,6 +3371,10 @@ export default function App() {
       notes?: string;
       startsAt: string;
       endsAt: string;
+      linkage?: {
+        projectId: string | null;
+        taskId: string | null;
+      };
     },
   ): Promise<void> {
     if (!entry.editable) throw new Error("schedule is read only");
@@ -3379,46 +3504,6 @@ export default function App() {
 
     setHomeError(copy.home.taskDestinationNotice);
     throw new Error("task destination unavailable");
-  }
-
-  async function openProjectInflowFromDecision(
-    item: ProjectInflowItem,
-  ): Promise<void> {
-    const availableWorkspaces =
-      workspaces.length > 0
-        ? workspaces
-        : await withAuthenticatedSession((accessToken) =>
-            fetchWorkspaces(apiBaseUrl, accessToken),
-          );
-    if (workspaces.length === 0) {
-      setWorkspaces(availableWorkspaces);
-      setWorkspacesReady(true);
-    }
-
-    for (const workspace of availableWorkspaces) {
-      const workspaceProjects =
-        workspace.id === selectedWorkspaceId && projects.length > 0
-          ? projects
-          : await withAuthenticatedSession((accessToken) =>
-              fetchProjects(apiBaseUrl, accessToken, workspace.id),
-            );
-      const project = workspaceProjects.find(
-        (candidate) => candidate.id === item.projectId,
-      );
-      if (!project) continue;
-      const inflow = await loadProjectInflow(project.id);
-      if (!inflow?.items.some((candidate) => candidate.id === item.id)) {
-        throw new Error("project inflow unavailable");
-      }
-      setProjects(workspaceProjects);
-      setSelectedWorkspaceId(workspace.id);
-      setSelectedProjectId(project.id);
-      setHighlightedProjectTaskId(undefined);
-      setHighlightedProjectInflowId(item.id);
-      navigate("projects", { projectDataReady: true });
-      return;
-    }
-    throw new Error("project inflow unavailable");
   }
 
   async function openScheduleFromAssistant(
@@ -4154,6 +4239,24 @@ export default function App() {
             inflowConversationKey(currentItem) !== inflowConversationKey(item),
         ),
       );
+      setDecisionInflowItems((current) =>
+        current.filter(
+          (currentItem) =>
+            inflowConversationKey(currentItem) !== inflowConversationKey(item),
+        ),
+      );
+      setHomeSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              inflow: current.inflow.filter(
+                (currentItem) =>
+                  inflowConversationKey(currentItem) !==
+                  inflowConversationKey(item),
+              ),
+            }
+          : current,
+      );
       await loadHomeSnapshot();
       if (selectedProjectId === item.projectId) {
         await Promise.all([
@@ -4189,6 +4292,24 @@ export default function App() {
           (currentItem) =>
             inflowConversationKey(currentItem) !== inflowConversationKey(item),
         ),
+      );
+      setDecisionInflowItems((current) =>
+        current.filter(
+          (currentItem) =>
+            inflowConversationKey(currentItem) !== inflowConversationKey(item),
+        ),
+      );
+      setHomeSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              inflow: current.inflow.filter(
+                (currentItem) =>
+                  inflowConversationKey(currentItem) !==
+                  inflowConversationKey(item),
+              ),
+            }
+          : current,
       );
       await loadHomeSnapshot();
       if (selectedProjectId === item.projectId) {
@@ -4823,6 +4944,7 @@ export default function App() {
             {destination === "calendar" && (
               <PlanningWorkspace
                 snapshot={planningSnapshot}
+                projects={planningProjectReferences}
                 range={planningRange}
                 calendarConnection={calendarConnection}
                 loading={planningLoading || mode === "loading"}
@@ -4931,10 +5053,65 @@ export default function App() {
                 itsmCandidates={decisionItsmCandidates}
                 loading={decisionsLoading || mode === "loading"}
                 error={decisionsError}
+                inflowSaving={inflowSaving}
+                gmailReview={{
+                  items: gmailInflowItems,
+                  projects: gmailInflowProjects,
+                  loading: gmailInflowLoading,
+                  loadingMore: gmailInflowLoadingMore,
+                  loadMoreError:
+                    gmailInflowLoadHealth.initialFailedWorkspaces.length ===
+                      0 &&
+                    gmailInflowLoadHealth.loadMoreFailedWorkspaces.length > 0,
+                  hasMore: Object.values(gmailInflowCursors).some(Boolean),
+                  error:
+                    gmailInflowError ??
+                    (gmailInflowLoadHealth.initialFailedWorkspaces.length > 0
+                      ? copy.gmailInflow.initialPartialProblem(
+                          gmailInflowLoadHealth.initialFailedWorkspaces,
+                        )
+                      : gmailInflowLoadHealth.loadMoreFailedWorkspaces.length >
+                          0
+                        ? copy.gmailInflow.moreLoadProblem
+                        : undefined),
+                  savingId: gmailInflowSavingId,
+                  onReload: loadGmailInflow,
+                  onLoadMore: loadMoreGmailInflow,
+                  onPromote: promoteGmailInflow,
+                  onDismiss: dismissGmailInflow,
+                  onDefer: deferGmailInflow,
+                  onRetryAnalysis: retryGmailInflowAnalysis,
+                  onOpenTask: async (taskId) => {
+                    const task = await loadTaskFromAssistant({
+                      id: taskId,
+                      projectId: null,
+                    });
+                    await openTaskFromAssistant(task);
+                    if (!task.projectId) {
+                      setHighlightedPlanningTaskId(task.id);
+                      navigate("calendar");
+                    }
+                  },
+                }}
                 onOpenConversation={selectConversation}
-                onOpenProjectInflow={openProjectInflowFromDecision}
+                onOpenTask={async (taskId) => {
+                  const task = await loadTaskFromAssistant({
+                    id: taskId,
+                    projectId: null,
+                  });
+                  await openTaskFromAssistant(task);
+                  if (!task.projectId) {
+                    setHighlightedPlanningTaskId(task.id);
+                    navigate("calendar");
+                  }
+                }}
+                onPromoteInflow={promoteWorkspaceInflow}
+                onDismissInflow={dismissWorkspaceInflow}
+                onRetryInflowAnalysis={retryWorkspaceInflowAnalysis}
+                onRetryInflowCompletion={retryWorkspaceInflowCompletion}
                 onConfirmItsm={confirmDecisionItsm}
                 onDecide={decideHomeRecommendation}
+                onRetryAnalysis={retryHomeRecommendationAnalysis}
               />
             )}
             {destination === "meetings" && tokens && (
@@ -5035,6 +5212,11 @@ export default function App() {
             <Suspense fallback={null}>
               <PlanningItemEditor
                 target={planningEditTarget}
+                linkableTasks={[
+                  ...(planningSnapshot?.tasks ?? []),
+                  ...(planningSnapshot?.completedTasks ?? []),
+                ]}
+                projects={planningProjectReferences}
                 onClose={() => setPlanningEditTarget(undefined)}
                 onSaveTask={savePlanningTask}
                 onSaveSchedule={savePlanningSchedule}

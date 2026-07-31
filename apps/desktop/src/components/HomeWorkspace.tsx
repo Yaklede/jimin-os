@@ -423,6 +423,11 @@ export function HomeWorkspace({
                 projectId: null,
               });
               await onOpenTask(task);
+              if (!task.projectId) {
+                setHighlightedHomeTaskId(task.id);
+                setOverviewFocusTarget("tasks");
+                setAssistantFocused(false);
+              }
             }}
           />
 
@@ -434,6 +439,18 @@ export function HomeWorkspace({
               onDismiss={onDismissInflow}
               onRetryAnalysis={onRetryInflowAnalysis}
               onRetryCompletion={onRetryInflowCompletion}
+              onOpenTask={async (taskId) => {
+                const task = await onLoadAssistantTask({
+                  id: taskId,
+                  projectId: null,
+                });
+                await onOpenTask(task);
+                if (!task.projectId) {
+                  setHighlightedHomeTaskId(task.id);
+                  setOverviewFocusTarget("tasks");
+                  setAssistantFocused(false);
+                }
+              }}
             />
           )}
 
@@ -1141,8 +1158,20 @@ function WeeklyOperationsBrief({
       backlog: current.backlog + report.backlogDelta,
       overdue: current.overdue + report.overdueTaskCount,
       stale: current.stale + report.staleTaskCount,
+      chatAttention:
+        current.chatAttention + (report.actionableChatInflowCount ?? 0),
+      gmailAttention:
+        current.gmailAttention + (report.actionableGmailInflowCount ?? 0),
     }),
-    { created: 0, completed: 0, backlog: 0, overdue: 0, stale: 0 },
+    {
+      created: 0,
+      completed: 0,
+      backlog: 0,
+      overdue: 0,
+      stale: 0,
+      chatAttention: 0,
+      gmailAttention: 0,
+    },
   );
   const attentionProjects = weeklyAttentionProjects(activeReports);
 
@@ -1188,6 +1217,16 @@ function WeeklyOperationsBrief({
           label={copy.home.weeklyStaleWork}
           value={totals.stale}
           attention={totals.stale > 0}
+        />
+        <WeeklyOperationMetric
+          label={copy.home.weeklyChatAttention}
+          value={totals.chatAttention}
+          attention={totals.chatAttention > 0}
+        />
+        <WeeklyOperationMetric
+          label={copy.home.weeklyGmailAttention}
+          value={totals.gmailAttention}
+          attention={totals.gmailAttention > 0}
         />
       </dl>
 
