@@ -69,6 +69,14 @@ import {
   type WeeklyReportSnapshot,
   type Workspace,
 } from "./api/projects";
+import {
+  createProjectWeeklyReport as createProjectWeeklyReportRequest,
+  finalizeReport as finalizeReportRequest,
+  fetchProjectReports,
+  updateReport as updateReportRequest,
+  type ProjectWeeklyReportContent,
+  type Report,
+} from "./api/reports";
 import { createGoal, fetchGoals, updateGoal, type Goal } from "./api/goals";
 import {
   createProjectGoogleChatSource,
@@ -304,6 +312,7 @@ export default function App() {
   >([]);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [projectTasks, setProjectTasks] = useState<Task[]>([]);
+  const [projectReports, setProjectReports] = useState<Report[]>([]);
   const [projectWebhooks, setProjectWebhooks] = useState<ProjectWebhook[]>([]);
   const [googleChatAccountsAvailable, setGoogleChatAccountsAvailable] =
     useState(false);
@@ -335,6 +344,8 @@ export default function App() {
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [webhooksLoading, setWebhooksLoading] = useState(false);
   const [inflowLoading, setInflowLoading] = useState(false);
+  const [reportsLoading, setReportsLoading] = useState(false);
+  const [reportsSaving, setReportsSaving] = useState(false);
   const [inflowSaving, setInflowSaving] = useState(false);
   const [inflowError, setInflowError] = useState<string>();
   const [
@@ -346,6 +357,7 @@ export default function App() {
   const [goalsSaving, setGoalsSaving] = useState(false);
   const [goalsError, setGoalsError] = useState<string>();
   const [projectsError, setProjectsError] = useState<string>();
+  const [reportsError, setReportsError] = useState<string>();
   const [weeklyReportError, setWeeklyReportError] = useState<string>();
   const [workspacesReady, setWorkspacesReady] = useState(false);
   const [selectedConversationId, setSelectedConversationId] = useState<
@@ -1439,6 +1451,100 @@ export default function App() {
     [apiBaseUrl, tokens, withAuthenticatedSession],
   );
 
+  const loadProjectReports = useCallback(
+    async (workspaceId: string, projectId: string) => {
+      if (!tokens) return undefined;
+      setReportsLoading(true);
+      setReportsError(undefined);
+      try {
+        const reports = await withAuthenticatedSession((accessToken) =>
+          fetchProjectReports(apiBaseUrl, accessToken, workspaceId, projectId),
+        );
+        setProjectReports(reports);
+        return reports;
+      } catch {
+        setProjectReports([]);
+        setReportsError(copy.projects.reportLoadProblem);
+        return undefined;
+      } finally {
+        setReportsLoading(false);
+      }
+    },
+    [apiBaseUrl, tokens, withAuthenticatedSession],
+  );
+
+  const createProjectWeeklyReport = useCallback(
+    async (workspaceId: string, projectId: string): Promise<void> => {
+      if (!tokens) return;
+      setReportsSaving(true);
+      setReportsError(undefined);
+      try {
+        const report = await withAuthenticatedSession((accessToken) =>
+          createProjectWeeklyReportRequest(
+            apiBaseUrl,
+            accessToken,
+            workspaceId,
+            projectId,
+          ),
+        );
+        setProjectReports((current) => [
+          report,
+          ...current.filter((item) => item.id !== report.id),
+        ]);
+      } catch {
+        setReportsError(copy.projects.reportGenerateProblem);
+      } finally {
+        setReportsSaving(false);
+      }
+    },
+    [apiBaseUrl, tokens, withAuthenticatedSession],
+  );
+
+  const updateProjectReport = useCallback(
+    async (
+      report: Report,
+      content: ProjectWeeklyReportContent,
+    ): Promise<void> => {
+      if (!tokens) return;
+      setReportsSaving(true);
+      setReportsError(undefined);
+      try {
+        const updated = await withAuthenticatedSession((accessToken) =>
+          updateReportRequest(apiBaseUrl, accessToken, report, content),
+        );
+        setProjectReports((current) =>
+          current.map((item) => (item.id === updated.id ? updated : item)),
+        );
+      } catch {
+        setReportsError(copy.projects.reportSaveProblem);
+      } finally {
+        setReportsSaving(false);
+      }
+    },
+    [apiBaseUrl, tokens, withAuthenticatedSession],
+  );
+
+  const finalizeProjectReport = useCallback(
+    async (report: Report): Promise<void> => {
+      if (!tokens) return;
+      setReportsSaving(true);
+      setReportsError(undefined);
+      try {
+        const finalized = await withAuthenticatedSession((accessToken) =>
+          finalizeReportRequest(apiBaseUrl, accessToken, report),
+        );
+        setProjectReports((current) =>
+          current.map((item) => (item.id === finalized.id ? finalized : item)),
+        );
+      } catch {
+        setReportsError(copy.projects.reportFinalizeProblem);
+      } finally {
+        setReportsSaving(false);
+      }
+    },
+    [apiBaseUrl, tokens, withAuthenticatedSession],
+  );
+
   const loadProjectWebhooks = useCallback(
     async (projectId: string) => {
       if (!tokens) return undefined;
@@ -2310,10 +2416,14 @@ export default function App() {
   useEffect(() => {
     if (selectedProjectId && destination === "projects") {
       void loadProjectTasks(selectedProjectId);
+      if (selectedWorkspaceId) {
+        void loadProjectReports(selectedWorkspaceId, selectedProjectId);
+      }
       void loadProjectWebhooks(selectedProjectId);
       void loadProjectInflow(selectedProjectId);
     } else if (!selectedProjectId) {
       setProjectTasks([]);
+      setProjectReports([]);
       setProjectWebhooks([]);
       setWebhookDeliveries([]);
       setProjectGoogleChatSources([]);
@@ -2322,9 +2432,11 @@ export default function App() {
     }
   }, [
     loadProjectInflow,
+    loadProjectReports,
     loadProjectTasks,
     loadProjectWebhooks,
     destination,
+    selectedWorkspaceId,
     selectedProjectId,
   ]);
 
@@ -3111,6 +3223,7 @@ export default function App() {
     setSelectedWorkspaceId(workspaceId);
     setSelectedProjectId(undefined);
     setProjectTasks([]);
+    setProjectReports([]);
   }
 
   function selectProject(projectId: string) {
@@ -4506,6 +4619,10 @@ export default function App() {
                 weeklyReport={weeklyReport}
                 weeklyReportHistory={weeklyReportHistory}
                 tasks={projectTasks}
+                reports={projectReports}
+                reportsLoading={reportsLoading}
+                reportsSaving={reportsSaving}
+                reportsError={reportsError}
                 webhooks={projectWebhooks}
                 webhookDeliveries={webhookDeliveries}
                 googleChatAccountsAvailable={googleChatAccountsAvailable}
@@ -4533,6 +4650,7 @@ export default function App() {
                   setHighlightedProjectTaskId(undefined);
                   setSelectedProjectId(undefined);
                   setProjectTasks([]);
+                  setProjectReports([]);
                   setProjectWebhooks([]);
                   setWebhookDeliveries([]);
                   setProjectGoogleChatSources([]);
@@ -4548,6 +4666,9 @@ export default function App() {
                 onCompleteTask={completeProjectTask}
                 onUpdateTask={updateProjectTask}
                 onDeleteTask={deleteProjectTask}
+                onCreateWeeklyReport={createProjectWeeklyReport}
+                onUpdateReport={updateProjectReport}
+                onFinalizeReport={finalizeProjectReport}
                 onCreateWebhook={createWorkspaceWebhook}
                 onUpdateWebhook={updateWorkspaceWebhook}
                 onTestWebhook={testWorkspaceWebhook}

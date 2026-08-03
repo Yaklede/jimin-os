@@ -154,6 +154,33 @@ export const projectCopy = {
     unassigned: number,
   ) =>
     `기한 지난 일 ${overdue}개 · 정체된 일 ${stale}개 · 담당자 없는 일 ${unassigned}개`,
+  reportDocumentTitle: "보고서 초안",
+  reportDocumentDescription:
+    "이번 주 운영 데이터를 보고서 형태로 저장하고 검토할 수 있어요.",
+  reportCreate: "보고서 작성",
+  reportRefresh: "최신 지표로 다시 만들기",
+  reportLoading: "보고서를 불러오고 있어요.",
+  reportEmptyTitle: "아직 저장된 보고서가 없어요",
+  reportEmptyDescription:
+    "보고서 작성을 누르면 현재 프로젝트의 주간 흐름을 정리해요.",
+  reportSummaryLabel: "요약",
+  reportFocusLabel: "먼저 확인할 점",
+  reportSaveDraft: "초안 저장",
+  reportFinalize: "보고서 확정",
+  reportHistoryLabel: "이전 보고서 보기",
+  reportLoadProblem: "보고서를 불러오지 못했어요.",
+  reportGenerateProblem:
+    "보고서를 만들지 못했어요. 잠시 후 다시 시도해 주세요.",
+  reportSaveProblem:
+    "보고서 초안을 저장하지 못했어요. 최신 버전을 확인해 주세요.",
+  reportFinalizeProblem:
+    "보고서를 확정하지 못했어요. 최신 버전을 확인해 주세요.",
+  reportStatus: {
+    draft: "검토 필요",
+    finalized: "확정됨",
+    archived: "보관됨",
+    failed: "생성 실패",
+  },
   editProject: "프로젝트 수정하기",
   openProjectOverview: "프로젝트 정보 보기",
   collapseProjectOverview: "프로젝트 정보 접기",

@@ -226,3 +226,14 @@ criterion, and reference-link arrays and that
 without a projection and use their explicitly public notes as the notification
 summary. Rollback uses the previous image together with a verified version-49
 backup after new task assignment projections have been written.
+
+Migration `0051_report_documents.sql` stores first-class, owner-scoped project
+weekly reports separately from conversations. Each report keeps an immutable
+version history, a draft/finalized status, and bounded structured evidence so a
+user can review or correct a report without changing the underlying work data.
+Apply it to an empty database and a restored version-50 backup, then verify a
+project report can be created, revised with an optimistic version, finalized,
+and read only by its owner and project scope. Confirm
+`jimin_schema_metadata.schema_version = 51`. The migration is additive; after
+reports are written, rollback uses the previous image together with a verified
+version-50 backup because older binaries do not understand report documents.
