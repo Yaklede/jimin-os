@@ -10826,7 +10826,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-        let history_response = router(state)
+        let history_response = router(state.clone())
             .oneshot(
                 Request::builder()
                     .uri(
