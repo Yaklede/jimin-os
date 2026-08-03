@@ -55,6 +55,7 @@ use jimin_storage::{
         DeleteTaskOutcome, NewScheduleEntry, NewTask, ScheduleEntryUpdate, TaskStatus, TaskUpdate,
     },
     push::EncryptedPushToken,
+    reports::{NewReport, PROJECT_WEEKLY_REPORT, ReportStatus, ReportUpdate},
     webhook::{
         EncryptedWebhookSecret, GoogleChatMentionDirectory, NewProjectWebhook,
         ProjectWebhookUpdate, RetryWebhookDeliveryOutcome, WebhookDestinationUpdate,
@@ -290,6 +291,168 @@ async fn sync_change_feed_pages_task_mutations_in_order() {
     assert_eq!(completed.items.len(), 1);
     assert_eq!(completed.items[0].entity_id, task.id);
     assert!(completed.items[0].entity_version > task.version);
+
+    database.close().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The integration test keeps report document versioning, finalization, and owner isolation in one lifecycle."
+)]
+async fn project_report_documents_are_versioned_finalized_and_owner_scoped() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 2, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    let other_owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("other owner should exist");
+    let workspace = database
+        .workspaces_for_user(owner.profile.id)
+        .await
+        .expect("workspace query should succeed")
+        .into_iter()
+        .find(|item| item.scope == WorkspaceScope::Personal)
+        .expect("personal workspace should exist");
+    let project = database
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            workspace_id: workspace.id,
+            title: "보고서 문서 검증".to_owned(),
+            objective: Some("프로젝트 보고서를 안정적으로 보관한다.".to_owned()),
+            management_mode: ProjectManagementMode::Operation,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
+            risk_level: 0,
+            next_action: Some("초안 내용을 검토한다.".to_owned()),
+            due_at: None,
+        })
+        .await
+        .expect("project should persist");
+    let now = OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .expect("whole-second fixture time");
+    let period_start = now - TimeDuration::days(7);
+    let content = serde_json::json!({
+        "kind": PROJECT_WEEKLY_REPORT,
+        "period": {"start": period_start.format(&Rfc3339).expect("period start should format"), "end": now.format(&Rfc3339).expect("period end should format")},
+        "summary": "이번 주 프로젝트 진행 상황을 정리했습니다.",
+        "metrics": [],
+        "focus": ["초안 검토"],
+        "evidence": [{"type": "project", "workspaceId": workspace.id.to_string(), "projectId": project.id.to_string()}]
+    });
+    let report = database
+        .create_report(&NewReport {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            workspace_id: workspace.id,
+            project_id: project.id,
+            report_type: PROJECT_WEEKLY_REPORT.to_owned(),
+            title: "보고서 문서 검증 주간 보고서".to_owned(),
+            period_start,
+            period_end: now,
+            content: content.clone(),
+            generated_by: "system".to_owned(),
+            generated_at: now,
+        })
+        .await
+        .expect("report should persist");
+    assert_eq!(report.status, ReportStatus::Draft);
+    assert_eq!(report.current_version, 1);
+    assert_eq!(report.version, 1);
+    assert_eq!(report.content, content);
+
+    let listed = database
+        .reports_for_project(owner.profile.id, workspace.id, project.id, 10)
+        .await
+        .expect("report list should load");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, report.id);
+
+    assert!(matches!(
+        database
+            .report_for_user(other_owner.profile.id, report.id)
+            .await,
+        Err(StorageError::IdentityConflict)
+    ));
+
+    let revised_content = serde_json::json!({
+        "kind": PROJECT_WEEKLY_REPORT,
+        "period": {"start": period_start.format(&Rfc3339).expect("period start should format"), "end": now.format(&Rfc3339).expect("period end should format")},
+        "summary": "이번 주 프로젝트 진행 상황과 다음 행동을 수정했습니다.",
+        "metrics": [{"key": "open", "label": "열린 일감", "value": 2}],
+        "focus": ["담당자 확인"],
+        "evidence": [{"type": "project", "workspaceId": workspace.id.to_string(), "projectId": project.id.to_string()}]
+    });
+    let updated = database
+        .update_report(&ReportUpdate {
+            id: report.id,
+            user_id: owner.profile.id,
+            content: revised_content.clone(),
+            generated_by: "user".to_owned(),
+            expected_version: 1,
+        })
+        .await
+        .expect("report update should succeed")
+        .expect("draft report should update");
+    assert_eq!(updated.current_version, 2);
+    assert_eq!(updated.version, 2);
+    assert_eq!(updated.content, revised_content);
+
+    assert!(
+        database
+            .update_report(&ReportUpdate {
+                id: report.id,
+                user_id: owner.profile.id,
+                content: updated.content.clone(),
+                generated_by: "user".to_owned(),
+                expected_version: 1,
+            })
+            .await
+            .expect("stale report update should resolve")
+            .is_none()
+    );
+
+    let finalized = database
+        .finalize_report(owner.profile.id, report.id, 2)
+        .await
+        .expect("report finalization should succeed")
+        .expect("draft report should finalize");
+    assert_eq!(finalized.status, ReportStatus::Finalized);
+    assert_eq!(finalized.current_version, 2);
+    assert_eq!(finalized.version, 3);
+    assert!(finalized.finalized_at.is_some());
+
+    assert!(
+        database
+            .update_report(&ReportUpdate {
+                id: report.id,
+                user_id: owner.profile.id,
+                content: revised_content,
+                generated_by: "user".to_owned(),
+                expected_version: 2,
+            })
+            .await
+            .expect("finalized report update should resolve")
+            .is_none()
+    );
+    assert!(
+        database
+            .finalize_report(owner.profile.id, report.id, 2)
+            .await
+            .expect("repeated finalization should resolve")
+            .is_none()
+    );
 
     database.close().await;
 }
