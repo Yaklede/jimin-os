@@ -25,6 +25,7 @@ import {
   type WeeklyReportSnapshot,
   type Workspace,
 } from "../api/projects";
+import { type ProjectWeeklyReportContent, type Report } from "../api/reports";
 import {
   type GoogleChatAccount,
   type GoogleChatSpace,
@@ -80,6 +81,10 @@ type ProjectsWorkspaceProps = {
   weeklyReport: WeeklyReport | undefined;
   weeklyReportHistory: WeeklyReportSnapshot[];
   tasks: Task[];
+  reports: Report[];
+  reportsLoading: boolean;
+  reportsSaving: boolean;
+  reportsError: string | undefined;
   webhooks: ProjectWebhook[];
   webhookDeliveries: WebhookDelivery[];
   itsmConnection: ProjectItsmConnectionSnapshot | undefined;
@@ -162,6 +167,12 @@ type ProjectsWorkspaceProps = {
     },
   ): Promise<void>;
   onDeleteTask(task: Task): Promise<void>;
+  onCreateWeeklyReport(workspaceId: string, projectId: string): Promise<void>;
+  onUpdateReport(
+    report: Report,
+    content: ProjectWeeklyReportContent,
+  ): Promise<void>;
+  onFinalizeReport(report: Report): Promise<void>;
   onCreateWebhook(input: {
     provider: ManagedWebhookProvider;
     url: string;
@@ -213,6 +224,10 @@ export function ProjectsWorkspace({
   weeklyReport,
   weeklyReportHistory,
   tasks,
+  reports,
+  reportsLoading,
+  reportsSaving,
+  reportsError,
   webhooks,
   webhookDeliveries,
   itsmConnection,
@@ -248,6 +263,9 @@ export function ProjectsWorkspace({
   onCompleteTask,
   onUpdateTask,
   onDeleteTask,
+  onCreateWeeklyReport,
+  onUpdateReport,
+  onFinalizeReport,
   onCreateWebhook,
   onUpdateWebhook,
   onTestWebhook,
@@ -1169,8 +1187,22 @@ export function ProjectsWorkspace({
                     project={selectedProject}
                     report={selectedWeeklyReport}
                     history={selectedWeeklyHistory}
+                    reports={reports}
+                    reportsLoading={reportsLoading}
+                    reportsSaving={reportsSaving}
+                    reportsError={reportsError}
                     error={weeklyReportError}
                     onOpenTasks={() => setActiveProjectTab("tasks")}
+                    onCreateReport={() =>
+                      selectedWorkspaceId
+                        ? onCreateWeeklyReport(
+                            selectedWorkspaceId,
+                            selectedProject.id,
+                          )
+                        : Promise.resolve()
+                    }
+                    onUpdateReport={onUpdateReport}
+                    onFinalizeReport={onFinalizeReport}
                   />
                 </div>
               )}
@@ -1594,8 +1626,15 @@ function ProjectWeeklyReportPanel({
   project,
   report,
   history,
+  reports,
+  reportsLoading,
+  reportsSaving,
+  reportsError,
   error,
   onOpenTasks,
+  onCreateReport,
+  onUpdateReport,
+  onFinalizeReport,
 }: {
   project: Project;
   report: WeeklyProjectReport | undefined;
@@ -1603,9 +1642,28 @@ function ProjectWeeklyReportPanel({
     snapshot: WeeklyReportSnapshot;
     project: WeeklyProjectReport;
   }>;
+  reports: Report[];
+  reportsLoading: boolean;
+  reportsSaving: boolean;
+  reportsError: string | undefined;
   error: string | undefined;
   onOpenTasks(): void;
+  onCreateReport(): Promise<void>;
+  onUpdateReport(
+    report: Report,
+    content: ProjectWeeklyReportContent,
+  ): Promise<void>;
+  onFinalizeReport(report: Report): Promise<void>;
 }) {
+  const latestReport = reports[0];
+  const latestContent = latestReport?.content;
+  const [summaryDraft, setSummaryDraft] = useState(
+    latestContent?.summary ?? "",
+  );
+  useEffect(() => {
+    setSummaryDraft(latestContent?.summary ?? "");
+  }, [latestReport?.id, latestReport?.version, latestContent?.summary]);
+
   if (!project.reportingEnabled) {
     return (
       <EmptySurface
@@ -1631,6 +1689,17 @@ function ProjectWeeklyReportPanel({
     );
   }
   const focusItems = weeklyFocusItems(report);
+
+  async function saveSummary(): Promise<void> {
+    if (!latestReport || latestReport.status !== "draft" || !latestContent) {
+      return;
+    }
+    await onUpdateReport(latestReport, {
+      ...latestContent,
+      summary: summaryDraft.trim(),
+    });
+  }
+
   return (
     <section className="project-weekly-report">
       <header>
@@ -1749,6 +1818,119 @@ function ProjectWeeklyReportPanel({
           </ul>
         ) : (
           <p>{copy.projects.weeklyHistoryEmpty}</p>
+        )}
+      </section>
+      <section
+        className="project-report-document"
+        aria-labelledby="project-report-document-title"
+      >
+        <header>
+          <div>
+            <strong id="project-report-document-title">
+              {copy.projects.reportDocumentTitle}
+            </strong>
+            <span>{copy.projects.reportDocumentDescription}</span>
+          </div>
+          <button
+            className="secondary-button focus-visible-control"
+            type="button"
+            disabled={reportsSaving || reportsLoading}
+            onClick={() => void onCreateReport()}
+          >
+            <BarChart3 aria-hidden="true" />
+            {latestReport
+              ? copy.projects.reportRefresh
+              : copy.projects.reportCreate}
+          </button>
+        </header>
+        {reportsError && (
+          <p className="inline-alert" role="alert">
+            {reportsError}
+          </p>
+        )}
+        {reportsLoading ? (
+          <p className="project-detail__empty">{copy.projects.reportLoading}</p>
+        ) : latestReport && latestContent ? (
+          <div className="project-report-document__body">
+            <div className="project-report-document__meta">
+              <span data-status={latestReport.status}>
+                {copy.projects.reportStatus[latestReport.status]}
+              </span>
+              <time dateTime={latestReport.updatedAt}>
+                {new Date(latestReport.updatedAt).toLocaleString("ko-KR", {
+                  dateStyle: "medium",
+                  timeStyle: "short",
+                })}
+              </time>
+            </div>
+            <label className="project-report-document__summary">
+              <span>{copy.projects.reportSummaryLabel}</span>
+              <textarea
+                value={summaryDraft}
+                onChange={(event) => setSummaryDraft(event.target.value)}
+                readOnly={latestReport.status !== "draft"}
+                rows={3}
+              />
+            </label>
+            <div className="project-report-document__metrics">
+              {latestContent.metrics.map((metric) => (
+                <span key={metric.key}>
+                  <small>{metric.label}</small>
+                  <strong>{metric.value ?? "-"}</strong>
+                </span>
+              ))}
+            </div>
+            <div className="project-report-document__focus">
+              <strong>{copy.projects.reportFocusLabel}</strong>
+              <ul>
+                {latestContent.focus.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+            {latestReport.status === "draft" && (
+              <div className="project-report-document__actions">
+                <button
+                  className="secondary-button focus-visible-control"
+                  type="button"
+                  disabled={reportsSaving || !summaryDraft.trim()}
+                  onClick={() => void saveSummary()}
+                >
+                  {reportsSaving
+                    ? copy.actions.saving
+                    : copy.projects.reportSaveDraft}
+                </button>
+                <button
+                  className="primary-button focus-visible-control"
+                  type="button"
+                  disabled={reportsSaving}
+                  onClick={() => void onFinalizeReport(latestReport)}
+                >
+                  {copy.projects.reportFinalize}
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <EmptySurface
+            title={copy.projects.reportEmptyTitle}
+            description={copy.projects.reportEmptyDescription}
+          />
+        )}
+        {reports.length > 1 && (
+          <details className="project-report-document__history">
+            <summary className="focus-visible-control">
+              {copy.projects.reportHistoryLabel}
+            </summary>
+            <ul>
+              {reports.slice(1).map((item) => (
+                <li key={item.id}>
+                  <span>{item.title}</span>
+                  <small>{copy.projects.reportStatus[item.status]}</small>
+                </li>
+              ))}
+            </ul>
+          </details>
         )}
       </section>
     </section>

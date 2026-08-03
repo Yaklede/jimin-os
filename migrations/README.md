@@ -278,3 +278,13 @@ executor remain `approved` or `executing` in the active decision inbox. Confirm
 `jimin_schema_metadata.schema_version = 54`. After recommendation action audits
 are written, rollback uses the verified version-53 backup because the previous
 schema rejects the new action types and cannot preserve their execution audit.
+Migration `0055_report_documents.sql` stores first-class, owner-scoped project
+weekly reports separately from conversations. Each report keeps an immutable
+version history, a draft/finalized status, and bounded structured evidence so a
+user can review or correct a report without changing the underlying work data.
+Apply it to an empty database and a restored version-54 backup, then verify a
+project report can be created, revised with an optimistic version, finalized,
+and read only by its owner and project scope. Confirm
+`jimin_schema_metadata.schema_version = 55`. The migration is additive; after
+reports are written, rollback uses the schema-54 compatibility image because
+older binaries do not understand report documents.
