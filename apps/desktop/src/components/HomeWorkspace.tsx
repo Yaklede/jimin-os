@@ -16,7 +16,14 @@ import {
   Settings2,
   Sparkles,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  FormEvent,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { type AgentJob, type ConversationMessage } from "../api/agent";
 import { type HomeSnapshot, type Recommendation } from "../api/home";
@@ -55,6 +62,7 @@ import {
 import { type PromoteInflowInput } from "./ProjectInflowPanel";
 
 type HomeWorkspaceProps = {
+  scheduledWork?: ReactNode;
   snapshot: HomeSnapshot | undefined;
   loading: boolean;
   error: string | undefined;
@@ -125,6 +133,7 @@ type HomeWorkspaceProps = {
 };
 
 export function HomeWorkspace({
+  scheduledWork,
   snapshot,
   loading,
   error,
@@ -308,6 +317,8 @@ export function HomeWorkspace({
           </button>
         </div>
       </header>
+
+      {scheduledWork}
 
       {error && (
         <p className="inline-alert" role="alert">

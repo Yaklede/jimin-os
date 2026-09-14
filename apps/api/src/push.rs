@@ -249,7 +249,9 @@ impl PushRuntime {
                 "message": {
                     "token": token.expose_secret(),
                     "data": {
-                        "itemType": delivery.item_type,
+                        // Installed clients accept task/schedule navigation only. A scheduled
+                        // digest is a timed home notification, not a new native item type.
+                        "itemType": if delivery.item_type == "scheduled_work" { "schedule" } else { &delivery.item_type },
                         "itemId": delivery.item_id.to_string(),
                         "destination": delivery.destination,
                         "projectId": delivery.project_id.map_or_else(String::new, |id| id.to_string()),

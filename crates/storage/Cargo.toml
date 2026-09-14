@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+utoipa.workspace = true
 jimin-auth = { path = "../auth" }
 jimin-domain = { path = "../domain" }
 secrecy.workspace = true

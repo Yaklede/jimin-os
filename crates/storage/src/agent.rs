@@ -111,6 +111,10 @@ pub enum PendingAgentAction {
 /// again, then commits the mutation with the final assistant message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentActionCommand {
+    CreateScheduledWork {
+        id: Uuid,
+        definition: crate::scheduled_work::ScheduledWorkDefinition,
+    },
     CreateTask {
         id: Uuid,
         project_id: Option<Uuid>,
@@ -393,6 +397,12 @@ impl AgentActionCommand {
                     Err(StorageError::InvalidConfiguration)
                 }
             }
+            Self::CreateScheduledWork { id, definition } => {
+                if !is_v7(*id) {
+                    return Err(StorageError::InvalidConfiguration);
+                }
+                definition.validate()
+            }
             Self::SendWebhookMessage {
                 id,
                 project_id,
@@ -479,6 +489,7 @@ impl AgentActionCommand {
             Self::UpdateProject { .. } => "update_project",
             Self::DeleteProject { .. } => "delete_project",
             Self::SendWebhookMessage { .. } => "send_webhook_message",
+            Self::CreateScheduledWork { .. } => "create_scheduled_work",
             Self::ApproveRecommendation { .. } => "approve_recommendation",
             Self::RejectRecommendation { .. } => "reject_recommendation",
             Self::DeferRecommendation { .. } => "defer_recommendation",
@@ -496,7 +507,8 @@ impl AgentActionCommand {
             | Self::CreateProject { id, .. }
             | Self::UpdateProject { id, .. }
             | Self::DeleteProject { id, .. }
-            | Self::SendWebhookMessage { id, .. } => *id,
+            | Self::SendWebhookMessage { id, .. }
+            | Self::CreateScheduledWork { id, .. } => *id,
             Self::ApproveRecommendation {
                 recommendation_id, ..
             }
@@ -3659,6 +3671,20 @@ async fn persist_agent_action(
             .map_err(|error| classify(&error))?
             .ok_or(StorageError::IdentityConflict)?;
             append_delete_change(transaction, user_id, "project", *id, version).await?;
+            return Ok(());
+        }
+        AgentActionCommand::CreateScheduledWork { id, definition } => {
+            crate::scheduled_work::save_in_transaction(
+                transaction,
+                user_id,
+                *id,
+                definition,
+                false,
+                None,
+                OffsetDateTime::now_utc(),
+            )
+            .await?
+            .ok_or(StorageError::IdentityConflict)?;
             return Ok(());
         }
         AgentActionCommand::SendWebhookMessage {

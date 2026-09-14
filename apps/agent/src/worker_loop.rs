@@ -139,6 +139,7 @@ enum StructuredAssistantActionKind {
     UpdateProject,
     DeleteProject,
     SendWebhookMessage,
+    CreateScheduledWork,
     ApproveRecommendation,
     RejectRecommendation,
     DeferRecommendation,
@@ -1142,6 +1143,18 @@ fn render_contextualized_turn(
          to 100. A mutate intent below 80 confidence must become clarify and must not contain actions. \
          You may select up to 32 local planning or recommendation decision actions in the actions array. Use an empty array for questions or ambiguous requests. \
          When the user asks to complete, cancel, or update several records, include one action for every matched record. \
+         For recurring reminders or scheduled project digests use create_scheduled_work as the ONLY action; never create \
+         a one-time calendar entry or send a message immediately. Store a disabled draft for owner preview and activation. \
+         Put a JSON object in action.message with exactly these camelCase fields: title, workspaceId, projectId (UUID or null), \
+         webhookId (configured Google Chat UUID or null), weekdays (ISO 1=Monday through 7=Sunday), time (HH:MM), \
+         followUpTime (later same-day HH:MM or null), timeZone (Asia/Seoul), taskScope (today, tomorrow, today_tomorrow, overdue, all_open), \
+         includeOverdue (boolean), assigneeNames (name filter array), destination (google_chat or in_app), mentionAssignees (boolean), \
+         mentionNames (additional registered names array), includeSchedules (boolean). Use exact owned context IDs and registered \
+         mention names only. For google_chat a project and enabled google_chat webhook are required and includeSchedules=false. \
+         For in_app webhookId=null, mentionAssignees=false, mentionNames=[]; includeSchedules only for personal workspace and \
+         without followUpTime. Ask for missing project/channel/time instead of inventing them. An afternoon follow-up only \
+         includes still-open work from the successfully delivered morning reminder. The draft does not execute until the owner \
+         activates it under Home > 예약 업무. For other actions, \
          For create_task and update_task, set assigneeName to the explicitly requested owner. For updates, preserve the \
          current assigneeName unless the user asks to assign, reassign, or clear it. When task notes unambiguously name an \
          owner and the user asks to apply those assignments, create one update_task action per matching task. \
@@ -1818,6 +1831,7 @@ fn assistant_output_schema() -> Value {
                                 "update_project",
                                 "delete_project",
                                 "send_webhook_message",
+                                "create_scheduled_work",
                                 "approve_recommendation",
                                 "reject_recommendation",
                                 "defer_recommendation"
@@ -1868,7 +1882,7 @@ fn assistant_output_schema() -> Value {
                         ,
                         "message": {
                             "type": "string",
-                            "description": "For send_webhook_message, the concise message to post to the selected configured channel.",
+                            "description": "For send_webhook_message, the concise message to post. For create_scheduled_work, the complete JSON-encoded recurrence definition specified in the system instructions; saved as a disabled draft.",
                             "maxLength": 1800
                         },
                         "reason": {
@@ -2097,6 +2111,13 @@ fn validated_agent_actions(
         }
         actions.push(validated_agent_action(&structured.action, context)?.ok_or(())?);
     }
+    if actions.len() > 1
+        && actions
+            .iter()
+            .any(|action| matches!(action, AgentActionCommand::CreateScheduledWork { .. }))
+    {
+        return Err(());
+    }
     if actions
         .iter()
         .filter(|action| matches!(action, AgentActionCommand::SendWebhookMessage { .. }))
@@ -2209,6 +2230,28 @@ fn validated_agent_action(
     };
 
     let command = match action.kind {
+        StructuredAssistantActionKind::CreateScheduledWork => {
+            let definition: jimin_storage::scheduled_work::ScheduledWorkDefinition =
+                serde_json::from_str(&action.message).map_err(|_| ())?;
+            definition.validate().map_err(|_| ())?;
+            if !context
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.id == definition.workspace_id)
+                || definition.project_id.is_some_and(|id| {
+                    !context
+                        .projects
+                        .iter()
+                        .any(|p| p.id == id && p.workspace_id == definition.workspace_id)
+                })
+            {
+                return Err(());
+            }
+            AgentActionCommand::CreateScheduledWork {
+                id: Uuid::now_v7(),
+                definition,
+            }
+        }
         StructuredAssistantActionKind::None => return Ok(None),
         StructuredAssistantActionKind::CreateTask => {
             let project_id = parse_optional_id(&action.project_id)?;
@@ -2754,7 +2797,8 @@ const fn agent_action_entity_id(action: &AgentActionCommand) -> Uuid {
         | AgentActionCommand::CreateProject { id, .. }
         | AgentActionCommand::UpdateProject { id, .. }
         | AgentActionCommand::DeleteProject { id, .. }
-        | AgentActionCommand::SendWebhookMessage { id, .. } => *id,
+        | AgentActionCommand::SendWebhookMessage { id, .. }
+        | AgentActionCommand::CreateScheduledWork { id, .. } => *id,
         AgentActionCommand::ApproveRecommendation {
             recommendation_id, ..
         }
@@ -3423,6 +3467,22 @@ fn agent_action_result(
                     open_task_count: project.open_task_count,
                 },
             )
+        }
+        AgentActionCommand::CreateScheduledWork { definition, .. } => {
+            return Ok((
+                format!(
+                    "‘{}’ 예약 초안을 저장했어요. 아직 자동 실행하지 않아요. 홈의 예약 업무에서 전달 내용을 미리 보고 예약을 시작해 주세요.",
+                    definition.title
+                ),
+                AssistantPresentation {
+                    kind: AssistantPresentationKind::Summary,
+                    title: "예약 초안을 확인해 주세요".into(),
+                    items: vec![],
+                    layout: AssistantPresentationLayout::Stack,
+                    sections: vec![],
+                    focus_item_id: None,
+                },
+            ));
         }
         AgentActionCommand::SendWebhookMessage { .. } => return Err(()),
         AgentActionCommand::ApproveRecommendation { .. }
@@ -5228,6 +5288,54 @@ mod tests {
         assert_eq!(presentation.sections[0].item_ids, vec![today.id]);
         assert_eq!(presentation.items.len(), 1);
         assert_eq!(presentation.focus_item_id, None);
+    }
+
+    #[test]
+    fn recurring_request_is_a_scoped_disabled_draft_and_rejects_invalid_scope() {
+        let workspace_id = Uuid::now_v7();
+        let context = TurnContext {
+            prompt: "평일 저녁 6시에 내일 할 일을 알려줘".into(),
+            schedule: Vec::new(),
+            tasks: Vec::new(),
+            daily_tasks: Vec::new(),
+            workspaces: vec![Workspace {
+                id: workspace_id,
+                scope: WorkspaceScope::Personal,
+                name: "개인".into(),
+                version: 1,
+            }],
+            projects: Vec::new(),
+            recommendations: Vec::new(),
+            requires_daily_task_coverage: false,
+            bulk_schedule_cancellation_ids: Vec::new(),
+        };
+        let mut definition = serde_json::json!({
+            "title": "내일 준비 브리핑", "workspaceId": workspace_id,
+            "projectId": null, "webhookId": null,
+            "weekdays": [1,2,3,4,5], "time": "18:00", "followUpTime": null,
+            "timeZone": "Asia/Seoul", "taskScope": "tomorrow", "includeOverdue": true,
+            "assigneeNames": [], "destination": "in_app", "mentionAssignees": false,
+            "mentionNames": [], "includeSchedules": true
+        });
+        let mut action = StructuredAssistantAction {
+            kind: StructuredAssistantActionKind::CreateScheduledWork,
+            message: definition.to_string(),
+            ..StructuredAssistantAction::default()
+        };
+        let command = validated_agent_action(&action, &context).unwrap().unwrap();
+        assert!(matches!(
+            command,
+            AgentActionCommand::CreateScheduledWork { .. }
+        ));
+        let (answer, _) = agent_action_results(&[command], &context).unwrap();
+        assert!(answer.contains("아직 자동 실행하지 않아요"));
+        definition["workspaceId"] = serde_json::json!(Uuid::now_v7());
+        action.message = definition.to_string();
+        assert!(validated_agent_action(&action, &context).is_err());
+        definition["workspaceId"] = serde_json::json!(workspace_id);
+        definition["time"] = serde_json::json!("25:70");
+        action.message = definition.to_string();
+        assert!(validated_agent_action(&action, &context).is_err());
     }
 
     #[test]

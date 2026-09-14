@@ -75,6 +75,7 @@ const PROJECT_DETAIL_TABS: ProjectDetailTab[] = [
 ];
 
 type ProjectsWorkspaceProps = {
+  scheduledWork?: ReactNode;
   workspaces: Workspace[];
   goals: Goal[];
   projects: Project[];
@@ -218,6 +219,7 @@ type ProjectsWorkspaceProps = {
 };
 
 export function ProjectsWorkspace({
+  scheduledWork,
   workspaces,
   goals,
   projects,
@@ -480,6 +482,8 @@ export function ProjectsWorkspace({
           {copy.actions.createProject}
         </button>
       </header>
+
+      {scheduledWork}
 
       <div
         className="workspace-tabs"

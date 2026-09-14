@@ -1,4 +1,5 @@
 import { Server, Sparkles } from "lucide-react";
+import { ScheduledWorkPanel } from "./components/ScheduledWorkPanel";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   lazy,
@@ -2374,6 +2375,11 @@ export default function App() {
       void peekPendingReminderNavigation()
         .then(async (navigation) => {
           if (!active || !navigation) return;
+          if (navigation.destination === "home") {
+            navigate("home");
+            await acknowledgePendingReminderNavigation(navigation);
+            return;
+          }
           if (
             navigation.destination === "projects" &&
             navigation.itemType === "task" &&
@@ -4969,6 +4975,12 @@ export default function App() {
           >
             {destination === "home" && (
               <HomeWorkspace
+                scheduledWork={
+                  <ScheduledWorkPanel
+                    baseUrl={apiBaseUrl}
+                    authenticate={withAuthenticatedSession}
+                  />
+                }
                 snapshot={homeSnapshot}
                 loading={homeLoading || mode === "loading"}
                 error={homeError ?? (mode === "error" ? message : undefined)}
@@ -5082,6 +5094,14 @@ export default function App() {
             )}
             {destination === "projects" && (
               <ProjectsWorkspace
+                scheduledWork={
+                  <ScheduledWorkPanel
+                    baseUrl={apiBaseUrl}
+                    authenticate={withAuthenticatedSession}
+                    workspaceId={selectedWorkspaceId}
+                    projectId={selectedProjectId}
+                  />
+                }
                 workspaces={workspaces}
                 goals={goals}
                 projects={projects}

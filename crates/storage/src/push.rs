@@ -578,6 +578,10 @@ impl Database {
                          AND registration.status = 'active'
                    )
                    OR NOT (
+                       (delivery.item_type = 'scheduled_work' AND delivery.target_at>NOW() AND EXISTS (
+                           SELECT 1 FROM scheduled_work_runs r WHERE r.id=delivery.item_id AND r.user_id=delivery.user_id AND r.status IN ('completed','failed')
+                       ))
+                       OR
                        (delivery.item_type = 'task' AND EXISTS (
                            SELECT 1 FROM tasks AS task
                            WHERE task.id = delivery.item_id AND task.user_id = delivery.user_id

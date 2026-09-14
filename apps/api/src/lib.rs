@@ -7,6 +7,7 @@ pub mod google_chat_oauth;
 mod meetings;
 pub mod probe;
 pub mod push;
+pub mod scheduled_work;
 mod voice_command;
 pub mod webhook;
 
@@ -1994,7 +1995,9 @@ struct ApiDoc;
 
 #[must_use]
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
-    ApiDoc::openapi()
+    let mut document = ApiDoc::openapi();
+    document.merge(scheduled_work::ScheduledWorkApiDoc::openapi());
+    document
 }
 
 #[allow(clippy::too_many_lines)] // The router is an auditable registry of public API surfaces.
@@ -2106,6 +2109,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/me", get(me))
         .route("/v1/devices", get(devices))
         .merge(device_signals::routes())
+        .merge(scheduled_work::routes())
         .merge(meetings::routes());
 
     let allowed_origins = allowed_client_origins(state.trusted_network());
@@ -10702,6 +10706,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scheduled_work_routes_require_an_authenticated_owner() {
+        let id = Uuid::now_v7();
+        for path in [
+            "/v1/scheduled-work".to_owned(),
+            "/v1/scheduled-work/runs".to_owned(),
+        ] {
+            let (state, _, _) = signed_auth_state(true);
+            let response = router(state)
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let (state, _, _) = signed_auth_state(true);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/scheduled-work/{id}/actions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"kind":"pause","expectedVersion":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn liveness_does_not_depend_on_database_readiness() {
         let state = ApiState::new("test-sha", false, None);
         let response = router(state)
@@ -10924,6 +10957,11 @@ mod tests {
                 "/v1/reports/{report_id}/finalize",
                 "/v1/schedule-entries",
                 "/v1/schedule-entries/{schedule_entry_id}",
+                "/v1/scheduled-work",
+                "/v1/scheduled-work/preview",
+                "/v1/scheduled-work/runs",
+                "/v1/scheduled-work/{id}",
+                "/v1/scheduled-work/{id}/actions",
                 "/v1/sync/changes",
                 "/v1/sync/stream",
                 "/v1/tasks",
