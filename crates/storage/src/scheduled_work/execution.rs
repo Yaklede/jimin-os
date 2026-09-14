@@ -24,6 +24,33 @@ struct ReminderTask {
     reference_links: Vec<String>,
 }
 
+impl ReminderTask {
+    /// Tasks retain their existing display field; matching and mentions use individual names.
+    fn assignee_names(&self) -> BTreeSet<&str> {
+        self.assignee_name
+            .as_deref()
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
+}
+
+fn assignee_label(names: &BTreeSet<&str>, mention: bool) -> String {
+    if names.is_empty() {
+        return "담당자 미정".into();
+    }
+    names
+        .iter()
+        .map(|name| {
+            let name = public_text(name);
+            if mention { format!("@{name}") } else { name }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[derive(sqlx::FromRow)]
 struct ReminderSchedule {
     title: String,
@@ -136,16 +163,18 @@ pub(super) async fn preview_in_transaction(
     .fetch_all(&mut **tx)
     .await
     .map_err(classify)?;
+    let assignee_filter = definition
+        .assignee_names
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
     let tasks: Vec<_> = tasks
         .into_iter()
         .filter(|task| {
             matches_scope(task.due_at, definition, at)
                 && previously_sent.is_none_or(|ids| ids.contains(&task.id))
-                && (definition.assignee_names.is_empty()
-                    || task
-                        .assignee_name
-                        .as_ref()
-                        .is_some_and(|name| definition.assignee_names.contains(name)))
+                && (assignee_filter.is_empty()
+                    || !task.assignee_names().is_disjoint(&assignee_filter))
         })
         .collect();
     let directory = if let Some(id) = definition.webhook_id {
@@ -165,13 +194,14 @@ pub(super) async fn preview_in_transaction(
     let mut mentions = definition
         .mention_names
         .iter()
-        .cloned()
+        .map(String::as_str)
         .collect::<BTreeSet<_>>();
     if definition.mention_assignees {
-        mentions.extend(tasks.iter().filter_map(|task| task.assignee_name.clone()));
+        mentions.extend(tasks.iter().flat_map(ReminderTask::assignee_names));
     }
     let missing: Vec<_> = mentions
         .iter()
+        .copied()
         .filter(|name| !directory.contains_key(*name))
         .collect();
     let warnings = if missing.is_empty() {
@@ -179,11 +209,7 @@ pub(super) async fn preview_in_transaction(
     } else {
         vec![format!(
             "멘션할 사람을 연결에서 먼저 등록해 주세요: {}",
-            missing
-                .into_iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
+            missing.join(", ")
         )]
     };
     let header = format!(
@@ -202,18 +228,13 @@ pub(super) async fn preview_in_transaction(
     }
     let mut group = None;
     for task in &tasks {
-        if group != Some(&task.assignee_name) {
-            let name = task.assignee_name.as_deref().unwrap_or("담당자 미정");
+        let names = task.assignee_names();
+        if group.as_ref() != Some(&names) {
             blocks.push(format!(
-                "\n담당자: {}{}",
-                if definition.mention_assignees && task.assignee_name.is_some() {
-                    "@"
-                } else {
-                    ""
-                },
-                public_text(name)
+                "\n담당자: {}",
+                assignee_label(&names, definition.mention_assignees)
             ));
-            group = Some(&task.assignee_name);
+            group = Some(names);
         }
         let mut lines = vec![
             format!("• {}", public_text(&task.title)),
@@ -642,6 +663,36 @@ async fn queue_push(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn assignee_names_are_trimmed_deduplicated_and_rendered_individually() {
+        let mut task = ReminderTask {
+            id: Uuid::now_v7(),
+            title: String::new(),
+            project_title: None,
+            assignee_name: Some(" 송인준, 김경주 ,송인준, ".into()),
+            due_at: None,
+            summary: None,
+            action_items: vec![],
+            completion_criteria: None,
+            reference_links: vec![],
+        };
+        let names = task.assignee_names();
+        assert_eq!(names, BTreeSet::from(["김경주", "송인준"]));
+        assert_eq!(assignee_label(&names, true), "@김경주, @송인준");
+        assert_eq!(assignee_label(&names, false), "김경주, 송인준");
+        for value in [None, Some(String::new()), Some(" , , ".into())] {
+            task.assignee_name = value;
+            assert!(task.assignee_names().is_empty());
+            assert_eq!(assignee_label(&task.assignee_names(), true), "담당자 미정");
+        }
+        task.assignee_name = Some("송인준".into());
+        assert_eq!(assignee_label(&task.assignee_names(), true), "@송인준");
+        assert_eq!(
+            assignee_label(&BTreeSet::from(["@전체 <users/all>"]), true),
+            "@＠전체 users/all"
+        );
+    }
+
     #[test]
     fn split_keeps_all_lines_and_provider_limit() {
         let blocks = (0..80)

@@ -372,4 +372,158 @@ async fn scheduled_work_upgrade_delivery_and_recovery_contract() {
         .unwrap();
     assert!(db.pause_scheduled_work(user, id, 4).await.unwrap());
     assert!(db.delete_scheduled_work(user, id, 5).await.unwrap());
+    verify_joint_assignees(&db, &pool).await;
+}
+
+#[allow(clippy::too_many_lines)] // Preview, activation and the durable outbox must agree on the same assignee set.
+async fn verify_joint_assignees(db: &Database, pool: &PgPool) {
+    let (user, workspace, project, webhook) = owner(pool).await;
+    let directory = serde_json::json!({"users": {
+        "송인준": "users/123456789012345678901",
+        "김경주": "users/123456789012345678902"
+    }});
+    sqlx::query("UPDATE project_webhooks SET mention_directory=$2 WHERE id=$1")
+        .bind(webhook)
+        .bind(&directory)
+        .execute(pool)
+        .await
+        .unwrap();
+    let task_id = task(
+        pool,
+        user,
+        project,
+        "공동 담당 할 일",
+        "2026-09-14T23:59:00+09:00",
+    )
+    .await;
+    let mut definition = rule(workspace, project, webhook);
+    let initial = at("2026-09-14T08:00:00+09:00");
+    for names in [
+        "송인준, 김경주",
+        "송인준,김경주",
+        " 김경주 , 송인준, 김경주, ",
+    ] {
+        sqlx::query("UPDATE tasks SET assignee_name=$2 WHERE id=$1")
+            .bind(task_id)
+            .bind(names)
+            .execute(pool)
+            .await
+            .unwrap();
+        let preview = db
+            .preview_scheduled_work(user, &definition, initial)
+            .await
+            .unwrap();
+        assert!(
+            preview.warnings.is_empty(),
+            "joint assignees must resolve individually: {:?}",
+            preview.warnings
+        );
+        assert_eq!(preview.task_ids, vec![task_id]);
+        let message = preview.messages.join("\n");
+        assert_eq!(message.matches("@송인준").count(), 1);
+        assert_eq!(message.matches("@김경주").count(), 1);
+        assert_eq!(message.matches("• 공동 담당 할 일").count(), 1);
+    }
+    // Selecting either co-assignee includes the task, selecting both never duplicates it.
+    for names in [vec!["송인준"], vec!["김경주"], vec!["송인준", "김경주"]] {
+        definition.assignee_names = names.into_iter().map(str::to_owned).collect();
+        let preview = db
+            .preview_scheduled_work(user, &definition, initial)
+            .await
+            .unwrap();
+        assert_eq!(preview.task_ids, vec![task_id]);
+        assert!(preview.warnings.is_empty());
+    }
+    definition.assignee_names = vec!["송인".into()];
+    assert!(
+        db.preview_scheduled_work(user, &definition, initial)
+            .await
+            .unwrap()
+            .task_ids
+            .is_empty()
+    );
+    definition.assignee_names = vec!["김경주".into()];
+    let id = Uuid::now_v7();
+    db.save_scheduled_work(user, id, &definition, true, None, initial)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        db.process_due_scheduled_work(at("2026-09-14T09:00:01+09:00"))
+            .await
+            .unwrap()
+    );
+    let runs = db.scheduled_work_runs(user, Some(id), None).await.unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "delivering");
+    assert_eq!(runs[0].task_ids, vec![task_id]);
+    let deliveries: Vec<(serde_json::Value, serde_json::Value)> = sqlx::query_as(
+        "SELECT d.payload,d.mention_directory FROM webhook_deliveries d JOIN scheduled_work_run_deliveries l ON l.delivery_id=d.id WHERE l.run_id=$1"
+    ).bind(runs[0].id).fetch_all(pool).await.unwrap();
+    assert_eq!(deliveries.len(), 1);
+    let (payload, snapshot) = &deliveries[0];
+    assert_eq!(snapshot, &directory);
+    assert!(
+        payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("담당자: @김경주, @송인준")
+    );
+    assert!(
+        payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("2026년 9월 14일 23:59")
+    );
+    // Receipt simulation only: no outbound HTTP request is made by this test.
+    sqlx::query(
+        "UPDATE webhook_deliveries SET status='delivered',delivered_at=NOW() WHERE user_id=$1",
+    )
+    .bind(user)
+    .execute(pool)
+    .await
+    .unwrap();
+    db.reconcile_scheduled_work_runs().await.unwrap();
+    assert!(
+        db.process_due_scheduled_work(at("2026-09-14T16:00:01+09:00"))
+            .await
+            .unwrap()
+    );
+    let runs = db.scheduled_work_runs(user, Some(id), None).await.unwrap();
+    assert_eq!(runs[0].kind, "followup");
+    assert_eq!(runs[0].status, "delivering");
+    assert_eq!(runs[0].task_ids, vec![task_id]);
+    assert!(
+        runs[0]
+            .messages
+            .join("\n")
+            .contains("담당자: @김경주, @송인준")
+    );
+    // A genuinely unknown co-assignee still blocks activation, naming only that person.
+    sqlx::query("UPDATE tasks SET assignee_name='송인준, 김경주, 미등록' WHERE id=$1")
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    let preview = db
+        .preview_scheduled_work(user, &definition, initial)
+        .await
+        .unwrap();
+    assert_eq!(
+        preview.warnings,
+        vec!["멘션할 사람을 연결에서 먼저 등록해 주세요: 미등록"]
+    );
+    assert!(
+        db.save_scheduled_work(user, Uuid::now_v7(), &definition, true, None, initial)
+            .await
+            .is_err()
+    );
+    definition.mention_assignees = false;
+    let preview = db
+        .preview_scheduled_work(user, &definition, initial)
+        .await
+        .unwrap();
+    assert!(preview.warnings.is_empty());
+    assert!(!preview.messages.join("\n").contains('@'));
+    assert!(db.pause_scheduled_work(user, id, 1).await.unwrap());
 }
