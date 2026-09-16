@@ -1149,7 +1149,9 @@ fn render_contextualized_turn(
          webhookId (configured Google Chat UUID or null), weekdays (ISO 1=Monday through 7=Sunday), time (HH:MM), \
          followUpTime (later same-day HH:MM or null), timeZone (Asia/Seoul), taskScope (today, tomorrow, today_tomorrow, overdue, all_open), \
          includeOverdue (boolean), assigneeNames (name filter array), destination (google_chat or in_app), mentionAssignees (boolean), \
-         mentionNames (additional registered names array), includeSchedules (boolean). Use exact owned context IDs and registered \
+         mentionNames (additional registered names array), includeSchedules (boolean), messageDetail (title_only or title_and_details). \
+         Default messageDetail to title_only; use title_and_details only when the user asks to include the task descriptions. \
+         Use exact owned context IDs and registered \
          mention names only. For google_chat a project and enabled google_chat webhook are required and includeSchedules=false. \
          For in_app webhookId=null, mentionAssignees=false, mentionNames=[]; includeSchedules only for personal workspace and \
          without followUpTime. Ask for missing project/channel/time instead of inventing them. An afternoon follow-up only \
@@ -5329,6 +5331,22 @@ mod tests {
         ));
         let (answer, _) = agent_action_results(&[command], &context).unwrap();
         assert!(answer.contains("아직 자동 실행하지 않아요"));
+        for mode in ["title_only", "title_and_details"] {
+            definition["messageDetail"] = serde_json::json!(mode);
+            action.message = definition.to_string();
+            let command = validated_agent_action(&action, &context).unwrap().unwrap();
+            let AgentActionCommand::CreateScheduledWork { definition, .. } = command else {
+                panic!("expected a scheduled work draft");
+            };
+            assert_eq!(
+                serde_json::to_value(definition).unwrap()["messageDetail"],
+                mode
+            );
+        }
+        definition["messageDetail"] = serde_json::json!("unsupported");
+        action.message = definition.to_string();
+        assert!(validated_agent_action(&action, &context).is_err());
+        definition["messageDetail"] = serde_json::json!("title_only");
         definition["workspaceId"] = serde_json::json!(Uuid::now_v7());
         action.message = definition.to_string();
         assert!(validated_agent_action(&action, &context).is_err());

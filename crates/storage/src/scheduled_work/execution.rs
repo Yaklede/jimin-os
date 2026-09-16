@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use super::{
     ScheduledWork, ScheduledWorkDefinition, ScheduledWorkPreview, ScheduledWorkRun,
-    WorkDestination, WorkScope, classify, korea_offset, validate_scope,
+    WorkDestination, WorkMessageDetail, WorkScope, classify, korea_offset, validate_scope,
 };
 use crate::{Database, StorageError, webhook::GoogleChatMentionDirectory};
 
@@ -62,16 +62,60 @@ fn public_text(value: &str) -> String {
     value.replace('@', "＠").replace(['<', '>'], "")
 }
 
-fn date_label(value: OffsetDateTime) -> String {
+fn reminder_date_label(value: OffsetDateTime, at: OffsetDateTime) -> String {
     let local = value.to_offset(korea_offset());
+    let year = if local.year() == at.to_offset(korea_offset()).year() {
+        String::new()
+    } else {
+        format!("{}년 ", local.year())
+    };
     format!(
-        "{}년 {}월 {}일 {:02}:{:02}",
-        local.year(),
+        "{year}{}월 {}일 {:02}:{:02}",
         u8::from(local.month()),
         local.day(),
         local.hour(),
         local.minute()
     )
+}
+
+fn task_reminder(task: &ReminderTask, mode: WorkMessageDetail, at: OffsetDateTime) -> String {
+    let due = task.due_at.map_or_else(
+        || "기한 없음".into(),
+        |due| format!("{} 마감", reminder_date_label(due, at)),
+    );
+    let mut lines = vec![format!(
+        "- {} ({due})",
+        public_text(&task.title)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    )];
+    if mode == WorkMessageDetail::TitleOnly {
+        return lines.join("\n");
+    }
+    lines.push(format!(
+        "  프로젝트: {}",
+        public_text(task.project_title.as_deref().unwrap_or("개인 할 일"))
+    ));
+    if let Some(summary) = &task.summary {
+        lines.extend(public_text(summary).lines().map(|line| format!("  {line}")));
+    }
+    for action in &task.action_items {
+        lines.extend(
+            public_text(action)
+                .lines()
+                .map(|line| format!("  · {line}")),
+        );
+    }
+    if let Some(criteria) = &task.completion_criteria {
+        lines.push(format!("  완료 기준: {}", public_text(criteria)));
+    }
+    lines.extend(
+        task.reference_links
+            .iter()
+            .map(|link| format!("  참고: {}", public_text(link))),
+    );
+    lines.join("\n")
 }
 
 fn matches_scope(
@@ -213,57 +257,40 @@ pub(super) async fn preview_in_transaction(
         )]
     };
     let header = format!(
-        "{} · {}\n{}할 일을 확인해 주세요.",
+        "{}{}",
         public_text(&definition.title),
-        date_label(at),
         if previously_sent.is_some() {
-            "앞서 안내한 일 중 남은 "
+            " · 남은 할 일"
         } else {
             ""
         }
     );
-    let mut blocks = Vec::new();
-    for name in &definition.mention_names {
-        blocks.push(format!("@{name}"));
-    }
-    let mut group = None;
+    let mut groups: BTreeMap<BTreeSet<&str>, Vec<&ReminderTask>> = BTreeMap::new();
     for task in &tasks {
-        let names = task.assignee_names();
-        if group.as_ref() != Some(&names) {
-            blocks.push(format!(
-                "\n담당자: {}",
-                assignee_label(&names, definition.mention_assignees)
-            ));
-            group = Some(names);
+        groups.entry(task.assignee_names()).or_default().push(task);
+    }
+    let mut blocks = Vec::new();
+    let additional = definition
+        .mention_names
+        .iter()
+        .filter(|name| {
+            !definition.mention_assignees
+                || !groups.keys().any(|names| names.contains(name.as_str()))
+        })
+        .map(|name| format!("@{name}"))
+        .collect::<BTreeSet<_>>();
+    if !additional.is_empty() {
+        blocks.push(additional.into_iter().collect::<Vec<_>>().join(", "));
+    }
+    for (names, mut tasks) in groups {
+        tasks.sort_by_key(|task| (task.due_at.is_none(), task.due_at, task.id));
+        blocks.push(format!(
+            "\n{}",
+            assignee_label(&names, definition.mention_assignees)
+        ));
+        for task in tasks {
+            blocks.push(task_reminder(task, definition.message_detail, at));
         }
-        let mut lines = vec![
-            format!("• {}", public_text(&task.title)),
-            format!(
-                "프로젝트: {}",
-                public_text(task.project_title.as_deref().unwrap_or("개인 할 일"))
-            ),
-            format!(
-                "마감: {}",
-                task.due_at.map_or_else(|| "정하지 않음".into(), date_label)
-            ),
-        ];
-        if let Some(summary) = &task.summary {
-            lines.push(public_text(summary));
-        }
-        lines.extend(
-            task.action_items
-                .iter()
-                .map(|line| format!("- {}", public_text(line))),
-        );
-        if let Some(criteria) = &task.completion_criteria {
-            lines.push(format!("완료 기준: {}", public_text(criteria)));
-        }
-        lines.extend(
-            task.reference_links
-                .iter()
-                .map(|link| format!("참고: {}", public_text(link))),
-        );
-        blocks.push(lines.join("\n"));
     }
     let mut schedule_count = 0;
     if definition.include_schedules {
@@ -284,11 +311,14 @@ pub(super) async fn preview_in_transaction(
         let schedules:Vec<ReminderSchedule> = sqlx::query_as("SELECT s.title,s.starts_at FROM schedule_entries s LEFT JOIN projects p ON p.id=s.project_id AND p.user_id=s.user_id WHERE s.user_id=$1 AND s.status='confirmed' AND s.ends_at>$2 AND s.starts_at<$3 AND (s.project_id IS NULL OR p.workspace_id=$4) AND ($5::UUID IS NULL OR s.project_id=$5) ORDER BY s.starts_at,s.id")
             .bind(user).bind(start).bind(end).bind(definition.workspace_id).bind(definition.project_id).fetch_all(&mut **tx).await.map_err(classify)?;
         schedule_count = schedules.len();
+        if !schedules.is_empty() {
+            blocks.push("\n일정".into());
+        }
         for entry in schedules {
             blocks.push(format!(
-                "일정: {} · {}",
+                "- {} ({})",
                 public_text(&entry.title),
-                date_label(entry.starts_at)
+                reminder_date_label(entry.starts_at, at)
             ));
         }
     }
@@ -663,6 +693,45 @@ async fn queue_push(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reminder_modes_keep_dates_but_only_details_mode_includes_description_and_links() {
+        let at = OffsetDateTime::parse("2026-09-16T09:00:00+09:00", &Rfc3339).unwrap();
+        let mut task = ReminderTask {
+            id: Uuid::now_v7(),
+            title: "  계약서\n 검토  ".into(),
+            project_title: Some("계약 프로젝트".into()),
+            assignee_name: Some("홍길동".into()),
+            due_at: Some(at + Duration::hours(9)),
+            summary: Some("누락된 조항을 검토해요.".into()),
+            action_items: vec!["@추가멘션 없이 <원문> 확인".into()],
+            completion_criteria: Some("검토 결과 공유".into()),
+            reference_links: vec!["https://example.test/docs".into()],
+        };
+        assert_eq!(
+            task_reminder(&task, WorkMessageDetail::TitleOnly, at),
+            "- 계약서 검토 (9월 16일 18:00 마감)"
+        );
+        let detailed = task_reminder(&task, WorkMessageDetail::TitleAndDetails, at);
+        for text in [
+            "- 계약서 검토 (9월 16일 18:00 마감)",
+            "계약 프로젝트",
+            "누락된 조항을 검토해요.",
+            "＠추가멘션 없이 원문 확인",
+            "완료 기준: 검토 결과 공유",
+            "https://example.test/docs",
+        ] {
+            assert!(detailed.contains(text), "{text}");
+        }
+        assert!(!detailed.contains('@'));
+        task.due_at = None;
+        assert_eq!(
+            task_reminder(&task, WorkMessageDetail::TitleOnly, at),
+            "- 계약서 검토 (기한 없음)"
+        );
+        let next_year = OffsetDateTime::parse("2026-12-31T15:30:00Z", &Rfc3339).unwrap();
+        assert_eq!(reminder_date_label(next_year, at), "2027년 1월 1일 00:30");
+    }
+
     #[test]
     fn assignee_names_are_trimmed_deduplicated_and_rendered_individually() {
         let mut task = ReminderTask {

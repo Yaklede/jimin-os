@@ -10705,6 +10705,26 @@ mod tests {
         (state, token.token().expose_secret().to_owned(), profile)
     }
 
+    #[test]
+    fn scheduled_work_openapi_describes_optional_message_detail_and_allowed_modes() {
+        let document = serde_json::to_value(openapi_document()).unwrap();
+        let definition = &document["components"]["schemas"]["ScheduledWorkDefinition"];
+        assert!(
+            !definition["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("messageDetail"))
+        );
+        assert_eq!(
+            definition["properties"]["messageDetail"]["default"],
+            "title_only"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["WorkMessageDetail"]["enum"],
+            serde_json::json!(["title_only", "title_and_details"])
+        );
+    }
+
     #[tokio::test]
     async fn scheduled_work_routes_require_an_authenticated_owner() {
         let id = Uuid::now_v7();

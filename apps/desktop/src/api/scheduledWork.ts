@@ -2,6 +2,7 @@ import { PlanningRequestError } from "./planning";
 
 export type ScheduledWorkScope =
   "today" | "tomorrow" | "today_tomorrow" | "overdue" | "all_open";
+export type ScheduledWorkMessageDetail = "title_only" | "title_and_details";
 export interface ScheduledWorkDefinition {
   title: string;
   workspaceId: string;
@@ -18,6 +19,17 @@ export interface ScheduledWorkDefinition {
   mentionAssignees: boolean;
   mentionNames: string[];
   includeSchedules: boolean;
+  /** Older stored rules omit this field and use title_only. */
+  messageDetail?: ScheduledWorkMessageDetail;
+}
+
+export function normalizeScheduledWorkDefinition(
+  definition: ScheduledWorkDefinition,
+): ScheduledWorkDefinition {
+  return {
+    ...definition,
+    messageDetail: definition.messageDetail ?? "title_only",
+  };
 }
 export interface ScheduledWork {
   id: string;

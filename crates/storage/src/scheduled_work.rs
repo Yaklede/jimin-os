@@ -27,6 +27,14 @@ pub enum WorkDestination {
     InApp,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkMessageDetail {
+    #[default]
+    TitleOnly,
+    TitleAndDetails,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ScheduledWorkDefinition {
@@ -47,6 +55,10 @@ pub struct ScheduledWorkDefinition {
     pub mention_assignees: bool,
     pub mention_names: Vec<String>,
     pub include_schedules: bool,
+    /// Omitted in existing rules and older clients: keep reminders concise by default.
+    #[serde(default)]
+    #[schema(default = "title_only")]
+    pub message_detail: WorkMessageDetail,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow, ToSchema)]
@@ -414,8 +426,33 @@ mod tests {
             mention_assignees: false,
             mention_names: vec![],
             include_schedules: false,
+            message_detail: WorkMessageDetail::TitleOnly,
         }
     }
+    #[test]
+    fn message_detail_defaults_for_legacy_rules_and_rejects_unknown_values() {
+        let mut value = serde_json::to_value(rule()).unwrap();
+        value.as_object_mut().unwrap().remove("messageDetail");
+        let legacy: ScheduledWorkDefinition = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(legacy.message_detail, WorkMessageDetail::TitleOnly);
+        for mode in [
+            WorkMessageDetail::TitleOnly,
+            WorkMessageDetail::TitleAndDetails,
+        ] {
+            value["messageDetail"] = serde_json::to_value(mode).unwrap();
+            let decoded: ScheduledWorkDefinition = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(decoded.message_detail, mode);
+        }
+        for invalid in [
+            serde_json::json!("full"),
+            serde_json::Value::Null,
+            serde_json::json!(1),
+        ] {
+            value["messageDetail"] = invalid;
+            assert!(serde_json::from_value::<ScheduledWorkDefinition>(value.clone()).is_err());
+        }
+    }
+
     #[test]
     fn next_slot_handles_friday_weekend_and_exact_slot() {
         let parse =

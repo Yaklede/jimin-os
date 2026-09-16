@@ -1,6 +1,6 @@
 use jimin_storage::{
     Database,
-    scheduled_work::{ScheduledWorkDefinition, WorkDestination, WorkScope},
+    scheduled_work::{ScheduledWorkDefinition, WorkDestination, WorkMessageDetail, WorkScope},
 };
 use secrecy::SecretString;
 use sqlx::PgPool;
@@ -28,6 +28,7 @@ fn rule(workspace: Uuid, project: Uuid, webhook: Uuid) -> ScheduledWorkDefinitio
         mention_assignees: true,
         mention_names: vec![],
         include_schedules: false,
+        message_detail: WorkMessageDetail::TitleAndDetails,
     }
 }
 async fn owner(pool: &PgPool) -> (Uuid, Uuid, Uuid, Uuid) {
@@ -121,12 +122,7 @@ async fn scheduled_work_upgrade_delivery_and_recovery_contract() {
             .contains("https://example.test/docs/task")
     );
     assert!(preview.messages.join("\n").contains("@홍길동"));
-    assert!(
-        preview
-            .messages
-            .join("\n")
-            .contains("2026년 9월 14일 23:59")
-    );
+    assert!(preview.messages.join("\n").contains("9월 14일 23:59"));
     let (other, other_workspace, _, _) = owner(&pool).await;
     assert!(
         db.preview_scheduled_work(other, &definition, initial)
@@ -373,6 +369,145 @@ async fn scheduled_work_upgrade_delivery_and_recovery_contract() {
     assert!(db.pause_scheduled_work(user, id, 4).await.unwrap());
     assert!(db.delete_scheduled_work(user, id, 5).await.unwrap());
     verify_joint_assignees(&db, &pool).await;
+    verify_message_detail_modes(&db, &pool).await;
+}
+
+#[allow(clippy::too_many_lines)] // Persisted definitions, previews and durable delivery share the same formatting contract.
+async fn verify_message_detail_modes(db: &Database, pool: &PgPool) {
+    let (user, workspace, project, webhook) = owner(pool).await;
+    let initial = at("2026-09-16T08:00:00+09:00");
+    let mut definition = rule(workspace, project, webhook);
+    definition.task_scope = WorkScope::AllOpen;
+    definition.mention_names = vec!["홍길동".into()];
+    let first = task(
+        pool,
+        user,
+        project,
+        "계약서 검토",
+        "2026-09-16T18:00:00+09:00",
+    )
+    .await;
+    let second = task(
+        pool,
+        user,
+        project,
+        "결과 공유",
+        "2026-09-17T09:00:00+09:00",
+    )
+    .await;
+    sqlx::query("UPDATE tasks SET assignee_name=$2 WHERE id=$1")
+        .bind(first)
+        .bind("홍길동, 이담당")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tasks SET assignee_name=$2 WHERE id=$1")
+        .bind(second)
+        .bind(" 이담당, 홍길동, 홍길동 ")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO task_assignment_public_details(task_id,user_id,summary,action_items,completion_criteria,reference_links) VALUES($1,$2,'누락 조항 확인',ARRAY['계약 조항 대조'],'검토 결과 전달',ARRAY['https://example.test/docs/contract'])").bind(first).bind(user).execute(pool).await.unwrap();
+    // JSON saved before this feature must also default to the concise format.
+    let mut legacy = serde_json::to_value(&definition).unwrap();
+    legacy.as_object_mut().unwrap().remove("messageDetail");
+    definition = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(definition.message_detail, WorkMessageDetail::TitleOnly);
+    let id = Uuid::now_v7();
+    db.save_scheduled_work(user, id, &definition, true, None, initial)
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("UPDATE scheduled_work SET definition=$2 WHERE id=$1")
+        .bind(id)
+        .bind(legacy)
+        .execute(pool)
+        .await
+        .unwrap();
+    let saved = db
+        .scheduled_work_for_user(user)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.id == id)
+        .unwrap();
+    assert_eq!(
+        saved.definition.message_detail,
+        WorkMessageDetail::TitleOnly
+    );
+    let preview = db
+        .preview_scheduled_work(user, &saved.definition, initial)
+        .await
+        .unwrap();
+    assert!(preview.warnings.is_empty());
+    assert_eq!(preview.task_ids.len(), 2);
+    let concise = preview.messages.join("\n");
+    assert_eq!(
+        concise,
+        "마감 안내\n\n@이담당, @홍길동\n- 계약서 검토 (9월 16일 18:00 마감)\n- 결과 공유 (9월 17일 09:00 마감)"
+    );
+    assert_eq!(concise.matches("@홍길동").count(), 1);
+    let clock = at("2026-09-16T09:00:05+09:00");
+    db.process_due_scheduled_work(clock).await.unwrap();
+    let runs = db.scheduled_work_runs(user, Some(id), None).await.unwrap();
+    assert_eq!(runs.len(), 1);
+    let primary = &runs[0];
+    assert_eq!(primary.messages, preview.messages);
+    let payload: serde_json::Value = sqlx::query_scalar("SELECT d.payload FROM webhook_deliveries d JOIN scheduled_work_run_deliveries l ON l.delivery_id=d.id WHERE l.run_id=$1").bind(primary.id).fetch_one(pool).await.unwrap();
+    assert_eq!(payload["message"], concise);
+    sqlx::query("UPDATE webhook_deliveries SET status='delivered',delivered_at=NOW() WHERE id IN (SELECT delivery_id FROM scheduled_work_run_deliveries WHERE run_id=$1)").bind(primary.id).execute(pool).await.unwrap();
+    db.reconcile_scheduled_work_runs().await.unwrap();
+    definition.message_detail = WorkMessageDetail::TitleAndDetails;
+    let current = db
+        .scheduled_work_for_user(user)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.id == id)
+        .unwrap();
+    let detailed_rule = db
+        .save_scheduled_work(user, id, &definition, true, Some(current.version), clock)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        detailed_rule.definition.message_detail,
+        WorkMessageDetail::TitleAndDetails
+    );
+    let detailed_preview = db
+        .preview_scheduled_work(user, &definition, clock)
+        .await
+        .unwrap();
+    let detailed = detailed_preview.messages.join("\n");
+    for text in [
+        "누락 조항 확인",
+        "계약 조항 대조",
+        "검토 결과 전달",
+        "https://example.test/docs/contract",
+    ] {
+        assert!(detailed.contains(text));
+        assert!(!concise.contains(text));
+    }
+    db.process_due_scheduled_work(at("2026-09-16T16:00:05+09:00"))
+        .await
+        .unwrap();
+    let runs = db.scheduled_work_runs(user, Some(id), None).await.unwrap();
+    let followup = runs.iter().find(|run| run.kind == "followup").unwrap();
+    assert!(
+        followup
+            .messages
+            .join("\n")
+            .contains("https://example.test/docs/contract")
+    );
+    assert_eq!(
+        runs.iter()
+            .find(|run| run.id == primary.id)
+            .unwrap()
+            .messages,
+        preview.messages
+    );
+    let payload: serde_json::Value = sqlx::query_scalar("SELECT d.payload FROM webhook_deliveries d JOIN scheduled_work_run_deliveries l ON l.delivery_id=d.id WHERE l.run_id=$1").bind(followup.id).fetch_one(pool).await.unwrap();
+    assert_eq!(payload["message"], followup.messages[0]);
 }
 
 #[allow(clippy::too_many_lines)] // Preview, activation and the durable outbox must agree on the same assignee set.
@@ -422,7 +557,7 @@ async fn verify_joint_assignees(db: &Database, pool: &PgPool) {
         let message = preview.messages.join("\n");
         assert_eq!(message.matches("@송인준").count(), 1);
         assert_eq!(message.matches("@김경주").count(), 1);
-        assert_eq!(message.matches("• 공동 담당 할 일").count(), 1);
+        assert_eq!(message.matches("- 공동 담당 할 일").count(), 1);
     }
     // Selecting either co-assignee includes the task, selecting both never duplicates it.
     for names in [vec!["송인준"], vec!["김경주"], vec!["송인준", "김경주"]] {
@@ -467,13 +602,13 @@ async fn verify_joint_assignees(db: &Database, pool: &PgPool) {
         payload["message"]
             .as_str()
             .unwrap()
-            .contains("담당자: @김경주, @송인준")
+            .contains("@김경주, @송인준")
     );
     assert!(
         payload["message"]
             .as_str()
             .unwrap()
-            .contains("2026년 9월 14일 23:59")
+            .contains("9월 14일 23:59")
     );
     // Receipt simulation only: no outbound HTTP request is made by this test.
     sqlx::query(
@@ -493,12 +628,7 @@ async fn verify_joint_assignees(db: &Database, pool: &PgPool) {
     assert_eq!(runs[0].kind, "followup");
     assert_eq!(runs[0].status, "delivering");
     assert_eq!(runs[0].task_ids, vec![task_id]);
-    assert!(
-        runs[0]
-            .messages
-            .join("\n")
-            .contains("담당자: @김경주, @송인준")
-    );
+    assert!(runs[0].messages.join("\n").contains("@김경주, @송인준"));
     // A genuinely unknown co-assignee still blocks activation, naming only that person.
     sqlx::query("UPDATE tasks SET assignee_name='송인준, 김경주, 미등록' WHERE id=$1")
         .bind(task_id)

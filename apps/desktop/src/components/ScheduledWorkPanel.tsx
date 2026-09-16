@@ -23,6 +23,7 @@ import {
 } from "../api/projects";
 import { fetchProjectWebhooks, type ProjectWebhook } from "../api/webhooks";
 import {
+  normalizeScheduledWorkDefinition,
   scheduledRequest,
   type ScheduledWork,
   type ScheduledWorkDefinition,
@@ -78,6 +79,7 @@ export function scheduledWorkTemplate(
     mentionAssignees: false,
     mentionNames: [],
     includeSchedules: template === "brief",
+    messageDetail: "title_only",
   };
 }
 function errorCopy(error: unknown) {
@@ -239,10 +241,12 @@ export function ScheduledWorkPanel({
         : workspaceId) ??
       workspaces[0]?.id ??
       "";
-    const next = item?.definition ?? {
-      ...scheduledWorkTemplate(workspace, template),
-      projectId: template === "brief" ? null : (projectId ?? null),
-    };
+    const next = normalizeScheduledWorkDefinition(
+      item?.definition ?? {
+        ...scheduledWorkTemplate(workspace, template),
+        projectId: template === "brief" ? null : (projectId ?? null),
+      },
+    );
     setEditing(item);
     setDefinition(next);
     setAssigneeFilter(next.assigneeNames.join(", "));
@@ -490,6 +494,10 @@ export function ScheduledWorkPanel({
                     {item.definition.destination === "google_chat"
                       ? "Google Chat"
                       : "홈과 앱 알림"}{" "}
+                    ·{" "}
+                    {item.definition.messageDetail === "title_and_details"
+                      ? "제목 + 내용"
+                      : "제목만"}{" "}
                     ·{" "}
                     {item.enabled
                       ? `다음 ${date(item.nextRunAt)}`
@@ -760,6 +768,27 @@ export function ScheduledWorkPanel({
                   <option value="in_app">홈과 앱 알림</option>
                   <option value="google_chat">Google Chat</option>
                 </select>
+              </label>
+              <label>
+                알림에 표시할 내용
+                <select
+                  value={definition.messageDetail ?? "title_only"}
+                  aria-describedby="scheduled-message-detail-help"
+                  onChange={(event) =>
+                    update({
+                      messageDetail: event.target
+                        .value as ScheduledWorkDefinition["messageDetail"],
+                    })
+                  }
+                >
+                  <option value="title_only">제목만</option>
+                  <option value="title_and_details">제목 + 내용</option>
+                </select>
+                <small id="scheduled-message-detail-help">
+                  {definition.messageDetail === "title_and_details"
+                    ? "제목과 마감일에 설명, 처리할 내용, 참고 링크를 함께 보내요."
+                    : "담당자별로 할 일 제목과 마감일만 보내요."}
+                </small>
               </label>
               {definition.destination === "google_chat" && (
                 <>
