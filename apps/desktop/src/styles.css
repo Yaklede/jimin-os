@@ -5268,6 +5268,70 @@ svg {
   min-height: 430px;
 }
 
+.inflow-review-queues {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.inflow-dismiss-form {
+  display: grid;
+  gap: 16px;
+  margin-top: 16px;
+  min-width: 0;
+}
+
+.inflow-dismiss-form > label {
+  display: grid;
+  gap: 8px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.inflow-dismiss-form textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 96px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+
+.inflow-dismiss-form > .inflow-dismiss-form__reply {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  gap: 12px;
+}
+
+.inflow-dismiss-form__reply input {
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  accent-color: var(--accent);
+}
+
+.inflow-dismiss-form .project-inflow-item__actions {
+  flex-wrap: wrap;
+}
+
+.inflow-review-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  margin-top: 8px;
+}
+
+.inflow-review-mark svg {
+  width: 18px;
+  height: 18px;
+}
+
 .home-inflow-review__queue {
   min-width: 0;
   border-right: 1px solid var(--border);

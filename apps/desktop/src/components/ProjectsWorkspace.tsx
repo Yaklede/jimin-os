@@ -213,7 +213,10 @@ type ProjectsWorkspaceProps = {
     item: ProjectInflowItem,
     input: PromoteInflowInput,
   ): Promise<void>;
-  onDismissInflow(item: ProjectInflowItem): Promise<void>;
+  onDismissInflow(
+    item: ProjectInflowItem,
+    input?: { reason?: string; replyToSource?: boolean; markSeen?: boolean },
+  ): Promise<void>;
   onRetryInflowAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryInflowCompletion(item: ProjectInflowItem): Promise<void>;
 };

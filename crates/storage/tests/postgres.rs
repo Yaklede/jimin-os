@@ -35,7 +35,7 @@ use jimin_storage::{
     google_chat::{
         CompleteGoogleChatOAuthAuthorization, CreateGoogleChatOAuthAuthorization,
         NewProjectGoogleChatSource, ProjectInflowStatus, PromoteProjectInflowItem,
-        ProviderGoogleChatMessage,
+        ProviderGoogleChatMessage, ReviewProjectInflowItem,
     },
     inflow_analysis::{
         InflowAnalysisResult, InflowAnalysisState, InflowClassification, InflowReferenceDocument,
@@ -2163,6 +2163,227 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             .iter()
             .any(|item| item.id == promoted.id)
     );
+    // Review is persistent but not a terminal decision. Later replies stay unread.
+    let review_items = database
+        .apply_google_chat_messages(
+            &connection,
+            &[ProviderGoogleChatMessage {
+                provider_message_name: "spaces/company-room/messages/review-1.review-1".to_owned(),
+                provider_thread_name: Some("spaces/company-room/threads/review".to_owned()),
+                sender_provider_name: Some("users/123456789012345678901".to_owned()),
+                sender_name: Some("요청자".to_owned()),
+                content_text: "검토 요청".to_owned(),
+                received_at: received_at + TimeDuration::seconds(100),
+            }],
+        )
+        .await
+        .expect("review fixture should ingest");
+    let review_records = database
+        .project_inflow_items(
+            owner.profile.id,
+            first_project.id,
+            Some(ProjectInflowStatus::Pending),
+        )
+        .await
+        .expect("review records should load");
+    let review = review_records
+        .iter()
+        .find(|item| item.id == review_items[0].inflow_id)
+        .expect("review record should exist");
+    let review_command = ReviewProjectInflowItem {
+        user_id: owner.profile.id,
+        project_id: first_project.id,
+        item_id: review.id,
+        expected_version: review.version,
+        mark_seen: true,
+        reason: None,
+        reply_to_source: false,
+    };
+    assert!(
+        database
+            .review_project_inflow_item(&ReviewProjectInflowItem {
+                project_id: second_project.id,
+                ..review_command.clone()
+            })
+            .await
+            .expect("cross-project review should be safe")
+            .is_none()
+    );
+    assert!(
+        database
+            .review_project_inflow_item(&ReviewProjectInflowItem {
+                user_id: Uuid::now_v7(),
+                ..review_command.clone()
+            })
+            .await
+            .expect("cross-user review should be safe")
+            .is_none()
+    );
+    let seen = database
+        .review_project_inflow_item(&review_command)
+        .await
+        .expect("review should save")
+        .expect("review should exist");
+    assert_eq!(seen.status, ProjectInflowStatus::Pending);
+    assert!(seen.reviewed_at.is_some());
+    assert!(
+        database
+            .review_project_inflow_item(&review_command)
+            .await
+            .expect("stale review should be safe")
+            .is_none()
+    );
+    let newer = database
+        .apply_google_chat_messages(
+            &connection,
+            &[ProviderGoogleChatMessage {
+                provider_message_name: "spaces/company-room/messages/review-2.review-2".to_owned(),
+                provider_thread_name: Some("spaces/company-room/threads/review".to_owned()),
+                sender_provider_name: Some("users/123456789012345678901".to_owned()),
+                sender_name: Some("요청자".to_owned()),
+                content_text: "추가 요청".to_owned(),
+                received_at: received_at + TimeDuration::seconds(101),
+            }],
+        )
+        .await
+        .expect("new reply should ingest");
+    let new_records = database
+        .project_inflow_items(
+            owner.profile.id,
+            first_project.id,
+            Some(ProjectInflowStatus::Pending),
+        )
+        .await
+        .expect("new records should load");
+    let new_reply = new_records
+        .iter()
+        .find(|item| item.id == newer[0].inflow_id)
+        .expect("new reply should exist");
+    assert!(new_reply.reviewed_at.is_none());
+    let without_reason = ReviewProjectInflowItem {
+        item_id: new_reply.id,
+        expected_version: new_reply.version,
+        mark_seen: false,
+        reply_to_source: true,
+        ..review_command.clone()
+    };
+    assert!(
+        database
+            .review_project_inflow_item(&without_reason)
+            .await
+            .is_err()
+    );
+    assert!(
+        database
+            .review_project_inflow_item(&ReviewProjectInflowItem {
+                reason: Some("x".repeat(2001)),
+                ..without_reason.clone()
+            })
+            .await
+            .is_err()
+    );
+    let dismissed = database
+        .review_project_inflow_item(&ReviewProjectInflowItem {
+            reason: Some(" 이미 처리한 요청이에요. ".to_owned()),
+            ..without_reason
+        })
+        .await
+        .expect("exclusion should save")
+        .expect("excluded item should exist");
+    assert_eq!(dismissed.status, ProjectInflowStatus::Dismissed);
+    assert_eq!(
+        dismissed.dismissal_reason.as_deref(),
+        Some("이미 처리한 요청이에요.")
+    );
+    assert_eq!(dismissed.dismissal_reply_status.as_deref(), Some("pending"));
+    let replies = database
+        .claim_google_chat_dismissal_replies(source.id)
+        .await
+        .expect("reply should claim");
+    assert_eq!(replies.len(), 1);
+    assert!(
+        database
+            .claim_google_chat_dismissal_replies(source.id)
+            .await
+            .expect("leased reply should not duplicate")
+            .is_empty()
+    );
+    database
+        .record_google_chat_dismissal_reply(&replies[0], Some("google_chat.provider_unavailable"))
+        .await
+        .expect("delivery failure should persist");
+    let excluded = database
+        .project_inflow_items(
+            owner.profile.id,
+            first_project.id,
+            Some(ProjectInflowStatus::Dismissed),
+        )
+        .await
+        .expect("excluded records should reload");
+    let failed = excluded
+        .iter()
+        .find(|item| item.id == dismissed.id)
+        .expect("exclusion must survive failed reply");
+    assert_eq!(failed.dismissal_reply_status.as_deref(), Some("failed"));
+    assert!(
+        database
+            .retry_project_inflow_dismissal_reply(
+                Uuid::now_v7(),
+                first_project.id,
+                failed.id,
+                failed.version
+            )
+            .await
+            .expect("other user must not retry")
+            .is_none()
+    );
+    database
+        .retry_project_inflow_dismissal_reply(
+            owner.profile.id,
+            first_project.id,
+            failed.id,
+            failed.version,
+        )
+        .await
+        .expect("owner should retry")
+        .expect("reply should requeue");
+    let retry = database
+        .claim_google_chat_dismissal_replies(source.id)
+        .await
+        .expect("retry should claim");
+    assert_eq!(
+        retry[0].id, replies[0].id,
+        "provider request ID must remain stable"
+    );
+    database
+        .record_google_chat_dismissal_reply(&retry[0], None)
+        .await
+        .expect("successful reply should persist");
+    assert!(
+        database
+            .claim_google_chat_dismissal_replies(source.id)
+            .await
+            .expect("sent reply must not resend")
+            .is_empty()
+    );
+    let delivered = database
+        .project_inflow_items(
+            owner.profile.id,
+            first_project.id,
+            Some(ProjectInflowStatus::Dismissed),
+        )
+        .await
+        .expect("delivery should reload");
+    assert_eq!(
+        delivered
+            .iter()
+            .find(|item| item.id == dismissed.id)
+            .unwrap()
+            .dismissal_reply_status
+            .as_deref(),
+        Some("sent")
+    );
+
     database
         .mark_google_chat_source_failure(source.id, "google_chat.authorization_rejected", true)
         .await

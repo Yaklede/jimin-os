@@ -242,6 +242,32 @@ export const projectCopy = {
   taskRemoveNotice:
     "일을 지우지 못했어요. 최신 내용을 불러온 뒤 다시 시도해 주세요.",
   inflowTitle: "확인할 대화",
+  inflowNewTitle: "새 업무 요청",
+  inflowExistingTitle: "기존 일감 업데이트",
+  inflowExistingEyebrow: "등록된 일감의 새 소식",
+  inflowExistingOpen: (count: number) => `추가 대화 ${count}건 확인하기`,
+  inflowExistingCollapse: "추가 대화 간단히 보기",
+  inflowExistingQueueTitle: "새 답글이 온 일감",
+  inflowExistingDescription:
+    "등록된 일감에 새 답글이 왔어요. 내용을 확인하고 기존 일감에서 이어서 처리해 주세요.",
+  inflowReviewedTitle: "확인한 대화",
+  inflowReviewed: "확인함",
+  inflowUnread: "새 내용 있음",
+  inflowMarkSeen: "확인했어요",
+  inflowReviewProblem: "확인 상태를 저장하지 못했어요. 다시 시도해 주세요.",
+  inflowDismissReason: "제외 사유",
+  inflowDismissReasonLabel: "제외 사유 (선택)",
+  inflowDismissReasonPlaceholder:
+    "예: 이미 처리했거나 다른 담당자가 진행 중인 일이에요.",
+  inflowDismissReasonRequired: "답글로 남길 사유를 적어 주세요.",
+  inflowDismissReplyLabel: "이 사유를 원문 대화에 답글로 남기기",
+  inflowDismissSave: "업무 아님으로 저장하기",
+  inflowDismissCancel: "계속 검토하기",
+  inflowDismissReplySent: "원문 대화에 사유를 남겼어요.",
+  inflowDismissReplyFailed:
+    "업무 아님으로 저장했지만 답글을 보내지 못했어요. 연결 상태를 확인하고 다시 시도해 주세요.",
+  inflowDismissReplyPending: "업무 아님으로 저장했어요. 답글을 보내고 있어요.",
+  inflowDismissReplyRetry: "사유 답글 다시 보내기",
   inflowDescription:
     "Chat 대화를 맥락별로 묶어 보여드려요. 해야 할 행동이 있는 대화만 할 일로 정리해요.",
   inflowHomeEyebrow: "새로 들어온 업무",

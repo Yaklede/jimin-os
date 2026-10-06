@@ -42,6 +42,23 @@ function inflow(
 }
 
 describe("home inflow review", () => {
+  it("separates new requests, existing task updates and reviewed conversations", () => {
+    const markup = renderReview([
+      inflow("new"),
+      inflow("update", { promotedTaskId: "existing-task" }),
+      inflow("read", { reviewed: true }),
+    ]);
+    expect(markup).toContain(copy.projects.inflowNewTitle);
+    expect(markup).toContain(copy.projects.inflowExistingTitle);
+    expect(markup).toContain(copy.projects.inflowReviewedTitle);
+    expect(markup).toContain('<details class="project-inflow__history">');
+    expect(markup).not.toContain(
+      '<details open="" class="project-inflow__history">',
+    );
+    expect(markup).toContain('id="home-inflow-queue-title-new"');
+    expect(markup).toContain('id="home-inflow-queue-title-existing"');
+    expect(markup).toContain(copy.projects.inflowMarkSeen);
+  });
   it("offers the full queue instead of silently truncating after five items", () => {
     const items = Array.from({ length: 7 }, (_, index) =>
       inflow(`${index + 1}`),

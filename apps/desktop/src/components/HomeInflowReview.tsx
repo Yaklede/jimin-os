@@ -5,6 +5,7 @@ import { type ProjectInflowItem } from "../api/googleChat";
 import { copy } from "../copy";
 import {
   InflowItemRow,
+  InflowItemList,
   inflowConversationKey,
   type PromoteInflowInput,
 } from "./ProjectInflowPanel";
@@ -13,13 +14,50 @@ type HomeInflowReviewProps = {
   items: ProjectInflowItem[];
   saving: boolean;
   onPromote(item: ProjectInflowItem, input: PromoteInflowInput): Promise<void>;
-  onDismiss(item: ProjectInflowItem): Promise<void>;
+  onDismiss(
+    item: ProjectInflowItem,
+    input?: { reason?: string; replyToSource?: boolean; markSeen?: boolean },
+  ): Promise<void>;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
   onOpenTask(taskId: string): Promise<void>;
 };
 
-export function HomeInflowReview({
+export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
+  const pending = homeInflowPendingItems(props.items);
+  const unread = pending.filter((item) => !item.reviewed);
+  const reviewed = pending.filter((item) => item.reviewed);
+  if (pending.length === 0) return null;
+  return (
+    <div className="inflow-review-queues">
+      <HomeInflowGroup
+        {...props}
+        items={unread.filter((item) => !item.promotedTaskId)}
+        kind="new"
+      />
+      <HomeInflowGroup
+        {...props}
+        items={unread.filter((item) => item.promotedTaskId)}
+        kind="existing"
+      />
+      {reviewed.length > 0 && (
+        <details className="project-inflow__history">
+          <summary className="focus-visible-control">
+            {copy.projects.inflowReviewedTitle} · {reviewed.length}개
+          </summary>
+          <InflowItemList
+            {...props}
+            items={reviewed}
+            title={copy.projects.inflowReviewedTitle}
+            onOpenTask={(taskId) => void props.onOpenTask(taskId)}
+          />
+        </details>
+      )}
+    </div>
+  );
+}
+
+function HomeInflowGroup({
   items,
   saving,
   onPromote,
@@ -27,7 +65,10 @@ export function HomeInflowReview({
   onRetryAnalysis,
   onRetryCompletion,
   onOpenTask,
-}: HomeInflowReviewProps) {
+  kind,
+}: HomeInflowReviewProps & { kind: "new" | "existing" }) {
+  const titleId = `home-inflow-title-${kind}`;
+  const detailId = `home-inflow-detail-title-${kind}`;
   const pendingItems = useMemo(() => homeInflowPendingItems(items), [items]);
   const [showAll, setShowAll] = useState(false);
   const visibleItems = useMemo(
@@ -57,14 +98,26 @@ export function HomeInflowReview({
   return (
     <section
       className="home-inflow"
-      aria-labelledby="home-inflow-title"
+      aria-labelledby={titleId}
       data-mobile-expanded={mobileExpanded}
     >
       <header className="home-inflow__heading">
         <div className="home-inflow__heading-copy">
-          <span>{copy.projects.inflowHomeEyebrow}</span>
-          <h2 id="home-inflow-title">{copy.projects.inflowHomeTitle}</h2>
-          <p>{copy.projects.inflowHomeDescription}</p>
+          <span>
+            {kind === "new"
+              ? copy.projects.inflowHomeEyebrow
+              : copy.projects.inflowExistingEyebrow}
+          </span>
+          <h2 id={titleId}>
+            {kind === "new"
+              ? copy.projects.inflowNewTitle
+              : copy.projects.inflowExistingTitle}
+          </h2>
+          <p>
+            {kind === "new"
+              ? copy.projects.inflowHomeDescription
+              : copy.projects.inflowExistingDescription}
+          </p>
         </div>
         <strong aria-label={`${pendingItems.length}개의 업무 요청`}>
           {pendingItems.length}
@@ -80,8 +133,12 @@ export function HomeInflowReview({
         <MessageCircleMore aria-hidden="true" />
         <span>
           {mobileExpanded
-            ? copy.projects.inflowHomeCollapse
-            : copy.projects.inflowHomeOpen(pendingItems.length)}
+            ? kind === "new"
+              ? copy.projects.inflowHomeCollapse
+              : copy.projects.inflowExistingCollapse
+            : kind === "new"
+              ? copy.projects.inflowHomeOpen(pendingItems.length)
+              : copy.projects.inflowExistingOpen(pendingItems.length)}
         </span>
         <ChevronDown aria-hidden="true" />
       </button>
@@ -89,12 +146,14 @@ export function HomeInflowReview({
       <div className="home-inflow-review">
         <aside
           className="home-inflow-review__queue"
-          aria-labelledby="home-inflow-queue-title"
+          aria-labelledby={`home-inflow-queue-title-${kind}`}
         >
           <div className="home-inflow-review__queue-heading">
             <MessageCircleMore aria-hidden="true" />
-            <strong id="home-inflow-queue-title">
-              {copy.projects.inflowHomeQueueTitle}
+            <strong id={`home-inflow-queue-title-${kind}`}>
+              {kind === "new"
+                ? copy.projects.inflowHomeQueueTitle
+                : copy.projects.inflowExistingQueueTitle}
             </strong>
             <span>{visibleItems.length}</span>
           </div>
@@ -148,11 +207,11 @@ export function HomeInflowReview({
 
         <section
           className="home-inflow-review__detail"
-          aria-labelledby="home-inflow-detail-title"
+          aria-labelledby={detailId}
         >
           <header>
             <span>{copy.projects.inflowHomeSelectedLabel}</span>
-            <strong id="home-inflow-detail-title">
+            <strong id={detailId}>
               {copy.projects.inflowHomeSelectedRequest(
                 selectedItem.senderName || "",
               )}

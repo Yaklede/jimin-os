@@ -107,6 +107,9 @@ export interface ProjectInflowItem {
   status: ProjectInflowStatus;
   promotedTaskId: string | null;
   acknowledged: boolean;
+  reviewed?: boolean;
+  dismissalReason?: string | null;
+  dismissalReplyStatus?: "pending" | "sent" | "failed" | null;
   completionStatus: ProjectInflowCompletionStatus;
   completionReactionCompleted: boolean;
   completionReplyCompleted: boolean;
@@ -328,8 +331,10 @@ export async function decideProjectInflow(
   access: string,
   item: ProjectInflowItem,
   input:
-    | { decision: "dismiss" }
+    | { decision: "dismiss"; reason?: string; replyToSource?: boolean }
+    | { decision: "mark_seen" }
     | { decision: "retry_completion" }
+    | { decision: "retry_dismissal_reply" }
     | { decision: "retry_analysis" }
     | {
         decision: "promote";

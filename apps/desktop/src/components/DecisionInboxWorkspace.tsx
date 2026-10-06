@@ -41,7 +41,10 @@ type DecisionInboxWorkspaceProps = {
     item: ProjectInflowItem,
     input: PromoteInflowInput,
   ): Promise<void>;
-  onDismissInflow(item: ProjectInflowItem): Promise<void>;
+  onDismissInflow(
+    item: ProjectInflowItem,
+    input?: { reason?: string; replyToSource?: boolean; markSeen?: boolean },
+  ): Promise<void>;
   onRetryInflowAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryInflowCompletion(item: ProjectInflowItem): Promise<void>;
   onConfirmItsm(candidate: ProjectItsmDecisionCandidate): Promise<void>;
@@ -306,7 +309,10 @@ function InflowDecisionSection({
   items: ProjectInflowItem[];
   saving: boolean;
   onPromote(item: ProjectInflowItem, input: PromoteInflowInput): Promise<void>;
-  onDismiss(item: ProjectInflowItem): Promise<void>;
+  onDismiss(
+    item: ProjectInflowItem,
+    input?: { reason?: string; replyToSource?: boolean; markSeen?: boolean },
+  ): Promise<void>;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
   onOpenTask(taskId: string): Promise<void>;
@@ -350,8 +356,10 @@ export function inflowDecisionSummary(item: ProjectInflowItem): string {
 }
 
 export function isProjectInflowDecisionItem(item: ProjectInflowItem): boolean {
+  if (item.status === "dismissed")
+    return item.dismissalReplyStatus === "failed";
   if (item.status === "promoted") return item.completionStatus === "failed";
-  if (item.status !== "pending") return false;
+  if (item.status !== "pending" || item.reviewed) return false;
   if (item.promotedTaskId) return true;
   if (item.analysisStatus === "failed" || item.analysisStatus === "stale") {
     return true;

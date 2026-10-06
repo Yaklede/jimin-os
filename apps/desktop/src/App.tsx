@@ -4397,36 +4397,37 @@ export default function App() {
 
   async function dismissWorkspaceInflow(
     item: ProjectInflowItem,
+    input?: { reason?: string; replyToSource?: boolean; markSeen?: boolean },
   ): Promise<void> {
     setInflowSaving(true);
     setInflowError(undefined);
     try {
-      await withAuthenticatedSession((accessToken) =>
+      const updated = await withAuthenticatedSession((accessToken) =>
         decideProjectInflow(apiBaseUrl, accessToken, item, {
-          decision: "dismiss",
+          ...(input?.markSeen
+            ? { decision: "mark_seen" as const }
+            : {
+                decision: "dismiss" as const,
+                reason: input?.reason,
+                replyToSource: input?.replyToSource ?? false,
+              }),
         }),
       );
-      setProjectInflowItems((current) =>
-        current.filter(
-          (currentItem) =>
-            inflowConversationKey(currentItem) !== inflowConversationKey(item),
-        ),
-      );
-      setDecisionInflowItems((current) =>
-        current.filter(
-          (currentItem) =>
-            inflowConversationKey(currentItem) !== inflowConversationKey(item),
-        ),
-      );
+      const reconcile = (items: ProjectInflowItem[]) =>
+        items.flatMap((currentItem) =>
+          inflowConversationKey(currentItem) !== inflowConversationKey(item)
+            ? [currentItem]
+            : input?.markSeen
+              ? [{ ...currentItem, reviewed: true, version: updated.version }]
+              : [],
+        );
+      setProjectInflowItems(reconcile);
+      setDecisionInflowItems(reconcile);
       setHomeSnapshot((current) =>
         current
           ? {
               ...current,
-              inflow: current.inflow.filter(
-                (currentItem) =>
-                  inflowConversationKey(currentItem) !==
-                  inflowConversationKey(item),
-              ),
+              inflow: reconcile(current.inflow),
             }
           : current,
       );
@@ -4450,7 +4451,10 @@ export default function App() {
     try {
       await withAuthenticatedSession((accessToken) =>
         decideProjectInflow(apiBaseUrl, accessToken, item, {
-          decision: "retry_completion",
+          decision:
+            item.status === "dismissed"
+              ? "retry_dismissal_reply"
+              : "retry_completion",
         }),
       );
       await loadProjectInflow(item.projectId);

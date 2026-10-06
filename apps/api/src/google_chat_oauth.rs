@@ -15,8 +15,9 @@ use jimin_storage::{
     calendar::EncryptedCalendarSecret,
     google_chat::{
         ClaimedGoogleChatOAuthAuthorization, CompleteGoogleChatOAuthAuthorization,
-        GoogleChatAccountConnection, GoogleChatCompletionDelivery, GoogleChatSourceSyncConnection,
-        GoogleChatTaskCompletionDelivery, ProviderGoogleChatMessage,
+        GoogleChatAccountConnection, GoogleChatCompletionDelivery, GoogleChatDismissalReply,
+        GoogleChatSourceSyncConnection, GoogleChatTaskCompletionDelivery,
+        ProviderGoogleChatMessage,
     },
 };
 use rand::Rng;
@@ -288,6 +289,46 @@ impl GoogleChatOAuthRuntime {
             );
         }
         Ok(outcomes)
+    }
+
+    /// Sends an optional exclusion reason using a stable request ID.
+    ///
+    /// # Errors
+    /// Returns sanitized authorization, scope, encryption or provider failures.
+    pub async fn deliver_dismissal_reply(
+        &self,
+        connection: &GoogleChatSourceSyncConnection,
+        reply: &GoogleChatDismissalReply,
+    ) -> Result<(), GoogleChatOAuthError> {
+        if connection.user_id != reply.user_id || connection.source_id != reply.source_id {
+            return Err(GoogleChatOAuthError::ProviderRejected);
+        }
+        if !Self::completion_scope_granted(&connection.granted_scopes) {
+            return Err(GoogleChatOAuthError::RequiredScopeMissing);
+        }
+        let thread = reply
+            .thread_name
+            .as_deref()
+            .ok_or(GoogleChatOAuthError::ProviderUnavailable)?;
+        let refresh_token = self.crypto.decrypt(
+            &connection.refresh_token,
+            &refresh_token_aad(connection.user_id, &connection.provider_subject),
+        )?;
+        let access_token = self
+            .chat
+            .refresh_access_token(&refresh_token)
+            .await
+            .map_err(GoogleChatOAuthError::from_google)?;
+        self.chat
+            .reply_to_thread(
+                &access_token,
+                &connection.space_name,
+                thread,
+                &format!("업무 아님으로 정리했어요.\n사유: {}", reply.reason),
+                &reply.id.to_string(),
+            )
+            .await
+            .map_err(|_| GoogleChatOAuthError::ProviderUnavailable)
     }
 
     /// Adds a completion reaction and posts one idempotent reply to the source

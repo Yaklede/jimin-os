@@ -16,6 +16,51 @@ afterEach(() => {
 });
 
 describe("Google Chat work intake API", () => {
+  it("sends exclusion reason and source reply only on explicit user choice", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ id: "inflow", status: "dismissed" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetch);
+    await decideProjectInflow(
+      "https://example.test",
+      "access",
+      promotableItem(3),
+      { decision: "dismiss", reason: "이미 처리했어요.", replyToSource: true },
+    );
+    expect(JSON.parse(String(fetch.mock.calls[0][1].body))).toEqual({
+      decision: "dismiss",
+      reason: "이미 처리했어요.",
+      replyToSource: true,
+      expectedVersion: 3,
+    });
+  });
+
+  it("saves reading without silently excluding or replying to the conversation", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({ id: "inflow", status: "pending", reviewed: true }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetch);
+    await decideProjectInflow(
+      "https://example.test",
+      "access",
+      promotableItem(5),
+      { decision: "mark_seen" },
+    );
+    expect(JSON.parse(String(fetch.mock.calls[0][1].body))).toEqual({
+      decision: "mark_seen",
+      expectedVersion: 5,
+    });
+  });
   it("keeps missing analysis identity explicit instead of guessing from the item", () => {
     const normalized = normalizeProjectInflowItem({
       ...promotableItem(7),

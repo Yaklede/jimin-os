@@ -65,7 +65,7 @@ use jimin_storage::{
         CreateGoogleChatOAuthAuthorization, GoogleChatAccount, GoogleChatAccountStatus,
         GoogleChatCompletionDelivery, GoogleChatSourceSyncConnection,
         GoogleChatTaskCompletionDelivery, NewProjectGoogleChatSource, ProjectGoogleChatSource,
-        ProjectInflowItem, ProjectInflowStatus, PromoteProjectInflowItem,
+        ProjectInflowItem, ProjectInflowStatus, PromoteProjectInflowItem, ReviewProjectInflowItem,
     },
     inflow_analysis::{
         InflowAnalysisState, InflowClassification, ProjectInflowAnalysis,
@@ -1012,6 +1012,9 @@ pub struct ProjectInflowItemResponse {
     status: String,
     promoted_task_id: Option<uuid::Uuid>,
     acknowledged: bool,
+    reviewed: bool,
+    dismissal_reason: Option<String>,
+    dismissal_reply_status: Option<String>,
     completion_status: String,
     completion_reaction_completed: bool,
     completion_reply_completed: bool,
@@ -1077,6 +1080,9 @@ pub struct DeleteProjectItsmConnectionQuery {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ProjectInflowDecisionRequest {
     decision: String,
+    reason: Option<String>,
+    #[serde(default)]
+    reply_to_source: bool,
     expected_version: i64,
     conversation_id: Option<uuid::Uuid>,
     representative_item_id: Option<uuid::Uuid>,
@@ -7769,7 +7775,10 @@ async fn decide_project_inflow_item(
         apply_project_inflow_decision(planning, user_id, project_id, item_id, &request).await;
     match result {
         Ok(Some(mut item)) => {
-            if matches!(request.decision.as_str(), "promote" | "retry_completion") {
+            if matches!(
+                request.decision.as_str(),
+                "promote" | "retry_completion" | "dismiss" | "retry_dismissal_reply"
+            ) {
                 match (
                     state.google_chat_oauth(),
                     planning
@@ -7813,7 +7822,7 @@ async fn decide_project_inflow_item(
                     }
                 }
                 if let Ok(items) = planning
-                    .project_inflow_items(user_id, project_id, Some(ProjectInflowStatus::Promoted))
+                    .project_inflow_items(user_id, project_id, Some(item.status))
                     .await
                     && let Some(refreshed) =
                         items.into_iter().find(|candidate| candidate.id == item.id)
@@ -7852,6 +7861,10 @@ async fn decide_project_inflow_item(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "All supported inflow decisions share one explicitly validated and ownership-scoped dispatcher"
+)]
 async fn apply_project_inflow_decision(
     planning: &Database,
     user_id: uuid::Uuid,
@@ -7860,9 +7873,17 @@ async fn apply_project_inflow_decision(
     request: &ProjectInflowDecisionRequest,
 ) -> Result<Option<ProjectInflowItem>, StorageError> {
     match request.decision.as_str() {
-        "dismiss" => {
+        "dismiss" | "mark_seen" => {
             planning
-                .dismiss_project_inflow_item(user_id, project_id, item_id, request.expected_version)
+                .review_project_inflow_item(&ReviewProjectInflowItem {
+                    user_id,
+                    project_id,
+                    item_id,
+                    expected_version: request.expected_version,
+                    mark_seen: request.decision == "mark_seen",
+                    reason: request.reason.clone(),
+                    reply_to_source: request.reply_to_source,
+                })
                 .await
         }
         "promote" => {
@@ -7911,6 +7932,16 @@ async fn apply_project_inflow_decision(
                     priority: request.priority.unwrap_or(1),
                     due_at,
                 })
+                .await
+        }
+        "retry_dismissal_reply" => {
+            planning
+                .retry_project_inflow_dismissal_reply(
+                    user_id,
+                    project_id,
+                    item_id,
+                    request.expected_version,
+                )
                 .await
         }
         "retry_completion" => {
@@ -8002,6 +8033,22 @@ async fn deliver_google_chat_completions(
     connection: &GoogleChatSourceSyncConnection,
     inflow_id: Option<uuid::Uuid>,
 ) -> Result<(), GoogleChatOAuthError> {
+    let replies = planning
+        .claim_google_chat_dismissal_replies(connection.source_id)
+        .await
+        .map_err(|_| GoogleChatOAuthError::ProviderUnavailable)?;
+    for reply in replies {
+        let result = runtime.deliver_dismissal_reply(connection, &reply).await;
+        planning
+            .record_google_chat_dismissal_reply(
+                &reply,
+                result
+                    .err()
+                    .map(google_chat_oauth::GoogleChatOAuthError::failure_code),
+            )
+            .await
+            .map_err(|_| GoogleChatOAuthError::ProviderUnavailable)?;
+    }
     let deliveries = planning
         .pending_google_chat_completion_deliveries(connection.source_id, inflow_id, 20)
         .await
@@ -8715,6 +8762,18 @@ fn project_inflow_item_response(
     } = candidate;
     let first_received_at = messages.first().ok_or(())?.received_at;
     let acknowledged = messages.iter().all(|item| item.acknowledged_at.is_some());
+    let reviewed = messages
+        .iter()
+        .filter(|item| !item.sent_by_owner)
+        .all(|item| item.reviewed_at.is_some());
+    let dismissal_reason = messages
+        .iter()
+        .rev()
+        .find_map(|item| item.dismissal_reason.clone());
+    let dismissal_reply_status = messages
+        .iter()
+        .rev()
+        .find_map(|item| item.dismissal_reply_status.clone());
     let completion = messages
         .iter()
         .find(|item| item.completion_requested_at.is_some());
@@ -8847,6 +8906,9 @@ fn project_inflow_item_response(
         status: project_inflow_status_name(representative.status).to_owned(),
         promoted_task_id: representative.promoted_task_id,
         acknowledged,
+        reviewed,
+        dismissal_reason,
+        dismissal_reply_status,
         completion_status: completion_status.to_owned(),
         completion_reaction_completed,
         completion_reply_completed,
@@ -11788,6 +11850,9 @@ mod tests {
                     status: ProjectInflowStatus::Pending,
                     promoted_task_id: None,
                     acknowledged_at: Some(received_at),
+                    reviewed_at: None,
+                    dismissal_reason: None,
+                    dismissal_reply_status: None,
                     completion_requested_at: None,
                     completion_reaction_at: None,
                     completion_reply_at: None,
@@ -11878,6 +11943,29 @@ mod tests {
             },
         ];
 
+        let mut reviewed_items = items.clone();
+        for item in &mut reviewed_items {
+            if !item.sent_by_owner {
+                item.reviewed_at = Some(item.received_at);
+            }
+        }
+        let reviewed_response = project_inflow_item_response(
+            group_project_inflow_candidates(reviewed_items.clone(), analyses.clone()).remove(0),
+        )
+        .expect("reviewed group should serialize");
+        assert!(
+            reviewed_response.reviewed,
+            "own replies must not make the reviewed group unread"
+        );
+        reviewed_items[1].reviewed_at = None;
+        let unread_response = project_inflow_item_response(
+            group_project_inflow_candidates(reviewed_items, analyses.clone()).remove(0),
+        )
+        .expect("unread group should serialize");
+        assert!(
+            !unread_response.reviewed,
+            "a new external reply must reopen attention"
+        );
         let candidates = group_project_inflow_candidates(items, analyses);
 
         assert_eq!(candidates.len(), 1);
@@ -11962,6 +12050,9 @@ mod tests {
                 status: ProjectInflowStatus::Pending,
                 promoted_task_id: Some(promoted_task_id),
                 acknowledged_at: Some(OffsetDateTime::UNIX_EPOCH),
+                reviewed_at: None,
+                dismissal_reason: None,
+                dismissal_reply_status: None,
                 completion_requested_at: None,
                 completion_reaction_at: None,
                 completion_reply_at: None,
@@ -12186,6 +12277,8 @@ mod tests {
     fn project_inflow_promotion_requires_an_explicit_deadline_choice() {
         let missing = ProjectInflowDecisionRequest {
             decision: "promote".to_owned(),
+            reason: None,
+            reply_to_source: false,
             expected_version: 1,
             conversation_id: None,
             representative_item_id: None,
@@ -12230,6 +12323,8 @@ mod tests {
     fn project_inflow_promotion_rejects_conflicting_deadline_fields() {
         let request = ProjectInflowDecisionRequest {
             decision: "promote".to_owned(),
+            reason: None,
+            reply_to_source: false,
             expected_version: 1,
             conversation_id: None,
             representative_item_id: None,

@@ -30,6 +30,28 @@ const MAX_MESSAGE_TEXT_CHARS: usize = 32_768;
 const MAX_TASK_NOTES_CHARS: usize = 10_000;
 const MAX_ASSIGNEE_NAME_CHARS: usize = 80;
 
+#[derive(Clone)]
+pub struct ReviewProjectInflowItem {
+    pub user_id: Uuid,
+    pub project_id: Uuid,
+    pub item_id: Uuid,
+    pub expected_version: i64,
+    pub mark_seen: bool,
+    pub reason: Option<String>,
+    pub reply_to_source: bool,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct GoogleChatDismissalReply {
+    pub id: Uuid,
+    pub inflow_id: Uuid,
+    pub user_id: Uuid,
+    pub source_id: Uuid,
+    pub thread_name: Option<String>,
+    pub reason: String,
+    pub attempt_count: i32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoogleChatAccountStatus {
     Connecting,
@@ -240,6 +262,9 @@ pub struct ProjectInflowItem {
     pub status: ProjectInflowStatus,
     pub promoted_task_id: Option<Uuid>,
     pub acknowledged_at: Option<OffsetDateTime>,
+    pub reviewed_at: Option<OffsetDateTime>,
+    pub dismissal_reason: Option<String>,
+    pub dismissal_reply_status: Option<String>,
     pub completion_requested_at: Option<OffsetDateTime>,
     pub completion_reaction_at: Option<OffsetDateTime>,
     pub completion_reply_at: Option<OffsetDateTime>,
@@ -264,6 +289,9 @@ struct ProjectInflowItemRow {
     status: String,
     promoted_task_id: Option<Uuid>,
     acknowledged_at: Option<OffsetDateTime>,
+    reviewed_at: Option<OffsetDateTime>,
+    dismissal_reason: Option<String>,
+    dismissal_reply_status: Option<String>,
     completion_requested_at: Option<OffsetDateTime>,
     completion_reaction_at: Option<OffsetDateTime>,
     completion_reply_at: Option<OffsetDateTime>,
@@ -291,6 +319,9 @@ impl TryFrom<ProjectInflowItemRow> for ProjectInflowItem {
             status: ProjectInflowStatus::parse(&row.status)?,
             promoted_task_id: row.promoted_task_id,
             acknowledged_at: row.acknowledged_at,
+            reviewed_at: row.reviewed_at,
+            dismissal_reason: row.dismissal_reason,
+            dismissal_reply_status: row.dismissal_reply_status,
             completion_requested_at: row.completion_requested_at,
             completion_reaction_at: row.completion_reaction_at,
             completion_reply_at: row.completion_reply_at,
@@ -1513,7 +1544,12 @@ impl Database {
                 ) AS sent_by_owner,
                 item.content_text,
                 item.received_at, item.status, item.promoted_task_id,
-                item.acknowledged_at, item.completion_requested_at,
+                item.acknowledged_at, item.reviewed_at, item.dismissal_reason,
+                (SELECT CASE WHEN reply.sent_at IS NOT NULL THEN 'sent'
+                    WHEN reply.error_code IS NOT NULL THEN 'failed' ELSE 'pending' END
+                 FROM project_inflow_dismissal_replies AS reply
+                 WHERE reply.inflow_id = item.id) AS dismissal_reply_status,
+                item.completion_requested_at,
                 item.completion_reaction_at, item.completion_reply_at,
                 item.completion_delivery_error_code,
                 item.completion_delivery_attempt_count, item.version
@@ -1570,7 +1606,12 @@ impl Database {
                 ) AS sent_by_owner,
                 item.content_text,
                 item.received_at, item.status, item.promoted_task_id,
-                item.acknowledged_at, item.completion_requested_at,
+                item.acknowledged_at, item.reviewed_at, item.dismissal_reason,
+                (SELECT CASE WHEN reply.sent_at IS NOT NULL THEN 'sent'
+                    WHEN reply.error_code IS NOT NULL THEN 'failed' ELSE 'pending' END
+                 FROM project_inflow_dismissal_replies AS reply
+                 WHERE reply.inflow_id = item.id) AS dismissal_reply_status,
+                item.completion_requested_at,
                 item.completion_reaction_at, item.completion_reply_at,
                 item.completion_delivery_error_code,
                 item.completion_delivery_attempt_count, item.version
@@ -1624,7 +1665,12 @@ impl Database {
                 ) AS sent_by_owner,
                 item.content_text,
                 item.received_at, item.status, item.promoted_task_id,
-                item.acknowledged_at, item.completion_requested_at,
+                item.acknowledged_at, item.reviewed_at, item.dismissal_reason,
+                (SELECT CASE WHEN reply.sent_at IS NOT NULL THEN 'sent'
+                    WHEN reply.error_code IS NOT NULL THEN 'failed' ELSE 'pending' END
+                 FROM project_inflow_dismissal_replies AS reply
+                 WHERE reply.inflow_id = item.id) AS dismissal_reply_status,
+                item.completion_requested_at,
                 item.completion_reaction_at, item.completion_reply_at,
                 item.completion_delivery_error_code,
                 item.completion_delivery_attempt_count, item.version
@@ -1655,12 +1701,55 @@ impl Database {
         item_id: Uuid,
         expected_version: i64,
     ) -> Result<Option<ProjectInflowItem>, StorageError> {
+        self.review_project_inflow_item(&ReviewProjectInflowItem {
+            user_id,
+            project_id,
+            item_id,
+            expected_version,
+            mark_seen: false,
+            reason: None,
+            reply_to_source: false,
+        })
+        .await
+    }
+
+    /// Saves reading separately from exclusion and atomically queues an optional
+    /// source reply. Messages newer than the selected snapshot remain unread.
+    ///
+    /// # Errors
+    /// Returns validation, ownership/version conflict, or persistence errors.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Review, snapshot-bounded exclusion, sync events and optional reply creation must commit in one transaction"
+    )]
+    pub async fn review_project_inflow_item(
+        &self,
+        command: &ReviewProjectInflowItem,
+    ) -> Result<Option<ProjectInflowItem>, StorageError> {
+        let ReviewProjectInflowItem {
+            user_id,
+            project_id,
+            item_id,
+            expected_version,
+            ..
+        } = *command;
+        let reason = command
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty());
+        if reason.is_some_and(|text| text.chars().count() > 2000 || text.contains('\0'))
+            || (command.reply_to_source && reason.is_none())
+            || (command.mark_seen && (reason.is_some() || command.reply_to_source))
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
         if ![user_id, project_id, item_id].into_iter().all(is_v7) || expected_version <= 0 {
             return Err(StorageError::InvalidConfiguration);
         }
         let mut transaction = self.pool().begin().await.map_err(classify)?;
-        let group = sqlx::query_as::<_, (Uuid, Option<String>)>(
-            "SELECT source_id, provider_thread_name
+        let group = sqlx::query_as::<_, (Uuid, Option<String>, OffsetDateTime)>(
+            "SELECT source_id, provider_thread_name, received_at
              FROM project_inflow_items
              WHERE id = $1 AND user_id = $2 AND project_id = $3
                AND version = $4 AND status = 'pending'
@@ -1673,16 +1762,19 @@ impl Database {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(classify)?;
-        let Some((source_id, thread_name)) = group else {
+        let Some((source_id, thread_name, received_at)) = group else {
             transaction.rollback().await.map_err(classify)?;
             return Ok(None);
         };
         let rows = sqlx::query_as::<_, ProjectInflowItemRow>(
             "UPDATE project_inflow_items AS item
-             SET status = 'dismissed'
+             SET status = CASE WHEN $6 THEN item.status ELSE 'dismissed' END,
+                 reviewed_at = NOW(),
+                 dismissal_reason = CASE WHEN $6 THEN item.dismissal_reason ELSE $7 END
              FROM project_google_chat_sources AS source
              WHERE item.user_id = $2 AND item.project_id = $3
                AND item.status = 'pending' AND source.id = item.source_id
+               AND (item.received_at, item.id) <= ($8, $1)
                AND (($4::TEXT IS NULL AND item.id = $1)
                  OR ($4::TEXT IS NOT NULL AND item.source_id = $5
                    AND item.provider_thread_name = $4))
@@ -1710,7 +1802,12 @@ impl Database {
                 ), FALSE) AS sent_by_owner,
                 item.content_text,
                 item.received_at, item.status, item.promoted_task_id,
-                item.acknowledged_at, item.completion_requested_at,
+                item.acknowledged_at, item.reviewed_at, item.dismissal_reason,
+                (SELECT CASE WHEN reply.sent_at IS NOT NULL THEN 'sent'
+                    WHEN reply.error_code IS NOT NULL THEN 'failed' ELSE 'pending' END
+                 FROM project_inflow_dismissal_replies AS reply
+                 WHERE reply.inflow_id = item.id) AS dismissal_reply_status,
+                item.completion_requested_at,
                 item.completion_reaction_at, item.completion_reply_at,
                 item.completion_delivery_error_code,
                 item.completion_delivery_attempt_count, item.version",
@@ -1720,6 +1817,9 @@ impl Database {
         .bind(project_id)
         .bind(&thread_name)
         .bind(source_id)
+        .bind(command.mark_seen)
+        .bind(reason)
+        .bind(received_at)
         .fetch_all(&mut *transaction)
         .await
         .map_err(classify)?;
@@ -1738,8 +1838,162 @@ impl Database {
                 selected = Some(item);
             }
         }
+        if command.reply_to_source {
+            sqlx::query(
+                "INSERT INTO project_inflow_dismissal_replies
+                    (id, inflow_id, user_id, source_id, thread_name, reason)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (inflow_id) DO NOTHING",
+            )
+            .bind(Uuid::now_v7())
+            .bind(item_id)
+            .bind(user_id)
+            .bind(source_id)
+            .bind(&thread_name)
+            .bind(reason)
+            .execute(&mut *transaction)
+            .await
+            .map_err(classify)?;
+            if let Some(item) = &mut selected {
+                item.dismissal_reply_status = Some("pending".to_owned());
+            }
+        }
         transaction.commit().await.map_err(classify)?;
         Ok(selected)
+    }
+
+    /// Claims a bounded set of replies. Stable IDs keep provider retries idempotent.
+    ///
+    /// # Errors
+    /// Returns validation or persistence errors.
+    pub async fn claim_google_chat_dismissal_replies(
+        &self,
+        source_id: Uuid,
+    ) -> Result<Vec<GoogleChatDismissalReply>, StorageError> {
+        if !is_v7(source_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        sqlx::query_as::<_, GoogleChatDismissalReply>(
+            "WITH ready AS (
+                SELECT id FROM project_inflow_dismissal_replies
+                WHERE source_id = $1 AND sent_at IS NULL AND attempt_count < 10
+                  AND next_attempt_at <= NOW()
+                  AND (lease_expires_at IS NULL OR lease_expires_at <= NOW())
+                ORDER BY next_attempt_at, id LIMIT 20 FOR UPDATE SKIP LOCKED
+             ) UPDATE project_inflow_dismissal_replies AS reply
+             SET lease_expires_at = NOW() + INTERVAL '3 minutes'
+             FROM ready WHERE reply.id = ready.id
+             RETURNING reply.id, reply.inflow_id, reply.user_id, reply.source_id,
+                reply.thread_name, reply.reason, reply.attempt_count",
+        )
+        .bind(source_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(classify)
+    }
+
+    /// Records delivery without undoing the original exclusion.
+    ///
+    /// # Errors
+    /// Returns validation or persistence errors.
+    pub async fn record_google_chat_dismissal_reply(
+        &self,
+        reply: &GoogleChatDismissalReply,
+        failure_code: Option<&str>,
+    ) -> Result<(), StorageError> {
+        if failure_code.is_some_and(|code| !valid_failure_code(code)) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        sqlx::query(
+            "UPDATE project_inflow_dismissal_replies SET
+                sent_at = CASE WHEN $3::TEXT IS NULL THEN NOW() ELSE NULL END,
+                error_code = $3, attempt_count = attempt_count + 1,
+                next_attempt_at = CASE WHEN $3::TEXT IS NULL THEN NULL
+                    ELSE NOW() + make_interval(secs => $4) END,
+                lease_expires_at = NULL
+             WHERE id = $1 AND user_id = $2 AND sent_at IS NULL",
+        )
+        .bind(reply.id)
+        .bind(reply.user_id)
+        .bind(failure_code)
+        .bind(30_i32 * 2_i32.pow(u32::try_from(reply.attempt_count.clamp(0, 6)).unwrap_or(6)))
+        .execute(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        let version = sqlx::query_scalar::<_, i64>(
+            "UPDATE project_inflow_items SET dismissal_reply_version = dismissal_reply_version + 1
+             WHERE id = $1 AND user_id = $2 RETURNING version",
+        )
+        .bind(reply.inflow_id)
+        .bind(reply.user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        if let Some(version) = version {
+            append_change(
+                &mut transaction,
+                reply.user_id,
+                "project_inflow_item",
+                reply.inflow_id,
+                version,
+            )
+            .await?;
+        }
+        transaction.commit().await.map_err(classify)
+    }
+
+    /// Requeues an unsent exclusion reply without changing the exclusion decision.
+    ///
+    /// # Errors
+    /// Returns validation or persistence errors.
+    pub async fn retry_project_inflow_dismissal_reply(
+        &self,
+        user_id: Uuid,
+        project_id: Uuid,
+        item_id: Uuid,
+        expected_version: i64,
+    ) -> Result<Option<ProjectInflowItem>, StorageError> {
+        if ![user_id, project_id, item_id].into_iter().all(is_v7) || expected_version <= 0 {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let updated = sqlx::query_scalar::<_, Uuid>(
+            "UPDATE project_inflow_dismissal_replies AS reply
+             SET next_attempt_at = NOW(), attempt_count = 0, error_code = NULL
+             FROM project_inflow_items AS item
+             WHERE reply.inflow_id = item.id AND reply.user_id = $1
+               AND item.user_id = $1 AND item.project_id = $2 AND item.id = $3
+               AND item.version = $4 AND item.status = 'dismissed'
+               AND reply.sent_at IS NULL
+               AND (reply.lease_expires_at IS NULL OR reply.lease_expires_at <= NOW())
+             RETURNING item.id",
+        )
+        .bind(user_id)
+        .bind(project_id)
+        .bind(item_id)
+        .bind(expected_version)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        if updated.is_none() {
+            transaction.rollback().await.map_err(classify)?;
+            return Ok(None);
+        }
+        let version = sqlx::query_scalar::<_, i64>("UPDATE project_inflow_items SET dismissal_reply_version = dismissal_reply_version + 1 WHERE id = $1 AND user_id = $2 RETURNING version")
+            .bind(item_id).bind(user_id).fetch_one(&mut *transaction).await.map_err(classify)?;
+        append_change(
+            &mut transaction,
+            user_id,
+            "project_inflow_item",
+            item_id,
+            version,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        self.project_inflow_items(user_id, project_id, Some(ProjectInflowStatus::Dismissed))
+            .await
+            .map(|items| items.into_iter().find(|item| item.id == item_id))
     }
 
     /// Promotes one pending inflow item into an owned project task atomically.
@@ -1961,7 +2215,12 @@ impl Database {
                 ), FALSE) AS sent_by_owner,
                 item.content_text,
                 item.received_at, item.status, item.promoted_task_id,
-                item.acknowledged_at, item.completion_requested_at,
+                item.acknowledged_at, item.reviewed_at, item.dismissal_reason,
+                (SELECT CASE WHEN reply.sent_at IS NOT NULL THEN 'sent'
+                    WHEN reply.error_code IS NOT NULL THEN 'failed' ELSE 'pending' END
+                 FROM project_inflow_dismissal_replies AS reply
+                 WHERE reply.inflow_id = item.id) AS dismissal_reply_status,
+                item.completion_requested_at,
                 item.completion_reaction_at, item.completion_reply_at,
                 item.completion_delivery_error_code,
                 item.completion_delivery_attempt_count, item.version",
@@ -2344,7 +2603,12 @@ async fn mark_inflow_group_promoted(
             ), FALSE) AS sent_by_owner,
             item.content_text,
             item.received_at, item.status, item.promoted_task_id,
-            item.acknowledged_at, item.completion_requested_at,
+            item.acknowledged_at, item.reviewed_at, item.dismissal_reason,
+            (SELECT CASE WHEN reply.sent_at IS NOT NULL THEN 'sent'
+                WHEN reply.error_code IS NOT NULL THEN 'failed' ELSE 'pending' END
+             FROM project_inflow_dismissal_replies AS reply
+             WHERE reply.inflow_id = item.id) AS dismissal_reply_status,
+            item.completion_requested_at,
             item.completion_reaction_at, item.completion_reply_at,
             item.completion_delivery_error_code,
             item.completion_delivery_attempt_count, item.version",
