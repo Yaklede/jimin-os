@@ -53,3 +53,11 @@ At this verification stage the changes were development-only. No production serv
 - Android production assets contain the private-server origin and no preview fixtures or loopback override. The temporary Firebase build configuration was removed by the build helper.
 - Final `adb devices -l` inventory is empty. No physical Android installation or physical file-picker verification is claimed.
 - Final macOS signature and installed executable checksum checks passed; the old process (PID 3602) remains running while restart approval is pending.
+
+## Physical Android installation (subsequent device connection)
+
+- User connected the physical Android device and explicitly requested installation.
+- On SM-S948N, verified arm64 support, matching installed-app signer and no version-code downgrade before updating with `install -r`; app data was not cleared.
+- Installed the verified production APK above successfully on 2026-10-06 at 14:55:56 KST. Package `io.jimin.os`, versionName `0.1.0`, versionCode `1000`.
+- Removed the local API reverse mapping; launched the production app and verified its process and resumed activity. No real task, Chat message or preference mutation was performed.
+- Physical image-upload/file-picker interaction is still not claimed as tested by this installation check.
