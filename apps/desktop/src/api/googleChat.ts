@@ -341,6 +341,7 @@ export async function decideProjectInflow(
         title: string;
         notes: string;
         assigneeName?: string;
+        workKind?: import("./planning").TaskWorkKind;
         priority: number;
         dueAt: string | null;
         withoutDeadline: boolean;

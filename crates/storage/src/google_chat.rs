@@ -334,6 +334,7 @@ impl TryFrom<ProjectInflowItemRow> for ProjectInflowItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoogleChatCompletionDelivery {
+    pub work_kind: String,
     pub inflow_id: Uuid,
     pub user_id: Uuid,
     pub source_id: Uuid,
@@ -356,6 +357,7 @@ pub struct GoogleChatCompletionDelivery {
 
 #[derive(sqlx::FromRow)]
 struct GoogleChatCompletionDeliveryRow {
+    work_kind: String,
     inflow_id: Uuid,
     user_id: Uuid,
     source_id: Uuid,
@@ -379,6 +381,7 @@ struct GoogleChatCompletionDeliveryRow {
 impl From<GoogleChatCompletionDeliveryRow> for GoogleChatCompletionDelivery {
     fn from(row: GoogleChatCompletionDeliveryRow) -> Self {
         Self {
+            work_kind: row.work_kind,
             inflow_id: row.inflow_id,
             user_id: row.user_id,
             source_id: row.source_id,
@@ -412,6 +415,8 @@ pub struct GoogleChatTaskCompletionDelivery {
     pub task_title: String,
     pub assignee_name: Option<String>,
     pub completed_at: OffsetDateTime,
+    pub work_kind: String,
+    pub completion_note: Option<String>,
     pub reply_completed: bool,
     pub attempt_count: i32,
 }
@@ -427,6 +432,8 @@ struct GoogleChatTaskCompletionDeliveryRow {
     task_title: String,
     assignee_name: Option<String>,
     completed_at: OffsetDateTime,
+    work_kind: String,
+    completion_note: Option<String>,
     reply_completed: bool,
     attempt_count: i32,
 }
@@ -443,6 +450,8 @@ impl From<GoogleChatTaskCompletionDeliveryRow> for GoogleChatTaskCompletionDeliv
             task_title: row.task_title,
             assignee_name: row.assignee_name,
             completed_at: row.completed_at,
+            work_kind: row.work_kind,
+            completion_note: row.completion_note,
             reply_completed: row.reply_completed,
             attempt_count: row.attempt_count,
         }
@@ -1209,7 +1218,7 @@ impl Database {
                 COALESCE(details.action_items, ARRAY[]::TEXT[]) AS action_items,
                 details.completion_criteria,
                 COALESCE(details.reference_links, ARRAY[]::TEXT[]) AS reference_links,
-                task.assignee_name, task.priority AS task_priority, task.due_at,
+                task.assignee_name, task.priority AS task_priority, task.due_at, task.work_kind,
                 item.completion_reaction_at IS NOT NULL AS reaction_completed,
                 item.completion_reply_at IS NOT NULL AS reply_completed,
                 item.completion_delivery_attempt_count AS attempt_count
@@ -1354,7 +1363,7 @@ impl Database {
             "SELECT delivery.inflow_id, delivery.user_id, delivery.source_id,
                 item.provider_thread_name, delivery.task_id,
                 delivery.task_version, delivery.task_title,
-                delivery.assignee_name, delivery.completed_at,
+                delivery.assignee_name, delivery.completed_at, delivery.work_kind, delivery.completion_note,
                 delivery.reply_at IS NOT NULL AS reply_completed,
                 delivery.delivery_attempt_count AS attempt_count
              FROM google_chat_task_completion_deliveries AS delivery
@@ -2009,6 +2018,24 @@ impl Database {
         &self,
         command: &PromoteProjectInflowItem,
     ) -> Result<Option<ProjectInflowItem>, StorageError> {
+        self.promote_project_inflow_item_with_work_kind(command, "general")
+            .await
+    }
+
+    /// Promotes a reviewed request with its explicit work type in the same transaction.
+    ///
+    /// # Errors
+    /// Returns validation/persistence errors or no item for stale analysis revisions.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "promotion is one revision-fenced transaction"
+    )]
+    pub async fn promote_project_inflow_item_with_work_kind(
+        &self,
+        command: &PromoteProjectInflowItem,
+        work_kind: &str,
+    ) -> Result<Option<ProjectInflowItem>, StorageError> {
+        crate::planning::validate_work_kind(work_kind)?;
         if ![
             command.user_id,
             command.project_id,
@@ -2064,7 +2091,7 @@ impl Database {
             );
         let reference_links =
             public_inflow_reference_links(&source_messages, &analysis.reference_documents.0);
-        let task = insert_promoted_task(&mut transaction, command, &task_notes).await?;
+        let task = insert_promoted_task(&mut transaction, command, &task_notes, work_kind).await?;
         insert_task_assignment_public_details(
             &mut transaction,
             command,
@@ -2267,10 +2294,10 @@ pub(crate) async fn queue_google_chat_task_completion_in_transaction(
     sqlx::query(
         "INSERT INTO google_chat_task_completion_deliveries (
             task_id, task_version, inflow_id, user_id, source_id,
-            task_title, assignee_name, completed_at
+            task_title, assignee_name, completed_at, work_kind, completion_note
          )
          SELECT $2, $3, item.id, item.user_id, item.source_id,
-            task.title, task.assignee_name, task.completed_at
+            task.title, task.assignee_name, task.completed_at, task.work_kind, task.completion_note
          FROM project_inflow_items AS item
          JOIN tasks AS task
            ON task.id = $2 AND task.user_id = $1
@@ -2459,14 +2486,15 @@ async fn insert_promoted_task(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     command: &PromoteProjectInflowItem,
     task_notes: &str,
+    work_kind: &str,
 ) -> Result<crate::planning::Task, StorageError> {
     let row = sqlx::query_as::<_, PromotedTaskRow>(
         "INSERT INTO tasks (
             id, user_id, project_id, title, notes, assignee_name,
-            status, priority, due_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, 'open', $7, $8)
+            status, priority, due_at, work_kind
+         ) VALUES ($1, $2, $3, $4, $5, $6, 'open', $7, $8, $9)
          RETURNING id, project_id, title, notes, assignee_name,
-            status, priority, due_at, completed_at, version",
+            status, priority, due_at, completed_at, work_kind, version",
     )
     .bind(command.task_id)
     .bind(command.user_id)
@@ -2476,6 +2504,7 @@ async fn insert_promoted_task(
     .bind(command.assignee_name.as_deref().map(str::trim))
     .bind(command.priority)
     .bind(command.due_at)
+    .bind(work_kind)
     .fetch_one(&mut **transaction)
     .await
     .map_err(classify)?;
@@ -2688,6 +2717,7 @@ struct PromotedTaskRow {
     priority: i16,
     due_at: Option<OffsetDateTime>,
     completed_at: Option<OffsetDateTime>,
+    work_kind: String,
     version: i64,
 }
 
@@ -2707,6 +2737,8 @@ impl PromotedTaskRow {
             priority: self.priority,
             due_at: self.due_at,
             completed_at: self.completed_at,
+            work_kind: self.work_kind,
+            completion_note: None,
             version: self.version,
         })
     }
@@ -3112,6 +3144,7 @@ mod tests {
     fn completion_delivery_keeps_task_context_for_detailed_source_reply() {
         let public_summary = "정산방식을 표시합니다.";
         let delivery = GoogleChatCompletionDelivery::from(GoogleChatCompletionDeliveryRow {
+            work_kind: "general".to_owned(),
             inflow_id: Uuid::now_v7(),
             user_id: Uuid::now_v7(),
             source_id: Uuid::now_v7(),

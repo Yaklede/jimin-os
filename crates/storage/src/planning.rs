@@ -44,6 +44,7 @@ pub struct TaskAssignmentDetails {
 
 /// Input used to render a bounded task-assignment message consistently.
 pub struct TaskAssignmentMessageInput<'a> {
+    pub work_kind: &'a str,
     pub project_title: &'a str,
     pub task_title: &'a str,
     pub public_summary: Option<&'a str>,
@@ -294,6 +295,8 @@ pub struct Task {
     pub priority: i16,
     pub due_at: Option<OffsetDateTime>,
     pub completed_at: Option<OffsetDateTime>,
+    pub work_kind: String,
+    pub completion_note: Option<String>,
     pub version: i64,
 }
 
@@ -356,6 +359,8 @@ struct TaskRow {
     priority: i16,
     due_at: Option<OffsetDateTime>,
     completed_at: Option<OffsetDateTime>,
+    work_kind: String,
+    completion_note: Option<String>,
     version: i64,
 }
 
@@ -433,6 +438,8 @@ impl TryFrom<TaskRow> for Task {
             priority: row.priority,
             due_at: row.due_at,
             completed_at: row.completed_at,
+            work_kind: row.work_kind,
+            completion_note: row.completion_note,
             version: row.version,
         })
     }
@@ -1040,6 +1047,19 @@ impl Database {
     ///
     /// Returns a classified storage error without exposing personal task text.
     pub async fn create_task(&self, task: &NewTask) -> Result<Task, StorageError> {
+        self.create_task_with_work_kind(task, "general").await
+    }
+
+    /// Creates a task and its assignment event with the selected work type atomically.
+    ///
+    /// # Errors
+    /// Returns a validation or persistence error without logging task content.
+    pub async fn create_task_with_work_kind(
+        &self,
+        task: &NewTask,
+        work_kind: &str,
+    ) -> Result<Task, StorageError> {
+        validate_work_kind(work_kind)?;
         task.validate()?;
         if let Some(project_id) = task.project_id
             && !self
@@ -1063,11 +1083,11 @@ impl Database {
             "\
             INSERT INTO tasks (
                 id, user_id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at
+                status, priority, due_at, work_kind
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8, $9, $10)
             RETURNING id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, version",
+                status, priority, due_at, completed_at, work_kind, completion_note, version",
         )
         .bind(task.id)
         .bind(task.user_id)
@@ -1088,6 +1108,7 @@ impl Database {
         )
         .bind(task.priority)
         .bind(task.due_at)
+        .bind(work_kind)
         .fetch_one(&mut *transaction)
         .await
         .map_err(classify)?;
@@ -1136,7 +1157,7 @@ impl Database {
             VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8, $9)
             ON CONFLICT (id) DO NOTHING
             RETURNING id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, version",
+                status, priority, due_at, completed_at, work_kind, completion_note, version",
         )
         .bind(task.id)
         .bind(task.user_id)
@@ -1164,7 +1185,7 @@ impl Database {
             let existing = sqlx::query_as::<_, TaskRow>(
                 "\
                 SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-                    status, priority, due_at, completed_at, version
+                    status, priority, due_at, completed_at, work_kind, completion_note, version
                 FROM tasks
                 WHERE id = $1 AND user_id = $2 AND status = 'open'",
             )
@@ -1207,7 +1228,7 @@ impl Database {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
             SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, version
+                status, priority, due_at, completed_at, work_kind, completion_note, version
             FROM tasks
             WHERE user_id = $1 AND status = 'open'
             ORDER BY priority DESC, due_at NULLS LAST, created_at ASC, id ASC",
@@ -1230,7 +1251,7 @@ impl Database {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
             SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, version
+                status, priority, due_at, completed_at, work_kind, completion_note, version
             FROM tasks
             WHERE user_id = $1 AND status = 'completed'
             ORDER BY completed_at DESC NULLS LAST, id DESC",
@@ -1259,7 +1280,7 @@ impl Database {
         let row = sqlx::query_as::<_, TaskRow>(
             "\
             SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, version
+                status, priority, due_at, completed_at, work_kind, completion_note, version
             FROM tasks
             WHERE user_id = $1 AND id = $2",
         )
@@ -1286,7 +1307,7 @@ impl Database {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
             SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, version
+                status, priority, due_at, completed_at, work_kind, completion_note, version
             FROM tasks
             WHERE user_id = $1
               AND status = 'open'
@@ -1315,7 +1336,7 @@ impl Database {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
             SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, version
+                status, priority, due_at, completed_at, work_kind, completion_note, version
             FROM tasks
             WHERE user_id = $1
               AND status = 'open'
@@ -1348,7 +1369,7 @@ impl Database {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
             SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, version
+                status, priority, due_at, completed_at, work_kind, completion_note, version
             FROM tasks
             WHERE user_id = $1 AND project_id = $2 AND status = 'open'
             ORDER BY priority DESC, due_at NULLS LAST, created_at ASC, id ASC",
@@ -1380,7 +1401,7 @@ impl Database {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
             SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, version
+                status, priority, due_at, completed_at, work_kind, completion_note, version
             FROM tasks
             WHERE user_id = $1 AND project_id = $2 AND status IN ('open', 'completed')
             ORDER BY
@@ -1408,6 +1429,19 @@ impl Database {
     /// Returns [`StorageError::InvalidConfiguration`] for invalid input and a
     /// classified persistence error when storage is unavailable.
     pub async fn update_task(&self, update: &TaskUpdate) -> Result<Option<Task>, StorageError> {
+        self.update_task_with_work_kind(update, None).await
+    }
+
+    /// Updates the selected work type without clearing it for older clients.
+    ///
+    /// # Errors
+    /// Returns a validation or persistence error; version conflicts return no task.
+    pub async fn update_task_with_work_kind(
+        &self,
+        update: &TaskUpdate,
+        work_kind: Option<&str>,
+    ) -> Result<Option<Task>, StorageError> {
+        work_kind.map(validate_work_kind).transpose()?;
         update.validate()?;
         if let Some(project_id) = update.project_id
             && !self
@@ -1449,13 +1483,15 @@ impl Database {
                 status = $9,
                 priority = $10,
                 due_at = $11,
+                work_kind = COALESCE($12, work_kind),
+                completion_note = CASE WHEN $9 = 'completed' THEN completion_note ELSE NULL END,
                 completed_at = CASE
                     WHEN $9 = 'completed' THEN COALESCE(completed_at, NOW())
                     ELSE NULL
                 END
             WHERE id = $1 AND user_id = $2 AND version = $3
             RETURNING id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, version",
+                status, priority, due_at, completed_at, work_kind, completion_note, version",
         )
         .bind(update.id)
         .bind(update.user_id)
@@ -1480,6 +1516,7 @@ impl Database {
         .bind(status)
         .bind(update.priority)
         .bind(update.due_at)
+        .bind(work_kind)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(classify)?;
@@ -1524,7 +1561,7 @@ impl Database {
         let current = sqlx::query_as::<_, TaskRow>(
             "\
             SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, version
+                status, priority, due_at, completed_at, work_kind, completion_note, version
             FROM tasks
             WHERE id = $1 AND user_id = $2
             FOR UPDATE",
@@ -1555,7 +1592,7 @@ impl Database {
             SET status = 'cancelled', completed_at = NULL
             WHERE id = $1 AND user_id = $2 AND version = $3
             RETURNING id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, version",
+                status, priority, due_at, completed_at, work_kind, completion_note, version",
         )
         .bind(task_id)
         .bind(user_id)
@@ -1608,7 +1645,27 @@ impl Database {
         task_id: Uuid,
         expected_version: i64,
     ) -> Result<Option<Task>, StorageError> {
-        if expected_version <= 0 {
+        self.complete_task_with_note(user_id, task_id, expected_version, None)
+            .await
+    }
+
+    /// Stores a reviewed completion result and queues its source reply in one transaction.
+    ///
+    /// # Errors
+    /// Returns a validation/persistence error; concurrent updates return no task.
+    pub async fn complete_task_with_note(
+        &self,
+        user_id: Uuid,
+        task_id: Uuid,
+        expected_version: i64,
+        completion_note: Option<&str>,
+    ) -> Result<Option<Task>, StorageError> {
+        if !is_v7(user_id)
+            || !is_v7(task_id)
+            || expected_version <= 0
+            || completion_note
+                .is_some_and(|value| value.trim().is_empty() || !valid_text(value, 2000, true))
+        {
             return Err(StorageError::InvalidConfiguration);
         }
         let mut transaction = self.pool().begin().await.map_err(classify)?;
@@ -1616,14 +1673,15 @@ impl Database {
         let row = sqlx::query_as::<_, TaskRow>(
             "\
             UPDATE tasks
-            SET status = 'completed', completed_at = NOW()
+            SET status = 'completed', completed_at = NOW(), completion_note = $4
             WHERE id = $1 AND user_id = $2 AND status = 'open' AND version = $3
             RETURNING id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, version",
+                status, priority, due_at, completed_at, work_kind, completion_note, version",
         )
         .bind(task_id)
         .bind(user_id)
         .bind(expected_version)
+        .bind(completion_note.map(str::trim))
         .fetch_optional(&mut *transaction)
         .await
         .map_err(classify)?;
@@ -1644,6 +1702,27 @@ impl Database {
         .await?;
         transaction.commit().await.map_err(classify)?;
         Ok(Some(task))
+    }
+}
+
+/// Validates the small public task work-type contract.
+///
+/// # Errors
+/// Returns invalid configuration for unknown work types.
+pub fn validate_work_kind(value: &str) -> Result<(), StorageError> {
+    if matches!(value, "general" | "verification" | "development") {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidConfiguration)
+    }
+}
+
+/// Human-readable work type shared by assignment notifications.
+pub fn task_work_kind_label(value: &str) -> &'static str {
+    match value {
+        "verification" => "확인 업무",
+        "development" => "개발 업무",
+        _ => "일반 업무",
     }
 }
 
@@ -1894,6 +1973,7 @@ pub(crate) async fn queue_task_webhook_in_transaction(
         .as_object_mut()
         .ok_or(StorageError::PersistenceUnavailable)?;
     object.insert("title".to_owned(), serde_json::json!(task.title));
+    object.insert("workKind".to_owned(), serde_json::json!(task.work_kind));
     object.insert(
         "projectTitle".to_owned(),
         serde_json::Value::String(project_title.clone()),
@@ -1996,7 +2076,7 @@ pub(crate) async fn queue_owned_task_webhook_by_id_in_transaction(
     let row = sqlx::query_as::<_, TaskRow>(
         "\
         SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-            status, priority, due_at, completed_at, version
+            status, priority, due_at, completed_at, work_kind, completion_note, version
         FROM tasks
         WHERE id = $1 AND user_id = $2",
     )
@@ -2027,6 +2107,7 @@ fn task_event_message(
     format_task_message(
         action,
         &TaskAssignmentMessageInput {
+            work_kind: &task.work_kind,
             project_title,
             task_title: &task.title,
             public_summary: details.notes.as_deref(),
@@ -2064,6 +2145,7 @@ fn format_task_message(action: &str, input: &TaskAssignmentMessageInput<'_>) -> 
         String::new(),
         format!("프로젝트: {project_title}"),
         format!("할 일: {title}"),
+        format!("업무 유형: {}", task_work_kind_label(input.work_kind)),
         format!("담당자: {assignee}"),
         format!(
             "마감: {}",
@@ -2345,6 +2427,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn task_work_kind_and_completion_result_validate_public_contract() {
+        for kind in ["general", "verification", "development"] {
+            assert!(validate_work_kind(kind).is_ok());
+        }
+        for kind in ["", "unknown", " verification", "development\n"] {
+            assert!(validate_work_kind(kind).is_err());
+        }
+        assert_eq!(task_work_kind_label("verification"), "확인 업무");
+        assert!(valid_text("확인 완료\n- 금액 일치", 2000, true));
+        assert!(valid_text(&"가".repeat(2000), 2000, false));
+        assert!(!valid_text(&"가".repeat(2001), 2000, false));
+        assert!(!valid_text("   ", 2000, false));
+        assert!(!valid_text("숨은\u{0}문자", 2000, false));
+    }
+
+    #[test]
     fn task_notes_allow_multiline_text_but_reject_unsafe_controls() {
         assert!(valid_text(
             "담당자: 김경주\n\n1. 처리 방향 확인\n2. 결과 공유",
@@ -2383,6 +2481,8 @@ mod tests {
             priority: 2,
             due_at: Some(due_at),
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 1,
         };
 
@@ -2425,6 +2525,8 @@ mod tests {
             priority: 1,
             due_at: None,
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 1,
         };
 
@@ -2458,6 +2560,8 @@ mod tests {
             priority: 1,
             due_at: None,
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 1,
         };
 
@@ -2501,6 +2605,8 @@ mod tests {
             priority: 3,
             due_at: None,
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 1,
         };
 
@@ -2624,6 +2730,7 @@ mod tests {
         );
 
         let message = format_task_assignment_message(&TaskAssignmentMessageInput {
+            work_kind: "general",
             project_title: "비스킷링크",
             task_title: "정산방식 표기 추가",
             public_summary: details.notes.as_deref(),
@@ -2671,6 +2778,7 @@ mod tests {
         let action_items = vec!["화면을 수정합니다.".to_owned()];
         let reference_links = vec!["https://itsm.example/issues/3876".to_owned()];
         let message = format_task_assignment_message(&TaskAssignmentMessageInput {
+            work_kind: "general",
             project_title: "비스킷링크",
             task_title: "거래내역 정산방식 표시 추가",
             public_summary: Some("표시 기준을 명확히 합니다."),

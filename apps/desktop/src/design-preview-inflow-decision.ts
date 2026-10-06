@@ -40,6 +40,10 @@ export function applyDesignPreviewInflowDecision(
     );
   }
   if (
+    (values.workKind !== undefined &&
+      !["general", "verification", "development"].includes(
+        String(values.workKind),
+      )) ||
     typeof values.title !== "string" ||
     !values.title.trim() ||
     typeof values.notes !== "string" ||
@@ -62,6 +66,8 @@ export function applyDesignPreviewInflowDecision(
     assigneeName:
       typeof values.assigneeName === "string" ? values.assigneeName : null,
     status: "open",
+    workKind: (values.workKind as Task["workKind"]) ?? "general",
+    completionNote: null,
     priority: Number(values.priority),
     dueAt: values.withoutDeadline === true ? null : String(values.dueAt),
     completedAt: null,

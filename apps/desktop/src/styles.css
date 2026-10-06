@@ -4098,12 +4098,14 @@ svg {
 
 .deadline-picker__inputs {
   display: grid;
+  align-items: start;
   grid-template-columns: minmax(150px, 50fr) minmax(112px, 29fr);
   gap: 8px;
 }
 
 .deadline-picker__inputs label {
   display: grid;
+  align-content: start;
   min-width: 0;
   gap: 5px;
 }
@@ -4112,6 +4114,67 @@ svg {
   color: var(--muted);
   font-size: 14px;
   font-weight: 600;
+}
+
+.deadline-picker__date {
+  position: relative;
+  min-width: 0;
+}
+.deadline-picker__date input {
+  padding-inline-end: 48px !important;
+}
+.deadline-picker__date input::-webkit-calendar-picker-indicator {
+  display: none;
+}
+.deadline-picker__calendar {
+  position: absolute;
+  inset-inline-end: 2px;
+  top: 23px;
+  width: 44px;
+  min-height: 44px;
+  padding: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--accent-text);
+  cursor: pointer;
+}
+.deadline-picker__calendar svg {
+  width: 20px;
+  height: 20px;
+}
+.deadline-picker__time {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  min-width: 0;
+}
+.deadline-picker__time select {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  color: var(--text-strong);
+  font: inherit;
+}
+.deadline-picker__date-presets {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.deadline-picker__date-presets button {
+  min-height: 44px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.deadline-picker[data-invalid="true"] .deadline-picker__inputs select {
+  border-color: var(--danger);
 }
 
 .deadline-picker__presets {

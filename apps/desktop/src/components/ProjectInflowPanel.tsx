@@ -20,6 +20,8 @@ import {
   type ProjectInflowReferenceDocument,
   projectInflowPromotionReadiness,
 } from "../api/googleChat";
+import type { TaskWorkKind } from "../api/planning";
+import { TaskWorkKindSelect } from "./TaskWorkKind";
 import { copy } from "../copy";
 import {
   DeadlinePicker,
@@ -63,6 +65,7 @@ type ProjectInflowPanelProps = {
 };
 
 export type PromoteInflowInput = {
+  workKind?: TaskWorkKind;
   title: string;
   notes: string;
   assigneeName?: string;
@@ -72,9 +75,16 @@ export type PromoteInflowInput = {
 };
 
 export type InflowDraftField =
-  "title" | "notes" | "assigneeName" | "priority" | "dueAt" | "withoutDeadline";
+  | "workKind"
+  | "title"
+  | "notes"
+  | "assigneeName"
+  | "priority"
+  | "dueAt"
+  | "withoutDeadline";
 
 export type InflowDraftValues = {
+  workKind?: TaskWorkKind;
   title: string;
   notes: string;
   assigneeName: string;
@@ -543,6 +553,9 @@ export function InflowItemRow({
   const [assigneeName, setAssigneeName] = useState(
     () => restoredDraft?.assigneeName ?? suggestedAssignee,
   );
+  const [workKind, setWorkKind] = useState<TaskWorkKind>(
+    () => restoredDraft?.workKind ?? "general",
+  );
   const [dueAt, setDueAt] = useState(
     () => restoredDraft?.dueAt ?? isoToSeoulLocalDateTime(item.suggestedDueAt),
   );
@@ -590,7 +603,15 @@ export function InflowItemRow({
     if (!hasUsableAnalysis) return;
     const dirtyFields = dirtyFieldsRef.current;
     const merged = mergeInflowDraftValues(
-      { title, notes, assigneeName, priority, dueAt, withoutDeadline },
+      {
+        title,
+        notes,
+        assigneeName,
+        priority,
+        dueAt,
+        withoutDeadline,
+        workKind,
+      },
       {
         title: suggestedTitle,
         notes: item.suggestedTaskNotes,
@@ -607,6 +628,7 @@ export function InflowItemRow({
     setDueAt(merged.dueAt);
     setWithoutDeadline(merged.withoutDeadline);
     setPriority(merged.priority);
+    setWorkKind(merged.workKind ?? "general");
     if (!hasDraft) dirtyFields.clear();
     setDraftBaseRevision((current) =>
       nextInflowDraftBaseRevision(current, analyzedRevision, hasDraft),
@@ -626,6 +648,7 @@ export function InflowItemRow({
     suggestedTitle,
     title,
     withoutDeadline,
+    workKind,
   ]);
 
   useEffect(() => {
@@ -643,6 +666,7 @@ export function InflowItemRow({
       priority,
       dueAt,
       withoutDeadline,
+      workKind,
       dirtyFields: [...dirtyFieldsRef.current],
     });
   }, [
@@ -657,6 +681,7 @@ export function InflowItemRow({
     priority,
     title,
     withoutDeadline,
+    workKind,
   ]);
 
   useEffect(
@@ -769,6 +794,7 @@ export function InflowItemRow({
         notes: notes.trim(),
         assigneeName: assigneeName || undefined,
         priority: Number(priority),
+        workKind,
         ...deadline,
       });
       setEditing(false);
@@ -1195,6 +1221,14 @@ export function InflowItemRow({
                       ))}
                     </select>
                   </label>
+                  <TaskWorkKindSelect
+                    value={workKind}
+                    disabled={saving || promoting}
+                    onChange={(value) => {
+                      markDirty("workKind");
+                      setWorkKind(value);
+                    }}
+                  />
                   <label>
                     <span>{copy.projects.inflowPriorityLabel}</span>
                     <select
@@ -1436,6 +1470,7 @@ export function mergeInflowDraftValues(
 ): InflowDraftValues {
   const dirty = new Set(dirtyFields);
   return {
+    workKind: dirty.has("workKind") ? current.workKind : suggested.workKind,
     title: dirty.has("title") ? current.title : suggested.title,
     notes: dirty.has("notes") ? current.notes : suggested.notes,
     assigneeName: dirty.has("assigneeName")
@@ -1574,6 +1609,8 @@ function readInflowDraft(
       typeof value.priority !== "string" ||
       typeof value.dueAt !== "string" ||
       typeof value.withoutDeadline !== "boolean" ||
+      (value.workKind !== undefined &&
+        !["general", "verification", "development"].includes(value.workKind)) ||
       !Array.isArray(value.dirtyFields)
     ) {
       clearInflowDraft(conversationId);

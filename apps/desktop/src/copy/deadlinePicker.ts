@@ -1,6 +1,11 @@
 export const deadlinePickerCopy = {
   date: "날짜",
   time: "시간",
+  hour: "시",
+  minute: "분",
+  openCalendar: "달력 열기",
+  today: "오늘",
+  tomorrow: "내일",
   presets: "빠른 시간 선택",
   todaySix: "오늘 오후 6시",
   todayEnd: "오늘 안에",

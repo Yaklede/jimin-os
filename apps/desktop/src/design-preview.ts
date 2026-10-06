@@ -26,6 +26,8 @@ export function installDesignPreview(): void {
       "예시 데이터입니다. 요청 내용을 확인하고 원인과 처리 방향을 정리합니다.",
     assigneeName: index < 3 ? "김경주" : "송천안",
     status: "open",
+    workKind: index % 2 === 0 ? "verification" : "development",
+    completionNote: null,
     priority: 2,
     dueAt: new Date(Date.now() + index * 86400000).toISOString(),
     completedAt: null,
@@ -166,6 +168,19 @@ export function installDesignPreview(): void {
       }
       return json({ error: "design_preview_only" }, 400);
     }
+    if (path === "/v1/tasks" && method === "POST") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      const task: Task = {
+        ...body,
+        id: `preview-created-${tasks.length}`,
+        status: "open",
+        completedAt: null,
+        completionNote: null,
+        version: 1,
+      };
+      tasks.push(task);
+      return json(task, 201);
+    }
     if (path === "/v1/tasks")
       return json(
         list(
@@ -182,6 +197,8 @@ export function installDesignPreview(): void {
       const task = tasks.find((task) => path.split("/")[3] === task.id);
       if (!task) return json({ error: "preview_item_missing" }, 404);
       if (init?.method === "POST" && path.endsWith("/complete")) {
+        task.completionNote =
+          JSON.parse(String(init?.body ?? "{}")).completionNote ?? null;
         task.status = "completed";
         task.completedAt = new Date().toISOString();
         task.version += 1;
@@ -189,6 +206,7 @@ export function installDesignPreview(): void {
       if (init?.method === "POST" && path.endsWith("/reopen")) {
         task.status = "open";
         task.completedAt = null;
+        task.completionNote = null;
         task.version += 1;
       }
       if (init?.method === "PUT")

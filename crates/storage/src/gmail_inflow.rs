@@ -871,6 +871,24 @@ impl Database {
         &self,
         command: &PromoteGmailInflowCandidate,
     ) -> Result<bool, StorageError> {
+        self.promote_gmail_inflow_candidate_with_work_kind(command, "general")
+            .await
+    }
+
+    /// Promotes a candidate atomically with its selected work type.
+    ///
+    /// # Errors
+    /// Returns validation, ownership, version, or persistence errors.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Promotion is a single atomic transaction."
+    )]
+    pub async fn promote_gmail_inflow_candidate_with_work_kind(
+        &self,
+        command: &PromoteGmailInflowCandidate,
+        work_kind: &str,
+    ) -> Result<bool, StorageError> {
+        crate::planning::validate_work_kind(work_kind)?;
         let task = NewTask {
             id: command.candidate_id,
             user_id: command.user_id,
@@ -916,8 +934,8 @@ impl Database {
         let inserted = sqlx::query(
             "INSERT INTO tasks (
                 id, user_id, project_id, parent_task_id, title, notes,
-                assignee_name, status, priority, due_at
-             ) VALUES ($1, $2, $3, NULL, $4, $5, $6, 'open', $7, $8)
+                assignee_name, status, priority, due_at, work_kind
+             ) VALUES ($1, $2, $3, NULL, $4, $5, $6, 'open', $7, $8, $9)
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(task.id)
@@ -928,6 +946,7 @@ impl Database {
         .bind(trimmed(task.assignee_name.as_deref()))
         .bind(task.priority)
         .bind(task.due_at)
+        .bind(work_kind)
         .execute(&mut *transaction)
         .await
         .map_err(classify)?;
@@ -946,6 +965,8 @@ impl Database {
             priority: task.priority,
             due_at: task.due_at,
             completed_at: None,
+            work_kind: work_kind.to_owned(),
+            completion_note: None,
             version: 1,
         };
         append_change(

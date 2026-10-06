@@ -425,6 +425,8 @@ pub struct TaskResponse {
     priority: i16,
     due_at: Option<String>,
     completed_at: Option<String>,
+    work_kind: String,
+    completion_note: Option<String>,
     version: i64,
 }
 
@@ -866,6 +868,7 @@ pub struct GmailInflowDecisionRequest {
     title: Option<String>,
     notes: Option<String>,
     assignee_name: Option<String>,
+    work_kind: Option<String>,
     priority: Option<i16>,
     due_at: Option<String>,
     #[serde(default)]
@@ -1079,6 +1082,7 @@ pub struct DeleteProjectItsmConnectionQuery {
 #[derive(Debug, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ProjectInflowDecisionRequest {
+    work_kind: Option<String>,
     decision: String,
     reason: Option<String>,
     #[serde(default)]
@@ -1455,6 +1459,7 @@ struct DeleteScheduleRequest {
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CreateTaskRequest {
+    work_kind: Option<String>,
     project_id: Option<uuid::Uuid>,
     parent_task_id: Option<uuid::Uuid>,
     title: String,
@@ -1467,6 +1472,7 @@ struct CreateTaskRequest {
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct UpdateTaskRequest {
+    work_kind: Option<String>,
     project_id: Option<uuid::Uuid>,
     parent_task_id: Option<uuid::Uuid>,
     title: String,
@@ -1684,6 +1690,7 @@ struct AgentTurnInput {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CompleteTaskRequest {
     expected_version: i64,
+    completion_note: Option<String>,
 }
 
 #[derive(serde::Deserialize, ToSchema)]
@@ -5064,17 +5071,20 @@ async fn create_task(
     };
     let user_id = principal.identity().user_id();
     match planning
-        .create_task(&NewTask {
-            id: uuid::Uuid::now_v7(),
-            user_id,
-            project_id: body.project_id,
-            parent_task_id: body.parent_task_id,
-            title: body.title,
-            notes: body.notes,
-            assignee_name: body.assignee_name,
-            priority: body.priority,
-            due_at,
-        })
+        .create_task_with_work_kind(
+            &NewTask {
+                id: uuid::Uuid::now_v7(),
+                user_id,
+                project_id: body.project_id,
+                parent_task_id: body.parent_task_id,
+                title: body.title,
+                notes: body.notes,
+                assignee_name: body.assignee_name,
+                priority: body.priority,
+                due_at,
+            },
+            body.work_kind.as_deref().unwrap_or("general"),
+        )
         .await
     {
         Ok(task) => match task_response(task) {
@@ -5161,19 +5171,22 @@ async fn update_task(
     };
     let user_id = principal.identity().user_id();
     match planning
-        .update_task(&TaskUpdate {
-            id: task_id,
-            user_id,
-            project_id: body.project_id,
-            parent_task_id: body.parent_task_id,
-            title: body.title,
-            notes: body.notes,
-            assignee_name: body.assignee_name,
-            status,
-            priority: body.priority,
-            due_at,
-            expected_version: body.expected_version,
-        })
+        .update_task_with_work_kind(
+            &TaskUpdate {
+                id: task_id,
+                user_id,
+                project_id: body.project_id,
+                parent_task_id: body.parent_task_id,
+                title: body.title,
+                notes: body.notes,
+                assignee_name: body.assignee_name,
+                status,
+                priority: body.priority,
+                due_at,
+                expected_version: body.expected_version,
+            },
+            body.work_kind.as_deref(),
+        )
         .await
     {
         Ok(Some(task)) => match task_response(task) {
@@ -5617,7 +5630,12 @@ async fn complete_task(
     };
     let user_id = principal.identity().user_id();
     match planning
-        .complete_task(user_id, task_id, body.expected_version)
+        .complete_task_with_note(
+            user_id,
+            task_id,
+            body.expected_version,
+            body.completion_note.as_deref(),
+        )
         .await
     {
         Ok(Some(task)) => match task_response(task) {
@@ -7906,32 +7924,35 @@ async fn apply_project_inflow_decision(
             };
             let due_at = project_inflow_deadline(request)?;
             planning
-                .promote_project_inflow_item(&PromoteProjectInflowItem {
-                    user_id,
-                    project_id,
-                    item_id,
-                    expected_version: request.expected_version,
-                    analysis_id,
-                    expected_representative_item_id,
-                    expected_source_revision,
-                    expected_analyzed_revision,
-                    task_id: uuid::Uuid::now_v7(),
-                    title: title.to_owned(),
-                    notes: request
-                        .notes
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_owned),
-                    assignee_name: request
-                        .assignee_name
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_owned),
-                    priority: request.priority.unwrap_or(1),
-                    due_at,
-                })
+                .promote_project_inflow_item_with_work_kind(
+                    &PromoteProjectInflowItem {
+                        user_id,
+                        project_id,
+                        item_id,
+                        expected_version: request.expected_version,
+                        analysis_id,
+                        expected_representative_item_id,
+                        expected_source_revision,
+                        expected_analyzed_revision,
+                        task_id: uuid::Uuid::now_v7(),
+                        title: title.to_owned(),
+                        notes: request
+                            .notes
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_owned),
+                        assignee_name: request
+                            .assignee_name
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_owned),
+                        priority: request.priority.unwrap_or(1),
+                        due_at,
+                    },
+                    request.work_kind.as_deref().unwrap_or("general"),
+                )
                 .await
         }
         "retry_dismissal_reply" => {
@@ -8111,6 +8132,7 @@ async fn deliver_google_chat_completions(
 
 fn google_chat_completion_reply(delivery: &GoogleChatCompletionDelivery) -> String {
     format_task_assignment_message(&TaskAssignmentMessageInput {
+        work_kind: &delivery.work_kind,
         project_title: &delivery.project_title,
         task_title: &delivery.task_title,
         public_summary: delivery.public_summary.as_deref(),
@@ -8125,11 +8147,17 @@ fn google_chat_completion_reply(delivery: &GoogleChatCompletionDelivery) -> Stri
 
 fn google_chat_task_completion_reply(delivery: &GoogleChatTaskCompletionDelivery) -> String {
     let assignee = delivery.assignee_name.as_deref().unwrap_or("정하지 않음");
-    format!(
-        "✅ 요청하신 작업을 완료했어요.\n할 일: {}\n담당자: {assignee}\n완료일: {}",
+    let mut message = format!(
+        "✅ 요청하신 작업을 완료했어요.\n할 일: {}\n업무 유형: {}\n담당자: {assignee}\n완료일: {}",
         delivery.task_title,
+        jimin_storage::planning::task_work_kind_label(&delivery.work_kind),
         format_google_chat_due_at(delivery.completed_at)
-    )
+    );
+    if let Some(note) = &delivery.completion_note {
+        message.push_str("\n\n확인 결과:\n");
+        message.push_str(note);
+    }
+    message
 }
 
 fn format_google_chat_due_at(value: OffsetDateTime) -> String {
@@ -9418,6 +9446,8 @@ fn task_response(task: Task) -> Result<TaskResponse, ()> {
             .completed_at
             .map(|value| value.format(&Rfc3339).map_err(|_| ()))
             .transpose()?,
+        work_kind: task.work_kind,
+        completion_note: task.completion_note,
         version: task.version,
     })
 }
@@ -9545,18 +9575,21 @@ async fn promote_gmail_inflow(
         _ => return Err(StorageError::InvalidConfiguration),
     };
     planning
-        .promote_gmail_inflow_candidate(&PromoteGmailInflowCandidate {
-            user_id,
-            workspace_id,
-            candidate_id,
-            expected_version: request.expected_version,
-            project_id,
-            title: title.to_owned(),
-            notes: request.notes.clone(),
-            assignee_name: request.assignee_name.clone(),
-            priority: request.priority.unwrap_or(1),
-            due_at,
-        })
+        .promote_gmail_inflow_candidate_with_work_kind(
+            &PromoteGmailInflowCandidate {
+                user_id,
+                workspace_id,
+                candidate_id,
+                expected_version: request.expected_version,
+                project_id,
+                title: title.to_owned(),
+                notes: request.notes.clone(),
+                assignee_name: request.assignee_name.clone(),
+                priority: request.priority.unwrap_or(1),
+                due_at,
+            },
+            request.work_kind.as_deref().unwrap_or("general"),
+        )
         .await
 }
 
@@ -9565,6 +9598,7 @@ fn request_has_gmail_promotion_fields(request: &GmailInflowDecisionRequest) -> b
         || request.title.is_some()
         || request.notes.is_some()
         || request.assignee_name.is_some()
+        || request.work_kind.is_some()
         || request.priority.is_some()
         || request.due_at.is_some()
         || request.without_deadline
@@ -12246,6 +12280,7 @@ mod tests {
         let due_at =
             OffsetDateTime::parse("2026-07-24T02:30:00Z", &Rfc3339).expect("deadline should parse");
         let reply = google_chat_completion_reply(&GoogleChatCompletionDelivery {
+            work_kind: "general".to_owned(),
             inflow_id: Uuid::now_v7(),
             user_id: Uuid::now_v7(),
             source_id: Uuid::now_v7(),
@@ -12276,10 +12311,12 @@ mod tests {
     }
 
     #[test]
-    fn google_chat_task_completion_reply_confirms_the_finished_work() {
+    fn google_chat_task_completion_reply_includes_the_saved_verification_result() {
         let completed_at = OffsetDateTime::parse("2026-07-27T05:45:00Z", &Rfc3339)
             .expect("completion time should parse");
         let reply = google_chat_task_completion_reply(&GoogleChatTaskCompletionDelivery {
+            work_kind: "verification".to_owned(),
+            completion_note: Some("거래내역 20건을 확인했고 모두 일치해요.".to_owned()),
             inflow_id: Uuid::now_v7(),
             user_id: Uuid::now_v7(),
             source_id: Uuid::now_v7(),
@@ -12295,13 +12332,14 @@ mod tests {
 
         assert_eq!(
             reply,
-            "✅ 요청하신 작업을 완료했어요.\n할 일: 권한 오류 수정\n담당자: 주홍석\n완료일: 2026년 7월 27일 14:45"
+            "✅ 요청하신 작업을 완료했어요.\n할 일: 권한 오류 수정\n업무 유형: 확인 업무\n담당자: 주홍석\n완료일: 2026년 7월 27일 14:45\n\n확인 결과:\n거래내역 20건을 확인했고 모두 일치해요."
         );
     }
 
     #[test]
     fn project_inflow_promotion_requires_an_explicit_deadline_choice() {
         let missing = ProjectInflowDecisionRequest {
+            work_kind: None,
             decision: "promote".to_owned(),
             reason: None,
             reply_to_source: false,
@@ -12348,6 +12386,7 @@ mod tests {
     #[test]
     fn project_inflow_promotion_rejects_conflicting_deadline_fields() {
         let request = ProjectInflowDecisionRequest {
+            work_kind: None,
             decision: "promote".to_owned(),
             reason: None,
             reply_to_source: false,

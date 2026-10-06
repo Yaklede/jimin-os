@@ -24,12 +24,16 @@ export function InflowPromotionDialog({
   dirty,
   onClose,
   children,
+  dialogCopy = inflowPromotionDialogCopy,
+  className,
 }: {
   open: boolean;
   busy: boolean;
   dirty: boolean;
   onClose(): void;
   children: ReactNode | ((requestClose: () => void) => ReactNode);
+  dialogCopy?: typeof inflowPromotionDialogCopy;
+  className?: string;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const keepEditingRef = useRef<HTMLButtonElement>(null);
@@ -67,7 +71,7 @@ export function InflowPromotionDialog({
     setConfirming(false);
     dialog.showModal();
     const frame = window.requestAnimationFrame(() => {
-      dialog.querySelector<HTMLInputElement>("form input")?.focus();
+      dialog.querySelector<HTMLElement>("form input, form textarea")?.focus();
     });
     const unregister = registerMobileBackHandler(() => {
       closeRef.current();
@@ -96,8 +100,10 @@ export function InflowPromotionDialog({
   return (
     <dialog
       ref={dialogRef}
-      className="inflow-promotion-dialog"
-      aria-label={inflowPromotionDialogCopy.title}
+      className={["inflow-promotion-dialog", className]
+        .filter(Boolean)
+        .join(" ")}
+      aria-label={dialogCopy.title}
       aria-busy={busy}
       onKeyDown={(event) => {
         if (event.key !== "Tab") return;
@@ -138,13 +144,13 @@ export function InflowPromotionDialog({
       <header className="inflow-promotion-dialog__heading">
         <ListTodo aria-hidden="true" />
         <div>
-          <h2>{inflowPromotionDialogCopy.title}</h2>
-          <p>{inflowPromotionDialogCopy.description}</p>
+          <h2>{dialogCopy.title}</h2>
+          <p>{dialogCopy.description}</p>
         </div>
         <button
           type="button"
           className="inflow-promotion-dialog__close focus-visible-control"
-          aria-label={inflowPromotionDialogCopy.close}
+          aria-label={dialogCopy.close}
           disabled={busy}
           onClick={requestClose}
         >
@@ -158,10 +164,10 @@ export function InflowPromotionDialog({
         <section
           className="inflow-promotion-dialog__confirmation"
           role="alertdialog"
-          aria-label={inflowPromotionDialogCopy.discardTitle}
+          aria-label={dialogCopy.discardTitle}
         >
-          <h3>{inflowPromotionDialogCopy.discardTitle}</h3>
-          <p>{inflowPromotionDialogCopy.discardDescription}</p>
+          <h3>{dialogCopy.discardTitle}</h3>
+          <p>{dialogCopy.discardDescription}</p>
           <div>
             <button
               ref={keepEditingRef}
