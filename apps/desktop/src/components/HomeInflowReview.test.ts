@@ -1,5 +1,6 @@
 import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import type { ProjectInflowItem } from "../api/googleChat";
@@ -42,6 +43,18 @@ function inflow(
 }
 
 describe("home inflow review", () => {
+  it("bounds the desktop grid track so expanded assignment forms scroll instead of clipping", () => {
+    const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+    expect(css).toMatch(
+      /\.home-inflow-review__selection\s*\{[^}]*grid-template-rows: minmax\(0, 1fr\);[^}]*max-height: min\(640px, calc\(100dvh - 160px\)\);/,
+    );
+    expect(css).toMatch(
+      /\.home-inflow\[data-view="calendar"\] \.home-inflow-review__selection\s*\{[^}]*max-height: min\(760px, calc\(100dvh - 160px\)\);/,
+    );
+    expect(css).toMatch(
+      /\.home-inflow-review__detail\s*\{[^}]*min-height: 0;[^}]*overflow-y: auto;/,
+    );
+  });
   it("separates new requests, existing task updates and reviewed conversations", () => {
     const markup = renderReview([
       inflow("new"),

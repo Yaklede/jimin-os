@@ -33,6 +33,7 @@ import {
 } from "./ContentSkeleton";
 import { assistantResponseAfterLatestRequest } from "./conversationResponse";
 import { LinkifiedText } from "./ExternalTextLink";
+import { RepresentativeImage } from "./RepresentativeImage";
 
 export { assistantResponseAfterLatestRequest } from "./conversationResponse";
 
@@ -466,7 +467,7 @@ function ConversationThread({
                       className="assistant-message__avatar"
                       aria-hidden="true"
                     >
-                      <img src="/images/hamster-home-wave.png" alt="" />
+                      <RepresentativeImage />
                     </span>
                   )}
                   <div className="assistant-message__meta">

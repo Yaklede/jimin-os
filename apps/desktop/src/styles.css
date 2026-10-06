@@ -983,7 +983,7 @@ svg {
 
 .home-command__continuation-heading {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr);
+  grid-template-columns: 28px minmax(0, 1fr) auto;
   align-items: start;
   gap: 12px;
 }
@@ -999,6 +999,11 @@ svg {
 .home-command__continuation-heading svg {
   width: 20px;
   height: 20px;
+}
+.home-command__new-request {
+  min-height: 44px;
+  align-self: start;
+  white-space: nowrap;
 }
 
 .home-command__continuation-heading h3,
@@ -12793,6 +12798,11 @@ svg {
     width: 28px;
     height: 28px;
   }
+  .home-command__new-request {
+    grid-column: 2 / -1;
+    justify-self: start;
+    white-space: normal;
+  }
 
   .home-page[data-assistant-state="working"] .home-greeting,
   .home-page[data-assistant-state="result"] .home-greeting,
@@ -17572,8 +17582,9 @@ svg {
 .home-inflow-review__selection {
   display: grid;
   grid-template-columns: minmax(240px, 1fr) minmax(0, 2fr);
+  grid-template-rows: minmax(0, 1fr);
   min-width: 0;
-  max-height: 640px;
+  max-height: min(640px, calc(100dvh - 160px));
 }
 .home-inflow-review__queue {
   display: flex;
@@ -17934,7 +17945,7 @@ body {
   padding: 0 16px 16px;
 }
 .home-inflow[data-view="calendar"] .home-inflow-review__selection {
-  max-height: 760px;
+  max-height: min(760px, calc(100dvh - 160px));
   background: transparent;
 }
 .home-inflow-review__queue,
@@ -18005,6 +18016,9 @@ body {
   flex: 1;
 }
 @media (max-width: 720px) {
+  .home-inflow-review__selection {
+    grid-template-rows: auto;
+  }
   .home-inflow[data-view="calendar"] .home-inflow-review__selection {
     max-height: none;
   }
@@ -18095,6 +18109,8 @@ body {
   position: fixed;
   inset: 80px 20px auto auto;
   width: 340px;
+  height: fit-content;
+  min-height: 0;
   max-width: calc(100% - 32px);
   max-height: calc(100dvh - 112px);
   margin: 0;
@@ -18111,6 +18127,9 @@ body {
 }
 .appearance-panel:popover-open {
   display: grid;
+  grid-auto-rows: max-content;
+  align-content: start;
+  align-items: start;
   gap: 20px;
 }
 .appearance-panel__heading {
@@ -18125,6 +18144,7 @@ body {
 }
 .appearance-panel__section {
   display: grid;
+  align-content: start;
   gap: 12px;
 }
 .appearance-panel__section > span {
@@ -18135,6 +18155,7 @@ body {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+  align-items: start;
 }
 .appearance-panel__mode {
   display: flex;
@@ -18142,6 +18163,7 @@ body {
   justify-content: center;
   gap: 8px;
   min-height: 44px;
+  height: 44px;
   padding: 8px;
   border: 0;
   border-radius: var(--radius-control);
@@ -18167,6 +18189,7 @@ body {
   display: grid;
   grid-template-columns: repeat(5, minmax(44px, 1fr));
   gap: 4px;
+  align-items: start;
 }
 .appearance-panel__color {
   display: grid;
@@ -18174,6 +18197,7 @@ body {
   align-content: center;
   gap: 8px;
   min-height: 68px;
+  height: 68px;
   padding: 8px 0;
   border: 0;
   border-radius: var(--radius-control);
@@ -18205,6 +18229,59 @@ body {
   color: var(--muted);
   font-size: 12px;
   line-height: 20px;
+}
+.representative-image-control {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.representative-image-control__preview {
+  display: block;
+  width: 64px;
+  height: 64px;
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--surface-subtle);
+}
+.representative-image-control__preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center top;
+}
+.representative-image-control__actions {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.representative-image-control__actions button {
+  min-height: 44px;
+  justify-content: center;
+  white-space: normal;
+  font-size: 14px;
+}
+.representative-image-control__actions svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.representative-image-control__status {
+  margin: 0;
+  color: var(--accent-text);
+  font-size: 14px;
+  line-height: 20px;
+}
+.representative-image-control__status[data-error="true"] {
+  color: var(--danger);
+}
+.os-brand__mark--hamster img[data-custom="true"],
+.assistant-message__avatar img[data-custom="true"],
+.representative-image-control__preview img[data-custom="true"] {
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
 }
 @media (max-width: 720px) {
   .os-shell:not([data-platform="desktop"]) .os-topbar {

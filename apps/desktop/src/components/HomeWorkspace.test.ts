@@ -1,8 +1,89 @@
 import { describe, expect, it } from "vitest";
+import { createElement, type ComponentProps } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import { type Task } from "../api/planning";
 import { type WeeklyReport } from "../api/projects";
-import { selectWeeklyPriorityTasks } from "./HomeWorkspace";
+import {
+  HomeAssistantCommand,
+  selectWeeklyPriorityTasks,
+} from "./HomeWorkspace";
+
+describe("home new request action", () => {
+  const base: ComponentProps<typeof HomeAssistantCommand> = {
+    ready: true,
+    conversationId: "home-conversation",
+    request: "할 일 확인해 줘",
+    job: undefined,
+    message: undefined,
+    focused: false,
+    onFocusChange() {},
+    onOpenAssistant() {},
+    onStartNew: async () => true,
+    onSend: async () => true,
+    onLoadTask: async () => task("task", null),
+    onCompleteTask: async () => task("task", null),
+    onRestoreTask: async () => task("task", null),
+    onEditTask() {},
+    onEditSchedule() {},
+    onOpenTask() {},
+    onOpenProject() {},
+    onOpenSchedule() {},
+  };
+  it("renders a visible new request action even when the previous result is collapsed", () => {
+    const markup = renderToStaticMarkup(
+      createElement(HomeAssistantCommand, base),
+    );
+    expect(markup).toContain("새 요청 시작하기");
+    expect(markup).toContain("home-command__new-request");
+    expect(markup).toContain("이어서 요청하기");
+  });
+  it.each(["completed", "failed", "cancelled", "declined"] as const)(
+    "enables the new request action after %s",
+    (state) => {
+      const markup = renderToStaticMarkup(
+        createElement(HomeAssistantCommand, {
+          ...base,
+          job: {
+            id: "job",
+            conversationId: "home-conversation",
+            state,
+            createdAt: "2026-10-06T00:00:00Z",
+            finishedAt: "2026-10-06T00:01:00Z",
+            pendingAction: null,
+            version: 1,
+          },
+        }),
+      );
+      expect(
+        markup.match(/<button[^>]*home-command__new-request[^>]*>/)?.[0],
+      ).not.toContain("disabled");
+    },
+  );
+  it.each(["running", "queued", "waiting_approval", "retry_wait"] as const)(
+    "keeps the button visible but disabled during %s",
+    (state) => {
+      const markup = renderToStaticMarkup(
+        createElement(HomeAssistantCommand, {
+          ...base,
+          job: {
+            id: "job",
+            conversationId: "home-conversation",
+            state,
+            createdAt: "2026-10-06T00:00:00Z",
+            finishedAt: null,
+            pendingAction: null,
+            version: 1,
+          },
+        }),
+      );
+      expect(markup).toContain("새 요청 시작하기");
+      expect(
+        markup.match(/<button[^>]*home-command__new-request[^>]*>/)?.[0],
+      ).toContain("disabled");
+    },
+  );
+});
 
 function task(
   id: string,

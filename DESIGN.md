@@ -55,6 +55,9 @@ Jimin OS의 제품 화면은 개인 데이터와 연결 서비스를 바탕으�
 ## System appearance
 
 - The palette icon beside refresh opens light/dark appearance and primary-color controls. Explicit choices are saved locally and applied before rendering. Without saved choices, the design preview starts dark and regular clients use the operating system appearance at launch.
+- The appearance panel sizes to its contents instead of distributing excess height across rows. Mode controls remain 44px and color controls 68px; short viewports scroll inside the panel.
+- Representative images can be selected or restored in this panel. PNG/JPEG/WebP inputs are resized locally and saved only on the current device; no server upload or cross-device sync is implied.
+- Desktop home inflow grids use a zero-minimum track and viewport-bounded height so expanded assignment forms scroll inside the detail column. Mobile details retain natural page scrolling; no assignment field or submission action may be clipped by the outer card.
 - Native Android status and navigation bars use the matching canvas color with
   legible system icons. Mobile content must respect the top and bottom system
   insets.
@@ -248,13 +251,13 @@ These roles record the user's earlier badge, connection, selection and form refi
 - Grouped assistant results use one continuous surface-subtle background across the assignee lists and selected detail. Task tabs omit the leading icon; count labels use accent/on-accent when selected and surface-hover/text-strong otherwise.
 
 ### Conversation profile and composer
-- Assistant messages show the existing hamster image as a 40px circular avatar, using the top crop to match the sidebar profile. Name and message occupy the adjacent Grid column with a 12px gap.
+- Assistant messages show the representative image as a 40px circular avatar. The default hamster uses a top crop; custom images use a centered cover crop matching the sidebar profile. Name and message occupy the adjacent Grid column with a 12px gap.
 - The user-requested message composer perimeter is an explicit exception to borderless cards: border-strong at rest and focus-colored perimeter when its textarea or send button is focused.
 - Textarea caret uses the bright focus token. Empty or whitespace input keeps send disabled in neutral gray; nonblank input immediately enables the fully opaque accent/on-accent send button. Existing loading and waiting guards remain.
 
 ### Home task detail and follow-up alignment
 - Grouped task details use top label, flexible content row and bottom action row in both assignee/date views. Shared 24px desktop / 16px narrow padding applies at both ends.
-- Follow-up heading uses a 28px icon column aligned to the 20px/28px title, with 12px horizontal gap and 8px title-to-description gap. Remove its trailing new-request button.
+- Follow-up heading uses a 28px icon column aligned to the 20px/28px title, with 12px horizontal gap and 8px title-to-description gap. A visible new-request button remains available when results are collapsed; on mobile it moves below the title and retains a 44px touch target. Busy requests disable it without hiding it.
 - Clicking the home input displays the send control in fully opaque primary color. Readiness, busy state and nonblank draft still determine whether sending is enabled.
 
 ### Project overview readability

@@ -13,6 +13,7 @@ import {
   MessageCircleMore,
   Mic,
   Pencil,
+  Plus,
   Send,
   Settings2,
   Sparkles,
@@ -891,7 +892,7 @@ function NowBrief({
   );
 }
 
-function HomeAssistantCommand({
+export function HomeAssistantCommand({
   ready,
   conversationId,
   request,
@@ -937,8 +938,10 @@ function HomeAssistantCommand({
   ): void | Promise<void>;
 }) {
   const [draft, setDraft] = useState("");
-  const [submitted, setSubmitted] = useState(false);
-  const [submittedRequest, setSubmittedRequest] = useState("");
+  const [submitted, setSubmitted] = useState(
+    Boolean(conversationId && request),
+  );
+  const [submittedRequest, setSubmittedRequest] = useState(request ?? "");
   const [sending, setSending] = useState(false);
   const [startingNew, setStartingNew] = useState(false);
   const [error, setError] = useState<string>();
@@ -1045,27 +1048,31 @@ function HomeAssistantCommand({
   );
 
   async function startNewRequest() {
-    if (startingNew) return;
+    if (startingNew || active || sending || !ready) return;
     setStartingNew(true);
     setError(undefined);
-    const started = await onStartNew();
-    setStartingNew(false);
-    if (!started) {
+    try {
+      const started = await onStartNew();
+      if (!started) {
+        setError(copy.home.startNewRequestProblem);
+        return;
+      }
+      setDraft("");
+      setSubmitted(false);
+      setSubmittedRequest("");
+      onFocusChange(false);
+      if (focusFrameRef.current !== undefined) {
+        cancelAnimationFrame(focusFrameRef.current);
+      }
+      focusFrameRef.current = requestAnimationFrame(() => {
+        focusFrameRef.current = undefined;
+        inputRef.current?.focus();
+      });
+    } catch {
       setError(copy.home.startNewRequestProblem);
-      return;
+    } finally {
+      setStartingNew(false);
     }
-    setDraft("");
-    setSubmitted(false);
-    setSubmittedRequest("");
-    setError(undefined);
-    onFocusChange(false);
-    if (focusFrameRef.current !== undefined) {
-      cancelAnimationFrame(focusFrameRef.current);
-    }
-    focusFrameRef.current = requestAnimationFrame(() => {
-      focusFrameRef.current = undefined;
-      inputRef.current?.focus();
-    });
   }
 
   return (
@@ -1170,6 +1177,25 @@ function HomeAssistantCommand({
               </h3>
               <p>{copy.home.followUpContext}</p>
             </div>
+            <button
+              type="button"
+              className="secondary-button home-command__new-request focus-visible-control"
+              disabled={!ready || active || sending || startingNew}
+              aria-busy={startingNew}
+              title={
+                active ? copy.home.commandProcessingDescription : undefined
+              }
+              onClick={() => void startNewRequest()}
+            >
+              {startingNew ? (
+                <span className="button-spinner" aria-hidden="true" />
+              ) : (
+                <Plus aria-hidden="true" />
+              )}
+              {startingNew
+                ? copy.home.startingNewRequest
+                : copy.home.startNewRequest}
+            </button>
           </div>
           {composer}
         </section>

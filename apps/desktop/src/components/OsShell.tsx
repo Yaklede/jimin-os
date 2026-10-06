@@ -22,6 +22,7 @@ import {
 
 import { copy } from "../copy";
 import { AppearanceControl } from "./appearance-control";
+import { RepresentativeImage } from "./RepresentativeImage";
 import { type VoiceCommandOutcome } from "./VoiceCommandSheet";
 import { registerMobileBackHandler } from "../mobileBack";
 import {
@@ -125,7 +126,7 @@ export function OsShell({
             className="os-brand__mark os-brand__mark--hamster"
             aria-hidden="true"
           >
-            <img src="/images/hamster-home-wave.png" alt="" />
+            <RepresentativeImage />
           </span>
           <span>{copy.productName.toLocaleLowerCase("en-US")}</span>
         </button>
