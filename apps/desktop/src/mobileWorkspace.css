@@ -1,11 +1,22 @@
 /* Phone-only layout. Desktop, including narrow native desktop windows, is unchanged. */
 @media (max-width: 720px) {
   .os-shell:not([data-platform="desktop"]) {
-    --mobile-nav-height: calc(64px + env(safe-area-inset-bottom, 0px));
+    --mobile-top-clearance: max(12px, var(--safe-area-top));
+    --mobile-nav-height: calc(64px + max(8px, var(--safe-area-bottom)));
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .os-shell:not([data-platform="desktop"]) .os-topbar {
+    margin-top: var(--mobile-top-clearance);
+  }
+  .os-shell:not([data-platform="desktop"]) .os-topbar__inner {
+    gap: 4px 8px;
   }
   .os-shell:not([data-platform="desktop"]) .os-content {
+    min-height: 0;
     padding-inline: 16px;
+    padding-top: 12px;
     padding-bottom: calc(var(--mobile-nav-height) + 16px);
+    scroll-padding-bottom: calc(var(--mobile-nav-height) + 16px);
   }
   .os-shell:not([data-platform="desktop"]) .os-content__view {
     min-height: 0;
@@ -13,9 +24,11 @@
   }
   .os-shell:not([data-platform="desktop"]) .os-mobile-nav {
     grid-template-columns: repeat(5, minmax(0, 1fr));
+    height: var(--mobile-nav-height);
     min-height: var(--mobile-nav-height);
-    padding: 4px 8px env(safe-area-inset-bottom, 0px);
+    padding: 4px 8px max(8px, var(--safe-area-bottom));
     align-items: center;
+    background: var(--surface);
   }
   .os-shell:not([data-platform="desktop"]) .os-mobile-nav > * {
     grid-column: auto;
@@ -76,7 +89,7 @@
   }
   .os-shell:not([data-platform="desktop"]) .os-mobile-more__items {
     bottom: calc(100% + 12px);
-    right: 0;
+    right: 16px;
     width: min(240px, calc(100vw - 32px));
     padding: 8px;
     border: 1px solid var(--control-contrast);
@@ -95,10 +108,20 @@
   }
   .os-shell:not([data-platform="desktop"]) .home-greeting {
     padding: 0;
-    margin-bottom: 4px;
+    margin: 0;
+    min-height: 0;
+    transform: none;
+    opacity: 1;
+    transition: none;
   }
   .os-shell:not([data-platform="desktop"]) .home-greeting h1 {
-    font-size: 22px;
+    font-size: 20px;
+    line-height: 28px;
+  }
+  .os-shell:not([data-platform="desktop"]) .home-greeting p {
+    margin: 4px 0 0;
+    font-size: 12px;
+    line-height: 20px;
   }
   .os-shell:not([data-platform="desktop"]) .home-greeting__actions {
     display: none;
@@ -107,6 +130,10 @@
     display: flex;
     flex-direction: column;
     gap: 16px;
+  }
+  .os-shell:not([data-platform="desktop"]) .sr-only {
+    margin: 0;
+    clip-path: inset(50%);
   }
   .mobile-task-queue {
     min-width: 0;
@@ -144,7 +171,7 @@
   .mobile-task-queue__grouping button {
     border: 0;
     border-radius: 10px;
-    min-height: 48px;
+    min-height: 44px;
     background: transparent;
     color: var(--muted);
     font-size: 14px;
