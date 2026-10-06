@@ -28,3 +28,17 @@
 - Preview remains at `http://localhost:1424/` with synthetic data only.
 - No production task or Google Chat message was created. No production installation, server deployment or migration performed in this task.
 - Physical Android native-back/keyboard and macOS WebKit modal interaction remain to be verified in a separate development build; browser responsive checks and mobile-back routing implementation are not claimed as physical-device QA.
+
+## Authorized production release — 2026-10-06
+
+- User explicitly requested production deployment after the development implementation.
+- PR #4 merged: https://github.com/Yaklede/jimin-os/pull/4. Reviewed source commit `aed0643c3231ad3eefa7ab717a5ce2aee5208dd6`; merge commit `4cbf2bdc2cecdc6d8128165e62d6530e5a5baca4`. Source trees match for apps/services/packages/scripts/deploy.
+- Both client builds passed the production-origin and preview-disabled asset verifier for `https://os.jimin.ai.kr`.
+- macOS: stable TeamIdentifier `9L5V75TP2R`, production bundle `io.jimin.os`, signature verified. Installed `/Applications/Jimin OS.app`, quit normally and relaunched through native UI. Production home data loaded successfully; no active recording or unsaved form was present before restart.
+- macOS executable SHA-256: `2a77b77be16f6345047f7d71517e2def513574cd8e0d6e447a3f66db1acf3f60`.
+- Previous macOS bundle retained at `/tmp/jimin-os-release-inflow-modal-20261006/previous-installed.app` for rollback.
+- Android: connected physical SM_S948N updated with `install -r`, after ABI/signature/version compatibility checks. Non-debuggable arm64 release, 12,193,612 bytes; app process/resumed activity verified. No uninstall or data clearing; no localhost API reverse mapping remains.
+- Android lastUpdateTime: `2026-10-06 15:16:01`; APK SHA-256: `e5a04d0be535fe79901e870b220de62e2638806a1f0c266ac7ed4275641daaeb`.
+- APK retained at `/Users/jimin/Desktop/study/jimin-os/releases/inflow-modal-20261006/jimin-os-production-arm64.apk`.
+- Server `/health/live` and `/health/ready` passed; API build `7414ed94aba418fee43ca25c572d20b4288e7e16`, schema 57. This release changes client UI only, so no backend rebuild/restart or migration was performed.
+- Native macOS registration interaction QA was not continued while the user was actively operating the app. Android native-back/keyboard QA remains unexecuted; installation/launch checks do not substitute for those tests. No real task or Google Chat message was created for release testing.
