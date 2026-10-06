@@ -15,8 +15,8 @@
 - [x] 사유 저장, 답글 선택, 발송 실패/재시도/중복 방지
 - [x] API 및 저장소 테스트, 타입 검사, 린트, 빌드
 - [x] 데스크탑/모바일 화면과 키보드 접근성
-- [ ] 운영 DB 백업/복원 확인, migration 57 적용, readiness 검증
-- [ ] 운영 desktop 설치, 실기기 연결 여부 확인
+- [x] 운영 DB 백업/복원 확인, migration 57 적용, readiness 검증
+- [x] 운영 desktop 설치, 실기기 연결 여부 확인
 
 ## 검증 중 발견 및 수정
 
@@ -39,9 +39,20 @@
 
 - PostgreSQL: 실제 격리 DB 52개 시나리오 모두 통과. 신규 확인/제외/답글 실패·재시도와 기존 일감 승격 회귀를 포함한다.
 - API unit: 113개 통과. 변경된 응답의 확인 상태 합산과 기존 인증 guard를 포함한다.
+- Storage unit: 84개 통과.
 - Desktop unit: 312개 통과. 신규/기존 구역, 기본 접힘, 요청 body 선택과 확인한 대화의 프로젝트 재검토를 포함한다.
 - TypeScript, Rust formatter/Clippy, 운영 web build 및 운영 서버 origin 검사 통과.
 - 공용 컴포넌트를 별도 dev 샘플에서 렌더링해 desktop 및 모바일 390×844 요청 너비를 확인했다. 실제 content 너비 375/scrollWidth 375로 가로 넘침 없음. 사유 입력, 기본 꺼진 답글 선택, 제외 후 다음 항목 선택을 확인했다.
 - 실제 운영 Chat 발송은 미실행. 발송 요청 ID 안정성과 실패 후 제외 보존은 DB 통합 테스트로 확인했다.
 - UX 자동 검사에는 기존 코드의 null/undefined, textarea placeholder 속성, error 변수명을 사용자 문구로 잘못 인식하는 오탐이 있다. 기존 보고서 상태의 ‘생성 실패’도 신규 변경 범위가 아니다. 신규 공개 문구는 별도 추출 검증과 수동 계약 확인으로 검토했다. 자동 검사 전체 통과로 보고하지 않는다.
 - Backend 정규식 harness는 Rust 파일을 지원하지 않아 신규 SQL에만 적용됐다. Rust 실제 검증은 Clippy/API/DB 테스트로 보완했다.
+- 확인용 임시 화면과 Vite 프로세스, 이번 작업에서 설치한 feature worktree의 node_modules/dist 및 임시 harness 디렉터리는 정리했다. 공용 Rust target과 운영 설치 후보/백업은 보존했다.
+
+## 운영 반영 결과 (2026-10-06)
+
+- 지정된 ‘로컬 서버 인프라’ 작업을 통해 서버 SHA `7414ed94aba418fee43ca25c572d20b4288e7e16`을 배포했다. CI `37412304466` 성공 및 공식 digest artifact를 사용했다.
+- 격리 환경 백업 복원 56/56/failure 0 → migration 57 및 readiness 57/57/failure 0 통과 후 운영 전환했다. 내부/Mac Twingate live·ready HTTP 200, 서비스 5개 healthy·restart 0을 인프라 작업에서 확인했다.
+- 클라이언트 전용 마지막 필터 수정 `a2a2cd09ffd1de0fc92a64cf3847b0ee5921b162`을 포함한 운영 macOS 앱을 `/Applications/Jimin OS.app`에 설치하고 재실행했다. 같은 앱 ID/개발 서명 지정 요구사항을 유지하며 이전 설치본은 `/tmp/jimin-os-release-inflow-20261006/previous-installed.app`에 보존했다.
+- 설치 실행 파일 SHA-256: `438cc99086fe3354299f38ccb73905e3373eca43ac7ff6e724c5182b66ccb2b4`. 설치 후 codesign deep/strict 검증 통과.
+- 실제 앱에서 ‘새 업무 요청 19건 / 기존 일감 업데이트 2건’ 및 기존 예약 업무/일감 로드를 확인했다. ‘업무 아님’ 사유 폼과 기본 꺼진 답글 checkbox를 열어 확인한 뒤 저장하지 않고 닫았다. 운영 업무 데이터/원문 Chat은 테스트로 변경하지 않았다.
+- Android는 `adb devices`에 연결된 기기가 없어 이번 설치를 실행하지 않았다. 모바일 반응형 QA는 dev에서 완료했으나 실기기 업데이트는 기기 연결 후 별도 진행해야 한다.
