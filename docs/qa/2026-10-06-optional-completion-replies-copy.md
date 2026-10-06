@@ -17,9 +17,7 @@ ProjectsWorkspace.tsx and apps/api/src/lib.rs. Code identifiers are excluded.
 
 예: 요청한 내용을 반영했어요. 확인한 결과나 전달할 내용을 남겨 주세요.
 
-답글 남기고 완료하기
-
-답글 없이 완료하기
+완료하기
 
 취소
 

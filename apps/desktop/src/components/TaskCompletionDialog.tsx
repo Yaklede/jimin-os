@@ -18,8 +18,7 @@ export const taskCompletionCopy = {
   label: "완료 답글 (선택)",
   placeholder:
     "예: 요청한 내용을 반영했어요. 확인한 결과나 전달할 내용을 남겨 주세요.",
-  save: "답글 남기고 완료하기",
-  skip: "답글 없이 완료하기",
+  complete: "완료하기",
   cancel: "취소",
   busy: "일감을 완료하고 있어요",
   failure:
@@ -41,13 +40,13 @@ export function TaskCompletionDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const inFlight = useRef(false);
-  async function finish(withResult: boolean) {
+  async function finish() {
     if (inFlight.current) return;
     inFlight.current = true;
     setBusy(true);
     setError(undefined);
     try {
-      await onComplete(withResult ? note.trim() || undefined : undefined);
+      await onComplete(note.trim() || undefined);
     } catch (cause) {
       setError(
         cause instanceof PlanningRequestError && cause.code === "conflict"
@@ -73,7 +72,7 @@ export function TaskCompletionDialog({
           className="task-completion-form"
           onSubmit={(event) => {
             event.preventDefault();
-            void finish(true);
+            void finish();
           }}
         >
           <strong>
@@ -106,18 +105,8 @@ export function TaskCompletionDialog({
             >
               {taskCompletionCopy.cancel}
             </button>
-            {note.trim() && (
-              <button
-                type="button"
-                className="secondary-button"
-                disabled={busy}
-                onClick={() => void finish(false)}
-              >
-                {taskCompletionCopy.skip}
-              </button>
-            )}
             <button type="submit" className="primary-button" disabled={busy}>
-              {note.trim() ? taskCompletionCopy.save : taskCompletionCopy.skip}
+              {taskCompletionCopy.complete}
             </button>
           </div>
         </form>

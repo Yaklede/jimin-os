@@ -54,7 +54,7 @@ describe("optional task completion replies", () => {
     );
     expect(markup).toContain(task.title);
     expect(markup).toContain(taskCompletionCopy.label);
-    expect(markup).toContain(taskCompletionCopy.skip);
+    expect(markup).toContain(taskCompletionCopy.complete);
     expect(markup).toContain('maxLength="2000"');
     expect(markup).toContain("원래 대화에도 전달");
     expect(markup).not.toContain("확인 업무");
@@ -71,9 +71,13 @@ describe("optional task completion replies", () => {
           onCancel() {},
         }),
       );
-      expect(markup).toContain(taskCompletionCopy.skip);
+      expect(markup).toContain(taskCompletionCopy.complete);
       expect(markup).toContain(taskCompletionCopy.cancel);
       expect(markup).not.toContain('required=""');
+      expect(markup.match(/type="submit"/g)).toHaveLength(1);
+      expect(markup.match(/<button\b/g)).toHaveLength(3);
+      expect(markup).not.toContain("답글 없이 완료하기");
+      expect(markup).not.toContain("답글 남기고 완료하기");
     },
   );
 });

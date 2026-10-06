@@ -4,7 +4,16 @@
 
 - Removed category selectors, badges, category filters and category labels from task creation, Chat/Gmail promotion, editing, task details, home, mobile queue and assistant results.
 - Every manual completion entry point now opens the same optional-reply dialog, independent of legacy task category.
-- Empty or whitespace-only input completes without a custom reply. Entered text can be saved with completion, or explicitly skipped.
+- One fixed 완료하기 button completes the task. Empty or whitespace-only input omits the custom reply; entered text is saved with completion. To omit an entered reply, clear the text first.
+
+### Single completion button follow-up
+
+- Frontend suite: 69 files / 433 tests passed; frontend build and Prettier passed.
+- Development preview: exactly one 완료하기 button with both empty and entered
+  text; completing with text and whitespace-only input both updated the task state.
+- Screenshot: `/tmp/jimin-task-completion-single-button-20261006.jpg`.
+- Scoped public-copy harness and `git diff --check` passed. No production
+  deployment or live Google Chat transmission performed for this follow-up.
 - Custom replies remain bounded to 2,000 characters and are saved atomically with completion. Existing source-thread delivery, provider retries, version fencing and duplicate prevention are preserved.
 - Assignment and completion notifications no longer display a task category. A custom completion reply uses the label 완료 답글.
 - Existing database values and API compatibility remain intact. No migration or production data rewrite was required.
