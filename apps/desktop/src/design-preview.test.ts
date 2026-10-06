@@ -15,6 +15,47 @@ function setupPreview() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("design preview API isolation", () => {
+  it("archives the prior request and opens an empty conversation without a server", async () => {
+    const originalFetch = setupPreview();
+    expect(
+      (
+        await window.fetch("/server/v1/conversations/preview-home/archive", {
+          method: "POST",
+        })
+      ).status,
+    ).toBe(204);
+    const created = await window.fetch("/server/v1/conversations", {
+      method: "POST",
+      body: JSON.stringify({
+        clientConversationId: "preview-new-home",
+        title: null,
+        surface: "home",
+      }),
+    });
+    expect(await created.json()).toMatchObject({
+      id: "preview-new-home",
+      status: "active",
+      lastMessageAt: null,
+    });
+    const active = await window
+      .fetch("/server/v1/conversations")
+      .then((response) => response.json());
+    expect(active.items).toHaveLength(1);
+    expect(active.items[0].id).toBe("preview-new-home");
+    expect(
+      await window
+        .fetch("/server/v1/conversations/preview-new-home/messages")
+        .then((response) => response.json()),
+    ).toEqual({ items: [], nextCursor: null });
+    expect(
+      (
+        await window.fetch(
+          "/server/v1/conversations/preview-new-home/jobs/latest",
+        )
+      ).status,
+    ).toBe(204);
+    expect(originalFetch).not.toHaveBeenCalled();
+  });
   it("keeps reviewed conversations pending and stores exclusion reasons without external replies", async () => {
     const originalFetch = setupPreview();
     const candidate = (await previewHome()).inflow[0];

@@ -2,7 +2,7 @@ import { designPreviewInflow } from "./design-preview-inflow";
 import { applyDesignPreviewInflowDecision } from "./design-preview-inflow-decision";
 import type { Task } from "./api/planning";
 import type { WeeklyReport } from "./api/projects";
-import type { ConversationMessage } from "./api/agent";
+import type { Conversation, ConversationMessage } from "./api/agent";
 
 // Fixtures for local preview or an explicit design-preview build only.
 export function installDesignPreview(): void {
@@ -74,7 +74,7 @@ export function installDesignPreview(): void {
       version: 1,
     },
   ];
-  const conversation = {
+  const conversation: Conversation = {
     id: "preview-home",
     title: "프로젝트 일감 정리",
     surface: "home",
@@ -82,6 +82,7 @@ export function installDesignPreview(): void {
     lastMessageAt: now,
     version: 1,
   };
+  const conversations = [conversation];
   const list = (items: unknown[]) => ({ items, nextCursor: null });
   const json = (body: unknown, status = 200) => Response.json(body, { status });
   window.fetch = async (input, init) => {
@@ -194,8 +195,54 @@ export function installDesignPreview(): void {
         Object.assign(task, JSON.parse(String(init.body)));
       return json(task);
     }
-    if (path === "/v1/conversations") return json(list([conversation]));
-    if (path.endsWith("/messages")) return json(list(messages));
+    if (path === "/v1/conversations") {
+      if (method === "GET")
+        return json(
+          list(conversations.filter((item) => item.status === "active")),
+        );
+      if (method === "POST") {
+        try {
+          const body =
+            init?.body !== undefined
+              ? JSON.parse(String(init.body))
+              : input instanceof Request
+                ? await input.clone().json()
+                : undefined;
+          if (
+            !body ||
+            typeof body.clientConversationId !== "string" ||
+            !["home", "chat"].includes(body.surface)
+          )
+            return json({ error: "preview_invalid_conversation" }, 400);
+          const next: Conversation = {
+            id: body.clientConversationId,
+            title: typeof body.title === "string" ? body.title : null,
+            surface: body.surface,
+            status: "active",
+            lastMessageAt: null,
+            version: 1,
+          };
+          conversations.push(next);
+          return json(next, 201);
+        } catch {
+          return json({ error: "preview_invalid_conversation" }, 400);
+        }
+      }
+    }
+    const archiveRoute = /^\/v1\/conversations\/([^/]+)\/archive$/.exec(path);
+    if (archiveRoute && method === "POST") {
+      const item = conversations.find(
+        (item) => item.id === decodeURIComponent(archiveRoute[1]),
+      );
+      if (!item) return json({ error: "preview_item_missing" }, 404);
+      item.status = "archived";
+      item.version += 1;
+      return new Response(null, { status: 204 });
+    }
+    if (path.endsWith("/messages"))
+      return json(list(path.split("/")[3] === conversation.id ? messages : []));
+    if (path.endsWith("/jobs/latest") && path.split("/")[3] !== conversation.id)
+      return new Response(null, { status: 204 });
     if (path.endsWith("/jobs/latest"))
       return json({
         id: "preview-job",

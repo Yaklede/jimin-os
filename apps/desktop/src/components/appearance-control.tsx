@@ -11,6 +11,7 @@ import {
   type AppearancePreferences,
 } from "../appearance-preferences";
 import { copy } from "../copy";
+import { RepresentativeImageControl } from "./RepresentativeImageControl";
 
 export function AppearanceControl() {
   const popoverId = useId();
@@ -123,6 +124,7 @@ export function AppearanceControl() {
             ))}
           </div>
         </div>
+        <RepresentativeImageControl />
         <p
           className="appearance-panel__help"
           role={saveFailed ? "status" : undefined}
