@@ -1,4 +1,5 @@
-import { useId } from "react";
+import { useId, useRef } from "react";
+import { CalendarDays } from "lucide-react";
 
 import { deadlinePickerCopy } from "../copy/deadlinePicker";
 
@@ -35,8 +36,10 @@ export function DeadlinePicker({
   className,
 }: DeadlinePickerProps) {
   const generatedId = useId();
+  const dateInputRef = useRef<HTMLInputElement>(null);
   const labelId = `${id || generatedId}-label`;
   const [date = "", time = ""] = value.split("T");
+  const [hour = "", minute = ""] = time.split(":");
 
   function changeDate(nextDate: string) {
     if (!nextDate) {
@@ -44,14 +47,6 @@ export function DeadlinePicker({
       return;
     }
     onChange(combineLocalDateTime(nextDate, time || nextQuarterHour(now)));
-  }
-
-  function changeTime(nextTime: string) {
-    if (!nextTime) {
-      onChange("");
-      return;
-    }
-    onChange(combineLocalDateTime(date || seoulDatePart(now), nextTime));
   }
 
   return (
@@ -68,31 +63,122 @@ export function DeadlinePicker({
         aria-labelledby={labelId}
         aria-describedby={describedBy}
       >
-        <label>
-          <span>{deadlinePickerCopy.date}</span>
-          <input
-            id={`${id}-date`}
-            type="date"
-            value={date}
+        <div className="deadline-picker__date">
+          <label>
+            <span>{deadlinePickerCopy.date}</span>
+            <input
+              ref={dateInputRef}
+              id={`${id}-date`}
+              type="date"
+              value={date}
+              disabled={disabled}
+              required={required}
+              aria-invalid={invalid}
+              aria-label={`${label} ${deadlinePickerCopy.date}`}
+              onChange={(event) => changeDate(event.currentTarget.value)}
+            />
+          </label>
+          <button
+            type="button"
+            className="deadline-picker__calendar"
             disabled={disabled}
-            required={required}
-            aria-invalid={invalid}
-            onChange={(event) => changeDate(event.currentTarget.value)}
-          />
-        </label>
-        <label>
-          <span>{deadlinePickerCopy.time}</span>
-          <input
-            id={`${id}-time`}
-            type="time"
-            step={15 * 60}
-            value={time}
-            disabled={disabled}
-            required={required}
-            aria-invalid={invalid}
-            onChange={(event) => changeTime(event.currentTarget.value)}
-          />
-        </label>
+            aria-label={`${label} ${deadlinePickerCopy.openCalendar}`}
+            onClick={() => {
+              const input = dateInputRef.current;
+              if (!input) return;
+              try {
+                if (input.showPicker) input.showPicker();
+                else input.focus();
+              } catch {
+                input.focus();
+              }
+            }}
+          >
+            <CalendarDays aria-hidden="true" />
+          </button>
+          {showPresets && (
+            <div className="deadline-picker__date-presets">
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => changeDate(seoulDatePart(now))}
+              >
+                {deadlinePickerCopy.today}
+              </button>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() =>
+                  changeDate(seoulDatePart(new Date(now.getTime() + 86400000)))
+                }
+              >
+                {deadlinePickerCopy.tomorrow}
+              </button>
+            </div>
+          )}
+        </div>
+        <div className="deadline-picker__time">
+          <label>
+            <span>{deadlinePickerCopy.time}</span>
+            <select
+              id={`${id}-time`}
+              aria-label={`${label} ${deadlinePickerCopy.hour}`}
+              value={hour}
+              disabled={disabled}
+              required={required}
+              aria-invalid={invalid}
+              onChange={(event) =>
+                onChange(
+                  selectLocalTimePart(
+                    value,
+                    "hour",
+                    event.currentTarget.value,
+                    now,
+                  ),
+                )
+              }
+            >
+              <option value="">{deadlinePickerCopy.hour}</option>
+              {Array.from({ length: 24 }, (_, index) => (
+                <option key={index} value={pad(index)}>
+                  {pad(index)}
+                  {deadlinePickerCopy.hour}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span className="deadline-picker__minute-label">
+              {deadlinePickerCopy.minute}
+            </span>
+            <select
+              id={`${id}-minute`}
+              aria-label={`${label} ${deadlinePickerCopy.minute}`}
+              value={minute}
+              disabled={disabled}
+              required={required}
+              aria-invalid={invalid}
+              onChange={(event) =>
+                onChange(
+                  selectLocalTimePart(
+                    value,
+                    "minute",
+                    event.currentTarget.value,
+                    now,
+                  ),
+                )
+              }
+            >
+              <option value="">{deadlinePickerCopy.minute}</option>
+              {Array.from({ length: 60 }, (_, index) => (
+                <option key={index} value={pad(index)}>
+                  {pad(index)}
+                  {deadlinePickerCopy.minute}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
       </div>
       {showPresets && (
         <div
@@ -139,6 +225,26 @@ export function DeadlinePicker({
         {formatSeoulDateTimePreview(value)}
       </p>
     </div>
+  );
+}
+
+export function selectLocalTimePart(
+  value: string,
+  part: "hour" | "minute",
+  selected: string,
+  now = new Date(),
+): string {
+  if (!selected) return "";
+  if (
+    !/^\d{2}$/.test(selected) ||
+    Number(selected) > (part === "hour" ? 23 : 59)
+  )
+    return value;
+  const [date, time = ""] = value.split("T");
+  const [hour = "09", minute = "00"] = time.split(":");
+  return combineLocalDateTime(
+    date || seoulDatePart(now),
+    `${part === "hour" ? selected : hour || "09"}:${part === "minute" ? selected : minute || "00"}`,
   );
 }
 

@@ -1,5 +1,15 @@
 # Database migrations
 
+Migration `0058_task_work_kind.sql` adds an explicit task work type and a bounded
+completion result. Existing tasks retain `general`; new assignments can select
+`verification` or `development`. Completed Chat delivery rows keep immutable
+type/result snapshots so later edits cannot change an in-flight reply. Apply to
+an empty database and a version-57 database in an isolated test transaction.
+Verify create/update/promotion, owner and version guards, retry uniqueness, and
+that reopening clears the result and cancels an unsent completion reply.
+The schema version becomes 58. Rollback after new fields are written requires
+a verified version-57 backup plus the previous images to avoid losing results.
+
 Migrations are forward-only and are embedded in `jimin-storage` at build time.
 
 Before applying a migration to production:

@@ -19,11 +19,12 @@
 
 ## 검증
 
-- Rust API/Agent/codex-client/storage unit tests 통과. 명시적 계정이 필요한 live smoke는 별도로 실행했다.
+- Rust API/Agent/codex-client/storage unit tests 301개 통과. 명시적 계정이 필요한 live smoke는 별도로 실행했다.
 - 실제 GPT-6.1 Sol 비민감 turn 완료 및 실제 structured ITSM 분석 smoke 통과: `new_task`, MID 요구사항과 등록된 담당자 보존, 프로젝트 불일치로 거절하지 않음.
 - 격리 PostgreSQL: 회사 Chat 수집·소유권·승격·제외·후속 댓글 lifecycle 및 모델 카탈로그/사용자 선택 round-trip 통과.
 - PostgreSQL에서 기존 매핑 오류 재시도, disabled 연결 제외, 재시도 idempotency 검증.
-- 데스크탑 설정/ITSM 연결 패널/판단함 회귀 테스트 33개 통과. 실제 UI asset은 변경하지 않았다.
+- 데스크탑 설정/ITSM 연결 패널/판단함 회귀 테스트 33개와 전체 65파일/408개 테스트 통과. TypeScript typecheck도 통과했다. 실제 UI asset은 변경하지 않았다.
+- API/Agent release build 통과.
 - formatter, clippy `-D warnings`, 배포 state 회귀, `git diff --check`, Backend Ultrawork scoped harness 통과.
 - HTTP route/body/OpenAPI 타입 추가 및 DB migration 없음. 기존 인증 guard와 optimistic version 검증 유지.
 
@@ -35,6 +36,8 @@
 | 테스트에서 비공개 DB pool 접근 | 별도 fixture pool 사용으로 수정 |
 | disable/enable fixture가 connection version을 올려 후속 검증 충돌 | 연결의 최신 version을 다시 읽어 회귀 lifecycle 유지 |
 | live smoke의 Duration scope 및 clippy 단위 오류 | 명시적인 `std::time::Duration::from_mins(2)`로 수정 |
+| 운영 서버 Docker Compose 2.29.7에서 `compose run --pull` 미지원 | 운영을 자동 복구하고 인프라 전환 도구의 임시 probe overlay로 pull 정책 고정 |
+| Gateway 재기동 직후 health 안정화 대기 부족 | 운영을 자동 복구하고 인프라 전환 도구의 health 대기 보강. 시작된 분석은 안전한 완료 시점을 확인한 뒤 재시도 |
 
 ## 문구/스킬 검토
 
@@ -55,5 +58,15 @@
 
 ## 운영 결과
 
-- 상태: 검증 완료 후 배포 대기
+- 상태: 운영 배포 및 실제 설치 앱 확인 완료 (2026-10-06)
+- 대상: main `2204a2301d0a8800aa7ba0ce41aca750cb2465f4` (PR #5 병합). 검증한 source `6db4a868fe96008463ffa4194c9596bb5475cc8f`와 Git tree가 같다.
+- 공식 이미지 빌드: GitHub Actions run `37425861865` 성공. API/Agent linux/amd64 및 OCI revision이 대상 SHA와 일치.
+- Twingate 경유 live 응답의 build SHA 일치, schema 57, 5개 운영 서비스 healthy/restart 0.
+- Linux Codex 0.159.0 호환성·기존 ChatGPT 인증·모델 8개 확인. GPT-6.1 Sol 비민감 turn `completed` 확인.
+- 기존 매핑 오류 재분석 대상 15건 모두 `ready`, ITSM 원문 읽기 성공 15건, 기존 매핑 오류 0건. #4245/#4247 원문 읽기와 요약 갱신 확인.
+- 실제 `/Applications/Jimin OS.app`에서 새로고침 후 GPT-6.1-Sol 선택 옵션과 자동 기본 모델 6.1 확인. 사용자의 기존 GPT-5.6-Sol/medium 설정은 변경하지 않음.
+- 실제 앱 #4247에서 프로젝트 불일치 문구 제거, 원문 전체·첨부 링크·구체적인 요약 표시 확인. 승격/제외/완료/Chat 전송은 검증 중 실행하지 않음.
+- 기존 inflow 변경·삭제 0건, 정상 수집으로 1건 추가. mount/설정/네트워크와 일감·모델 선택 보존 확인.
+- Gateway/PostgreSQL/meeting-transcriber의 기존 이미지 및 컨테이너 보존. 전사 이미지 다운로드/재빌드 없음.
+- 전환 도구 문제 두 차례 자동 rollback 후 수정된 도구로 최종 전환 성공. 최초 실패는 제품 코드 및 DB migration 문제가 아님.
 - macOS/Android: UI asset 변경 없음. 서버 반영을 위해 재설치할 필요 없음.

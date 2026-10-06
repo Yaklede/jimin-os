@@ -4360,6 +4360,8 @@ mod tests {
             priority: 2,
             due_at: None,
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 1,
         };
         let schedule_id = schedule.id;
@@ -4375,6 +4377,8 @@ mod tests {
             priority: 1,
             due_at: None,
             completed_at: Some(now),
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 2,
         };
         let completed_task_id = completed_task.id;
@@ -4541,6 +4545,8 @@ mod tests {
             priority: 1,
             due_at: None,
             completed_at: Some(completed_at),
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 2,
         };
 
@@ -4760,6 +4766,8 @@ mod tests {
             priority: 1,
             due_at: Some(now + Duration::hours(2)),
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 1,
         };
         let goal_task = Task {
@@ -4773,6 +4781,8 @@ mod tests {
             priority: 1,
             due_at: None,
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 1,
         };
         let unrelated = Task {
@@ -4786,6 +4796,8 @@ mod tests {
             priority: 3,
             due_at: None,
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 1,
         };
         let goal = GoalOverview {
@@ -4921,6 +4933,8 @@ mod tests {
             priority: 2,
             due_at: None,
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 1,
         };
         let context = TurnContext {
@@ -4972,6 +4986,8 @@ mod tests {
             priority: 2,
             due_at: None,
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 1,
         };
         let schedule = ScheduleEntry {
@@ -5070,6 +5086,8 @@ mod tests {
             priority: 1,
             due_at: None,
             completed_at: Some(completed_at),
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 2,
         };
         let morning = completed_task("아침 완료", day_start + Duration::hours(6));
@@ -5132,6 +5150,8 @@ mod tests {
             priority: 2,
             due_at: None,
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 1,
         };
         let context = TurnContext {
@@ -5182,6 +5202,8 @@ mod tests {
                 priority: 1,
                 due_at: None,
                 completed_at: None,
+                work_kind: "general".to_owned(),
+                completion_note: None,
                 version: 1,
             })
             .collect::<Vec<_>>();
@@ -5247,6 +5269,8 @@ mod tests {
                 priority: 1,
                 due_at: None,
                 completed_at: None,
+                work_kind: "general".to_owned(),
+                completion_note: None,
                 version: 1,
             })
             .collect::<Vec<_>>();
@@ -5303,6 +5327,8 @@ mod tests {
             priority: 2,
             due_at: None,
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 1,
         };
         let tomorrow = Task {
@@ -5316,6 +5342,8 @@ mod tests {
             priority: 2,
             due_at: Some(now + Duration::days(1)),
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 1,
         };
         let context = TurnContext {
@@ -5476,6 +5504,8 @@ mod tests {
             priority: 2,
             due_at: Some(parent_due_at),
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 1,
         };
         let context = TurnContext {
@@ -5530,6 +5560,8 @@ mod tests {
             priority: 2,
             due_at: None,
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 3,
         };
         let context = TurnContext {
@@ -5671,6 +5703,8 @@ mod tests {
             priority: 1,
             due_at: None,
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 1,
         };
         let schedule = LinkedScheduleEntry {
@@ -5731,6 +5765,8 @@ mod tests {
             priority: 1,
             due_at: None,
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 1,
         };
         let context = TurnContext {
@@ -6105,6 +6141,8 @@ mod tests {
             priority: 2,
             due_at: None,
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 7,
         };
         let context = TurnContext {
@@ -6281,6 +6319,8 @@ mod tests {
             priority: 2,
             due_at: None,
             completed_at: Some(OffsetDateTime::now_utc()),
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 3,
         };
         let context = TurnContext {
@@ -6355,6 +6395,8 @@ mod tests {
             priority: 2,
             due_at: None,
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 3,
         };
         let second = Task {
@@ -6545,6 +6587,8 @@ mod tests {
             priority: 2,
             due_at: None,
             completed_at: Some(OffsetDateTime::now_utc()),
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 7,
         };
         let context = TurnContext {

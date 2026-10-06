@@ -12,6 +12,8 @@ import {
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import type { GmailInflowCandidate } from "../api/gmailInflow";
+import { TaskWorkKindSelect } from "./TaskWorkKind";
+import type { TaskWorkKind } from "../api/planning";
 import { PlanningRequestError } from "../api/planning";
 import type { Project } from "../api/projects";
 import { copy } from "../copy";
@@ -25,6 +27,7 @@ import {
 import { LinkifiedText, SafeExternalLink } from "./ExternalTextLink";
 
 export interface PromoteGmailInflowInput {
+  workKind?: TaskWorkKind;
   title: string;
   notes: string;
   projectId: string;
@@ -35,6 +38,7 @@ export interface PromoteGmailInflowInput {
 }
 
 export type GmailInflowDraftValues = {
+  workKind?: TaskWorkKind;
   title: string;
   notes: string;
   assigneeName: string;
@@ -328,7 +332,14 @@ function GmailInflowDetail({
   const [actionError, setActionError] = useState<string>();
   const dirtyFieldsRef = useRef(new Set<GmailInflowDraftField>());
   const analysisReady = item.analysisStatus === "ready";
-  const { title, notes, assigneeName, priority, dueAt } = draft;
+  const {
+    title,
+    notes,
+    assigneeName,
+    priority,
+    dueAt,
+    workKind = "general",
+  } = draft;
 
   useEffect(() => {
     setDraft((current) =>
@@ -380,6 +391,7 @@ function GmailInflowDetail({
         projectId,
         assigneeName: assigneeName.trim() || null,
         priority,
+        workKind,
         dueAt: deadline.value ?? null,
         withoutDeadline: deadline.value === undefined,
       });
@@ -529,6 +541,11 @@ function GmailInflowDetail({
                 rows={4}
               />
             </label>
+            <TaskWorkKindSelect
+              value={workKind}
+              disabled={saving}
+              onChange={(value) => changeDraft("workKind", value)}
+            />
             <div className="gmail-inflow__field-grid">
               <label>
                 <span>{copy.gmailInflow.assignee}</span>
@@ -719,6 +736,7 @@ export function mergeGmailInflowDraftValues(
 ): GmailInflowDraftValues {
   const dirty = new Set(dirtyFields);
   return {
+    workKind: dirty.has("workKind") ? current.workKind : suggested.workKind,
     title: dirty.has("title") ? current.title : suggested.title,
     notes: dirty.has("notes") ? current.notes : suggested.notes,
     assigneeName: dirty.has("assigneeName")

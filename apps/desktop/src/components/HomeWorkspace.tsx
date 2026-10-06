@@ -1,3 +1,4 @@
+import { TaskWorkKindBadge } from "./TaskWorkKind";
 import { TaskSelectionControl } from "./TaskSelectionControl";
 import {
   AlertTriangle,
@@ -674,7 +675,10 @@ export function HomeWorkspace({
                           aria-label={copy.home.openTaskInSchedule(task.title)}
                         >
                           <span className="home-task-list__content">
-                            <strong>{task.title}</strong>
+                            <strong>
+                              {task.title}{" "}
+                              <TaskWorkKindBadge kind={task.workKind} />
+                            </strong>
                             <small data-assigned={Boolean(task.assigneeName)}>
                               {copy.projects.taskAssignee(
                                 task.assigneeName ?? undefined,
@@ -1338,7 +1342,9 @@ function WeeklyOperationsBrief({
                   onClick={() => void onOpenTask(task)}
                 >
                   <span>
-                    <strong>{task.title}</strong>
+                    <strong>
+                      {task.title} <TaskWorkKindBadge kind={task.workKind} />
+                    </strong>
                     <small>
                       {copy.projects.taskAssignee(
                         task.assigneeName ?? undefined,
@@ -1696,7 +1702,9 @@ function DeadlineBrief({
               >
                 <span>{dueStateLabel(state)}</span>
                 <span className="home-deadline-brief__copy">
-                  <strong>{task.title}</strong>
+                  <strong>
+                    {task.title} <TaskWorkKindBadge kind={task.workKind} />
+                  </strong>
                   <small data-assigned={Boolean(task.assigneeName)}>
                     {copy.projects.taskAssignee(task.assigneeName ?? undefined)}
                   </small>

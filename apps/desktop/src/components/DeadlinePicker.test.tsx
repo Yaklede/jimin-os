@@ -9,10 +9,11 @@ import {
   isoToSeoulLocalDateTime,
   resolveOptionalSeoulDateTime,
   seoulLocalDateTimeToIso,
+  selectLocalTimePart,
 } from "./DeadlinePicker";
 
 describe("DeadlinePicker", () => {
-  it("uses separate date and 15-minute time inputs", () => {
+  it("offers separate date, hour, and every minute without an unsupported native time picker", () => {
     const markup = renderToStaticMarkup(
       createElement(DeadlinePicker, {
         id: "deadline",
@@ -24,10 +25,28 @@ describe("DeadlinePicker", () => {
     );
 
     expect(markup).toContain('type="date"');
-    expect(markup).toContain('type="time"');
-    expect(markup).toContain('step="900"');
+    expect(markup).not.toContain('type="time"');
+    expect(markup).not.toContain('step="900"');
+    expect(markup).toContain('aria-label="마감 시"');
+    expect(markup).toContain('aria-label="마감 분"');
+    expect(markup).toContain('value="59"');
     expect(markup).toContain(deadlinePickerCopy.todaySix);
     expect(markup).toContain(deadlinePickerCopy.tomorrowSix);
+  });
+
+  it("changes hour or minute without dropping the date or rounding a saved time", () => {
+    expect(selectLocalTimePart("2026-10-06T14:42", "hour", "16")).toBe(
+      "2026-10-06T16:42",
+    );
+    expect(selectLocalTimePart("2026-10-06T14:42", "minute", "59")).toBe(
+      "2026-10-06T14:59",
+    );
+    expect(
+      selectLocalTimePart("", "hour", "18", new Date("2026-10-06T01:00:00Z")),
+    ).toBe("2026-10-06T18:00");
+    expect(selectLocalTimePart("2026-10-06T14:42", "hour", "24")).toBe(
+      "2026-10-06T14:42",
+    );
   });
 
   it("converts the selected Korean time independently of the device zone", () => {

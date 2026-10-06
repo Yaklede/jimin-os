@@ -1,3 +1,4 @@
+import { TaskWorkKindBadge } from "./TaskWorkKind";
 import {
   ArrowRight,
   CalendarDays,
@@ -242,8 +243,9 @@ export function AssistantInteractiveCanvas({
     setCompletingTaskId(task.id);
     setOpenError(undefined);
     try {
-      await onCompleteTask(task);
-      if (!mountedRef.current) return;
+      const completed = await onCompleteTask(task);
+      if (!mountedRef.current || completed.status !== "completed") return;
+      setSelectedTaskDetail(completed);
       setCompletedTaskIds((current) => new Set(current).add(task.id));
     } catch {
       if (mountedRef.current) {
@@ -723,6 +725,7 @@ function ItemDetail({
           aria-busy={taskDetailLoading}
         >
           <div className="assistant-canvas__task-badges">
+            <TaskWorkKindBadge kind={taskDetail?.workKind} />
             <span
               className="assistant-canvas__task-status"
               data-status={status}
@@ -758,6 +761,14 @@ function ItemDetail({
               <strong>{copy.home.resultTaskNotesLabel}</strong>
               <p>
                 <LinkifiedText text={taskDetail.notes} />
+              </p>
+            </div>
+          )}
+          {taskDetail?.completionNote && (
+            <div className="assistant-canvas__task-notes">
+              <strong>확인 결과</strong>
+              <p>
+                <LinkifiedText text={taskDetail.completionNote} />
               </p>
             </div>
           )}

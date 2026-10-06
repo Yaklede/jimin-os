@@ -1795,7 +1795,7 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
     let due_at = OffsetDateTime::parse("2026-07-27T03:00:00Z", &Rfc3339)
         .expect("task deadline should parse");
     let promoted = database
-        .promote_project_inflow_item(&PromoteProjectInflowItem {
+        .promote_project_inflow_item_with_work_kind(&PromoteProjectInflowItem {
             user_id: owner.profile.id,
             project_id: first_project.id,
             item_id: pending[0].id,
@@ -1815,7 +1815,7 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             assignee_name: Some("개발 담당자".to_owned()),
             priority: 2,
             due_at: Some(due_at),
-        })
+        }, "verification")
         .await
         .expect("owned inflow should promote")
         .expect("pending inflow should still be available");
@@ -1844,6 +1844,7 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         "the reaction must be attached to the first external request, not the latest comment"
     );
     assert_eq!(completion_deliveries[0].due_at, Some(due_at));
+    assert_eq!(completion_deliveries[0].work_kind, "verification");
     assert_eq!(
         completion_deliveries[0].assignee_name.as_deref(),
         Some("개발 담당자")
@@ -1921,8 +1922,30 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         .await
         .expect("promoted task should load")
         .expect("promoted task should exist");
+    for invalid_note in [
+        "   ".to_owned(),
+        "가".repeat(2001),
+        "숨은\u{0}문자".to_owned(),
+    ] {
+        assert!(
+            database
+                .complete_task_with_note(
+                    owner.profile.id,
+                    task.id,
+                    task.version,
+                    Some(&invalid_note)
+                )
+                .await
+                .is_err()
+        );
+    }
     let completed_task = database
-        .complete_task(owner.profile.id, task.id, task.version)
+        .complete_task_with_note(
+            owner.profile.id,
+            task.id,
+            task.version,
+            Some("  거래내역 20건을 확인했어요.\n정산 금액이 모두 일치해요.  "),
+        )
         .await
         .expect("promoted task should complete")
         .expect("open promoted task should be version matched");
@@ -1931,6 +1954,16 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         .await
         .expect("task completion reply should load");
     assert_eq!(task_completion_deliveries.len(), 1);
+    assert_eq!(completed_task.work_kind, "verification");
+    assert_eq!(
+        completed_task.completion_note.as_deref(),
+        Some("거래내역 20건을 확인했어요.\n정산 금액이 모두 일치해요.")
+    );
+    assert_eq!(
+        task_completion_deliveries[0].completion_note,
+        completed_task.completion_note
+    );
+    assert_eq!(task_completion_deliveries[0].work_kind, "verification");
     assert_eq!(task_completion_deliveries[0].task_id, completed_task.id);
     assert_eq!(
         task_completion_deliveries[0].task_version,
@@ -1961,6 +1994,8 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             .is_empty(),
         "restoring the task must cancel its unsent completion reply"
     );
+    assert_eq!(restored_task.work_kind, "verification");
+    assert!(restored_task.completion_note.is_none());
     let completed_again = database
         .complete_task(owner.profile.id, restored_task.id, restored_task.version)
         .await
@@ -1971,6 +2006,7 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         .await
         .expect("second completion reply should load");
     assert_eq!(second_completion_deliveries.len(), 1);
+    assert!(second_completion_deliveries[0].completion_note.is_none());
     assert_eq!(
         second_completion_deliveries[0].task_version, completed_again.version,
         "a later completion cycle must use a distinct idempotency version"
@@ -2614,6 +2650,7 @@ fn assert_automatic_webhook_delivery(
         .copied()
         .chain([
             "title",
+            "workKind",
             "projectTitle",
             "dueAt",
             "assigneeName",
@@ -9856,9 +9893,21 @@ async fn gmail_inflow_preserves_workspace_revision_decisions_and_promotion_lifec
     );
     assert!(
         database
-            .promote_gmail_inflow_candidate(&command(project.id, promotable.version))
+            .promote_gmail_inflow_candidate_with_work_kind(
+                &command(project.id, promotable.version),
+                "development"
+            )
             .await
             .expect("owned project should promote")
+    );
+    assert_eq!(
+        database
+            .task_for_user(owner.profile.id, promotable.id)
+            .await
+            .expect("promoted Gmail task should load")
+            .expect("promoted task should exist")
+            .work_kind,
+        "development"
     );
     database
         .apply_gmail_inbox_sync(

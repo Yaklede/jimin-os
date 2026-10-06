@@ -1897,6 +1897,8 @@ mod tests {
             priority: 1,
             due_at: Some(tomorrow_due),
             completed_at: None,
+            work_kind: "general".to_owned(),
+            completion_note: None,
             version: 1,
         };
         let schedule = ScheduleEntry {

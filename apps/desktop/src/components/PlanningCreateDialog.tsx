@@ -1,3 +1,5 @@
+import { TaskWorkKindSelect } from "./TaskWorkKind";
+import type { TaskWorkKind } from "../api/planning";
 import { CalendarPlus, ListTodo, X } from "lucide-react";
 import {
   type FormEvent,
@@ -28,6 +30,7 @@ export type PlanningCreateKind = "task" | "schedule";
 export type PlanningTaskCreateInput = {
   title: string;
   notes?: string;
+  workKind?: TaskWorkKind;
   priority: number;
   dueAt?: string;
 };
@@ -64,6 +67,7 @@ export function PlanningCreateDialog({
   const [title, setTitle] = useState("");
   const [notes, setNotes] = useState("");
   const [priority, setPriority] = useState(1);
+  const [workKind, setWorkKind] = useState<TaskWorkKind>("general");
   const [dueAt, setDueAt] = useState("");
   const [startsAt, setStartsAt] = useState("");
   const [endsAt, setEndsAt] = useState("");
@@ -81,6 +85,7 @@ export function PlanningCreateDialog({
     setTitle("");
     setNotes("");
     setPriority(1);
+    setWorkKind("general");
     setDueAt("");
     setStartsAt(scheduleRange.startsAt);
     setEndsAt(scheduleRange.endsAt);
@@ -162,6 +167,7 @@ export function PlanningCreateDialog({
           title: nextTitle,
           notes: notes.trim() || undefined,
           priority,
+          workKind,
           dueAt: taskDueAt,
         });
       } else {
@@ -246,32 +252,41 @@ export function PlanningCreateDialog({
           </CreateField>
 
           {taskMode ? (
-            <div className="planning-editor__field-grid">
-              <CreateField
-                label={copy.forms.priority}
-                htmlFor="planning-create-priority"
-              >
-                <select
-                  id="planning-create-priority"
-                  value={priority}
-                  onChange={(event) => setPriority(Number(event.target.value))}
-                >
-                  <option value={0}>{copy.forms.priorityNormal}</option>
-                  <option value={1}>{copy.forms.prioritySoon}</option>
-                  <option value={2}>{copy.forms.priorityImportant}</option>
-                  <option value={3}>{copy.forms.priorityHighest}</option>
-                </select>
-              </CreateField>
-              <DeadlinePicker
-                className="planning-editor__field"
-                id="planning-create-due-at"
-                label={copy.forms.dueAt}
-                value={dueAt}
+            <>
+              <TaskWorkKindSelect
+                value={workKind}
                 disabled={saving}
-                showPresets
-                onChange={setDueAt}
+                onChange={setWorkKind}
               />
-            </div>
+              <div className="planning-editor__field-grid">
+                <CreateField
+                  label={copy.forms.priority}
+                  htmlFor="planning-create-priority"
+                >
+                  <select
+                    id="planning-create-priority"
+                    value={priority}
+                    onChange={(event) =>
+                      setPriority(Number(event.target.value))
+                    }
+                  >
+                    <option value={0}>{copy.forms.priorityNormal}</option>
+                    <option value={1}>{copy.forms.prioritySoon}</option>
+                    <option value={2}>{copy.forms.priorityImportant}</option>
+                    <option value={3}>{copy.forms.priorityHighest}</option>
+                  </select>
+                </CreateField>
+                <DeadlinePicker
+                  className="planning-editor__field"
+                  id="planning-create-due-at"
+                  label={copy.forms.dueAt}
+                  value={dueAt}
+                  disabled={saving}
+                  showPresets
+                  onChange={setDueAt}
+                />
+              </div>
+            </>
           ) : (
             <>
               <div className="planning-editor__field-grid">

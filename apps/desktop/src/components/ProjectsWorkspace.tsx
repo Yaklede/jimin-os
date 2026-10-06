@@ -1,3 +1,15 @@
+import {
+  DeadlinePicker,
+  isoToSeoulLocalDateTime,
+  resolveOptionalSeoulDateTime,
+} from "./DeadlinePicker";
+import { deadlinePickerCopy } from "../copy/deadlinePicker";
+import {
+  TaskWorkKindSelect,
+  TaskWorkKindBadge,
+  taskWorkKindLabel,
+} from "./TaskWorkKind";
+import type { TaskWorkKind } from "../api/planning";
 import { TaskSelectionControl } from "./TaskSelectionControl";
 import {
   ArrowLeft,
@@ -154,7 +166,11 @@ type ProjectsWorkspaceProps = {
     },
   ): Promise<void>;
   onDeleteProject(project: Project): Promise<void>;
-  onCreateTask(input: { title: string; parentTaskId?: string }): Promise<void>;
+  onCreateTask(input: {
+    title: string;
+    parentTaskId?: string;
+    workKind?: TaskWorkKind;
+  }): Promise<void>;
   onCompleteTask(task: Task): Promise<void>;
   onUpdateTask(
     task: Task,
@@ -162,6 +178,7 @@ type ProjectsWorkspaceProps = {
       title: string;
       notes?: string;
       assigneeName?: string;
+      workKind?: TaskWorkKind;
       status: Task["status"];
       priority: number;
       dueAt?: string;
@@ -302,6 +319,7 @@ export function ProjectsWorkspace({
   const [riskLevel, setRiskLevel] = useState("0");
   const [dueDate, setDueDate] = useState("");
   const [taskTitle, setTaskTitle] = useState("");
+  const [taskWorkKind, setTaskWorkKind] = useState<TaskWorkKind>("general");
   const [taskParentId, setTaskParentId] = useState("");
   const [formError, setFormError] = useState<string>();
   const [editingProjectId, setEditingProjectId] = useState<string>();
@@ -347,12 +365,23 @@ export function ProjectsWorkspace({
   const completedTasks = tasks.filter((task) => task.status === "completed");
   const rootTasks = tasks.filter((task) => !task.parentTaskId);
   const rootOpenTasks = openTasks.filter((task) => !task.parentTaskId);
-  const openTaskRows = taskHierarchyRows(openTasks);
+  const [workKindFilter, setWorkKindFilter] = useState<TaskWorkKind | "all">(
+    "all",
+  );
+  const openTaskRows = taskHierarchyRows(
+    workKindFilter === "all"
+      ? openTasks
+      : openTasks.filter(
+          (task) => (task.workKind ?? "general") === workKindFilter,
+        ),
+  );
   const inflowAttentionTotal = projectInflowAttentionCount(projectInflowItems);
   const connectionTotal = projectConnectionCount(webhooks, itsmConnection);
 
   useEffect(() => {
     setTaskTitle("");
+    setTaskWorkKind("general");
+    setWorkKindFilter("all");
     setTaskParentId("");
     setEditingProjectId(undefined);
     setSavedProjectId(undefined);
@@ -459,6 +488,7 @@ export function ProjectsWorkspace({
       await onCreateTask({
         title: taskTitle.trim(),
         parentTaskId: taskParentId || undefined,
+        workKind: taskWorkKind,
       });
       setTaskTitle("");
       setTaskParentId("");
@@ -1038,7 +1068,23 @@ export function ProjectsWorkspace({
                     </div>
                     <span>{copy.projects.openTaskCount(openTasks.length)}</span>
                   </div>
-                  {openTasks.length ? (
+                  <label className="task-kind-filter">
+                    <span>업무 유형별로 보기</span>
+                    <select
+                      value={workKindFilter}
+                      onChange={(event) =>
+                        setWorkKindFilter(
+                          event.target.value as TaskWorkKind | "all",
+                        )
+                      }
+                    >
+                      <option value="all">모든 업무</option>
+                      <option value="verification">확인 업무</option>
+                      <option value="development">개발 업무</option>
+                      <option value="general">일반 업무</option>
+                    </select>
+                  </label>
+                  {openTaskRows.length ? (
                     <ul className="project-task-list">
                       {openTaskRows.map(({ task, depth, childCount }) => (
                         <li
@@ -1077,7 +1123,10 @@ export function ProjectsWorkspace({
                             }
                           >
                             <span className="project-task-list__details">
-                              <strong>{task.title}</strong>
+                              <strong>
+                                {task.title}{" "}
+                                <TaskWorkKindBadge kind={task.workKind} />
+                              </strong>
                               <span>
                                 {taskMeta(task)}
                                 {childCount > 0 &&
@@ -1134,7 +1183,9 @@ export function ProjectsWorkspace({
                     </ul>
                   ) : (
                     <p className="project-detail__empty">
-                      {copy.projects.workItemsEmpty}
+                      {workKindFilter === "all"
+                        ? copy.projects.workItemsEmpty
+                        : "선택한 유형의 할 일이 없어요. 다른 유형을 선택해 주세요."}
                     </p>
                   )}
                   <form
@@ -1153,6 +1204,14 @@ export function ProjectsWorkspace({
                       }
                       maxLength={200}
                       placeholder={copy.projects.workItemHint}
+                    />
+                    <TaskWorkKindSelect
+                      compact
+                      value={taskWorkKind}
+                      disabled={
+                        saving || selectedProject.status === "completed"
+                      }
+                      onChange={setTaskWorkKind}
                     />
                     <label className="sr-only" htmlFor="project-task-parent">
                       {copy.projects.parentTaskLabel}
@@ -1276,7 +1335,10 @@ export function ProjectsWorkspace({
                               }
                             >
                               <span className="project-task-list__details">
-                                <strong>{task.title}</strong>
+                                <strong>
+                                  {task.title}{" "}
+                                  <TaskWorkKindBadge kind={task.workKind} />
+                                </strong>
                                 <span>
                                   {copy.projects.completedTaskMeta(
                                     taskMeta(task),
@@ -2409,7 +2471,19 @@ function TaskDetail({ task, parentTask }: { task: Task; parentTask?: Task }) {
           />
         </p>
       </div>
+      {task.completionNote && (
+        <div>
+          <span>확인 결과</span>
+          <p>
+            <LinkifiedText text={task.completionNote} />
+          </p>
+        </div>
+      )}
       <dl>
+        <div>
+          <dt>업무 유형</dt>
+          <dd>{taskWorkKindLabel(task.workKind)}</dd>
+        </div>
         {parentTask && (
           <div>
             <dt>{copy.projects.parentTaskLabel}</dt>
@@ -2456,6 +2530,7 @@ function TaskEditForm({
     title: string;
     notes?: string;
     assigneeName?: string;
+    workKind?: TaskWorkKind;
     status: Task["status"];
     priority: number;
     dueAt?: string;
@@ -2466,8 +2541,11 @@ function TaskEditForm({
   const [title, setTitle] = useState(task.title);
   const [notes, setNotes] = useState(task.notes ?? "");
   const [assigneeName, setAssigneeName] = useState(task.assigneeName ?? "");
+  const [workKind, setWorkKind] = useState<TaskWorkKind>(
+    task.workKind ?? "general",
+  );
   const [priority, setPriority] = useState(String(task.priority));
-  const [dueDate, setDueDate] = useState(isoToDateInput(task.dueAt));
+  const [dueDate, setDueDate] = useState(isoToSeoulLocalDateTime(task.dueAt));
   const [parentTaskId, setParentTaskId] = useState(task.parentTaskId ?? "");
   const [confirmingRemoval, setConfirmingRemoval] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -2498,15 +2576,21 @@ function TaskEditForm({
       setError(copy.projects.workItemTitleRequired);
       return;
     }
+    const deadline = resolveOptionalSeoulDateTime(dueDate);
+    if (!deadline.valid) {
+      setError(deadlinePickerCopy.invalid);
+      return;
+    }
     setError(undefined);
     try {
       await onSave({
         title: title.trim(),
         notes: notes.trim() || undefined,
         assigneeName: assigneeName.trim() || undefined,
+        workKind,
         status: task.status,
         priority: Number(priority),
-        dueAt: dateInputToIso(dueDate),
+        dueAt: deadline.value,
         parentTaskId: parentTaskId || null,
       });
     } catch {
@@ -2562,6 +2646,11 @@ function TaskEditForm({
           onChange={(event) => setNotes(event.target.value)}
         />
       </label>
+      <TaskWorkKindSelect
+        value={workKind}
+        disabled={busy}
+        onChange={setWorkKind}
+      />
       <div className="project-task-edit-form__fields">
         <label htmlFor={`task-parent-${task.id}`}>
           <span>{copy.projects.parentTaskLabel}</span>
@@ -2605,16 +2694,14 @@ function TaskEditForm({
             ))}
           </select>
         </label>
-        <label htmlFor={`task-due-${task.id}`}>
-          <span>{copy.projects.dueDateLabel}</span>
-          <input
-            id={`task-due-${task.id}`}
-            type="date"
-            value={dueDate}
-            disabled={busy}
-            onInput={(event) => setDueDate(event.currentTarget.value)}
-          />
-        </label>
+        <DeadlinePicker
+          id={`task-due-${task.id}`}
+          label={copy.projects.dueDateLabel}
+          value={dueDate}
+          disabled={busy}
+          showPresets
+          onChange={setDueDate}
+        />
       </div>
       {confirmingRemoval ? (
         <div

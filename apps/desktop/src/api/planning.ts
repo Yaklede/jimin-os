@@ -26,6 +26,8 @@ export interface ScheduleEntry {
   version: number;
 }
 
+export type TaskWorkKind = "general" | "verification" | "development";
+
 export interface Task {
   id: string;
   projectId: string | null;
@@ -37,6 +39,8 @@ export interface Task {
   priority: number;
   dueAt: string | null;
   completedAt: string | null;
+  workKind?: TaskWorkKind;
+  completionNote?: string | null;
   version: number;
 }
 
@@ -195,6 +199,7 @@ export async function createTask(
   access: string,
   input: {
     title: string;
+    workKind?: TaskWorkKind;
     notes?: string;
     assigneeName?: string;
     priority: number;
@@ -211,6 +216,7 @@ export async function createTask(
     assigneeName: input.assigneeName || null,
     priority: input.priority,
     dueAt: input.dueAt || null,
+    ...(input.workKind ? { workKind: input.workKind } : {}),
   });
 }
 
@@ -231,6 +237,7 @@ export async function completeTask(
   baseUrl: string,
   access: string,
   task: Task,
+  completionNote?: string,
 ): Promise<Task> {
   return request<Task>(
     baseUrl,
@@ -239,6 +246,9 @@ export async function completeTask(
     "POST",
     {
       expectedVersion: task.version,
+      ...(completionNote?.trim()
+        ? { completionNote: completionNote.trim() }
+        : {}),
     },
   );
 }
@@ -249,6 +259,7 @@ export async function updateTask(
   task: Task,
   input: {
     title: string;
+    workKind?: TaskWorkKind;
     notes?: string;
     assigneeName?: string;
     status: Task["status"];
@@ -270,6 +281,7 @@ export async function updateTask(
     priority: input.priority,
     dueAt: input.dueAt || null,
     expectedVersion: task.version,
+    ...(input.workKind ? { workKind: input.workKind } : {}),
   });
 }
 

@@ -1,3 +1,4 @@
+import { TaskWorkKindBadge } from "./TaskWorkKind";
 import { TaskSelectionControl } from "./TaskSelectionControl";
 import {
   CalendarDays,
@@ -371,7 +372,9 @@ export function PlanningWorkspace({
                     onComplete={() => complete(task)}
                   />
                   <div>
-                    <strong>{task.title}</strong>
+                    <strong>
+                      {task.title} <TaskWorkKindBadge kind={task.workKind} />
+                    </strong>
                     {task.notes && (
                       <p>
                         <LinkifiedText text={task.notes} />
@@ -581,7 +584,9 @@ export function PlanningWorkspace({
                       )}
                     </button>
                     <div>
-                      <strong>{task.title}</strong>
+                      <strong>
+                        {task.title} <TaskWorkKindBadge kind={task.workKind} />
+                      </strong>
                       <span className="task-status-badge">완료됨</span>
                       {task.notes && (
                         <p>

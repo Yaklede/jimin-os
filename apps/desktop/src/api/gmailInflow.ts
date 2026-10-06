@@ -99,6 +99,7 @@ export type GmailInflowDecision =
       title: string;
       notes: string;
       assigneeName: string | null;
+      workKind?: import("./planning").TaskWorkKind;
       priority: number;
       dueAt: string | null;
       withoutDeadline: boolean;

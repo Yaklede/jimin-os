@@ -1,3 +1,4 @@
+import { useTaskCompletion } from "./components/TaskCompletionDialog";
 import { Server, Sparkles } from "lucide-react";
 import { ScheduledWorkPanel } from "./components/ScheduledWorkPanel";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -3084,13 +3085,19 @@ export default function App() {
     return true;
   }
 
+  const { requestCompletion, completionDialog } = useTaskCompletion(
+    (task, note) =>
+      withAuthenticatedSession((accessToken) =>
+        completeTask(apiBaseUrl, accessToken, task, note),
+      ),
+  );
+
   async function completeHomeTask(task: Task): Promise<void> {
     if (!tokens) return;
     setHomeError(undefined);
     try {
-      const completed = await withAuthenticatedSession((accessToken) =>
-        completeTask(apiBaseUrl, accessToken, task),
-      );
+      const completed = await requestCompletion(task);
+      if (completed.status !== "completed") return;
       applyCompletedTask(task, completed);
     } catch {
       setHomeError(copy.messages.taskCompletionNotice);
@@ -3155,9 +3162,8 @@ export default function App() {
         fetchTask(apiBaseUrl, accessToken, task.id),
       );
       if (currentTask.status !== "open") return currentTask;
-      const completed = await withAuthenticatedSession((accessToken) =>
-        completeTask(apiBaseUrl, accessToken, currentTask),
-      );
+      const completed = await requestCompletion(currentTask);
+      if (completed.status !== "completed") return completed;
       applyCompletedTask(currentTask, completed);
       return completed;
     } catch (error) {
@@ -3373,6 +3379,7 @@ export default function App() {
       title: string;
       notes?: string;
       assigneeName?: string;
+      workKind?: Task["workKind"];
       status: Task["status"];
       priority: number;
       dueAt?: string;
@@ -3812,6 +3819,7 @@ export default function App() {
   async function createProjectTask(input: {
     title: string;
     parentTaskId?: string;
+    workKind?: Task["workKind"];
   }): Promise<void> {
     if (!selectedProjectId) throw new Error("project unavailable");
     setProjectsSaving(true);
@@ -3823,6 +3831,7 @@ export default function App() {
           priority: 1,
           projectId: selectedProjectId,
           parentTaskId: input.parentTaskId,
+          workKind: input.workKind,
         }),
       );
       setProjectTasks((current) => [...current, task]);
@@ -3853,9 +3862,8 @@ export default function App() {
     setProjectsSaving(true);
     setProjectsError(undefined);
     try {
-      const completed = await withAuthenticatedSession((accessToken) =>
-        completeTask(apiBaseUrl, accessToken, task),
-      );
+      const completed = await requestCompletion(task);
+      if (completed.status !== "completed") return;
       await cancelLocalReminder("task", task.id).catch(() => false);
       setProjectTasks((current) =>
         current.map((item) => (item.id === completed.id ? completed : item)),
@@ -3907,6 +3915,7 @@ export default function App() {
       title: string;
       notes?: string;
       assigneeName?: string;
+      workKind?: Task["workKind"];
       status: Task["status"];
       priority: number;
       dueAt?: string;
@@ -5353,6 +5362,7 @@ export default function App() {
               />
             )}
           </WorkspaceRouteBoundary>
+          {completionDialog}
           {planningEditTarget && (
             <Suspense fallback={null}>
               <PlanningItemEditor
