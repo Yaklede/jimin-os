@@ -45,3 +45,15 @@
 - No AndroidRuntime fatal error found in the bounded end-of-test log.
 - Evidence screenshots: `/tmp/jimin-integrated-emulator-home.png`, `/tmp/jimin-integrated-emulator-final.png`.
 - Limitations: native Korean typing through Mobile MCP was unavailable (non-ASCII unsupported); actual speech recognition, live Google Chat replies and production provider mutations were not exercised. Existing frontend regression tests cover optional reply behavior separately.
+
+## Navigation visual follow-up — DEV only, not deployed
+
+- User rejected the six-column navigation's visual balance after the integrated release.
+- Scoped targets: `mobileWorkspace.css`, `mobileWorkspace.test.ts`, `components/OsShell.tsx`, `components/OsShell.test.tsx`.
+- Bottom navigation now has five equal destinations: Home, Projects, Calendar, Meetings, More. Removed the isolated filled microphone circle; voice is preserved in the native top command launcher and as a labeled action inside More.
+- Each tab explicitly uses centered column layout, 22px icons, 12px/18px labels at weight 500, transparent background and 56px height. Only the selected icon uses the accent; selected label uses strong neutral text. Safe-area height is shared with content clearance.
+- Full frontend regression: 70 files / 439 tests passed. DEV Android build passed and was installed only as `io.jimin.os.dev` on `emulator-5554`.
+- Browser measurements at 320px: five equal 57.8×56px controls; at 411px: five equal 76×56px controls. No horizontal overflow; More menu remains inside viewport. Desktop 1440px bottom navigation remains hidden.
+- Native emulator measurements: five equal approximately 210×150 physical-pixel destinations, no extra unlabeled action. More voice action reaches the native microphone permission prompt; prompt dismissed without granting access. Voice failure sheet opens and Android Back closes it.
+- Visual proof: `/tmp/jimin-nav-before.png`, `/tmp/jimin-nav-after.png`. Live recording is not covered.
+- Prior installed macOS app and durable production APK are unchanged. This follow-up has not been merged or deployed; review the emulator before a subsequent production release.

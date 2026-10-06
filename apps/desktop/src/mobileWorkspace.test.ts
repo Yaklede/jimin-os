@@ -13,7 +13,7 @@ describe("native phone layout", () => {
       "--mobile-top-clearance: max(12px, var(--safe-area-top))",
     );
     expect(styles).toContain(
-      "--mobile-nav-height: calc(64px + max(8px, var(--safe-area-bottom)))",
+      "--mobile-nav-height: calc(56px + max(8px, var(--safe-area-bottom)))",
     );
     expect(styles).toContain(
       "padding-bottom: calc(var(--mobile-nav-height) + 16px)",
@@ -38,17 +38,20 @@ describe("native phone layout", () => {
     expect(menu).toContain("calc(100vw - 32px)");
   });
 
-  it("fits the microphone and every destination in one row without an overlapping floating button", () => {
+  it("uses five equal destinations with no unlabeled floating action", () => {
     expect(styles).toContain(
-      "grid-template-columns: repeat(6, minmax(0, 1fr))",
+      "grid-template-columns: repeat(5, minmax(0, 1fr))",
     );
-    const microphone = styles.match(
-      /\.os-shell:not\(\[data-platform="desktop"\]\) \.os-mobile-nav__assistant \{([^}]+)\}/,
+    const button = styles.match(
+      /\.os-shell:not\(\[data-platform="desktop"\]\) \.os-mobile-nav \.os-nav__button \{([^}]+)\}/,
     )?.[1];
-    expect(microphone).toContain("position: static");
-    expect(microphone).toContain("width: 44px");
-    expect(microphone).toContain("height: 44px");
-    expect(microphone).toContain("transform: none");
+    expect(button).toContain("flex-direction: column");
+    expect(button).toContain("justify-content: center");
+    expect(button).toContain("font-size: 12px");
+    expect(button).toContain("font-weight: 500");
+    expect(button).toContain("height: 56px");
+    expect(button).toContain("background: transparent");
+    expect(styles).not.toContain("os-mobile-nav__assistant");
   });
 
   it("prevents desktop greeting motion and line heights leaking onto phones", () => {

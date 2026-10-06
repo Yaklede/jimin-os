@@ -279,14 +279,6 @@ export function OsShell({
           label={copy.navigation.projects}
           onClick={() => onNavigate("projects")}
         />
-        <button
-          className="os-mobile-nav__assistant focus-visible-control"
-          type="button"
-          aria-label={copy.actions.startAssistantConversation}
-          onClick={openVoiceSheet}
-        >
-          <Mic aria-hidden="true" />
-        </button>
         <NavigationButton
           active={destination === "calendar"}
           icon={<CalendarDays aria-hidden="true" />}
@@ -318,6 +310,15 @@ export function OsShell({
             <span>{copy.navigation.more}</span>
           </summary>
           <div className="os-mobile-more__items">
+            <NavigationButton
+              active={false}
+              icon={<Mic aria-hidden="true" />}
+              label={copy.actions.startAssistantConversation}
+              onClick={() => {
+                if (mobileMoreRef.current) mobileMoreRef.current.open = false;
+                openVoiceSheet();
+              }}
+            />
             {(
               [
                 [
