@@ -7,11 +7,7 @@
     "core:default",
     {
       "identifier": "opener:allow-open-url",
-      "allow": [
-        { "url": "https://auth.openai.com/*" },
-        { "url": "https://chatgpt.com/*" },
-        { "url": "https://accounts.google.com/*" }
-      ]
+      "allow": [{ "url": "https://*" }]
     },
     "voice-recognition:allow-start",
     "voice-recognition:allow-stop",

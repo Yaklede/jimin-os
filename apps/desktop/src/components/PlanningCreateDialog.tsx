@@ -16,6 +16,12 @@ import {
   resolveOptionalSeoulDateTime,
   seoulLocalDateTimeToIso,
 } from "./DeadlinePicker";
+import { type Task } from "../api/planning";
+import {
+  scheduleLinkageForTask,
+  scheduleTaskOptionLabel,
+  type ScheduleProjectReference,
+} from "./scheduleLinkage";
 
 export type PlanningCreateKind = "task" | "schedule";
 
@@ -31,10 +37,14 @@ export type PlanningScheduleCreateInput = {
   notes?: string;
   startsAt: string;
   endsAt: string;
+  projectId?: string | null;
+  taskId?: string | null;
 };
 
 type PlanningCreateDialogProps = {
   kind: PlanningCreateKind | undefined;
+  linkableTasks?: Task[];
+  projects?: ScheduleProjectReference[];
   onClose(): void;
   onCreateTask(input: PlanningTaskCreateInput): Promise<void>;
   onCreateSchedule(input: PlanningScheduleCreateInput): Promise<void>;
@@ -42,6 +52,8 @@ type PlanningCreateDialogProps = {
 
 export function PlanningCreateDialog({
   kind,
+  linkableTasks = [],
+  projects = [],
   onClose,
   onCreateTask,
   onCreateSchedule,
@@ -55,6 +67,7 @@ export function PlanningCreateDialog({
   const [dueAt, setDueAt] = useState("");
   const [startsAt, setStartsAt] = useState("");
   const [endsAt, setEndsAt] = useState("");
+  const [linkedTaskId, setLinkedTaskId] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -71,6 +84,7 @@ export function PlanningCreateDialog({
     setDueAt("");
     setStartsAt(scheduleRange.startsAt);
     setEndsAt(scheduleRange.endsAt);
+    setLinkedTaskId("");
     setSaving(false);
     setError(undefined);
 
@@ -151,11 +165,13 @@ export function PlanningCreateDialog({
           dueAt: taskDueAt,
         });
       } else {
+        const linkage = scheduleLinkageForTask(linkableTasks, linkedTaskId);
         await onCreateSchedule({
           title: nextTitle,
           notes: notes.trim() || undefined,
           startsAt: localInputToIso(startsAt),
           endsAt: localInputToIso(endsAt),
+          ...linkage,
         });
       }
       dialogRef.current?.close();
@@ -257,36 +273,62 @@ export function PlanningCreateDialog({
               />
             </div>
           ) : (
-            <div className="planning-editor__field-grid">
-              <DeadlinePicker
-                className="planning-editor__field"
-                id="planning-create-starts-at"
-                label={copy.forms.startsAt}
-                value={startsAt}
-                disabled={saving}
-                required
-                allowClear={false}
-                describedBy={error ? "planning-create-error" : undefined}
-                onChange={(value) => {
-                  setStartsAt(value);
-                  setError(undefined);
-                }}
-              />
-              <DeadlinePicker
-                className="planning-editor__field"
-                id="planning-create-ends-at"
-                label={copy.forms.endsAt}
-                value={endsAt}
-                disabled={saving}
-                required
-                allowClear={false}
-                describedBy={error ? "planning-create-error" : undefined}
-                onChange={(value) => {
-                  setEndsAt(value);
-                  setError(undefined);
-                }}
-              />
-            </div>
+            <>
+              <div className="planning-editor__field-grid">
+                <DeadlinePicker
+                  className="planning-editor__field"
+                  id="planning-create-starts-at"
+                  label={copy.forms.startsAt}
+                  value={startsAt}
+                  disabled={saving}
+                  required
+                  allowClear={false}
+                  describedBy={error ? "planning-create-error" : undefined}
+                  onChange={(value) => {
+                    setStartsAt(value);
+                    setError(undefined);
+                  }}
+                />
+                <DeadlinePicker
+                  className="planning-editor__field"
+                  id="planning-create-ends-at"
+                  label={copy.forms.endsAt}
+                  value={endsAt}
+                  disabled={saving}
+                  required
+                  allowClear={false}
+                  describedBy={error ? "planning-create-error" : undefined}
+                  onChange={(value) => {
+                    setEndsAt(value);
+                    setError(undefined);
+                  }}
+                />
+              </div>
+              <CreateField
+                label={copy.forms.linkedTask}
+                htmlFor="planning-create-linked-task"
+                description={copy.forms.linkedTaskDescription}
+              >
+                <select
+                  id="planning-create-linked-task"
+                  aria-describedby="planning-create-linked-task-description"
+                  value={linkedTaskId}
+                  onChange={(event) => setLinkedTaskId(event.target.value)}
+                >
+                  <option value="">{copy.forms.linkedTaskNone}</option>
+                  {linkableTasks.map((task) => (
+                    <option key={task.id} value={task.id}>
+                      {scheduleTaskOptionLabel(task, projects, {
+                        noProject: copy.forms.linkedTaskNoProject,
+                        unknownProject: copy.forms.linkedTaskUnknownProject,
+                        unassigned: copy.home.unassignedTaskGroup,
+                        noDueDate: copy.home.noDueDateTaskGroup,
+                      })}
+                    </option>
+                  ))}
+                </select>
+              </CreateField>
+            </>
           )}
         </fieldset>
 
@@ -344,7 +386,7 @@ function CreateField({
     <div className="planning-editor__field">
       <label htmlFor={htmlFor}>{label}</label>
       {children}
-      {description && <p>{description}</p>}
+      {description && <p id={`${htmlFor}-description`}>{description}</p>}
     </div>
   );
 }

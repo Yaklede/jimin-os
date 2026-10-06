@@ -1,5 +1,5 @@
+import { TaskSelectionControl } from "./TaskSelectionControl";
 import {
-  CalendarClock,
   CalendarDays,
   CalendarPlus,
   CheckCircle2,
@@ -8,7 +8,6 @@ import {
   ChevronRight,
   Circle,
   Cloud,
-  History,
   Pencil,
   Plus,
   RefreshCw,
@@ -25,17 +24,22 @@ import { type GoogleCalendarConnection } from "../api/calendar";
 import { copy } from "../copy";
 import {
   planningViewRange,
+  samePlanningDay,
+  scheduleOverlapsPlanningDay,
   shiftPlanningViewRange,
   type PlanningRangeMode,
   type PlanningViewRange,
 } from "../planningRange";
+import { PlanningCalendar } from "./planning-calendar";
 import { taskDueState } from "../planningDue";
 import {
   SkeletonBlock,
   SkeletonGroup,
   useDelayedSkeleton,
 } from "./ContentSkeleton";
+import { LinkifiedText } from "./ExternalTextLink";
 import { EmptySurface } from "./HomeWorkspace";
+import { type ScheduleProjectReference } from "./scheduleLinkage";
 import {
   PlanningCreateDialog,
   type PlanningCreateKind,
@@ -45,6 +49,7 @@ import {
 
 type PlanningWorkspaceProps = {
   snapshot: PlanningSnapshot | undefined;
+  projects: ScheduleProjectReference[];
   range: PlanningViewRange;
   calendarConnection?: GoogleCalendarConnection;
   loading: boolean;
@@ -63,6 +68,7 @@ type PlanningWorkspaceProps = {
 
 export function PlanningWorkspace({
   snapshot,
+  projects,
   range,
   calendarConnection,
   loading,
@@ -91,15 +97,30 @@ export function PlanningWorkspace({
   const skeletonVisible = useDelayedSkeleton(initialLoading);
   const showingSkeleton = initialLoading || skeletonVisible;
   const now = Date.now();
-  const upcomingSchedule =
-    snapshot?.schedule.filter(
-      (entry) => new Date(entry.endsAt).getTime() >= now,
+  const calendarVisible = range.mode !== "day";
+  const visibleTasks =
+    snapshot?.tasks.filter(
+      (task) =>
+        !calendarVisible ||
+        !task.dueAt ||
+        samePlanningDay(new Date(task.dueAt), range.anchor),
     ) ?? [];
-  const pastSchedule = [
-    ...(snapshot?.schedule.filter(
-      (entry) => new Date(entry.endsAt).getTime() < now,
-    ) ?? []),
-  ].reverse();
+  const visibleSchedule =
+    snapshot?.schedule.filter(
+      (entry) =>
+        !calendarVisible || scheduleOverlapsPlanningDay(entry, range.anchor),
+    ) ?? [];
+  const upcomingSchedule = visibleSchedule.filter(
+    (entry) => new Date(entry.endsAt).getTime() >= now,
+  );
+  const pastSchedule = visibleSchedule
+    .filter((entry) => new Date(entry.endsAt).getTime() < now)
+    .reverse();
+  const tasksById = new Map(
+    [...(snapshot?.tasks ?? []), ...(snapshot?.completedTasks ?? [])].map(
+      (task) => [task.id, task],
+    ),
+  );
 
   useEffect(() => {
     if (!highlightedScheduleId) return;
@@ -282,29 +303,51 @@ export function PlanningWorkspace({
         </div>
       </section>
 
+      {calendarVisible && (
+        <>
+          <PlanningCalendar
+            range={range}
+            snapshot={snapshot}
+            loading={loading}
+            onOpenSchedule={onEditSchedule}
+            onOpenTask={onEditTask}
+            onSelectDate={(date) =>
+              void onRangeChange(planningViewRange(range.mode, date))
+            }
+          />
+          <h2 className="planning-selected-date" aria-live="polite">
+            {copy.schedule.selectedDate(
+              new Intl.DateTimeFormat("ko-KR", {
+                month: "long",
+                day: "numeric",
+                weekday: "short",
+              }).format(range.anchor),
+            )}
+          </h2>
+        </>
+      )}
       <section className="planning-tasks" aria-labelledby="planning-task-title">
         <div className="planning-section-heading">
           <div>
-            <CheckCircle2 aria-hidden="true" />
             <h2 id="planning-task-title">{copy.tasks.title}</h2>
           </div>
           <span>
             {showingSkeleton ? (
               <CountSkeleton visible={skeletonVisible} />
             ) : (
-              copy.home.taskCount(snapshot?.tasks.length ?? 0)
+              copy.home.taskCount(visibleTasks.length)
             )}
           </span>
         </div>
         <div
           className="planning-surface"
-          data-empty={!showingSkeleton && !snapshot?.tasks.length}
+          data-empty={!showingSkeleton && !visibleTasks.length}
         >
           {showingSkeleton ? (
             <PlanningTaskSkeleton rows={4} visible={skeletonVisible} />
-          ) : snapshot?.tasks.length ? (
+          ) : visibleTasks.length ? (
             <ul className="planning-task-list">
-              {snapshot.tasks.map((task) => (
+              {visibleTasks.map((task) => (
                 <li
                   className="planning-entity-row planning-entity-row--task"
                   key={task.id}
@@ -317,23 +360,23 @@ export function PlanningWorkspace({
                   data-pending={pendingTask?.id === task.id}
                   tabIndex={task.id === highlightedTaskId ? -1 : undefined}
                 >
-                  <button
+                  <TaskSelectionControl
+                    title={task.title}
                     className="planning-task-list__complete focus-visible-control"
-                    type="button"
-                    onClick={() => void complete(task)}
                     disabled={Boolean(pendingTask)}
-                    aria-label={copy.home.completeTask(task.title)}
-                  >
-                    {pendingTask?.id === task.id &&
-                    pendingTask.action === "complete" ? (
-                      <span className="button-spinner" aria-hidden="true" />
-                    ) : (
-                      <Circle aria-hidden="true" />
-                    )}
-                  </button>
+                    busy={
+                      pendingTask?.id === task.id &&
+                      pendingTask.action === "complete"
+                    }
+                    onComplete={() => complete(task)}
+                  />
                   <div>
                     <strong>{task.title}</strong>
-                    {task.notes && <p>{task.notes}</p>}
+                    {task.notes && (
+                      <p>
+                        <LinkifiedText text={task.notes} />
+                      </p>
+                    )}
                   </div>
                   {task.dueAt && (
                     <time
@@ -392,6 +435,9 @@ export function PlanningWorkspace({
               {upcomingSchedule.map((entry) => (
                 <ScheduleRow
                   entry={entry}
+                  linkedTask={
+                    entry.taskId ? tasksById.get(entry.taskId) : undefined
+                  }
                   highlighted={entry.id === highlightedScheduleId}
                   elementRef={
                     entry.id === highlightedScheduleId
@@ -405,8 +451,16 @@ export function PlanningWorkspace({
             </ol>
           ) : (
             <EmptySurface
-              title={copy.home.scheduleEmptyTitle}
-              description={copy.schedule.upcomingEmpty}
+              title={
+                calendarVisible
+                  ? copy.schedule.selectedDateEmptyTitle
+                  : copy.home.scheduleEmptyTitle
+              }
+              description={
+                calendarVisible
+                  ? copy.schedule.selectedDateEmpty
+                  : copy.schedule.upcomingEmpty
+              }
             />
           )}
         </div>
@@ -419,9 +473,6 @@ export function PlanningWorkspace({
           onToggle={(event) => setHistoryOpen(event.currentTarget.open)}
         >
           <summary className="planning-archive__summary focus-visible-control">
-            <span className="planning-archive__icon" aria-hidden="true">
-              <CalendarClock />
-            </span>
             <span className="planning-archive__copy">
               <strong>{copy.schedule.historyTitle}</strong>
               <span>{copy.schedule.historyCollapsed}</span>
@@ -449,6 +500,9 @@ export function PlanningWorkspace({
                 {pastSchedule.map((entry) => (
                   <ScheduleRow
                     entry={entry}
+                    linkedTask={
+                      entry.taskId ? tasksById.get(entry.taskId) : undefined
+                    }
                     highlighted={entry.id === highlightedScheduleId}
                     elementRef={
                       entry.id === highlightedScheduleId
@@ -475,9 +529,6 @@ export function PlanningWorkspace({
           onToggle={(event) => setCompletedOpen(event.currentTarget.open)}
         >
           <summary className="planning-archive__summary focus-visible-control">
-            <span className="planning-archive__icon" aria-hidden="true">
-              <History />
-            </span>
             <span className="planning-archive__copy">
               <strong>{copy.tasks.completedTitle}</strong>
               <span>{copy.tasks.completedCollapsed}</span>
@@ -531,7 +582,12 @@ export function PlanningWorkspace({
                     </button>
                     <div>
                       <strong>{task.title}</strong>
-                      {task.notes && <p>{task.notes}</p>}
+                      <span className="task-status-badge">완료됨</span>
+                      {task.notes && (
+                        <p>
+                          <LinkifiedText text={task.notes} />
+                        </p>
+                      )}
                     </div>
                     {task.completedAt && (
                       <time dateTime={task.completedAt}>
@@ -554,6 +610,8 @@ export function PlanningWorkspace({
       </div>
       <PlanningCreateDialog
         kind={createKind}
+        linkableTasks={snapshot?.tasks ?? []}
+        projects={projects}
         onClose={() => setCreateKind(undefined)}
         onCreateTask={onCreateTask}
         onCreateSchedule={onCreateSchedule}
@@ -635,11 +693,13 @@ function PlanningTaskSkeleton({
 
 function ScheduleRow({
   entry,
+  linkedTask,
   highlighted,
   elementRef,
   onEdit,
 }: {
   entry: ScheduleEntry;
+  linkedTask?: Task;
   highlighted: boolean;
   elementRef?: RefObject<HTMLLIElement | null>;
   onEdit(entry: ScheduleEntry): void;
@@ -662,6 +722,11 @@ function ScheduleRow({
           {entry.notes ||
             `${formatTime(entry.startsAt)}–${formatTime(entry.endsAt)}`}
         </p>
+        {linkedTask && (
+          <span className="planning-row-context">
+            {copy.schedule.linkedTask(linkedTask.title)}
+          </span>
+        )}
       </div>
       {entry.editable ? (
         <button

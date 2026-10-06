@@ -22,6 +22,7 @@ import {
   resolveOptionalSeoulDateTime,
   seoulLocalDateTimeToIso,
 } from "./DeadlinePicker";
+import { LinkifiedText, SafeExternalLink } from "./ExternalTextLink";
 
 export interface PromoteGmailInflowInput {
   title: string;
@@ -43,7 +44,7 @@ export type GmailInflowDraftValues = {
 
 export type GmailInflowDraftField = keyof GmailInflowDraftValues;
 
-type GmailInflowReviewProps = {
+export type GmailInflowReviewProps = {
   items: GmailInflowCandidate[];
   loading: boolean;
   loadingMore: boolean;
@@ -575,17 +576,17 @@ function GmailInflowDetail({
               {copy.gmailInflow.bodyUnavailable}
             </p>
           )}
-          <p>{item.bodyText || item.snippet}</p>
+          <p>
+            <LinkifiedText text={item.bodyText || item.snippet} />
+          </p>
           {item.originalThreadUrl && (
-            <a
+            <SafeExternalLink
               className="gmail-inflow__original-link"
               href={item.originalThreadUrl}
-              target="_blank"
-              rel="noreferrer"
             >
               {copy.gmailInflow.openOriginal}
               <ExternalLink aria-hidden="true" />
-            </a>
+            </SafeExternalLink>
           )}
           {item.referenceLinks.length > 0 && (
             <div className="gmail-inflow__references">
@@ -596,10 +597,10 @@ function GmailInflowDetail({
               <ul>
                 {item.referenceLinks.map((link) => (
                   <li key={link}>
-                    <a href={link} target="_blank" rel="noreferrer">
+                    <SafeExternalLink href={link}>
                       <span>{readableLink(link)}</span>
                       <ExternalLink aria-hidden="true" />
-                    </a>
+                    </SafeExternalLink>
                   </li>
                 ))}
               </ul>

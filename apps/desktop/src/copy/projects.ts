@@ -79,6 +79,8 @@ export const projectCopy = {
     overdue: "기한 지난 일",
     stale: "정체된 일",
     unassigned: "담당자 없는 일",
+    chatAttention: "확인할 Chat",
+    gmailAttention: "확인할 메일",
     cycleTime: "평균 처리 시간",
     onTime: "기한 내 완료",
   },
@@ -154,13 +156,40 @@ export const projectCopy = {
     unassigned: number,
   ) =>
     `기한 지난 일 ${overdue}개 · 정체된 일 ${stale}개 · 담당자 없는 일 ${unassigned}개`,
+  reportDocumentTitle: "보고서 초안",
+  reportDocumentDescription:
+    "이번 주 운영 데이터를 보고서 형태로 저장하고 검토할 수 있어요.",
+  reportCreate: "보고서 작성",
+  reportRefresh: "최신 지표로 다시 만들기",
+  reportLoading: "보고서를 불러오고 있어요.",
+  reportEmptyTitle: "아직 저장된 보고서가 없어요",
+  reportEmptyDescription:
+    "보고서 작성을 누르면 현재 프로젝트의 주간 흐름을 정리해요.",
+  reportSummaryLabel: "요약",
+  reportFocusLabel: "먼저 확인할 점",
+  reportSaveDraft: "초안 저장",
+  reportFinalize: "보고서 확정",
+  reportHistoryLabel: "이전 보고서 보기",
+  reportLoadProblem: "보고서를 불러오지 못했어요.",
+  reportGenerateProblem:
+    "보고서를 만들지 못했어요. 잠시 후 다시 시도해 주세요.",
+  reportSaveProblem:
+    "보고서 초안을 저장하지 못했어요. 최신 버전을 확인해 주세요.",
+  reportFinalizeProblem:
+    "보고서를 확정하지 못했어요. 최신 버전을 확인해 주세요.",
+  reportStatus: {
+    draft: "검토 필요",
+    finalized: "확정됨",
+    archived: "보관됨",
+    failed: "생성 실패",
+  },
   editProject: "프로젝트 수정하기",
   openProjectOverview: "프로젝트 정보 보기",
   collapseProjectOverview: "프로젝트 정보 접기",
   editTitle: "프로젝트 수정",
   editDescription: "목표와 현재 상태, 다음 행동을 최신 내용으로 바꿔요.",
-  stopEditing: "수정 그만두기",
-  saveChanges: "변경 내용 저장하기",
+  saveChanges: "저장하기",
+  deleteAction: "삭제",
   projectUpdated: "프로젝트를 최신 내용으로 바꿨어요.",
   projectUpdateNotice:
     "프로젝트를 바꾸지 못했어요. 최신 상태를 불러온 뒤 다시 시도해 주세요.",
@@ -213,18 +242,72 @@ export const projectCopy = {
   taskRemoveNotice:
     "일을 지우지 못했어요. 최신 내용을 불러온 뒤 다시 시도해 주세요.",
   inflowTitle: "확인할 대화",
+  inflowNewTitle: "새 업무 요청",
+  inflowExistingTitle: "기존 일감 업데이트",
+  inflowTabsLabel: "업무 요청 구분",
+  inflowNewTabShort: "새 요청",
+  inflowExistingTabShort: "기존 일감",
+  inflowNewEmpty:
+    "새 업무 요청이 없어요. 기존 일감 탭에서 새 소식을 확인해 보세요.",
+  inflowExistingEmpty:
+    "기존 일감에 새 답글이 없어요. 새 요청 탭에서 들어온 업무를 확인해 보세요.",
+  inflowExistingEyebrow: "등록된 일감의 새 소식",
+  inflowExistingOpen: (count: number) => `추가 대화 ${count}건 확인하기`,
+  inflowExistingCollapse: "추가 대화 간단히 보기",
+  inflowExistingQueueTitle: "새 답글이 온 일감",
+  inflowExistingDescription:
+    "등록된 일감에 새 답글이 왔어요. 내용을 확인하고 기존 일감에서 이어서 처리해 주세요.",
+  inflowReviewedTitle: "확인한 대화",
+  inflowReviewed: "확인함",
+  inflowUnread: "새 내용 있음",
+  inflowMarkSeen: "확인했어요",
+  inflowReviewProblem: "확인 상태를 저장하지 못했어요. 다시 시도해 주세요.",
+  inflowDismissReason: "제외 사유",
+  inflowDismissReasonLabel: "제외 사유 (선택)",
+  inflowDismissReasonPlaceholder:
+    "예: 이미 처리했거나 다른 담당자가 진행 중인 일이에요.",
+  inflowDismissReasonRequired: "답글로 남길 사유를 적어 주세요.",
+  inflowDismissReplyLabel: "이 사유를 원문 대화에 답글로 남기기",
+  inflowDismissSave: "업무 아님으로 저장하기",
+  inflowDismissCancel: "계속 검토하기",
+  inflowDismissReplySent: "원문 대화에 사유를 남겼어요.",
+  inflowDismissReplyFailed:
+    "업무 아님으로 저장했지만 답글을 보내지 못했어요. 연결 상태를 확인하고 다시 시도해 주세요.",
+  inflowDismissReplyPending: "업무 아님으로 저장했어요. 답글을 보내고 있어요.",
+  inflowDismissReplyRetry: "사유 답글 다시 보내기",
   inflowDescription:
     "Chat 대화를 맥락별로 묶어 보여드려요. 해야 할 행동이 있는 대화만 할 일로 정리해요.",
   inflowHomeEyebrow: "새로 들어온 업무",
   inflowHomeTitle: "새로운 업무 요청을 정리했어요",
   inflowHomeDescription:
-    "AI가 대화 맥락을 읽고 새 업무만 정리했어요. 담당자와 마감일을 확인해 주세요.",
+    "Google Chat에서 AI가 찾은 업무 후보예요. 할 일인지 확인하고 담당자와 마감일을 정해 등록해 주세요.",
+  inflowHomeViews: "업무 요청 보기",
+  inflowHomeListView: "목록",
+  inflowHomeCalendarView: "받은 날짜",
+  inflowHomeCalendarHint: "받은 날짜를 선택하면 업무 요청을 볼 수 있어요.",
+  inflowHomeCalendarScope:
+    "아직 등록하지 않은 업무 후보를 받은 날짜 기준으로 보여줘요.",
+  inflowExistingCalendarScope:
+    "등록된 일감에 새로 온 답글을 받은 날짜 기준으로 보여줘요.",
+  inflowHomeRequestCount: (count: number) => `업무 요청 ${count}건`,
+  inflowHomeCalendarCount: (count: number) => `${count}건`,
+  inflowHomeCalendarDate: (label: string, count: number) =>
+    `${label}, 업무 요청 ${count}건`,
+  inflowHomeDateEmpty: "이 날짜에 받은 업무 요청이 없어요",
+  inflowHomeDateEmptyHelp:
+    "표시가 있는 날짜를 선택하거나 목록에서 전체 요청을 확인해 보세요.",
+  inflowHomeDatePending: "받은 날짜 확인 필요",
+  inflowHomeCloseDetail: "상세 닫기",
+  inflowHomeScrollHint: "목록 안에서 스크롤해 더 볼 수 있어요.",
+  inflowHomeReceivedOn: (label: string) => `${label} 받은 요청`,
   inflowHomeQueueTitle: "확인할 요청",
   inflowHomeSelectedLabel: "선택한 업무",
   inflowHomeSelectedRequest: (senderName: string) =>
     senderName ? `${senderName}님의 요청` : "보낸 사람을 확인하고 있어요",
   inflowHomeOpen: (count: number) => `업무 요청 ${count}건 확인하기`,
   inflowHomeCollapse: "업무 요청 간단히 보기",
+  inflowHomeShowAll: (count: number) => `업무 요청 ${count}건 모두 보기`,
+  inflowHomeShowLess: "최근 5건만 보기",
   inflowConnectAccount: "회사 Google 계정 연결",
   inflowConnectAnotherAccount: "다른 회사 계정 연결",
   inflowConnectDescription:
@@ -247,8 +330,9 @@ export const projectCopy = {
     "할 일 등록과 원문 표시, 마감일 답글 상태를 함께 확인할 수 있어요.",
   inflowNoSource: "아직 확인할 Chat 공간을 연결하지 않았어요.",
   inflowPromote: "할 일로 정리하기",
+  inflowRegister: "등록하기",
   inflowPromoteAndNotify: "할 일로 정리하고 알리기",
-  inflowPromoting: "할 일로 정리하는 중",
+  inflowPromoting: "등록하는 중",
   inflowDismiss: "업무 아님",
   inflowAnalyzing: "대화 맥락을 읽고 업무 내용을 정리하고 있어요.",
   inflowAnalysisHelp:

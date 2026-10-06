@@ -76,3 +76,56 @@ describe("planning view range", () => {
     expect(older.from).toEqual(new Date(2026, 4, 1));
   });
 });
+
+import {
+  planningCalendarDays,
+  samePlanningDay,
+  scheduleOverlapsPlanningDay,
+} from "./planningRange";
+
+describe("planning calendar dates", () => {
+  it("shows every leap-February date in complete Monday-based weeks", () => {
+    const range = planningViewRange("month", new Date(2028, 1, 15));
+    const days = planningCalendarDays(range);
+    expect(days.length % 7).toBe(0);
+    expect(days[0].getDay()).toBe(1);
+    expect(days.at(-1)?.getDay()).toBe(0);
+    const monthDays = days.filter((day) => day >= range.from && day < range.to);
+    expect(monthDays).toHaveLength(29);
+    expect(monthDays[0].getDate()).toBe(1);
+    expect(monthDays.at(-1)?.getDate()).toBe(29);
+  });
+  it("shows exactly one week across a year boundary", () => {
+    const range = planningViewRange("week", new Date(2027, 0, 1));
+    const days = planningCalendarDays(range);
+    expect(days).toHaveLength(7);
+    expect(days[0]).toEqual(new Date(2026, 11, 28));
+    expect(days[6]).toEqual(new Date(2027, 0, 3));
+    expect(new Set(days.map((day) => day.getTime())).size).toBe(7);
+  });
+  it("uses calendar-day equality instead of equal timestamps", () => {
+    expect(
+      samePlanningDay(new Date(2026, 9, 2, 0), new Date(2026, 9, 2, 23)),
+    ).toBe(true);
+    expect(samePlanningDay(new Date(2026, 9, 2), new Date(2026, 9, 3))).toBe(
+      false,
+    );
+  });
+  it("includes overnight schedules on each affected date but excludes midnight end", () => {
+    const entry = {
+      startsAt: new Date(2026, 9, 2, 23).toISOString(),
+      endsAt: new Date(2026, 9, 3, 1).toISOString(),
+    };
+    expect(scheduleOverlapsPlanningDay(entry, new Date(2026, 9, 2))).toBe(true);
+    expect(scheduleOverlapsPlanningDay(entry, new Date(2026, 9, 3))).toBe(true);
+    expect(scheduleOverlapsPlanningDay(entry, new Date(2026, 9, 4))).toBe(
+      false,
+    );
+    expect(
+      scheduleOverlapsPlanningDay(
+        { ...entry, endsAt: new Date(2026, 9, 3).toISOString() },
+        new Date(2026, 9, 3),
+      ),
+    ).toBe(false);
+  });
+});

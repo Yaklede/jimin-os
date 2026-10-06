@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "framework": null,
+  "buildCommand": "",
+  "installCommand": "",
+  "outputDirectory": ".",
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}

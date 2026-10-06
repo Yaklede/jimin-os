@@ -479,6 +479,34 @@ mod tests {
     }
 
     #[test]
+    fn scheduled_work_joint_assignees_expand_to_two_google_chat_mentions() {
+        let directory = GoogleChatMentionDirectory {
+            users: [
+                (
+                    "송인준".to_owned(),
+                    "users/123456789012345678901".to_owned(),
+                ),
+                (
+                    "김경주".to_owned(),
+                    "users/123456789012345678902".to_owned(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let payload = provider_payload(
+            WebhookProvider::GoogleChat,
+            "chat.message",
+            &serde_json::json!({"message": "담당자: @김경주, @송인준\n• 공동 담당 할 일\n마감: 2026년 9월 14일 23:59"}),
+            &directory,
+        ).unwrap();
+        assert_eq!(
+            payload["text"],
+            "담당자: <users/123456789012345678902>, <users/123456789012345678901>\n• 공동 담당 할 일\n마감: 2026년 9월 14일 23:59"
+        );
+    }
+
+    #[test]
     fn assigned_task_notification_mentions_the_registered_assignee_once() {
         let directory = GoogleChatMentionDirectory {
             users: [(

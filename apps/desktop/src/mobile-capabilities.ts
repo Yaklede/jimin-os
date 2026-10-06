@@ -83,9 +83,10 @@ function currentRuntime(): MobileCapabilityRuntime {
 }
 
 function platformFrom(runtime: MobileCapabilityRuntime): MobilePlatform {
+  if (!runtime.tauri) return "web";
   if (/Android/i.test(runtime.userAgent)) return "android";
   if (/iPhone|iPad|iPod/i.test(runtime.userAgent)) return "ios";
-  return runtime.tauri ? "desktop" : "web";
+  return "desktop";
 }
 
 function assertNativeVoiceDictation(runtime: MobileCapabilityRuntime): void {

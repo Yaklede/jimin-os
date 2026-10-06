@@ -7,6 +7,7 @@ pub mod google_chat_oauth;
 mod meetings;
 pub mod probe;
 pub mod push;
+pub mod scheduled_work;
 mod voice_command;
 pub mod webhook;
 
@@ -64,7 +65,7 @@ use jimin_storage::{
         CreateGoogleChatOAuthAuthorization, GoogleChatAccount, GoogleChatAccountStatus,
         GoogleChatCompletionDelivery, GoogleChatSourceSyncConnection,
         GoogleChatTaskCompletionDelivery, NewProjectGoogleChatSource, ProjectGoogleChatSource,
-        ProjectInflowItem, ProjectInflowStatus, PromoteProjectInflowItem,
+        ProjectInflowItem, ProjectInflowStatus, PromoteProjectInflowItem, ReviewProjectInflowItem,
     },
     inflow_analysis::{
         InflowAnalysisState, InflowClassification, ProjectInflowAnalysis,
@@ -80,10 +81,11 @@ use jimin_storage::{
         ProjectItsmConnection,
     },
     planning::{
-        DeleteTaskOutcome, NewScheduleEntry, NewTask, ScheduleEntry, ScheduleEntryUpdate,
-        ScheduleSource, ScheduleStatus, Task, TaskAssignmentMessageInput, TaskStatus, TaskUpdate,
-        format_task_assignment_message,
+        DeleteTaskOutcome, LinkedScheduleEntry, NewScheduleEntry, NewTask, ScheduleEntry,
+        ScheduleEntryLinkage, ScheduleEntryUpdate, ScheduleSource, ScheduleStatus, Task,
+        TaskAssignmentMessageInput, TaskStatus, TaskUpdate, format_task_assignment_message,
     },
+    reports::{NewReport, PROJECT_WEEKLY_REPORT, Report, ReportStatus, ReportUpdate},
     sync::SyncChange,
     webhook::{
         GoogleChatMentionDirectory, NewProjectWebhook, ProjectWebhook, ProjectWebhookUpdate,
@@ -390,6 +392,8 @@ pub struct DeviceListResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ScheduleEntryResponse {
     id: uuid::Uuid,
+    project_id: Option<uuid::Uuid>,
+    task_id: Option<uuid::Uuid>,
     title: String,
     notes: Option<String>,
     starts_at: String,
@@ -521,6 +525,8 @@ pub struct WeeklyReportResponse {
     overdue_task_count: i64,
     stale_task_count: i64,
     unassigned_task_count: i64,
+    actionable_chat_inflow_count: i64,
+    actionable_gmail_inflow_count: i64,
     projects: Vec<WeeklyProjectReportResponse>,
 }
 
@@ -537,6 +543,34 @@ pub struct WeeklyReportSnapshotResponse {
 #[serde(rename_all = "camelCase")]
 pub struct WeeklyReportHistoryResponse {
     items: Vec<WeeklyReportSnapshotResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportResponse {
+    id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+    project_id: uuid::Uuid,
+    report_type: String,
+    title: String,
+    period_start: String,
+    period_end: String,
+    status: String,
+    current_version: i64,
+    #[schema(value_type = Object)]
+    content: serde_json::Value,
+    generated_at: String,
+    finalized_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+    version: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportListResponse {
+    items: Vec<ReportResponse>,
+    next_cursor: Option<String>,
 }
 
 /// A desired outcome that gives projects and daily work a clear direction.
@@ -978,6 +1012,9 @@ pub struct ProjectInflowItemResponse {
     status: String,
     promoted_task_id: Option<uuid::Uuid>,
     acknowledged: bool,
+    reviewed: bool,
+    dismissal_reason: Option<String>,
+    dismissal_reply_status: Option<String>,
     completion_status: String,
     completion_reaction_completed: bool,
     completion_reply_completed: bool,
@@ -1043,6 +1080,9 @@ pub struct DeleteProjectItsmConnectionQuery {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ProjectInflowDecisionRequest {
     decision: String,
+    reason: Option<String>,
+    #[serde(default)]
+    reply_to_source: bool,
     expected_version: i64,
     conversation_id: Option<uuid::Uuid>,
     representative_item_id: Option<uuid::Uuid>,
@@ -1376,6 +1416,8 @@ struct DisconnectGoogleCalendarQuery {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CreateScheduleRequest {
     client_mutation_id: Option<uuid::Uuid>,
+    project_id: Option<uuid::Uuid>,
+    task_id: Option<uuid::Uuid>,
     title: String,
     notes: Option<String>,
     starts_at: String,
@@ -1385,7 +1427,17 @@ struct CreateScheduleRequest {
 
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ScheduleLinkageRequest {
+    project_id: Option<uuid::Uuid>,
+    task_id: Option<uuid::Uuid>,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct UpdateScheduleRequest {
+    /// Omit to preserve existing links. Send an object with null fields to
+    /// clear links explicitly.
+    linkage: Option<ScheduleLinkageRequest>,
     title: String,
     notes: Option<String>,
     starts_at: String,
@@ -1542,6 +1594,35 @@ struct WeeklyReportHistoryQuery {
     limit: Option<i64>,
 }
 
+#[derive(serde::Deserialize, IntoParams, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ReportListQuery {
+    workspace_id: uuid::Uuid,
+    project_id: uuid::Uuid,
+    limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CreateProjectWeeklyReportRequest {
+    workspace_id: uuid::Uuid,
+    project_id: uuid::Uuid,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UpdateReportRequest {
+    #[schema(value_type = Object)]
+    content: serde_json::Value,
+    expected_version: i64,
+}
+
+#[derive(serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct FinalizeReportRequest {
+    expected_version: i64,
+}
+
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct TaskListQuery {
@@ -1692,6 +1773,11 @@ pub(crate) fn error_response(
         list_projects,
         get_weekly_report,
         get_weekly_report_history,
+        list_reports,
+        create_project_weekly_report,
+        get_report,
+        update_report,
+        finalize_report,
         create_project,
         update_project,
         delete_project,
@@ -1775,6 +1861,7 @@ pub(crate) fn error_response(
         SyncChangeListResponse,
         DeviceRegistrationRequest,
         CreateScheduleRequest,
+        ScheduleLinkageRequest,
         ScheduleEntryResponse,
         ScheduleListResponse,
         GoogleCalendarConnectionResponse,
@@ -1819,6 +1906,8 @@ pub(crate) fn error_response(
         WeeklyReportResponse,
         WeeklyReportSnapshotResponse,
         WeeklyReportHistoryResponse,
+        ReportResponse,
+        ReportListResponse,
         ProjectWebhookResponse,
         ProjectWebhookListResponse,
         WebhookDeliveryResponse,
@@ -1868,6 +1957,10 @@ pub(crate) fn error_response(
         ProjectListQuery,
         WeeklyReportQuery,
         WeeklyReportHistoryQuery,
+        ReportListQuery,
+        CreateProjectWeeklyReportRequest,
+        UpdateReportRequest,
+        FinalizeReportRequest,
         TaskListQuery,
         CompleteTaskRequest,
         VoiceCommandRequest,
@@ -1908,7 +2001,9 @@ struct ApiDoc;
 
 #[must_use]
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
-    ApiDoc::openapi()
+    let mut document = ApiDoc::openapi();
+    document.merge(scheduled_work::ScheduledWorkApiDoc::openapi());
+    document
 }
 
 #[allow(clippy::too_many_lines)] // The router is an auditable registry of public API surfaces.
@@ -1948,6 +2043,19 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/projects", get(list_projects).post(create_project))
         .route("/v1/reports/weekly", get(get_weekly_report))
         .route("/v1/reports/weekly/history", get(get_weekly_report_history))
+        .route("/v1/reports", get(list_reports))
+        .route(
+            "/v1/reports/project-weekly",
+            axum::routing::post(create_project_weekly_report),
+        )
+        .route(
+            "/v1/reports/{report_id}",
+            get(get_report).put(update_report),
+        )
+        .route(
+            "/v1/reports/{report_id}/finalize",
+            axum::routing::post(finalize_report),
+        )
         .route(
             "/v1/projects/{project_id}",
             axum::routing::put(update_project).delete(delete_project),
@@ -2007,6 +2115,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/me", get(me))
         .route("/v1/devices", get(devices))
         .merge(device_signals::routes())
+        .merge(scheduled_work::routes())
         .merge(meetings::routes());
 
     let allowed_origins = allowed_client_origins(state.trusted_network());
@@ -2814,12 +2923,12 @@ async fn list_schedule_entries(
         return unavailable_response(request_id);
     };
     match planning
-        .schedule_entries_in_range(principal.identity().user_id(), from, to)
+        .schedule_entries_with_linkage_in_range(principal.identity().user_id(), from, to)
         .await
     {
         Ok(entries) => match entries
             .into_iter()
-            .map(schedule_entry_response)
+            .map(linked_schedule_entry_response)
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(items) => Json(ScheduleListResponse {
@@ -2845,7 +2954,7 @@ async fn create_google_schedule_entry(
     request_id: RequestId,
 ) -> Response {
     match planning
-        .create_schedule_entry_with_calendar_outbox(
+        .create_schedule_entry_with_calendar_outbox_and_linkage(
             &NewScheduleEntry {
                 id: body.client_mutation_id.unwrap_or_else(uuid::Uuid::now_v7),
                 user_id,
@@ -2856,10 +2965,14 @@ async fn create_google_schedule_entry(
                 time_zone: body.time_zone.clone(),
             },
             &target,
+            ScheduleEntryLinkage {
+                project_id: body.project_id,
+                task_id: body.task_id,
+            },
         )
         .await
     {
-        Ok(entry) => match schedule_entry_response(entry) {
+        Ok(entry) => match linked_schedule_entry_response(entry) {
             Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
             Err(()) => unavailable_response(request_id),
         },
@@ -2907,10 +3020,10 @@ async fn get_home_snapshot(
         webhooks,
         workspaces,
     ) = match tokio::try_join!(
-        planning.schedule_entries_in_range(user_id, from, to),
+        planning.schedule_entries_with_linkage_in_range(user_id, from, to),
         planning.home_tasks_for_user(user_id, to),
         planning.deadline_tasks_for_user(user_id, deadline_boundary),
-        planning.active_recommendations_for_user(user_id, OffsetDateTime::now_utc(), 5),
+        planning.active_decisions_for_user(user_id, OffsetDateTime::now_utc(), 5),
         planning.pending_project_inflow_for_user(user_id),
         planning.project_inflow_analyses_for_user(user_id),
         planning.user_project_webhooks(user_id),
@@ -2931,7 +3044,7 @@ async fn get_home_snapshot(
     }
     let Ok(schedule) = schedule
         .into_iter()
-        .map(schedule_entry_response)
+        .map(linked_schedule_entry_response)
         .collect::<Result<Vec<_>, _>>()
     else {
         return unavailable_response(request_id);
@@ -3149,18 +3262,24 @@ async fn create_schedule_entry(
         Err(error) => return storage_error_response(&error, request_id),
     }
     match planning
-        .create_schedule_entry(&NewScheduleEntry {
-            id: body.client_mutation_id.unwrap_or_else(uuid::Uuid::now_v7),
-            user_id: principal.identity().user_id(),
-            title: body.title,
-            notes: body.notes,
-            starts_at,
-            ends_at,
-            time_zone: body.time_zone,
-        })
+        .create_schedule_entry_with_linkage(
+            &NewScheduleEntry {
+                id: body.client_mutation_id.unwrap_or_else(uuid::Uuid::now_v7),
+                user_id: principal.identity().user_id(),
+                title: body.title,
+                notes: body.notes,
+                starts_at,
+                ends_at,
+                time_zone: body.time_zone,
+            },
+            ScheduleEntryLinkage {
+                project_id: body.project_id,
+                task_id: body.task_id,
+            },
+        )
         .await
     {
-        Ok(entry) => match schedule_entry_response(entry) {
+        Ok(entry) => match linked_schedule_entry_response(entry) {
             Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
             Err(()) => unavailable_response(request_id),
         },
@@ -3197,22 +3316,44 @@ async fn update_schedule_entry(
         return unavailable_response(request_id);
     };
     match planning
-        .update_schedule_entry(&ScheduleEntryUpdate {
-            id: schedule_entry_id,
-            user_id: principal.identity().user_id(),
-            title: body.title.clone(),
-            notes: body.notes.clone(),
-            starts_at,
-            ends_at,
-            time_zone: body.time_zone.clone(),
-            expected_version: body.expected_version,
-        })
+        .update_schedule_entry_with_linkage(
+            &ScheduleEntryUpdate {
+                id: schedule_entry_id,
+                user_id: principal.identity().user_id(),
+                title: body.title.clone(),
+                notes: body.notes.clone(),
+                starts_at,
+                ends_at,
+                time_zone: body.time_zone.clone(),
+                expected_version: body.expected_version,
+            },
+            body.linkage.as_ref().map(|linkage| ScheduleEntryLinkage {
+                project_id: linkage.project_id,
+                task_id: linkage.task_id,
+            }),
+        )
         .await
     {
-        Ok(Some(entry)) => match schedule_entry_response(entry) {
+        Ok(Some(entry)) => match linked_schedule_entry_response(entry) {
             Ok(response) => Json(response).into_response(),
             Err(()) => unavailable_response(request_id),
         },
+        Ok(None) if body.linkage.is_some() => {
+            match planning
+                .schedule_entry_with_linkage_by_id(
+                    principal.identity().user_id(),
+                    schedule_entry_id,
+                )
+                .await
+            {
+                Ok(Some(entry)) if entry.entry.source == ScheduleSource::Manual => {
+                    schedule_conflict_response(request_id)
+                }
+                Ok(Some(_)) => invalid_request_response(request_id),
+                Ok(None) => schedule_conflict_response(request_id),
+                Err(error) => storage_error_response(&error, request_id),
+            }
+        }
         Ok(None) => {
             update_google_schedule_entry(
                 &state,
@@ -3728,6 +3869,294 @@ async fn get_weekly_report_history(
                 .collect(),
         })
         .into_response(),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/reports",
+    tag = "work",
+    params(ReportListQuery),
+    responses(
+        (status = 200, body = ReportListResponse),
+        (status = 400),
+        (status = 401),
+        (status = 503)
+    )
+)]
+async fn list_reports(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    axum::extract::Query(query): axum::extract::Query<ReportListQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .reports_for_project(
+            principal.identity().user_id(),
+            query.workspace_id,
+            query.project_id,
+            query.limit.unwrap_or(12),
+        )
+        .await
+    {
+        Ok(reports) => match reports
+            .into_iter()
+            .map(report_response)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(items) => Json(ReportListResponse {
+                items,
+                next_cursor: None,
+            })
+            .into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/reports/project-weekly",
+    tag = "work",
+    request_body = CreateProjectWeeklyReportRequest,
+    responses(
+        (status = 201, body = ReportResponse),
+        (status = 200, body = ReportResponse),
+        (status = 400),
+        (status = 401),
+        (status = 503)
+    )
+)]
+async fn create_project_weekly_report(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Json(body): Json<CreateProjectWeeklyReportRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let user_id = principal.identity().user_id();
+    let report = match planning
+        .weekly_report_for_workspace(user_id, body.workspace_id, Some(body.project_id))
+        .await
+    {
+        Ok(report) => report,
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    let Some(project) = report
+        .projects
+        .iter()
+        .find(|project| project.project_id == body.project_id)
+    else {
+        return invalid_request_response(request_id);
+    };
+    let existing = match planning
+        .reports_for_project(user_id, body.workspace_id, body.project_id, 52)
+        .await
+    {
+        Ok(reports) => reports.into_iter().find(|item| {
+            item.report_type == PROJECT_WEEKLY_REPORT
+                && item.period_start == report.period_start
+                && item.period_end == report.period_end
+        }),
+        Err(error) => return storage_error_response(&error, request_id),
+    };
+    let content = project_weekly_report_content(project, &report);
+    if let Some(existing) = existing {
+        if existing.status == ReportStatus::Draft {
+            match planning
+                .update_report(&ReportUpdate {
+                    id: existing.id,
+                    user_id,
+                    content,
+                    generated_by: "system".to_owned(),
+                    expected_version: existing.version,
+                })
+                .await
+            {
+                Ok(Some(updated)) => {
+                    return match report_response(updated) {
+                        Ok(response) => Json(response).into_response(),
+                        Err(()) => unavailable_response(request_id),
+                    };
+                }
+                Ok(None) => {
+                    return error_response(
+                        StatusCode::CONFLICT,
+                        "report.version_conflict",
+                        "보고서가 다른 곳에서 변경됐어요. 최신 버전을 확인해 주세요.",
+                        request_id,
+                        false,
+                    );
+                }
+                Err(error) => return storage_error_response(&error, request_id),
+            }
+        }
+        return match report_response(existing) {
+            Ok(response) => Json(response).into_response(),
+            Err(()) => unavailable_response(request_id),
+        };
+    }
+    let title = format!("{} 주간 운영 보고서", project.title);
+    match planning
+        .create_report(&NewReport {
+            id: uuid::Uuid::now_v7(),
+            user_id,
+            workspace_id: body.workspace_id,
+            project_id: body.project_id,
+            report_type: PROJECT_WEEKLY_REPORT.to_owned(),
+            title,
+            period_start: report.period_start,
+            period_end: report.period_end,
+            content,
+            generated_by: "system".to_owned(),
+            generated_at: report.period_end,
+        })
+        .await
+    {
+        Ok(report) => match report_response(report) {
+            Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/reports/{report_id}",
+    tag = "work",
+    params(("report_id" = String, Path)),
+    responses((status = 200, body = ReportResponse), (status = 400), (status = 401), (status = 404), (status = 503))
+)]
+async fn get_report(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(report_id): Path<uuid::Uuid>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .report_for_user(principal.identity().user_id(), report_id)
+        .await
+    {
+        Ok(report) => match report_response(report) {
+            Ok(response) => Json(response).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Err(StorageError::IdentityConflict) => not_found_response(request_id),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/reports/{report_id}",
+    tag = "work",
+    params(("report_id" = String, Path)),
+    request_body = UpdateReportRequest,
+    responses((status = 200, body = ReportResponse), (status = 400), (status = 401), (status = 409), (status = 503))
+)]
+async fn update_report(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(report_id): Path<uuid::Uuid>,
+    Json(body): Json<UpdateReportRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .update_report(&ReportUpdate {
+            id: report_id,
+            user_id: principal.identity().user_id(),
+            content: body.content,
+            generated_by: "user".to_owned(),
+            expected_version: body.expected_version,
+        })
+        .await
+    {
+        Ok(Some(report)) => match report_response(report) {
+            Ok(response) => Json(response).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Ok(None) => error_response(
+            StatusCode::CONFLICT,
+            "report.version_conflict",
+            "보고서가 다른 곳에서 변경됐어요. 최신 버전을 확인해 주세요.",
+            request_id,
+            false,
+        ),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/reports/{report_id}/finalize",
+    tag = "work",
+    params(("report_id" = String, Path)),
+    request_body = FinalizeReportRequest,
+    responses((status = 200, body = ReportResponse), (status = 400), (status = 401), (status = 409), (status = 503))
+)]
+async fn finalize_report(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(report_id): Path<uuid::Uuid>,
+    Json(body): Json<FinalizeReportRequest>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(planning) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    match planning
+        .finalize_report(
+            principal.identity().user_id(),
+            report_id,
+            body.expected_version,
+        )
+        .await
+    {
+        Ok(Some(report)) => match report_response(report) {
+            Ok(response) => Json(response).into_response(),
+            Err(()) => unavailable_response(request_id),
+        },
+        Ok(None) => error_response(
+            StatusCode::CONFLICT,
+            "report.version_conflict",
+            "보고서가 이미 확정됐거나 최신 버전이 아니에요.",
+            request_id,
+            false,
+        ),
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -7346,7 +7775,10 @@ async fn decide_project_inflow_item(
         apply_project_inflow_decision(planning, user_id, project_id, item_id, &request).await;
     match result {
         Ok(Some(mut item)) => {
-            if matches!(request.decision.as_str(), "promote" | "retry_completion") {
+            if matches!(
+                request.decision.as_str(),
+                "promote" | "retry_completion" | "dismiss" | "retry_dismissal_reply"
+            ) {
                 match (
                     state.google_chat_oauth(),
                     planning
@@ -7390,7 +7822,7 @@ async fn decide_project_inflow_item(
                     }
                 }
                 if let Ok(items) = planning
-                    .project_inflow_items(user_id, project_id, Some(ProjectInflowStatus::Promoted))
+                    .project_inflow_items(user_id, project_id, Some(item.status))
                     .await
                     && let Some(refreshed) =
                         items.into_iter().find(|candidate| candidate.id == item.id)
@@ -7429,6 +7861,10 @@ async fn decide_project_inflow_item(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "All supported inflow decisions share one explicitly validated and ownership-scoped dispatcher"
+)]
 async fn apply_project_inflow_decision(
     planning: &Database,
     user_id: uuid::Uuid,
@@ -7437,9 +7873,17 @@ async fn apply_project_inflow_decision(
     request: &ProjectInflowDecisionRequest,
 ) -> Result<Option<ProjectInflowItem>, StorageError> {
     match request.decision.as_str() {
-        "dismiss" => {
+        "dismiss" | "mark_seen" => {
             planning
-                .dismiss_project_inflow_item(user_id, project_id, item_id, request.expected_version)
+                .review_project_inflow_item(&ReviewProjectInflowItem {
+                    user_id,
+                    project_id,
+                    item_id,
+                    expected_version: request.expected_version,
+                    mark_seen: request.decision == "mark_seen",
+                    reason: request.reason.clone(),
+                    reply_to_source: request.reply_to_source,
+                })
                 .await
         }
         "promote" => {
@@ -7488,6 +7932,16 @@ async fn apply_project_inflow_decision(
                     priority: request.priority.unwrap_or(1),
                     due_at,
                 })
+                .await
+        }
+        "retry_dismissal_reply" => {
+            planning
+                .retry_project_inflow_dismissal_reply(
+                    user_id,
+                    project_id,
+                    item_id,
+                    request.expected_version,
+                )
                 .await
         }
         "retry_completion" => {
@@ -7579,6 +8033,22 @@ async fn deliver_google_chat_completions(
     connection: &GoogleChatSourceSyncConnection,
     inflow_id: Option<uuid::Uuid>,
 ) -> Result<(), GoogleChatOAuthError> {
+    let replies = planning
+        .claim_google_chat_dismissal_replies(connection.source_id)
+        .await
+        .map_err(|_| GoogleChatOAuthError::ProviderUnavailable)?;
+    for reply in replies {
+        let result = runtime.deliver_dismissal_reply(connection, &reply).await;
+        planning
+            .record_google_chat_dismissal_reply(
+                &reply,
+                result
+                    .err()
+                    .map(google_chat_oauth::GoogleChatOAuthError::failure_code),
+            )
+            .await
+            .map_err(|_| GoogleChatOAuthError::ProviderUnavailable)?;
+    }
     let deliveries = planning
         .pending_google_chat_completion_deliveries(connection.source_id, inflow_id, 20)
         .await
@@ -8292,6 +8762,18 @@ fn project_inflow_item_response(
     } = candidate;
     let first_received_at = messages.first().ok_or(())?.received_at;
     let acknowledged = messages.iter().all(|item| item.acknowledged_at.is_some());
+    let reviewed = messages
+        .iter()
+        .filter(|item| !item.sent_by_owner)
+        .all(|item| item.reviewed_at.is_some());
+    let dismissal_reason = messages
+        .iter()
+        .rev()
+        .find_map(|item| item.dismissal_reason.clone());
+    let dismissal_reply_status = messages
+        .iter()
+        .rev()
+        .find_map(|item| item.dismissal_reply_status.clone());
     let completion = messages
         .iter()
         .find(|item| item.completion_requested_at.is_some());
@@ -8424,6 +8906,9 @@ fn project_inflow_item_response(
         status: project_inflow_status_name(representative.status).to_owned(),
         promoted_task_id: representative.promoted_task_id,
         acknowledged,
+        reviewed,
+        dismissal_reason,
+        dismissal_reply_status,
         completion_status: completion_status.to_owned(),
         completion_reaction_completed,
         completion_reply_completed,
@@ -8875,8 +9360,24 @@ fn storage_error_response(error: &StorageError, request_id: RequestId) -> Respon
 }
 
 fn schedule_entry_response(entry: ScheduleEntry) -> Result<ScheduleEntryResponse, ()> {
+    schedule_entry_response_with_linkage(entry, None, None)
+}
+
+fn linked_schedule_entry_response(
+    linked: LinkedScheduleEntry,
+) -> Result<ScheduleEntryResponse, ()> {
+    schedule_entry_response_with_linkage(linked.entry, linked.project_id, linked.task_id)
+}
+
+fn schedule_entry_response_with_linkage(
+    entry: ScheduleEntry,
+    project_id: Option<uuid::Uuid>,
+    task_id: Option<uuid::Uuid>,
+) -> Result<ScheduleEntryResponse, ()> {
     Ok(ScheduleEntryResponse {
         id: entry.id,
+        project_id,
+        task_id,
         title: entry.title,
         notes: entry.notes,
         starts_at: entry.starts_at.format(&Rfc3339).map_err(|_| ())?,
@@ -9345,6 +9846,8 @@ fn weekly_report_response(report: WeeklyWorkspaceReport) -> WeeklyReportResponse
         overdue_task_count: sum(|project| project.overdue_task_count),
         stale_task_count: sum(|project| project.stale_task_count),
         unassigned_task_count: sum(|project| project.unassigned_task_count),
+        actionable_chat_inflow_count: report.actionable_chat_inflow_count,
+        actionable_gmail_inflow_count: report.actionable_gmail_inflow_count,
         projects,
     }
 }
@@ -9358,6 +9861,94 @@ fn weekly_report_snapshot_response(snapshot: WeeklyReportSnapshot) -> WeeklyRepo
             .unwrap_or_else(|_| snapshot.generated_at.unix_timestamp().to_string()),
         report: weekly_report_response(snapshot.report),
     }
+}
+
+fn report_response(report: Report) -> Result<ReportResponse, ()> {
+    Ok(ReportResponse {
+        id: report.id,
+        workspace_id: report.workspace_id,
+        project_id: report.project_id,
+        report_type: report.report_type,
+        title: report.title,
+        period_start: report.period_start.format(&Rfc3339).map_err(|_| ())?,
+        period_end: report.period_end.format(&Rfc3339).map_err(|_| ())?,
+        status: match report.status {
+            ReportStatus::Draft => "draft".to_owned(),
+            ReportStatus::Finalized => "finalized".to_owned(),
+            ReportStatus::Archived => "archived".to_owned(),
+            ReportStatus::Failed => "failed".to_owned(),
+        },
+        current_version: report.current_version,
+        content: report.content,
+        generated_at: report.generated_at.format(&Rfc3339).map_err(|_| ())?,
+        finalized_at: report
+            .finalized_at
+            .map(|value| value.format(&Rfc3339).map_err(|_| ()))
+            .transpose()?,
+        created_at: report.created_at.format(&Rfc3339).map_err(|_| ())?,
+        updated_at: report.updated_at.format(&Rfc3339).map_err(|_| ())?,
+        version: report.version,
+    })
+}
+
+fn project_weekly_report_content(
+    project: &WeeklyProjectReport,
+    report: &WeeklyWorkspaceReport,
+) -> serde_json::Value {
+    let mut focus = Vec::new();
+    if project.overdue_task_count > 0 {
+        focus.push(format!(
+            "기한이 지난 일 {}개를 먼저 확인하세요.",
+            project.overdue_task_count
+        ));
+    }
+    if project.stale_task_count > 0 {
+        focus.push(format!(
+            "오랫동안 바뀌지 않은 일 {}개를 확인하세요.",
+            project.stale_task_count
+        ));
+    }
+    if project.unassigned_task_count > 0 {
+        focus.push(format!(
+            "담당자가 정해지지 않은 일 {}개를 배정하세요.",
+            project.unassigned_task_count
+        ));
+    }
+    if project.backlog_end_count > project.backlog_start_count {
+        focus.push(format!(
+            "열린 일이 {}개 늘었습니다.",
+            project.backlog_end_count - project.backlog_start_count
+        ));
+    }
+    if focus.is_empty() {
+        focus.push("기한·정체·담당자 누락 없이 안정적으로 운영 중입니다.".to_owned());
+    }
+    serde_json::json!({
+        "kind": PROJECT_WEEKLY_REPORT,
+        "period": {
+            "start": report.period_start.format(&Rfc3339).unwrap_or_default(),
+            "end": report.period_end.format(&Rfc3339).unwrap_or_default(),
+        },
+        "summary": format!(
+            "{}에서 이번 주 새로 들어온 일 {}개 중 {}개를 완료했고, 열린 일은 {}개입니다.",
+            project.title,
+            project.created_task_count,
+            project.completed_task_count,
+            project.backlog_end_count,
+        ),
+        "metrics": [
+            {"key": "created", "label": "새로 들어온 일", "value": project.created_task_count},
+            {"key": "completed", "label": "완료한 일", "value": project.completed_task_count},
+            {"key": "backlog", "label": "현재 열린 일", "value": project.backlog_end_count},
+            {"key": "overdue", "label": "기한 지난 일", "value": project.overdue_task_count},
+            {"key": "stale", "label": "정체된 일", "value": project.stale_task_count},
+            {"key": "unassigned", "label": "담당자 미정", "value": project.unassigned_task_count},
+            {"key": "cycle_time_hours", "label": "평균 처리 시간(시간)", "value": project.average_cycle_time_hours},
+            {"key": "on_time_completion_percent", "label": "기한 내 완료율", "value": project.on_time_completion_percent},
+        ],
+        "focus": focus,
+        "evidence": [{"type": "weekly_metrics", "workspaceId": report.workspace_id, "projectId": project.project_id}]
+    })
 }
 
 fn weekly_project_report_response(report: WeeklyProjectReport) -> WeeklyProjectReportResponse {
@@ -10004,6 +10595,8 @@ mod tests {
             workspace_id,
             period_start: OffsetDateTime::from_unix_timestamp(1_769_958_000).expect("period start"),
             period_end: OffsetDateTime::from_unix_timestamp(1_770_303_600).expect("period end"),
+            actionable_chat_inflow_count: 3,
+            actionable_gmail_inflow_count: 2,
             projects: vec![WeeklyProjectReport {
                 project_id: Uuid::now_v7(),
                 title: "상시 CS 운영".to_owned(),
@@ -10023,7 +10616,38 @@ mod tests {
         assert_eq!(report.created_task_count, 6);
         assert_eq!(report.completed_task_count, 4);
         assert_eq!(report.backlog_delta, 2);
+        assert_eq!(report.actionable_chat_inflow_count, 3);
+        assert_eq!(report.actionable_gmail_inflow_count, 2);
         assert_eq!(report.projects[0].health, "at_risk");
+    }
+
+    #[test]
+    fn linked_schedule_contract_exposes_project_and_task_context_directly() {
+        let project_id = Uuid::now_v7();
+        let task_id = Uuid::now_v7();
+        let starts_at = OffsetDateTime::from_unix_timestamp(1_770_001_200).expect("schedule start");
+        let response = linked_schedule_entry_response(LinkedScheduleEntry {
+            entry: ScheduleEntry {
+                id: Uuid::now_v7(),
+                title: "계약 검토 집중 시간".to_owned(),
+                notes: None,
+                starts_at,
+                ends_at: starts_at + TimeDuration::hours(1),
+                time_zone: "Asia/Seoul".to_owned(),
+                status: ScheduleStatus::Confirmed,
+                source: ScheduleSource::Manual,
+                editable: true,
+                version: 1,
+            },
+            project_id: Some(project_id),
+            task_id: Some(task_id),
+        })
+        .expect("linked schedule response should render");
+        let serialized =
+            serde_json::to_value(response).expect("linked schedule response should serialize");
+
+        assert_eq!(serialized["projectId"], project_id.to_string());
+        assert_eq!(serialized["taskId"], task_id.to_string());
     }
 
     #[test]
@@ -10141,6 +10765,55 @@ mod tests {
             ));
 
         (state, token.token().expose_secret().to_owned(), profile)
+    }
+
+    #[test]
+    fn scheduled_work_openapi_describes_optional_message_detail_and_allowed_modes() {
+        let document = serde_json::to_value(openapi_document()).unwrap();
+        let definition = &document["components"]["schemas"]["ScheduledWorkDefinition"];
+        assert!(
+            !definition["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("messageDetail"))
+        );
+        assert_eq!(
+            definition["properties"]["messageDetail"]["default"],
+            "title_only"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["WorkMessageDetail"]["enum"],
+            serde_json::json!(["title_only", "title_and_details"])
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_work_routes_require_an_authenticated_owner() {
+        let id = Uuid::now_v7();
+        for path in [
+            "/v1/scheduled-work".to_owned(),
+            "/v1/scheduled-work/runs".to_owned(),
+        ] {
+            let (state, _, _) = signed_auth_state(true);
+            let response = router(state)
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let (state, _, _) = signed_auth_state(true);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/scheduled-work/{id}/actions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"kind":"pause","expectedVersion":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -10358,10 +11031,19 @@ mod tests {
                 "/v1/push/registration",
                 "/v1/recommendations",
                 "/v1/recommendations/{recommendation_id}/decisions",
+                "/v1/reports",
+                "/v1/reports/project-weekly",
                 "/v1/reports/weekly",
                 "/v1/reports/weekly/history",
+                "/v1/reports/{report_id}",
+                "/v1/reports/{report_id}/finalize",
                 "/v1/schedule-entries",
                 "/v1/schedule-entries/{schedule_entry_id}",
+                "/v1/scheduled-work",
+                "/v1/scheduled-work/preview",
+                "/v1/scheduled-work/runs",
+                "/v1/scheduled-work/{id}",
+                "/v1/scheduled-work/{id}/actions",
                 "/v1/sync/changes",
                 "/v1/sync/stream",
                 "/v1/tasks",
@@ -10392,6 +11074,29 @@ mod tests {
         assert!(
             document.paths.paths["/v1/reports/weekly/history"]
                 .get
+                .is_some()
+        );
+        assert!(document.paths.paths["/v1/reports"].get.is_some());
+        assert!(
+            document.paths.paths["/v1/reports/project-weekly"]
+                .post
+                .as_ref()
+                .and_then(|operation| operation.request_body.as_ref())
+                .is_some()
+        );
+        assert!(
+            document.paths.paths["/v1/reports/{report_id}"]
+                .get
+                .is_some()
+        );
+        assert!(
+            document.paths.paths["/v1/reports/{report_id}"]
+                .put
+                .is_some()
+        );
+        assert!(
+            document.paths.paths["/v1/reports/{report_id}/finalize"]
+                .post
                 .is_some()
         );
         for path in [
@@ -10765,7 +11470,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-        let history_response = router(state)
+        let history_response = router(state.clone())
             .oneshot(
                 Request::builder()
                     .uri(
@@ -10778,6 +11483,50 @@ mod tests {
             .expect("handler should respond");
 
         assert_eq!(history_response.status(), StatusCode::UNAUTHORIZED);
+
+        let list_response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/reports?workspaceId=019f68cb-9400-7000-8000-000000000000&projectId=019f68cb-9400-7000-8000-000000000001")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+        assert_eq!(list_response.status(), StatusCode::UNAUTHORIZED);
+
+        let create_response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/reports/project-weekly")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "workspaceId": "019f68cb-9400-7000-8000-000000000000",
+                            "projectId": "019f68cb-9400-7000-8000-000000000001"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+        assert_eq!(create_response.status(), StatusCode::UNAUTHORIZED);
+
+        let report_id = "019f68cb-9400-7000-8000-000000000002";
+        let finalize_response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/reports/{report_id}/finalize"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"expectedVersion":1}"#))
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+        assert_eq!(finalize_response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -11101,6 +11850,9 @@ mod tests {
                     status: ProjectInflowStatus::Pending,
                     promoted_task_id: None,
                     acknowledged_at: Some(received_at),
+                    reviewed_at: None,
+                    dismissal_reason: None,
+                    dismissal_reply_status: None,
                     completion_requested_at: None,
                     completion_reaction_at: None,
                     completion_reply_at: None,
@@ -11191,6 +11943,29 @@ mod tests {
             },
         ];
 
+        let mut reviewed_items = items.clone();
+        for item in &mut reviewed_items {
+            if !item.sent_by_owner {
+                item.reviewed_at = Some(item.received_at);
+            }
+        }
+        let reviewed_response = project_inflow_item_response(
+            group_project_inflow_candidates(reviewed_items.clone(), analyses.clone()).remove(0),
+        )
+        .expect("reviewed group should serialize");
+        assert!(
+            reviewed_response.reviewed,
+            "own replies must not make the reviewed group unread"
+        );
+        reviewed_items[1].reviewed_at = None;
+        let unread_response = project_inflow_item_response(
+            group_project_inflow_candidates(reviewed_items, analyses.clone()).remove(0),
+        )
+        .expect("unread group should serialize");
+        assert!(
+            !unread_response.reviewed,
+            "a new external reply must reopen attention"
+        );
         let candidates = group_project_inflow_candidates(items, analyses);
 
         assert_eq!(candidates.len(), 1);
@@ -11275,6 +12050,9 @@ mod tests {
                 status: ProjectInflowStatus::Pending,
                 promoted_task_id: Some(promoted_task_id),
                 acknowledged_at: Some(OffsetDateTime::UNIX_EPOCH),
+                reviewed_at: None,
+                dismissal_reason: None,
+                dismissal_reply_status: None,
                 completion_requested_at: None,
                 completion_reaction_at: None,
                 completion_reply_at: None,
@@ -11499,6 +12277,8 @@ mod tests {
     fn project_inflow_promotion_requires_an_explicit_deadline_choice() {
         let missing = ProjectInflowDecisionRequest {
             decision: "promote".to_owned(),
+            reason: None,
+            reply_to_source: false,
             expected_version: 1,
             conversation_id: None,
             representative_item_id: None,
@@ -11543,6 +12323,8 @@ mod tests {
     fn project_inflow_promotion_rejects_conflicting_deadline_fields() {
         let request = ProjectInflowDecisionRequest {
             decision: "promote".to_owned(),
+            reason: None,
+            reply_to_source: false,
             expected_version: 1,
             conversation_id: None,
             representative_item_id: None,

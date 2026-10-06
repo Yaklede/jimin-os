@@ -1,0 +1,305 @@
+.scheduled-summary {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  text-align: left;
+  margin: 0 0 16px;
+}
+.scheduled-summary > svg:first-child {
+  color: var(--accent);
+}
+.scheduled-summary span {
+  flex: 1;
+  min-width: 0;
+}
+.scheduled-summary strong,
+.scheduled-summary small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.scheduled-summary small {
+  color: var(--muted);
+  margin-top: 3px;
+}
+.scheduled-dialog {
+  width: min(820px, calc(100vw - 40px));
+  max-width: none;
+  max-height: calc(100dvh - 48px);
+  padding: 24px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  color: var(--text);
+  overflow: auto;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+.scheduled-dialog::backdrop {
+  background: rgb(0 0 0 / 50%);
+}
+.scheduled-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  justify-content: space-between;
+}
+.scheduled-heading h2 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 22px;
+}
+.scheduled-heading p,
+.scheduled-rule p {
+  margin: 5px 0;
+  color: var(--muted);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.scheduled-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  padding: 16px 0;
+  margin-bottom: 16px;
+}
+.scheduled-tabs,
+.scheduled-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.scheduled-dialog button {
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: transparent;
+  padding: 8px 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease;
+}
+.scheduled-dialog button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.scheduled-dialog button:hover:not(:disabled) {
+  background: var(--surface-subtle);
+}
+.scheduled-dialog button[aria-pressed="true"] {
+  background: var(--accent-tint);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.scheduled-dialog button.primary-button {
+  background: var(--accent);
+  color: var(--canvas);
+  border-color: var(--accent);
+}
+.scheduled-dialog .scheduled-icon {
+  width: 44px;
+  flex-shrink: 0;
+  padding: 8px;
+}
+.scheduled-rule {
+  border-bottom: 1px solid var(--border);
+  padding: 16px 0;
+  min-width: 0;
+}
+.scheduled-rule > strong {
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+.scheduled-rule .scheduled-actions {
+  margin-top: 12px;
+}
+.scheduled-badge {
+  display: inline-block;
+  font-size: 12px;
+  margin-left: 8px;
+  color: var(--accent);
+}
+.scheduled-badge[data-status="failed"] {
+  color: var(--danger);
+}
+.scheduled-form fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.scheduled-form > fieldset > legend {
+  font-weight: 700;
+  margin-bottom: 16px;
+}
+.scheduled-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 16px;
+  min-width: 0;
+  font-size: 14px;
+}
+.scheduled-form input:not([type="checkbox"]),
+.scheduled-form select {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 48px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text-strong);
+  font: inherit;
+  padding: 10px 12px;
+}
+.scheduled-form select {
+  appearance: auto;
+}
+.scheduled-form input:focus-visible,
+.scheduled-form select:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.scheduled-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.scheduled-form small,
+.scheduled-muted {
+  font-size: 13px;
+  color: var(--muted);
+}
+.scheduled-form .scheduled-check {
+  flex-direction: row;
+  align-items: center;
+  min-height: 44px;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.scheduled-check input {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+  margin: 0;
+}
+.scheduled-form .scheduled-days {
+  display: grid;
+  grid-template-columns: repeat(7, 44px);
+  gap: 4px;
+  margin-bottom: 16px;
+}
+.scheduled-days legend {
+  margin-bottom: 8px;
+  font-size: 14px;
+}
+.scheduled-days button {
+  padding: 8px;
+  width: 100%;
+  min-width: 0;
+}
+@media (max-width: 380px) {
+  .scheduled-form .scheduled-days {
+    grid-template-columns: repeat(4, 44px);
+  }
+}
+.scheduled-people {
+  display: flex;
+  gap: 8px 16px;
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+.scheduled-form footer {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+  margin-top: 16px;
+  justify-content: flex-end;
+}
+.scheduled-preview,
+.scheduled-confirm {
+  margin: 16px 0;
+  padding: 16px;
+  background: var(--surface-subtle);
+  border-radius: var(--radius-control);
+}
+.scheduled-preview h3 {
+  margin: 0;
+  font-size: 16px;
+}
+.scheduled-dialog details {
+  margin-top: 12px;
+}
+.scheduled-dialog summary {
+  cursor: pointer;
+  min-height: 44px;
+  padding: 10px 0;
+}
+.scheduled-dialog pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 14px;
+  padding: 12px;
+  background: var(--canvas);
+  border-radius: 8px;
+}
+.scheduled-notice {
+  color: var(--success);
+  font-size: 14px;
+}
+.scheduled-empty {
+  color: var(--muted);
+  padding: 16px 0;
+}
+@media (max-width: 640px) {
+  .scheduled-dialog {
+    width: calc(100vw - 16px);
+    max-height: calc(
+      100dvh - 24px - var(--safe-area-top) - var(--safe-area-bottom)
+    );
+    padding: 16px;
+    margin: auto;
+  }
+  .scheduled-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+  .scheduled-heading h2 {
+    font-size: 20px;
+  }
+  .scheduled-form input:not([type="checkbox"]),
+  .scheduled-form select {
+    font-size: 16px;
+  }
+  .scheduled-summary {
+    padding: 12px;
+  }
+  .scheduled-rule .scheduled-actions button {
+    font-size: 13px;
+  }
+  .scheduled-form footer .primary-button {
+    flex: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scheduled-dialog button {
+    transition: none;
+  }
+}

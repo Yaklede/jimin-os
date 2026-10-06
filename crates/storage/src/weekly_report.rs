@@ -30,6 +30,10 @@ pub struct WeeklyWorkspaceReport {
     pub workspace_id: Uuid,
     pub period_start: OffsetDateTime,
     pub period_end: OffsetDateTime,
+    #[serde(default)]
+    pub actionable_chat_inflow_count: i64,
+    #[serde(default)]
+    pub actionable_gmail_inflow_count: i64,
     pub projects: Vec<WeeklyProjectReport>,
 }
 
@@ -66,6 +70,8 @@ struct WeeklyReportSnapshotRow {
     period_start: OffsetDateTime,
     period_end: OffsetDateTime,
     generated_at: OffsetDateTime,
+    actionable_chat_inflow_count: i64,
+    actionable_gmail_inflow_count: i64,
     projects: Json<Vec<WeeklyProjectReport>>,
 }
 
@@ -78,6 +84,8 @@ struct WeeklyReportTotals {
     overdue: i64,
     stale: i64,
     unassigned: i64,
+    actionable_chat_inflow: i64,
+    actionable_gmail_inflow: i64,
 }
 
 const WEEKLY_PROJECT_REPORT_QUERY: &str = "\
@@ -228,6 +236,10 @@ impl Database {
     /// # Errors
     ///
     /// Returns an invalid-configuration or persistence error.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The report keeps project metrics and both owner-attention source counts on one consistent read boundary."
+    )]
     pub async fn weekly_report_for_workspace_at(
         &self,
         user_id: Uuid,
@@ -281,10 +293,61 @@ impl Database {
                 }
             })
             .collect();
+        let actionable_chat_inflow_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM project_inflow_analyses AS analysis
+             INNER JOIN projects AS project
+                ON project.id = analysis.project_id
+               AND project.user_id = analysis.user_id
+             WHERE analysis.user_id = $1
+               AND project.workspace_id = $2
+               AND ($3::UUID IS NULL OR analysis.project_id = $3)
+               AND analysis.state = 'ready'
+               AND analysis.classification IN ('new_task', 'follow_up', 'question')
+               AND analysis.analyzed_revision = analysis.source_revision
+               AND EXISTS (
+                   SELECT 1
+                   FROM project_inflow_items AS item
+                   WHERE item.source_id = analysis.source_id
+                     AND item.status = 'pending'
+                     AND COALESCE(
+                         'thread:' || item.provider_thread_name,
+                         'message:' || item.provider_message_name
+                     ) = analysis.conversation_key
+               )",
+        )
+        .bind(user_id)
+        .bind(workspace_id)
+        .bind(project_id)
+        .fetch_one(self.pool())
+        .await
+        .map_err(classify)?;
+        let actionable_gmail_inflow_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM gmail_inflow_candidates
+             WHERE user_id = $1
+               AND workspace_id = $2
+               -- Pending Gmail candidates are workspace-scoped until the
+               -- owner promotes one into a project, so do not attribute them
+               -- to an individual project report.
+               AND $3::UUID IS NULL
+               AND analysis_state = 'ready'
+               AND classification IN ('new_task', 'follow_up', 'question')
+               AND analyzed_revision = source_revision
+               AND decision_status = 'pending'",
+        )
+        .bind(user_id)
+        .bind(workspace_id)
+        .bind(project_id)
+        .fetch_one(self.pool())
+        .await
+        .map_err(classify)?;
         Ok(WeeklyWorkspaceReport {
             workspace_id,
             period_start: period.0,
             period_end: period.1,
+            actionable_chat_inflow_count,
+            actionable_gmail_inflow_count,
             projects,
         })
     }
@@ -341,7 +404,8 @@ impl Database {
             return Err(StorageError::InvalidConfiguration);
         }
         let rows = sqlx::query_as::<_, WeeklyReportSnapshotRow>(
-            "SELECT id, workspace_id, period_start, period_end, generated_at, projects
+            "SELECT id, workspace_id, period_start, period_end, generated_at,
+                actionable_chat_inflow_count, actionable_gmail_inflow_count, projects
              FROM weekly_report_snapshots
              WHERE user_id = $1 AND workspace_id = $2
              ORDER BY period_start DESC
@@ -362,6 +426,8 @@ impl Database {
                     workspace_id: row.workspace_id,
                     period_start: row.period_start,
                     period_end: row.period_end,
+                    actionable_chat_inflow_count: row.actionable_chat_inflow_count,
+                    actionable_gmail_inflow_count: row.actionable_gmail_inflow_count,
                     projects: row.projects.0,
                 },
             })
@@ -386,9 +452,11 @@ impl Database {
                 created_task_count, completed_task_count,
                 backlog_start_count, backlog_end_count,
                 overdue_task_count, stale_task_count, unassigned_task_count,
+                actionable_chat_inflow_count, actionable_gmail_inflow_count,
                 projects, generated_at
              ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                $14, $15, $16
              )
              ON CONFLICT (user_id, workspace_id, period_start) DO UPDATE SET
                 period_end = EXCLUDED.period_end,
@@ -399,6 +467,10 @@ impl Database {
                 overdue_task_count = EXCLUDED.overdue_task_count,
                 stale_task_count = EXCLUDED.stale_task_count,
                 unassigned_task_count = EXCLUDED.unassigned_task_count,
+                actionable_chat_inflow_count =
+                    EXCLUDED.actionable_chat_inflow_count,
+                actionable_gmail_inflow_count =
+                    EXCLUDED.actionable_gmail_inflow_count,
                 projects = EXCLUDED.projects,
                 generated_at = EXCLUDED.generated_at,
                 updated_at = NOW()",
@@ -415,6 +487,8 @@ impl Database {
         .bind(totals.overdue)
         .bind(totals.stale)
         .bind(totals.unassigned)
+        .bind(totals.actionable_chat_inflow)
+        .bind(totals.actionable_gmail_inflow)
         .bind(projects)
         .bind(generated_at)
         .execute(self.pool())
@@ -434,6 +508,8 @@ fn weekly_report_totals(report: &WeeklyWorkspaceReport) -> WeeklyReportTotals {
             overdue: 0,
             stale: 0,
             unassigned: 0,
+            actionable_chat_inflow: report.actionable_chat_inflow_count,
+            actionable_gmail_inflow: report.actionable_gmail_inflow_count,
         },
         |totals, project| WeeklyReportTotals {
             created: totals.created + project.created_task_count,
@@ -443,6 +519,8 @@ fn weekly_report_totals(report: &WeeklyWorkspaceReport) -> WeeklyReportTotals {
             overdue: totals.overdue + project.overdue_task_count,
             stale: totals.stale + project.stale_task_count,
             unassigned: totals.unassigned + project.unassigned_task_count,
+            actionable_chat_inflow: totals.actionable_chat_inflow,
+            actionable_gmail_inflow: totals.actionable_gmail_inflow,
         },
     )
 }
@@ -473,6 +551,8 @@ mod tests {
             workspace_id: Uuid::now_v7(),
             period_start: OffsetDateTime::UNIX_EPOCH,
             period_end: OffsetDateTime::UNIX_EPOCH + time::Duration::days(5),
+            actionable_chat_inflow_count: 4,
+            actionable_gmail_inflow_count: 2,
             projects: vec![
                 project_report(3, 2, 4, 5, 1, 2, 3),
                 project_report(5, 4, 2, 1, 0, 1, 0),
@@ -489,6 +569,8 @@ mod tests {
                 overdue: 1,
                 stale: 3,
                 unassigned: 3,
+                actionable_chat_inflow: 4,
+                actionable_gmail_inflow: 2,
             }
         );
     }

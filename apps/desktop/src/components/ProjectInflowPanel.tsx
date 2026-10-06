@@ -26,6 +26,7 @@ import {
   isoToSeoulLocalDateTime,
   seoulLocalDateTimeToIso,
 } from "./DeadlinePicker";
+import { LinkifiedText, SafeExternalLink } from "./ExternalTextLink";
 
 type ProjectInflowPanelProps = {
   accountsAvailable: boolean;
@@ -48,7 +49,10 @@ type ProjectInflowPanelProps = {
   onDeleteSource(source: ProjectGoogleChatSource): Promise<void>;
   onSyncSource(source: ProjectGoogleChatSource): Promise<void>;
   onPromote(item: ProjectInflowItem, input: PromoteInflowInput): Promise<void>;
-  onDismiss(item: ProjectInflowItem): Promise<void>;
+  onDismiss(
+    item: ProjectInflowItem,
+    input?: { reason?: string; replyToSource?: boolean; markSeen?: boolean },
+  ): Promise<void>;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
   onOpenTask(taskId: string): void;
@@ -109,7 +113,14 @@ export function ProjectInflowPanel({
   const [spaceName, setSpaceName] = useState("");
   const [acknowledge, setAcknowledge] = useState(true);
   const [importHistory, setImportHistory] = useState(false);
-  const pendingItems = items.filter(isProjectInflowAttentionItem);
+  const pendingItems = items.filter((item) => item.status === "pending");
+  const newItems = pendingItems.filter(
+    (item) => !item.promotedTaskId && !item.reviewed,
+  );
+  const existingItems = pendingItems.filter(
+    (item) => item.promotedTaskId && !item.reviewed,
+  );
+  const reviewedItems = pendingItems.filter((item) => item.reviewed);
   const handledItems = items
     .filter((item) => item.status !== "pending")
     .slice(0, 12);
@@ -200,6 +211,7 @@ export function ProjectInflowPanel({
           <label>
             <span>{copy.projects.inflowAccountLabel}</span>
             <select
+              aria-label={copy.projects.inflowAccountLabel}
               value={accountId}
               disabled={saving}
               onChange={(event) => {
@@ -217,6 +229,7 @@ export function ProjectInflowPanel({
           <label>
             <span>{copy.projects.inflowSpaceLabel}</span>
             <select
+              aria-label={copy.projects.inflowSpaceLabel}
               value={spaceName}
               disabled={loading || saving}
               onChange={(event) => setSpaceName(event.target.value)}
@@ -233,6 +246,7 @@ export function ProjectInflowPanel({
             <label className="project-inflow__acknowledge">
               <input
                 type="checkbox"
+                aria-label={copy.projects.inflowAckLabel}
                 checked={acknowledge}
                 disabled={saving}
                 onChange={(event) => setAcknowledge(event.target.checked)}
@@ -242,6 +256,7 @@ export function ProjectInflowPanel({
             <label className="project-inflow__acknowledge">
               <input
                 type="checkbox"
+                aria-label={copy.projects.inflowImportHistoryLabel}
                 checked={importHistory}
                 disabled={saving}
                 onChange={(event) => setImportHistory(event.target.checked)}
@@ -331,8 +346,8 @@ export function ProjectInflowPanel({
                 </p>
               )}
               <InflowItemList
-                title={copy.projects.inflowPendingTitle}
-                items={pendingItems}
+                title={copy.projects.inflowNewTitle}
+                items={newItems}
                 saving={saving}
                 onPromote={onPromote}
                 onDismiss={onDismiss}
@@ -340,6 +355,34 @@ export function ProjectInflowPanel({
                 onRetryCompletion={onRetryCompletion}
                 onOpenTask={onOpenTask}
               />
+              <InflowItemList
+                title={copy.projects.inflowExistingTitle}
+                items={existingItems}
+                saving={saving}
+                onPromote={onPromote}
+                onDismiss={onDismiss}
+                onRetryAnalysis={onRetryAnalysis}
+                onRetryCompletion={onRetryCompletion}
+                onOpenTask={onOpenTask}
+              />
+              {reviewedItems.length > 0 && (
+                <details className="project-inflow__history">
+                  <summary className="focus-visible-control">
+                    {copy.projects.inflowReviewedTitle} · {reviewedItems.length}
+                    개
+                  </summary>
+                  <InflowItemList
+                    title={copy.projects.inflowReviewedTitle}
+                    items={reviewedItems}
+                    saving={saving}
+                    onPromote={onPromote}
+                    onDismiss={onDismiss}
+                    onRetryAnalysis={onRetryAnalysis}
+                    onRetryCompletion={onRetryCompletion}
+                    onOpenTask={onOpenTask}
+                  />
+                </details>
+              )}
               {handledItems.length > 0 && (
                 <details className="project-inflow__history">
                   <summary className="focus-visible-control">
@@ -375,7 +418,7 @@ export function ProjectInflowPanel({
   );
 }
 
-function InflowItemList({
+export function InflowItemList({
   title,
   items,
   saving,
@@ -390,7 +433,10 @@ function InflowItemList({
   items: ProjectInflowItem[];
   saving: boolean;
   onPromote(item: ProjectInflowItem, input: PromoteInflowInput): Promise<void>;
-  onDismiss(item: ProjectInflowItem): Promise<void>;
+  onDismiss(
+    item: ProjectInflowItem,
+    input?: { reason?: string; replyToSource?: boolean; markSeen?: boolean },
+  ): Promise<void>;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
   onOpenTask(taskId: string): void;
@@ -435,7 +481,10 @@ export function InflowItemRow({
   item: ProjectInflowItem;
   saving: boolean;
   onPromote(item: ProjectInflowItem, input: PromoteInflowInput): Promise<void>;
-  onDismiss(item: ProjectInflowItem): Promise<void>;
+  onDismiss(
+    item: ProjectInflowItem,
+    input?: { reason?: string; replyToSource?: boolean; markSeen?: boolean },
+  ): Promise<void>;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
   onOpenTask?(taskId: string): void;
@@ -446,8 +495,16 @@ export function InflowItemRow({
     [conversationId],
   );
   const [editing, setEditing] = useState(Boolean(restoredDraft));
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  const editButtonRef = useRef<HTMLButtonElement>(null);
+  const wasEditingRef = useRef(editing);
   const [promoting, setPromoting] = useState(false);
   const [promotionError, setPromotionError] = useState<string>();
+  const [dismissEditing, setDismissEditing] = useState(false);
+  const [dismissReason, setDismissReason] = useState("");
+  const [replyToSource, setReplyToSource] = useState(false);
+  const [dismissing, setDismissing] = useState(false);
+  const [dismissError, setDismissError] = useState<string>();
   const messages = item.messages ?? [
     {
       senderName: item.senderName,
@@ -516,6 +573,12 @@ export function InflowItemRow({
   const canNotifyAssignee = Boolean(
     assigneeName && item.notifiableAssigneeNames?.includes(assigneeName),
   );
+
+  useEffect(() => {
+    if (editing) titleInputRef.current?.focus();
+    else if (wasEditingRef.current) editButtonRef.current?.focus();
+    wasEditingRef.current = editing;
+  }, [editing]);
 
   useEffect(() => {
     if (!hasUsableAnalysis) return;
@@ -621,8 +684,47 @@ export function InflowItemRow({
   }
 
   async function dismissItem() {
-    await onDismiss(item);
-    clearInflowDraft(conversationId);
+    if (existingTaskFollowUp) {
+      await markSeen();
+      return;
+    }
+    setEditing(false);
+    setDismissError(undefined);
+    setDismissEditing(true);
+  }
+
+  async function markSeen() {
+    if (saving || dismissing) return;
+    setDismissing(true);
+    setDismissError(undefined);
+    try {
+      await onDismiss(item, { markSeen: true });
+    } catch {
+      setDismissError(copy.projects.inflowReviewProblem);
+    } finally {
+      setDismissing(false);
+    }
+  }
+
+  async function submitDismissal(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving || dismissing) return;
+    const reason = dismissReason.trim();
+    if (replyToSource && !reason) {
+      setDismissError(copy.projects.inflowDismissReasonRequired);
+      return;
+    }
+    setDismissing(true);
+    setDismissError(undefined);
+    try {
+      await onDismiss(item, { reason: reason || undefined, replyToSource });
+      clearInflowDraft(conversationId);
+      setDismissEditing(false);
+    } catch {
+      setDismissError(copy.projects.inflowDecisionProblem);
+    } finally {
+      setDismissing(false);
+    }
   }
 
   async function submitPromotion(event: FormEvent<HTMLFormElement>) {
@@ -670,15 +772,30 @@ export function InflowItemRow({
         <span>{item.sourceName}</span>
         <span>대화 {messageCount}개</span>
         <span>{formatConversationRange(firstReceivedAt, item.receivedAt)}</span>
-        {item.acknowledged && <span>👀 표시 완료</span>}
+        {item.status === "pending" && (
+          <span>
+            {item.reviewed
+              ? copy.projects.inflowReviewed
+              : copy.projects.inflowUnread}
+          </span>
+        )}
+        {item.acknowledged && (
+          <span className="project-inflow-item__acknowledged">
+            <Eye aria-hidden="true" /> 표시 완료
+          </span>
+        )}
       </div>
       <div className="project-inflow-item__summary">
         <strong>{suggestedTitle}</strong>
         <p>
-          {item.analysisSummary ??
-            (analysisFailed
-              ? copy.projects.inflowAnalysisHelp
-              : copy.projects.inflowAnalyzing)}
+          <LinkifiedText
+            text={
+              item.analysisSummary ??
+              (analysisFailed
+                ? copy.projects.inflowAnalysisHelp
+                : copy.projects.inflowAnalyzing)
+            }
+          />
         </p>
         {item.analysisConfidence !== null && hasUsableAnalysis && (
           <span>
@@ -696,9 +813,7 @@ export function InflowItemRow({
           <ul>
             {referenceLinks.map((link) => (
               <li key={link}>
-                <a href={link} target="_blank" rel="noreferrer">
-                  {link}
-                </a>
+                <SafeExternalLink href={link}>{link}</SafeExternalLink>
               </li>
             ))}
           </ul>
@@ -727,13 +842,15 @@ export function InflowItemRow({
                     {formatReceivedAt(message.receivedAt)}
                   </time>
                 </div>
-                <p>{message.contentText}</p>
+                <p>
+                  <LinkifiedText text={message.contentText} />
+                </p>
               </li>
             ))}
           </ol>
         </details>
       )}
-      {existingTaskFollowUp ? (
+      {dismissEditing ? null : existingTaskFollowUp ? (
         <div className="project-inflow-item__follow-up" role="group">
           <div>
             <strong>{copy.projects.inflowFollowUpTitle}</strong>
@@ -754,7 +871,7 @@ export function InflowItemRow({
             <button
               className="secondary-button focus-visible-control"
               type="button"
-              disabled={saving}
+              disabled={saving || dismissing || Boolean(item.reviewed)}
               onClick={() => void dismissItem()}
             >
               <Check aria-hidden="true" />
@@ -801,6 +918,31 @@ export function InflowItemRow({
                 </button>
               )}
             </>
+          )}
+          {item.dismissalReason && (
+            <p>
+              {copy.projects.inflowDismissReason}: {item.dismissalReason}
+            </p>
+          )}
+          {item.dismissalReplyStatus && (
+            <p>
+              {item.dismissalReplyStatus === "sent"
+                ? copy.projects.inflowDismissReplySent
+                : item.dismissalReplyStatus === "failed"
+                  ? copy.projects.inflowDismissReplyFailed
+                  : copy.projects.inflowDismissReplyPending}
+            </p>
+          )}
+          {item.dismissalReplyStatus === "failed" && (
+            <button
+              className="secondary-button focus-visible-control"
+              type="button"
+              disabled={saving}
+              onClick={() => void onRetryCompletion(item)}
+            >
+              <RefreshCw aria-hidden="true" />{" "}
+              {copy.projects.inflowDismissReplyRetry}
+            </button>
           )}
         </div>
       ) : analysisFailed && !editing ? (
@@ -946,6 +1088,8 @@ export function InflowItemRow({
             <label className="project-inflow-item__title-field">
               <span>{copy.projects.inflowTaskTitleLabel}</span>
               <input
+                ref={titleInputRef}
+                aria-label={copy.projects.inflowTaskTitleLabel}
                 value={title}
                 maxLength={300}
                 disabled={saving}
@@ -962,6 +1106,7 @@ export function InflowItemRow({
             <label className="project-inflow-item__notes-field">
               <span>{copy.projects.inflowTaskNotesLabel}</span>
               <textarea
+                aria-label={copy.projects.inflowTaskNotesLabel}
                 value={notes}
                 maxLength={10_000}
                 rows={8}
@@ -979,6 +1124,7 @@ export function InflowItemRow({
             <label>
               <span>{copy.projects.inflowAssigneeLabel}</span>
               <select
+                aria-label={copy.projects.inflowAssigneeLabel}
                 value={assigneeName}
                 disabled={saving}
                 onChange={(event) => {
@@ -992,6 +1138,22 @@ export function InflowItemRow({
                     {name}
                   </option>
                 ))}
+              </select>
+            </label>
+            <label>
+              <span>{copy.projects.inflowPriorityLabel}</span>
+              <select
+                aria-label={copy.projects.inflowPriorityLabel}
+                value={priority}
+                disabled={saving}
+                onChange={(event) => {
+                  markDirty("priority");
+                  setPriority(event.target.value);
+                }}
+              >
+                <option value="1">{copy.forms.priorityNormal}</option>
+                <option value="2">{copy.forms.priorityImportant}</option>
+                <option value="3">{copy.forms.priorityHighest}</option>
               </select>
             </label>
             <div className="project-inflow-item__deadline-field">
@@ -1022,6 +1184,8 @@ export function InflowItemRow({
             <label className="project-inflow-item__no-deadline">
               <input
                 type="checkbox"
+                role="switch"
+                aria-label={copy.projects.inflowWithoutDeadline}
                 checked={withoutDeadline}
                 disabled={saving}
                 onChange={(event) => {
@@ -1032,21 +1196,6 @@ export function InflowItemRow({
                 }}
               />
               <span>{copy.projects.inflowWithoutDeadline}</span>
-            </label>
-            <label>
-              <span>{copy.projects.inflowPriorityLabel}</span>
-              <select
-                value={priority}
-                disabled={saving}
-                onChange={(event) => {
-                  markDirty("priority");
-                  setPriority(event.target.value);
-                }}
-              >
-                <option value="1">{copy.forms.priorityNormal}</option>
-                <option value="2">{copy.forms.priorityImportant}</option>
-                <option value="3">{copy.forms.priorityHighest}</option>
-              </select>
             </label>
           </div>
           {promotionError && (
@@ -1065,7 +1214,7 @@ export function InflowItemRow({
                 : copy.projects.inflowAssigneeNotificationOff}
             </p>
           )}
-          <div>
+          <div className="project-inflow-item__register-actions">
             <button
               className="primary-button focus-visible-control"
               type="submit"
@@ -1088,9 +1237,7 @@ export function InflowItemRow({
               )}
               {promoting
                 ? copy.projects.inflowPromoting
-                : canNotifyAssignee
-                  ? copy.projects.inflowPromoteAndNotify
-                  : copy.projects.inflowPromote}
+                : copy.projects.inflowRegister}
             </button>
             <button
               className="secondary-button focus-visible-control"
@@ -1110,6 +1257,7 @@ export function InflowItemRow({
       ) : (
         <div className="project-inflow-item__actions">
           <button
+            ref={editButtonRef}
             className="primary-button focus-visible-control"
             type="button"
             disabled={saving}
@@ -1131,12 +1279,83 @@ export function InflowItemRow({
           </button>
         </div>
       )}
+      {dismissEditing && (
+        <form
+          className="inflow-dismiss-form"
+          onSubmit={(event) => void submitDismissal(event)}
+          aria-label={copy.projects.inflowDismissSave}
+          aria-busy={dismissing}
+        >
+          <label>
+            <span>{copy.projects.inflowDismissReasonLabel}</span>
+            <textarea
+              value={dismissReason}
+              onChange={(event) => setDismissReason(event.target.value)}
+              maxLength={2000}
+              rows={3}
+              placeholder={copy.projects.inflowDismissReasonPlaceholder}
+              disabled={saving || dismissing}
+              autoFocus
+            />
+          </label>
+          <label className="inflow-dismiss-form__reply">
+            <input
+              type="checkbox"
+              checked={replyToSource}
+              onChange={(event) => setReplyToSource(event.target.checked)}
+              disabled={saving || dismissing}
+            />
+            <span>{copy.projects.inflowDismissReplyLabel}</span>
+          </label>
+          <div className="project-inflow-item__actions">
+            <button
+              className="primary-button focus-visible-control"
+              type="submit"
+              disabled={saving || dismissing}
+            >
+              {dismissing ? "저장 중" : copy.projects.inflowDismissSave}
+            </button>
+            <button
+              className="secondary-button focus-visible-control"
+              type="button"
+              disabled={saving || dismissing}
+              onClick={() => {
+                setDismissEditing(false);
+                setDismissError(undefined);
+              }}
+            >
+              {copy.projects.inflowDismissCancel}
+            </button>
+          </div>
+        </form>
+      )}
+      {item.status === "pending" &&
+        !existingTaskFollowUp &&
+        !dismissEditing &&
+        !editing && (
+          <button
+            className="text-button focus-visible-control inflow-review-mark"
+            type="button"
+            disabled={saving || dismissing || Boolean(item.reviewed)}
+            onClick={() => void markSeen()}
+          >
+            <Check aria-hidden="true" />{" "}
+            {item.reviewed
+              ? copy.projects.inflowReviewed
+              : copy.projects.inflowMarkSeen}
+          </button>
+        )}
+      {dismissError && (
+        <p className="project-inflow-item__error" role="alert">
+          {dismissError}
+        </p>
+      )}
     </li>
   );
 }
 
 export function isProjectInflowAttentionItem(item: ProjectInflowItem): boolean {
-  return item.status === "pending";
+  return item.status === "pending" && !item.reviewed;
 }
 
 export function projectInflowAttentionCount(
@@ -1198,14 +1417,16 @@ function ReferenceEvidence({
                   </span>
                 </div>
                 {externalUrl && (
-                  <a href={externalUrl} target="_blank" rel="noreferrer">
+                  <SafeExternalLink href={externalUrl}>
                     {copy.projects.inflowEvidenceOpen}
                     <ExternalLink aria-hidden="true" />
-                  </a>
+                  </SafeExternalLink>
                 )}
               </header>
               {document.originalContent ? (
-                <pre>{document.originalContent}</pre>
+                <pre>
+                  <LinkifiedText text={document.originalContent} />
+                </pre>
               ) : (
                 <p>{copy.projects.inflowEvidenceUnavailable}</p>
               )}

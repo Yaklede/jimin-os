@@ -13,6 +13,8 @@ type ClientPlatform = "macos" | "ios" | "android";
 
 export interface ScheduleEntry {
   id: string;
+  projectId?: string | null;
+  taskId?: string | null;
   title: string;
   notes: string | null;
   startsAt: string;
@@ -300,10 +302,16 @@ export async function createScheduleEntry(
     startsAt: string;
     endsAt: string;
     notes?: string;
+    projectId?: string | null;
+    taskId?: string | null;
   },
 ): Promise<ScheduleEntry> {
   const clientMutationId = input.clientMutationId ?? createUuidV7();
-  if (!isUuidV7(clientMutationId)) {
+  if (
+    !isUuidV7(clientMutationId) ||
+    (input.projectId != null && !isUuidV7(input.projectId)) ||
+    (input.taskId != null && !isUuidV7(input.taskId))
+  ) {
     throw new PlanningRequestError("invalid");
   }
   return request<ScheduleEntry>(
@@ -313,6 +321,8 @@ export async function createScheduleEntry(
     "POST",
     {
       clientMutationId,
+      projectId: input.projectId ?? null,
+      taskId: input.taskId ?? null,
       title: input.title,
       notes: input.notes || null,
       startsAt: new Date(input.startsAt).toISOString(),
@@ -326,8 +336,24 @@ export async function updateScheduleEntry(
   baseUrl: string,
   access: string,
   entry: ScheduleEntry,
-  input: { title: string; startsAt: string; endsAt: string; notes?: string },
+  input: {
+    title: string;
+    startsAt: string;
+    endsAt: string;
+    notes?: string;
+    linkage?: {
+      projectId: string | null;
+      taskId: string | null;
+    };
+  },
 ): Promise<ScheduleEntry> {
+  if (
+    input.linkage !== undefined &&
+    ((input.linkage.projectId != null && !isUuidV7(input.linkage.projectId)) ||
+      (input.linkage.taskId != null && !isUuidV7(input.linkage.taskId)))
+  ) {
+    throw new PlanningRequestError("invalid");
+  }
   return request<ScheduleEntry>(
     baseUrl,
     access,
@@ -340,6 +366,7 @@ export async function updateScheduleEntry(
       endsAt: new Date(input.endsAt).toISOString(),
       timeZone: PLANNING_TIME_ZONE,
       expectedVersion: entry.version,
+      ...(input.linkage === undefined ? {} : { linkage: input.linkage }),
     },
   );
 }

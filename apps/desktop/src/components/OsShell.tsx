@@ -6,6 +6,7 @@ import {
   House,
   Inbox,
   Mic,
+  MoreHorizontal,
   RefreshCw,
   Settings2,
   Sparkles,
@@ -20,6 +21,7 @@ import {
 } from "react";
 
 import { copy } from "../copy";
+import { AppearanceControl } from "./appearance-control";
 import { type VoiceCommandOutcome } from "./VoiceCommandSheet";
 import { registerMobileBackHandler } from "../mobileBack";
 import {
@@ -64,12 +66,14 @@ export function OsShell({
   refreshing,
   platform: platformOverride,
 }: OsShellProps) {
+  const navigateFromSidebar = (target: OsDestination) => onNavigate(target);
   const [voiceSheetOpen, setVoiceSheetOpen] = useState(false);
   const [runtimePlatform] = useState(
     () => platformOverride ?? mobileCapabilitySnapshot().platform,
   );
   const deferredRefreshing = useDeferredBusy(refreshing);
   const previousDestinationRef = useRef(destination);
+  const mobileMoreRef = useRef<HTMLDetailsElement>(null);
   const routeDirection = destinationDirection(
     previousDestinationRef.current,
     destination,
@@ -79,6 +83,7 @@ export function OsShell({
 
   useEffect(() => {
     previousDestinationRef.current = destination;
+    if (mobileMoreRef.current) mobileMoreRef.current.open = false;
   }, [destination]);
 
   useEffect(() => {
@@ -113,16 +118,23 @@ export function OsShell({
         <button
           className="os-brand focus-visible-control"
           type="button"
-          onClick={() => onNavigate("home")}
+          onClick={() => navigateFromSidebar("home")}
           aria-label={copy.actions.goHome}
         >
-          <span className="os-brand__mark" aria-hidden="true">
-            <Sparkles />
+          <span
+            className="os-brand__mark os-brand__mark--hamster"
+            aria-hidden="true"
+          >
+            <img src="/images/hamster-home-wave.png" alt="" />
           </span>
           <span>{copy.productName.toLocaleLowerCase("en-US")}</span>
         </button>
 
-        <nav className="os-nav" aria-label={copy.navigation.label}>
+        <nav
+          id="primary-navigation"
+          className="os-nav"
+          aria-label={copy.navigation.label}
+        >
           <NavigationButton
             active={destination === "home"}
             icon={<House aria-hidden="true" />}
@@ -139,38 +151,38 @@ export function OsShell({
             active={destination === "projects"}
             icon={<FolderKanban aria-hidden="true" />}
             label={copy.navigation.projects}
-            onClick={() => onNavigate("projects")}
+            onClick={() => navigateFromSidebar("projects")}
           />
           <NavigationButton
             active={destination === "decisions"}
             icon={<Inbox aria-hidden="true" />}
             label={copy.navigation.decisions}
-            onClick={() => onNavigate("decisions")}
+            onClick={() => navigateFromSidebar("decisions")}
           />
           <NavigationButton
             active={destination === "meetings"}
             icon={<AudioLines aria-hidden="true" />}
             label={copy.navigation.meetings}
-            onClick={() => onNavigate("meetings")}
+            onClick={() => navigateFromSidebar("meetings")}
           />
           <NavigationButton
             active={destination === "memory"}
             icon={<BrainCircuit aria-hidden="true" />}
             label={copy.navigation.memory}
-            onClick={() => onNavigate("memory")}
+            onClick={() => navigateFromSidebar("memory")}
           />
           <NavigationButton
             active={destination === "settings"}
             icon={<Settings2 aria-hidden="true" />}
             label={copy.navigation.settings}
-            onClick={() => onNavigate("settings")}
+            onClick={() => navigateFromSidebar("settings")}
           />
         </nav>
 
         <button
           className="os-sidebar__assistant focus-visible-control"
           type="button"
-          onClick={openChat}
+          onClick={() => navigateFromSidebar("chat")}
           aria-label={copy.actions.startAssistantConversation}
         >
           <Mic aria-hidden="true" />
@@ -180,29 +192,37 @@ export function OsShell({
 
       <section className="os-workspace">
         <header className="os-topbar">
-          <button
-            className="os-command-launcher focus-visible-control"
-            type="button"
-            onClick={openChat}
-          >
-            <Mic aria-hidden="true" />
-            <span>{copy.home.commandPlaceholder}</span>
-            <kbd>⌘K</kbd>
-          </button>
-          <div className="os-topbar__controls">
-            <time dateTime={new Date().toISOString()}>{todayLabel()}</time>
+          <div className="os-topbar__inner">
             <button
-              className="os-topbar__refresh focus-visible-control"
+              className="os-command-launcher focus-visible-control"
               type="button"
-              aria-label={copy.actions.refresh}
-              onClick={onRefresh}
-              disabled={refreshing}
+              onClick={openChat}
             >
-              <RefreshCw
-                aria-hidden="true"
-                className={refreshing ? "spin" : ""}
-              />
+              <Mic aria-hidden="true" />
+              <span>{copy.home.commandPlaceholder}</span>
+              <kbd>⌘K</kbd>
             </button>
+            <time
+              className="os-topbar__date"
+              dateTime={new Date().toISOString()}
+            >
+              {todayLabel()}
+            </time>
+            <div className="os-topbar__controls">
+              <button
+                className="os-topbar__refresh focus-visible-control"
+                type="button"
+                aria-label={copy.actions.refresh}
+                onClick={onRefresh}
+                disabled={refreshing}
+              >
+                <RefreshCw
+                  aria-hidden="true"
+                  className={refreshing ? "spin" : ""}
+                />
+              </button>
+              <AppearanceControl />
+            </div>
           </div>
         </header>
         <div
@@ -245,7 +265,7 @@ export function OsShell({
           className="os-mobile-nav__assistant focus-visible-control"
           type="button"
           aria-label={copy.actions.startAssistantConversation}
-          onClick={openVoiceSheet}
+          onClick={runtimePlatform === "web" ? openChat : openVoiceSheet}
         >
           <Mic aria-hidden="true" />
         </button>
@@ -255,12 +275,75 @@ export function OsShell({
           label={copy.navigation.schedule}
           onClick={() => onNavigate("calendar")}
         />
-        <NavigationButton
-          active={destination === "meetings"}
-          icon={<AudioLines aria-hidden="true" />}
-          label={copy.navigation.meetings}
-          onClick={() => onNavigate("meetings")}
-        />
+        {runtimePlatform === "web" ? (
+          <details
+            className="os-mobile-more"
+            ref={mobileMoreRef}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape") return;
+              event.currentTarget.open = false;
+              event.currentTarget.querySelector("summary")?.focus();
+            }}
+          >
+            <summary
+              className="os-nav__button focus-visible-control"
+              data-active={[
+                "decisions",
+                "meetings",
+                "memory",
+                "settings",
+              ].includes(destination)}
+            >
+              <MoreHorizontal aria-hidden="true" />
+              <span>{copy.navigation.more}</span>
+            </summary>
+            <div className="os-mobile-more__items">
+              {(
+                [
+                  [
+                    "decisions",
+                    copy.navigation.decisions,
+                    <Inbox aria-hidden="true" />,
+                  ],
+                  [
+                    "meetings",
+                    copy.navigation.meetings,
+                    <AudioLines aria-hidden="true" />,
+                  ],
+                  [
+                    "memory",
+                    copy.navigation.memory,
+                    <BrainCircuit aria-hidden="true" />,
+                  ],
+                  [
+                    "settings",
+                    copy.navigation.settings,
+                    <Settings2 aria-hidden="true" />,
+                  ],
+                ] as const
+              ).map(([target, label, icon]) => (
+                <NavigationButton
+                  key={target}
+                  active={destination === target}
+                  icon={icon}
+                  label={label}
+                  onClick={() => {
+                    if (mobileMoreRef.current)
+                      mobileMoreRef.current.open = false;
+                    onNavigate(target);
+                  }}
+                />
+              ))}
+            </div>
+          </details>
+        ) : (
+          <NavigationButton
+            active={destination === "meetings"}
+            icon={<AudioLines aria-hidden="true" />}
+            label={copy.navigation.meetings}
+            onClick={() => onNavigate("meetings")}
+          />
+        )}
       </nav>
 
       {voiceSheetOpen && (
