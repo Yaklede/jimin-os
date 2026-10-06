@@ -27,19 +27,86 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
   const pending = homeInflowPendingItems(props.items);
   const unread = pending.filter((item) => !item.reviewed);
   const reviewed = pending.filter((item) => item.reviewed);
+  const groups = {
+    new: unread.filter((item) => !item.promotedTaskId),
+    existing: unread.filter((item) => item.promotedTaskId),
+  };
+  const [activeTab, setActiveTab] = useState<"new" | "existing">(() =>
+    groups.new.length === 0 && groups.existing.length > 0 ? "existing" : "new",
+  );
   if (pending.length === 0) return null;
   return (
     <div className="inflow-review-queues">
-      <HomeInflowGroup
-        {...props}
-        items={unread.filter((item) => !item.promotedTaskId)}
-        kind="new"
-      />
-      <HomeInflowGroup
-        {...props}
-        items={unread.filter((item) => item.promotedTaskId)}
-        kind="existing"
-      />
+      <div
+        className="home-inflow-tabs"
+        role="tablist"
+        aria-label={copy.projects.inflowTabsLabel}
+      >
+        {(["new", "existing"] as const).map((kind, index) => (
+          <button
+            key={kind}
+            id={`home-inflow-tab-${kind}`}
+            className="focus-visible-control"
+            type="button"
+            role="tab"
+            aria-selected={activeTab === kind}
+            aria-controls={`home-inflow-panel-${kind}`}
+            tabIndex={activeTab === kind ? 0 : -1}
+            onClick={() => setActiveTab(kind)}
+            onKeyDown={(event) => {
+              const next =
+                event.key === "Home"
+                  ? 0
+                  : event.key === "End"
+                    ? 1
+                    : event.key === "ArrowRight" || event.key === "ArrowLeft"
+                      ? 1 - index
+                      : null;
+              if (next === null) return;
+              event.preventDefault();
+              setActiveTab(next === 0 ? "new" : "existing");
+              event.currentTarget.parentElement
+                ?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+                [next]?.focus();
+            }}
+          >
+            <span className="home-inflow-tabs__full-label">
+              {kind === "new"
+                ? copy.projects.inflowNewTitle
+                : copy.projects.inflowExistingTitle}
+            </span>
+            <span className="home-inflow-tabs__short-label">
+              {kind === "new"
+                ? copy.projects.inflowNewTabShort
+                : copy.projects.inflowExistingTabShort}
+            </span>
+            <span className="home-inflow-tabs__count">
+              {groups[kind].length}
+            </span>
+          </button>
+        ))}
+      </div>
+      {(["new", "existing"] as const).map((kind) => (
+        <div
+          key={kind}
+          className="home-inflow-tab-panel"
+          id={`home-inflow-panel-${kind}`}
+          role="tabpanel"
+          aria-labelledby={`home-inflow-tab-${kind}`}
+          hidden={activeTab !== kind}
+          tabIndex={0}
+        >
+          {groups[kind].length > 0 ? (
+            <HomeInflowGroup {...props} items={groups[kind]} kind={kind} />
+          ) : (
+            <p className="home-inflow-tabs__empty">
+              {kind === "new"
+                ? copy.projects.inflowNewEmpty
+                : copy.projects.inflowExistingEmpty}
+            </p>
+          )}
+        </div>
+      ))}
       {reviewed.length > 0 && (
         <details className="project-inflow__history">
           <summary className="focus-visible-control">

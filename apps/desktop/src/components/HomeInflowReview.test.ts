@@ -58,6 +58,22 @@ describe("home inflow review", () => {
     expect(markup).toContain('id="home-inflow-queue-title-new"');
     expect(markup).toContain('id="home-inflow-queue-title-existing"');
     expect(markup).toContain(copy.projects.inflowMarkSeen);
+    expect(markup.match(/role="tablist"/g)).toHaveLength(1);
+    expect(markup.match(/role="tab"/g)).toHaveLength(2);
+    expect(markup.match(/role="tabpanel"/g)).toHaveLength(2);
+    expect(markup).toContain('aria-controls="home-inflow-panel-new"');
+    expect(markup).toContain('aria-controls="home-inflow-panel-existing"');
+    expect(markup).toMatch(/id="home-inflow-tab-new"[^>]*aria-selected="true"/);
+    expect(markup).toMatch(/id="home-inflow-panel-existing"[^>]*hidden=""/);
+  });
+
+  it("opens existing updates when there are no new requests", () => {
+    const markup = renderReview([inflow("update", { promotedTaskId: "task" })]);
+    expect(markup).toMatch(
+      /id="home-inflow-tab-existing"[^>]*aria-selected="true"/,
+    );
+    expect(markup).toMatch(/id="home-inflow-panel-new"[^>]*hidden=""/);
+    expect(markup).toContain(copy.projects.inflowNewEmpty);
   });
   it("offers the full queue instead of silently truncating after five items", () => {
     const items = Array.from({ length: 7 }, (_, index) =>

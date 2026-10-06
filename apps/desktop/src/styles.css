@@ -5269,9 +5269,110 @@ svg {
 }
 
 .inflow-review-queues {
+  grid-column: 1 / -1;
   display: grid;
-  gap: 16px;
+  gap: 0;
   min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  box-shadow: var(--shadow-panel);
+}
+
+.inflow-review-queues .home-inflow {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.home-inflow-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-subtle);
+}
+
+.home-inflow-tabs > button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  padding: 8px 16px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    color 160ms ease,
+    background-color 160ms ease;
+}
+
+.home-inflow-tabs > button:hover {
+  color: var(--text-strong);
+  background: var(--surface);
+}
+
+.home-inflow-tabs > button[aria-selected="true"] {
+  color: var(--accent);
+  background: var(--accent-tint);
+  border-color: var(--border);
+}
+
+.home-inflow-tabs__count {
+  font-variant-numeric: tabular-nums;
+}
+
+.home-inflow-tabs__short-label,
+.home-inflow-tab-panel[hidden] {
+  display: none;
+}
+
+.home-inflow-tab-panel {
+  min-width: 0;
+}
+
+.home-inflow-tabs__empty {
+  margin: 0;
+  padding: 24px;
+  color: var(--muted);
+}
+
+.inflow-review-queues > .project-inflow__history {
+  border-top: 1px solid var(--border);
+  padding: 16px 20px;
+}
+
+@media (max-width: 680px) {
+  .home-inflow-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 8px;
+  }
+
+  .home-inflow-tabs > button {
+    padding: 8px;
+    white-space: nowrap;
+  }
+
+  .home-inflow-tabs__full-label {
+    display: none;
+  }
+
+  .home-inflow-tabs__short-label {
+    display: inline;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-inflow-tabs > button {
+    transition: none;
+  }
 }
 
 .inflow-dismiss-form {

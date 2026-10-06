@@ -244,6 +244,13 @@ export const projectCopy = {
   inflowTitle: "확인할 대화",
   inflowNewTitle: "새 업무 요청",
   inflowExistingTitle: "기존 일감 업데이트",
+  inflowTabsLabel: "업무 요청 구분",
+  inflowNewTabShort: "새 요청",
+  inflowExistingTabShort: "기존 일감",
+  inflowNewEmpty:
+    "새 업무 요청이 없어요. 기존 일감 탭에서 새 소식을 확인해 보세요.",
+  inflowExistingEmpty:
+    "기존 일감에 새 답글이 없어요. 새 요청 탭에서 들어온 업무를 확인해 보세요.",
   inflowExistingEyebrow: "등록된 일감의 새 소식",
   inflowExistingOpen: (count: number) => `추가 대화 ${count}건 확인하기`,
   inflowExistingCollapse: "추가 대화 간단히 보기",
