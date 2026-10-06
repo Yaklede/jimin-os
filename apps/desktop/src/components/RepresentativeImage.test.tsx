@@ -9,6 +9,18 @@ it("retains the original image when no saved preference is available", () => {
     'src="/images/hamster-home-wave.png"',
   );
 });
+it("permits local image decoding in native production without allowing plugins", () => {
+  const config = JSON.parse(
+    readFileSync(
+      new URL("../../src-tauri/tauri.conf.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  expect(config.app.security.csp).toContain(
+    "img-src 'self' data: blob: https:",
+  );
+  expect(config.app.security.csp).toContain("object-src 'none'");
+});
 it("adds image controls without dropping modes, colors or the existing popover", () => {
   const markup = renderToStaticMarkup(<AppearanceControl />);
   for (const label of [

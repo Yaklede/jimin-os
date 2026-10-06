@@ -13,6 +13,7 @@
 - The continuation still had its handler but no rendered new-request button. Restored the button even when results are collapsed. Busy states disable it without hiding it; callback failures preserve existing input and report a recovery action.
 - Appearance sizing depended on popover/Grid free-space distribution. Explicit content sizing, max-content rows and 44px/68px controls prevent stretching.
 - Inflow selection had a maximum height but its implicit auto Grid row grew to 1,143px. The outer card clipped it while the detail itself had no overflow. A zero-minimum flexible track and viewport-bounded maximum now produce a real detail scroll region. Mobile retains natural page scrolling.
+- Release inspection found native CSP needed `blob:` in the image directive for the local file decoding step. Only image blob loading was added; object/plugin content remains disallowed. A production-config regression test guards this requirement.
 
 ## Verification
 
