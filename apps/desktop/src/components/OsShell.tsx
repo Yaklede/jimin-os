@@ -279,6 +279,14 @@ export function OsShell({
           label={copy.navigation.projects}
           onClick={() => onNavigate("projects")}
         />
+        <button
+          className="os-mobile-nav__assistant focus-visible-control"
+          type="button"
+          aria-label={copy.actions.startAssistantConversation}
+          onClick={openVoiceSheet}
+        >
+          <Mic aria-hidden="true" />
+        </button>
         <NavigationButton
           active={destination === "calendar"}
           icon={<CalendarDays aria-hidden="true" />}

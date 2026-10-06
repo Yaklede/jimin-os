@@ -38,6 +38,19 @@ describe("native phone layout", () => {
     expect(menu).toContain("calc(100vw - 32px)");
   });
 
+  it("fits the microphone and every destination in one row without an overlapping floating button", () => {
+    expect(styles).toContain(
+      "grid-template-columns: repeat(6, minmax(0, 1fr))",
+    );
+    const microphone = styles.match(
+      /\.os-shell:not\(\[data-platform="desktop"\]\) \.os-mobile-nav__assistant \{([^}]+)\}/,
+    )?.[1];
+    expect(microphone).toContain("position: static");
+    expect(microphone).toContain("width: 44px");
+    expect(microphone).toContain("height: 44px");
+    expect(microphone).toContain("transform: none");
+  });
+
   it("prevents desktop greeting motion and line heights leaking onto phones", () => {
     const greeting = styles.match(
       /\.os-shell:not\(\[data-platform="desktop"\]\) \.home-greeting \{([^}]+)\}/,

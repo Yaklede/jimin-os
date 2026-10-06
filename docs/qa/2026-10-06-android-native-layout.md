@@ -36,3 +36,16 @@
 - Rollback APK: `outputs/android-ui-20261006/previous-production.apk`.
 - Screenshots: `/tmp/jimin-native-ui-production-home.png`, `/tmp/jimin-native-ui-production-more.png`, `/tmp/jimin-native-ui-dev-editor.png`.
 - Native checks are bounded UI checks, not an assertion that every mobile feature, provider, recording or notification flow was exhaustively tested.
+
+## Follow-up: missing microphone and incomplete queue selection
+
+- User correctly reported that the bottom microphone was still missing. The deployed baseline had removed the launcher from `OsShell`; the first CSS-only correction did not restore it. The earlier completion claim did not cover this regression.
+- Restored the existing microphone/voice-sheet handler alongside Home, Projects, Schedule, Meetings and More. Six bounded columns keep every existing destination directly accessible. The microphone is an in-flow 44px control, not an overlapping floating button.
+- A permanently reserved scrollbar gutter left an unfilled strip on short inflow lists. Use an automatic gutter and extend the selection accent over the full row height. The real single-request card in the user's screenshot now fills the queue width on-device.
+- Changes additionally target `OsShell.tsx`, its tests, and inflow selection CSS/tests. No new UI wording, API or provider behavior was introduced.
+- All 70 frontend test files / 434 tests passed; typecheck, formatting and whitespace checks passed.
+- Browser checks: web/Android/iOS selectors at 320/411/430px, light/dark and reduced motion. No horizontal overflow; all six touch targets at least 44px. Voice dialog opens/closes and More stays within the viewport. Desktop navigation remains unchanged/hidden.
+- Physical production device: microphone visible, all destinations aligned, More popup within screen, and the same real inflow request's background and accent fill the row. Live speech recognition was not exercised to avoid unintentionally submitting a production command. Voice dialog activation was exercised in the isolated browser fixture.
+- Installed production package with update-compatible signer, non-debuggable arm64 release, production server assets and no preview data. Authentication retained; no task or source-chat write performed. Main branch remains unmerged.
+- Follow-up APK: `outputs/android-ui-20261006/jimin-os-production-mic-restored-arm64.apk`; SHA-256 `2425542a28c280de1958e489dd742ee129ad8682e2f89aeecd0801531c428489`.
+- Screenshots: `/tmp/jimin-native-ui-mic-restored-home.png`, `/tmp/jimin-native-ui-mic-restored-more.png`, `/tmp/jimin-native-ui-inflow-full-fill.png`.
