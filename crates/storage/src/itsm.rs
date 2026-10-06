@@ -193,6 +193,76 @@ impl DeleteProjectItsmConnection {
 }
 
 impl Database {
+    /// Retries only unhandled analyses blocked by the retired project-mapping
+    /// gate. Enabled owner-scoped connections remain the opt-in boundary;
+    /// dismissed conversations and any thread linked to a task are untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error if the retry and sync changes cannot commit.
+    pub async fn requeue_itsm_mapping_blocked_analyses(&self) -> Result<usize, StorageError> {
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let rows = sqlx::query_as::<_, (Uuid, Uuid, i64)>(
+            "UPDATE project_inflow_analyses AS analysis
+             SET state = 'queued', attempt_count = 0, error_code = NULL
+             WHERE analysis.state IN ('ready', 'failed')
+               AND analysis.linked_task_id IS NULL
+               AND EXISTS (
+                    SELECT 1 FROM project_itsm_connections AS connection
+                    WHERE connection.user_id = analysis.user_id
+                      AND connection.project_id = analysis.project_id
+                      AND connection.enabled = TRUE
+               )
+               AND EXISTS (
+                    SELECT 1 FROM jsonb_array_elements(analysis.reference_documents) AS reference
+                    WHERE reference ->> 'provider' = 'itsm'
+                      AND reference ->> 'errorCode' IN (
+                        'itsm.project_mismatch', 'itsm.confirmation_required'
+                      )
+               )
+               AND EXISTS (
+                    SELECT 1 FROM project_google_chat_sources AS source
+                    WHERE source.id = analysis.source_id AND source.enabled = TRUE
+               )
+               AND EXISTS (
+                    SELECT 1 FROM project_inflow_items AS item
+                    WHERE item.id = analysis.representative_item_id
+                      AND item.user_id = analysis.user_id
+                      AND item.project_id = analysis.project_id
+                      AND item.status = 'pending'
+                      AND item.promoted_task_id IS NULL
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM project_inflow_items AS item
+                    WHERE item.user_id = analysis.user_id
+                      AND item.source_id = analysis.source_id
+                      AND item.promoted_task_id IS NOT NULL
+                      AND (
+                        (analysis.conversation_key LIKE 'thread:%'
+                            AND item.provider_thread_name = substr(analysis.conversation_key, 8))
+                        OR (analysis.conversation_key LIKE 'message:%'
+                            AND item.provider_message_name = substr(analysis.conversation_key, 9))
+                      )
+               )
+             RETURNING analysis.user_id, analysis.id, analysis.version",
+        )
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        for (user_id, analysis_id, version) in &rows {
+            append_change(
+                &mut transaction,
+                *user_id,
+                "project_inflow_analysis",
+                *analysis_id,
+                *version,
+            )
+            .await?;
+        }
+        transaction.commit().await.map_err(classify)?;
+        Ok(rows.len())
+    }
+
     /// Loads the ITSM opt-in for one owned project.
     ///
     /// Missing and foreign projects both return `None`, preventing ownership

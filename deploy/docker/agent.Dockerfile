@@ -16,8 +16,8 @@ COPY schemas ./schemas
 RUN cargo build --locked --release --package jimin-agent --bin jimin-agent
 
 FROM ${NODE_RUNTIME_IMAGE} AS codex-installer
-ARG CODEX_VERSION=0.144.1
-ARG CODEX_NPM_INTEGRITY=sha512-Xir1zqPfpenhdoAoshN53uonzbBXj18COyzRkFlVZpSNyEl5XtkuYu9oddELePFN7K/0sXUcSO34Ad5IeCXPbw==
+ARG CODEX_VERSION=0.159.0
+ARG CODEX_NPM_INTEGRITY=sha512-nQWxAkzn+Rhr8TgtIhVhSlqvCytrMoqe+P8xoo4xxhCIBnzOfRs6SEmkMJfTPjkU3BYlsplwDOY2dbSp4+514g==
 
 RUN set -eu; \
     actual_integrity="$(npm view "@openai/codex@${CODEX_VERSION}" dist.integrity)"; \
@@ -27,7 +27,7 @@ RUN set -eu; \
 
 FROM ${NODE_RUNTIME_IMAGE} AS runtime
 ARG JIMIN_BUILD_SHA=dev
-ARG CODEX_VERSION=0.144.1
+ARG CODEX_VERSION=0.159.0
 LABEL org.opencontainers.image.title="Jimin OS Agent" \
       org.opencontainers.image.source="https://github.com/Yaklede/jimin-os" \
       org.opencontainers.image.revision="${JIMIN_BUILD_SHA}" \

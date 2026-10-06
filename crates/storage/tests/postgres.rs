@@ -1563,16 +1563,66 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             .await
             .expect("the in-flight redacted analysis should finish")
     );
-    assert!(
+    let retry_fixture_pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("retry fixture pool should connect");
+    sqlx::query("UPDATE project_itsm_connections SET enabled = FALSE WHERE project_id = $1")
+        .bind(first_project.id)
+        .execute(&retry_fixture_pool)
+        .await
+        .expect("temporarily disable enrichment for the regression fixture");
+    assert_eq!(
         database
+            .requeue_itsm_mapping_blocked_analyses()
+            .await
+            .expect("disabled connections must be respected"),
+        0
+    );
+    sqlx::query("UPDATE project_itsm_connections SET enabled = TRUE WHERE project_id = $1")
+        .bind(first_project.id)
+        .execute(&retry_fixture_pool)
+        .await
+        .expect("restore fixture enrichment");
+    let itsm_connection = database
+        .project_itsm_connection(owner.profile.id, first_project.id)
+        .await
+        .expect("fixture connection should reload after version changes")
+        .expect("fixture connection still exists");
+    assert_eq!(
+        database
+            .requeue_itsm_mapping_blocked_analyses()
+            .await
+            .expect("legacy mapping errors should be retried"),
+        1
+    );
+    assert_eq!(
+        database
+            .requeue_itsm_mapping_blocked_analyses()
+            .await
+            .expect("retry must be idempotent"),
+        0
+    );
+    assert!(
+        !database
             .requeue_inflow_analysis_after_itsm_confirmation(
                 owner.profile.id,
                 first_project.id,
                 initial_analysis.id,
             )
             .await
-            .expect("the completed redacted analysis should be requeued"),
-        "confirmation that wins the race must cause one fresh analysis"
+            .expect("an already queued result must not be queued twice"),
+        "the legacy confirmation path remains idempotent"
+    );
+    /* Legacy owner confirmation can still retry older results, but no longer
+    controls whether trusted links are readable. */
+    assert!(
+        database
+            .project_inflow_analyses(owner.profile.id, first_project.id)
+            .await
+            .expect("retried analysis should load")
+            .iter()
+            .any(|analysis| analysis.id == initial_analysis.id
+                && analysis.state == InflowAnalysisState::Queued)
     );
     let confirmed_analysis = database
         .claim_next_inflow_analysis(analysis_runner, Duration::from_secs(30))

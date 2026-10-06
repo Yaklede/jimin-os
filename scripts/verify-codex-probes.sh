@@ -55,7 +55,7 @@ info "Authenticated ChatGPT account confirmed"
 info "Running the pinned non-personal turn fixture"
 if ! turn_summary="$(compose run --rm --no-deps agent \
     probe turn \
-    --model gpt-5.4 \
+    --model "${JIMIN_AGENT_PROBE_MODEL:-gpt-6.1-sol}" \
     --prompt-file /opt/jimin-agent/fixtures/generic-prompt.txt)"; then
   die "turn probe command failed"
 fi

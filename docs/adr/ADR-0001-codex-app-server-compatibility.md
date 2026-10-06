@@ -72,7 +72,20 @@ initialize
 - [ ] Agent 재시작 뒤 인증 유지
 - [ ] child crash와 지원하지 않는 version 회귀 테스트
 
+## 2026-10-06 모델 카탈로그 갱신
+
+- 현재 지원 런타임을 stable `@openai/codex@0.159.0`으로 올렸다. 최초 호환성 표는 과거 결정 기록으로 유지한다.
+- schema와 패키지 integrity, macOS binary checksum은 `schemas/codex/0.159.0/metadata.json`에 기록했다. 어댑터, 배포 변수, Dockerfile의 버전과 integrity 일치를 회귀 테스트한다.
+- 0.157.0의 실제 `model/list`에는 GPT-6.1 Sol이 없었고, 0.159.0에서는 `gpt-6.1-sol`과 런타임이 제공한 추론 강도가 확인됐다. 같은 런타임에서 비민감 fixture의 실제 turn 완료도 확인했다.
+- 모델명을 UI에 하드코딩하지 않는다. Agent가 시작할 때와 작업 사이 15분 간격으로 런타임 카탈로그를 저장한다. 갱신 실패 시 기존 유효 snapshot을 유지하고 1분 뒤 재시도한다.
+- `model/list`는 런타임의 캐시/번들 목록일 수 있으므로 주기 동기화만으로 모든 미래 모델의 즉시 반영이나 계정 사용 권한을 보장하지 않는다. 신규 모델 검증에는 실제 완료된 turn과 런타임 호환성 검증이 필요하다.
+- 직접 저장한 사용자 모델 설정은 변경하지 않는다. 자동 선택은 런타임 기본값을 따르며, 이번 로컬 검증에서 기본 모델은 GPT-6.1 Sol이었다.
+- 기존 Codex 관리 로그인과 인증 volume을 유지한다. API key 기반 provider로 변경하지 않는다.
+- 이번 검증은 개발 환경이다. Linux 운영 이미지 및 운영 계정의 검증은 이후 배포 시 별도로 수행한다.
+
 ## 근거
 
 - [Codex App Server](https://developers.openai.com/codex/app-server/)
 - [Codex authentication](https://developers.openai.com/codex/auth/)
+- [GPT-6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol)
+- [Models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)

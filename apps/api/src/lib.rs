@@ -10034,21 +10034,19 @@ fn project_management_mode(value: &str) -> Option<ProjectManagementMode> {
 fn project_itsm_connection_response(
     connection: &ProjectItsmConnection,
 ) -> ProjectItsmConnectionResponse {
-    let confirmation_status = if !connection.enabled {
-        ProjectItsmConfirmationStatus::Disabled
-    } else if connection.itsm_project_id.is_some() {
+    let confirmation_status = if connection.enabled {
+        // Keep the existing wire contract, but link enrichment no longer
+        // requires mapping or confirming an upstream ITSM project.
         ProjectItsmConfirmationStatus::Confirmed
-    } else if connection.candidate_itsm_project_name.is_some() {
-        ProjectItsmConfirmationStatus::ConfirmationRequired
     } else {
-        ProjectItsmConfirmationStatus::Discovering
+        ProjectItsmConfirmationStatus::Disabled
     };
     ProjectItsmConnectionResponse {
         id: connection.id,
         project_id: connection.project_id,
         enabled: connection.enabled,
         confirmation_status,
-        candidate_project_name: connection.candidate_itsm_project_name.clone(),
+        candidate_project_name: None,
         version: connection.version,
     }
 }
@@ -10523,6 +10521,34 @@ mod tests {
                     .contains(&forbidden.to_ascii_lowercase()),
                 "public connection responses must not expose {forbidden}",
             );
+        }
+    }
+
+    #[test]
+    fn enabled_itsm_connection_is_ready_without_upstream_project_confirmation() {
+        for candidate in [None, Some("비스킷링크".to_owned())] {
+            let mut connection = ProjectItsmConnection {
+                id: Uuid::now_v7(),
+                project_id: Uuid::now_v7(),
+                itsm_project_id: None,
+                candidate_itsm_project_id: candidate.as_ref().map(|_| "42".to_owned()),
+                candidate_itsm_project_name: candidate,
+                enabled: true,
+                created_at: OffsetDateTime::now_utc(),
+                updated_at: OffsetDateTime::now_utc(),
+                version: 1,
+            };
+            let response = project_itsm_connection_response(&connection);
+            assert!(matches!(
+                response.confirmation_status,
+                ProjectItsmConfirmationStatus::Confirmed
+            ));
+            assert!(response.candidate_project_name.is_none());
+            connection.enabled = false;
+            assert!(matches!(
+                project_itsm_connection_response(&connection).confirmation_status,
+                ProjectItsmConfirmationStatus::Disabled
+            ));
         }
     }
 

@@ -287,6 +287,36 @@ function buttonOpeningTag(markup: string, label: string): string {
   return markup.slice(buttonIndex, markup.indexOf(">", buttonIndex) + 1);
 }
 
+describe("runtime model catalog presentation", () => {
+  it("renders GPT-6.1 Sol and reasoning options supplied by the runtime", () => {
+    const markup = renderSettings({
+      modelSettings: {
+        items: [
+          {
+            id: "gpt-6.1-sol",
+            displayName: "GPT-6.1-Sol",
+            description: "Runtime model description",
+            isDefault: true,
+            defaultReasoningEffort: "low",
+            supportedReasoningEfforts: [
+              { id: "low", description: "Fast" },
+              { id: "ultra", description: "Extended reasoning" },
+            ],
+          },
+        ],
+        selectedModelId: "gpt-6.1-sol",
+        selectedReasoningEffort: "ultra",
+      },
+    });
+
+    expect(markup).toContain(
+      '<option value="gpt-6.1-sol" selected="">GPT-6.1-Sol</option>',
+    );
+    expect(markup).toContain('<option value="ultra" selected="">');
+    expect(markup).toContain("자동 선택 (GPT-6.1-Sol)");
+  });
+});
+
 function renderSettings(
   overrides: Partial<ComponentProps<typeof SettingsWorkspace>> = {},
 ): string {

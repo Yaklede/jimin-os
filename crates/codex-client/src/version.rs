@@ -5,7 +5,7 @@ use tokio::process::Command;
 
 use crate::error::{Error, Result};
 
-pub const SUPPORTED_CODEX_VERSION: &str = "0.144.1";
+pub const SUPPORTED_CODEX_VERSION: &str = "0.159.0";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,8 +82,38 @@ mod tests {
     #[test]
     fn parses_the_pinned_codex_version() {
         assert_eq!(
-            parse_version_output(b"codex-cli 0.144.1\n").expect("valid version"),
+            parse_version_output(b"codex-cli 0.159.0\n").expect("valid version"),
             SUPPORTED_CODEX_VERSION
+        );
+    }
+
+    #[test]
+    fn deployment_and_schema_use_the_adapter_runtime_version() {
+        let versions = include_str!("../../../deploy/versions.env");
+        let dockerfile = include_str!("../../../deploy/docker/agent.Dockerfile");
+        assert!(
+            versions.lines().any(|line| {
+                line.strip_prefix("CODEX_VERSION=") == Some(SUPPORTED_CODEX_VERSION)
+            })
+        );
+        let docker_versions = dockerfile
+            .lines()
+            .filter_map(|line| line.strip_prefix("ARG CODEX_VERSION="))
+            .collect::<Vec<_>>();
+        assert_eq!(docker_versions, vec![SUPPORTED_CODEX_VERSION; 2]);
+        let metadata: serde_json::Value =
+            serde_json::from_str(include_str!("../../../schemas/codex/0.159.0/metadata.json"))
+                .expect("runtime schema metadata");
+        assert_eq!(metadata["codexVersion"], SUPPORTED_CODEX_VERSION);
+        let integrity = versions
+            .lines()
+            .find_map(|line| line.strip_prefix("CODEX_NPM_INTEGRITY="))
+            .expect("pinned npm integrity");
+        assert_eq!(metadata["packageIntegrity"], integrity);
+        assert!(
+            dockerfile
+                .lines()
+                .any(|line| { line.strip_prefix("ARG CODEX_NPM_INTEGRITY=") == Some(integrity) })
         );
     }
 

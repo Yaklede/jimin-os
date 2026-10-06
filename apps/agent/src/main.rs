@@ -70,6 +70,7 @@ enum Command {
 enum Probe {
     Compatibility,
     Account,
+    Models,
     Turn {
         #[arg(long)]
         prompt_file: PathBuf,
@@ -185,6 +186,14 @@ async fn execute_probe(codex_binary: &Path, probe: Probe) -> ProbeOutput {
                 Ok(Ok(result)) => success("account", result),
                 Ok(Err(error)) => failure("account", &error),
                 Err(_) => failure_code("account", "probe_timeout"),
+            }
+        }
+        Probe::Models => {
+            match tokio::time::timeout(ACCOUNT_PROBE_TIMEOUT, run_models_probe(codex_binary)).await
+            {
+                Ok(Ok(result)) => success("models", result),
+                Ok(Err(error)) => failure("models", &error),
+                Err(_) => failure_code("models", "probe_timeout"),
             }
         }
         Probe::Turn { prompt_file, model } => {
@@ -840,6 +849,20 @@ async fn run_account_probe(codex_binary: &Path) -> Result<AccountProbeResult, Er
     finish_probe(result, shutdown_result)
 }
 
+async fn run_models_probe(
+    codex_binary: &Path,
+) -> Result<Vec<jimin_codex_client::ProcessingModel>, Error> {
+    let mut process = AppServerProcess::spawn(codex_binary).await?;
+    let result = async {
+        let client = process.client_mut();
+        client.initialize().await?;
+        client.list_processing_models().await
+    }
+    .await;
+    let shutdown_result = process.shutdown().await;
+    finish_probe(result, shutdown_result)
+}
+
 async fn run_turn_probe(
     codex_binary: &Path,
     prompt_file: &Path,
@@ -993,6 +1016,14 @@ mod tests {
 
         let cli = Cli::try_parse_from(["jimin-agent", "health"]).expect("health command");
         assert!(matches!(cli.command, Some(Command::Health)));
+        let cli = Cli::try_parse_from(["jimin-agent", "probe", "models"])
+            .expect("model catalog diagnostic command");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Probe {
+                probe: Probe::Models
+            })
+        ));
     }
 
     #[test]
@@ -1075,7 +1106,7 @@ mod tests {
     fn terminal_adapter_errors_map_to_queryable_agent_states() {
         assert_eq!(
             terminal_state_for_error(&jimin_codex_client::Error::IncompatibleVersion {
-                expected: "0.144.1",
+                expected: jimin_codex_client::SUPPORTED_CODEX_VERSION,
                 actual: "0.142.3".to_owned(),
             }),
             Some(crate::health::HealthState::Incompatible)

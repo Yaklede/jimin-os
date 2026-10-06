@@ -1,0 +1,13 @@
+{
+  "codexVersion": "0.159.0",
+  "package": "@openai/codex@0.159.0",
+  "packageIntegrity": "sha512-nQWxAkzn+Rhr8TgtIhVhSlqvCytrMoqe+P8xoo4xxhCIBnzOfRs6SEmkMJfTPjkU3BYlsplwDOY2dbSp4+514g==",
+  "binarySha256": "e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a",
+  "binaryTarget": "aarch64-apple-darwin",
+  "generatedAt": "2026-10-06",
+  "stableApiOnly": true,
+  "commands": [
+    "codex app-server generate-json-schema --out schemas/codex/0.159.0/json",
+    "codex app-server generate-ts --out schemas/codex/0.159.0/dist/typescript"
+  ]
+}

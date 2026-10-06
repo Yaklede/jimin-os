@@ -52,6 +52,33 @@ const MAX_AGENT_ACTIONS: usize = 32;
 const MINIMUM_MUTATION_INTENT_CONFIDENCE: u8 = 80;
 const MAX_FOREGROUND_BURST: usize = 3;
 const BACKGROUND_QUEUE_COUNT: usize = 4;
+const MODEL_CATALOG_REFRESH_INTERVAL: Duration = Duration::from_mins(15);
+const MODEL_CATALOG_RETRY_INTERVAL: Duration = Duration::from_mins(1);
+
+struct ModelCatalogRefresh {
+    next_at: Instant,
+}
+
+impl ModelCatalogRefresh {
+    fn after_success(now: Instant) -> Self {
+        Self {
+            next_at: now + MODEL_CATALOG_REFRESH_INTERVAL,
+        }
+    }
+
+    fn due(&self, now: Instant) -> bool {
+        now >= self.next_at
+    }
+
+    fn completed(&mut self, now: Instant, succeeded: bool) {
+        self.next_at = now
+            + if succeeded {
+                MODEL_CATALOG_REFRESH_INTERVAL
+            } else {
+                MODEL_CATALOG_RETRY_INTERVAL
+            };
+    }
+}
 
 struct TurnContext {
     prompt: String,
@@ -254,6 +281,14 @@ where
     W: AsyncWrite + Unpin,
 {
     synchronize_processing_models(client, database).await?;
+    if itsm_client.is_some() {
+        let retried = database.requeue_itsm_mapping_blocked_analyses().await?;
+        crate::write_single_json_line(&json!({
+            "event": "agent_itsm_mapping_retry_queued",
+            "count": retried
+        }));
+    }
+    let mut model_refresh = ModelCatalogRefresh::after_success(Instant::now());
     let shutdown = wait_for_shutdown_signal();
     tokio::pin!(shutdown);
     let recovery_interval = lease / 2;
@@ -263,6 +298,18 @@ where
     let mut consecutive_background_misses = 0usize;
 
     loop {
+        if model_refresh.due(Instant::now()) {
+            // Refresh only between jobs. A transient catalog failure must not
+            // interrupt conversations or replace the last valid DB snapshot.
+            let refreshed = synchronize_processing_models(client, database).await;
+            if let Err(error) = &refreshed {
+                crate::write_single_json_line(&json!({
+                    "event": "agent_model_catalog_refresh_failed",
+                    "error": { "code": error.code() }
+                }));
+            }
+            model_refresh.completed(Instant::now(), refreshed.is_ok());
+        }
         if Instant::now() >= next_recovery_at {
             // A restarted App Server cannot safely replay a turn that might
             // have reached Codex. Once its lease expires, surface that
@@ -4189,6 +4236,22 @@ mod tests {
         sort_tasks_for_execution, validate_turn_intent, validated_agent_action,
         validated_assistant_response,
     };
+
+    #[test]
+    fn model_catalog_refresh_is_periodic_and_retries_without_a_busy_loop() {
+        let now = tokio::time::Instant::now();
+        let mut refresh = super::ModelCatalogRefresh::after_success(now);
+        assert!(!refresh.due(now));
+        assert!(!refresh.due(now + super::MODEL_CATALOG_REFRESH_INTERVAL / 2));
+        let first_refresh = now + super::MODEL_CATALOG_REFRESH_INTERVAL;
+        assert!(refresh.due(first_refresh));
+        refresh.completed(first_refresh, false);
+        assert!(!refresh.due(first_refresh));
+        assert!(refresh.due(first_refresh + super::MODEL_CATALOG_RETRY_INTERVAL));
+        refresh.completed(first_refresh, true);
+        assert!(!refresh.due(first_refresh + super::MODEL_CATALOG_RETRY_INTERVAL));
+        assert!(refresh.due(first_refresh + super::MODEL_CATALOG_REFRESH_INTERVAL));
+    }
 
     fn recommendation_fixture(status: RecommendationStatus) -> Recommendation {
         let now = OffsetDateTime::now_utc();
