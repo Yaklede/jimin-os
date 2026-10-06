@@ -43,6 +43,15 @@ function inflow(
 }
 
 describe("home inflow review", () => {
+  it("fills selected queue rows without an unused scrollbar strip or inset accent", () => {
+    const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+    expect(css).toMatch(
+      /\.home-inflow-review__queue ol\s*\{[^}]*overflow-y: auto;[^}]*scrollbar-gutter: auto;/,
+    );
+    expect(css).toMatch(
+      /\.home-inflow-review__queue-item::before\s*\{[^}]*inset: 0 auto 0 0;/,
+    );
+  });
   it("bounds the desktop grid track so expanded assignment forms scroll instead of clipping", () => {
     const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
     expect(css).toMatch(
