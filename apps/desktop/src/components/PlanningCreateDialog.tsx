@@ -1,4 +1,3 @@
-import { TaskWorkKindSelect } from "./TaskWorkKind";
 import type { TaskWorkKind } from "../api/planning";
 import { CalendarPlus, ListTodo, X } from "lucide-react";
 import {
@@ -67,7 +66,6 @@ export function PlanningCreateDialog({
   const [title, setTitle] = useState("");
   const [notes, setNotes] = useState("");
   const [priority, setPriority] = useState(1);
-  const [workKind, setWorkKind] = useState<TaskWorkKind>("general");
   const [dueAt, setDueAt] = useState("");
   const [startsAt, setStartsAt] = useState("");
   const [endsAt, setEndsAt] = useState("");
@@ -81,7 +79,6 @@ export function PlanningCreateDialog({
     title,
     notes,
     priority,
-    workKind,
     dueAt,
     startsAt,
     endsAt,
@@ -103,7 +100,6 @@ export function PlanningCreateDialog({
       "",
       "",
       1,
-      "general",
       "",
       scheduleRange.startsAt,
       scheduleRange.endsAt,
@@ -117,7 +113,6 @@ export function PlanningCreateDialog({
     setTitle("");
     setNotes("");
     setPriority(1);
-    setWorkKind("general");
     setDueAt("");
     setStartsAt(scheduleRange.startsAt);
     setEndsAt(scheduleRange.endsAt);
@@ -198,7 +193,6 @@ export function PlanningCreateDialog({
           title: nextTitle,
           notes: notes.trim() || undefined,
           priority,
-          workKind,
           dueAt: taskDueAt,
         });
       } else {
@@ -284,11 +278,6 @@ export function PlanningCreateDialog({
 
           {taskMode ? (
             <>
-              <TaskWorkKindSelect
-                value={workKind}
-                disabled={saving}
-                onChange={setWorkKind}
-              />
               <div className="planning-editor__field-grid">
                 <CreateField
                   label={copy.forms.priority}

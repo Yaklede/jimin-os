@@ -1,7 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { TaskWorkKindSelect, TaskWorkKindBadge } from "./TaskWorkKind";
 import {
   TaskCompletionDialog,
   taskCompletionCopy,
@@ -10,29 +9,7 @@ import { mergeInflowDraftValues } from "./ProjectInflowPanel";
 import { mergeGmailInflowDraftValues } from "./GmailInflowReview";
 import type { Task } from "../api/planning";
 
-describe("task work type and completion result", () => {
-  it("offers explicit verification/development choices and keeps legacy general work", () => {
-    const markup = renderToStaticMarkup(
-      createElement(TaskWorkKindSelect, {
-        value: "verification",
-        onChange() {},
-      }),
-    );
-    expect(markup).toContain('value="verification" selected');
-    expect(markup).toContain("확인 업무");
-    expect(markup).toContain("개발 업무");
-    expect(markup).toContain("일반 업무");
-    expect(
-      renderToStaticMarkup(
-        createElement(TaskWorkKindBadge, { kind: "general" }),
-      ),
-    ).toBe("");
-    expect(
-      renderToStaticMarkup(
-        createElement(TaskWorkKindBadge, { kind: "development" }),
-      ),
-    ).toContain("개발 업무");
-  });
+describe("optional task completion replies", () => {
   it("keeps a manually selected type when Chat or Gmail analysis refreshes", () => {
     const chat = {
       title: "확인",
@@ -76,9 +53,27 @@ describe("task work type and completion result", () => {
       }),
     );
     expect(markup).toContain(task.title);
-    expect(markup).toContain(taskCompletionCopy.save);
+    expect(markup).toContain(taskCompletionCopy.label);
     expect(markup).toContain(taskCompletionCopy.skip);
     expect(markup).toContain('maxLength="2000"');
-    expect(markup).toContain("원래 대화에도 답글");
+    expect(markup).toContain("원래 대화에도 전달");
+    expect(markup).not.toContain("확인 업무");
+    expect(markup).not.toContain("개발 업무");
+    expect(markup).not.toContain("일반 업무");
   });
+  it.each(["general", "verification", "development"] as const)(
+    "offers reply-less completion for legacy %s tasks",
+    (workKind) => {
+      const markup = renderToStaticMarkup(
+        createElement(TaskCompletionDialog, {
+          task: { id: "task", title: "작업", workKind } as Task,
+          async onComplete() {},
+          onCancel() {},
+        }),
+      );
+      expect(markup).toContain(taskCompletionCopy.skip);
+      expect(markup).toContain(taskCompletionCopy.cancel);
+      expect(markup).not.toContain('required=""');
+    },
+  );
 });

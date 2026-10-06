@@ -1,7 +1,35 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTask, updateTask, completeTask, type Task } from "./planning";
 afterEach(() => vi.unstubAllGlobals());
-describe("task type and result transport", () => {
+describe("legacy task type compatibility and optional completion reply transport", () => {
+  it.each(["general", "verification", "development"] as const)(
+    "accepts optional completion replies for legacy %s tasks without sending a category",
+    async (workKind) => {
+      const task = {
+        id: "task",
+        projectId: null,
+        version: 3,
+        workKind,
+      } as Task;
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockImplementation(async () => Response.json(task));
+      vi.stubGlobal("fetch", fetchMock);
+      for (const note of [
+        undefined,
+        "   ",
+        "  요청 내용을 반영했어요.\n확인해 주세요.  ",
+      ]) {
+        await completeTask("https://example.test", "test", task, note);
+        const body = JSON.parse(String(fetchMock.mock.calls.at(-1)?.[1]?.body));
+        expect(body).toEqual({
+          expectedVersion: 3,
+          ...(note?.trim() ? { completionNote: note.trim() } : {}),
+        });
+        expect(body).not.toHaveProperty("workKind");
+      }
+    },
+  );
   it("sends the chosen type on creation/update and a trimmed result on completion", async () => {
     const task = {
       id: "task",

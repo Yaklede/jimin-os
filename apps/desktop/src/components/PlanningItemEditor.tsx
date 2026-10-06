@@ -1,4 +1,3 @@
-import { TaskWorkKindSelect } from "./TaskWorkKind";
 import type { TaskWorkKind } from "../api/planning";
 import { CalendarClock, ListTodo, Trash2, X } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState, type ReactNode } from "react";
@@ -74,7 +73,6 @@ export function PlanningItemEditor({
   const [notes, setNotes] = useState("");
   const [assigneeName, setAssigneeName] = useState("");
   const [priority, setPriority] = useState(1);
-  const [workKind, setWorkKind] = useState<TaskWorkKind>("general");
   const [dueAt, setDueAt] = useState("");
   const [startsAt, setStartsAt] = useState("");
   const [endsAt, setEndsAt] = useState("");
@@ -91,7 +89,6 @@ export function PlanningItemEditor({
     notes,
     assigneeName,
     priority,
-    workKind,
     dueAt,
     startsAt,
     endsAt,
@@ -119,7 +116,6 @@ export function PlanningItemEditor({
       target.item.notes ?? "",
       target.kind === "task" ? (target.item.assigneeName ?? "") : "",
       target.kind === "task" ? target.item.priority : 1,
-      target.kind === "task" ? (target.item.workKind ?? "general") : "general",
       target.kind === "task" ? isoToLocalInput(target.item.dueAt) : "",
       target.kind === "schedule" ? isoToLocalInput(target.item.startsAt) : "",
       target.kind === "schedule" ? isoToLocalInput(target.item.endsAt) : "",
@@ -137,9 +133,6 @@ export function PlanningItemEditor({
       target.kind === "task" ? (target.item.assigneeName ?? "") : "",
     );
     setPriority(target.kind === "task" ? target.item.priority : 1);
-    setWorkKind(
-      target.kind === "task" ? (target.item.workKind ?? "general") : "general",
-    );
     setDueAt(target.kind === "task" ? isoToLocalInput(target.item.dueAt) : "");
     setStartsAt(
       target.kind === "schedule" ? isoToLocalInput(target.item.startsAt) : "",
@@ -251,7 +244,6 @@ export function PlanningItemEditor({
           assigneeName: assigneeName.trim() || undefined,
           status: activeTarget.item.status,
           priority,
-          workKind,
           dueAt: taskDueAt,
         });
       } else {
@@ -368,7 +360,7 @@ export function PlanningItemEditor({
 
           {activeTarget.kind === "task" && activeTarget.item.completionNote && (
             <section className="task-completion-result">
-              <strong>확인 결과</strong>
+              <strong>완료 답글</strong>
               <p>{activeTarget.item.completionNote}</p>
             </section>
           )}
@@ -389,11 +381,6 @@ export function PlanningItemEditor({
                   }}
                 />
               </EditorField>
-              <TaskWorkKindSelect
-                value={workKind}
-                disabled={saving}
-                onChange={setWorkKind}
-              />
               <div className="planning-editor__field-grid">
                 <EditorField
                   label={copy.forms.priority}

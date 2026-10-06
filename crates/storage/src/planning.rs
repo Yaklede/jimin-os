@@ -1649,7 +1649,7 @@ impl Database {
             .await
     }
 
-    /// Stores a reviewed completion result and queues its source reply in one transaction.
+    /// Stores an optional completion reply for any task and queues its source reply atomically.
     ///
     /// # Errors
     /// Returns a validation/persistence error; concurrent updates return no task.
@@ -1705,7 +1705,7 @@ impl Database {
     }
 }
 
-/// Validates the small public task work-type contract.
+/// Validates legacy work-kind values retained for existing clients and stored tasks.
 ///
 /// # Errors
 /// Returns invalid configuration for unknown work types.
@@ -1714,15 +1714,6 @@ pub fn validate_work_kind(value: &str) -> Result<(), StorageError> {
         Ok(())
     } else {
         Err(StorageError::InvalidConfiguration)
-    }
-}
-
-/// Human-readable work type shared by assignment notifications.
-pub fn task_work_kind_label(value: &str) -> &'static str {
-    match value {
-        "verification" => "확인 업무",
-        "development" => "개발 업무",
-        _ => "일반 업무",
     }
 }
 
@@ -2145,7 +2136,6 @@ fn format_task_message(action: &str, input: &TaskAssignmentMessageInput<'_>) -> 
         String::new(),
         format!("프로젝트: {project_title}"),
         format!("할 일: {title}"),
-        format!("업무 유형: {}", task_work_kind_label(input.work_kind)),
         format!("담당자: {assignee}"),
         format!(
             "마감: {}",
@@ -2427,14 +2417,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn task_work_kind_and_completion_result_validate_public_contract() {
+    fn legacy_work_kind_and_optional_completion_reply_validate_compatibility_contract() {
         for kind in ["general", "verification", "development"] {
             assert!(validate_work_kind(kind).is_ok());
         }
         for kind in ["", "unknown", " verification", "development\n"] {
             assert!(validate_work_kind(kind).is_err());
         }
-        assert_eq!(task_work_kind_label("verification"), "확인 업무");
         assert!(valid_text("확인 완료\n- 금액 일치", 2000, true));
         assert!(valid_text(&"가".repeat(2000), 2000, false));
         assert!(!valid_text(&"가".repeat(2001), 2000, false));
