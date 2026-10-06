@@ -13,13 +13,13 @@ describe("native phone layout", () => {
       "--mobile-top-clearance: max(12px, var(--safe-area-top))",
     );
     expect(styles).toContain(
-      "--mobile-nav-height: calc(56px + max(8px, var(--safe-area-bottom)))",
+      "--mobile-nav-height: calc(80px + max(8px, var(--safe-area-bottom)))",
     );
     expect(styles).toContain(
-      "padding-bottom: calc(var(--mobile-nav-height) + 16px)",
+      "padding-bottom: calc(var(--mobile-nav-height) + 56px)",
     );
     expect(styles).toContain(
-      "scroll-padding-bottom: calc(var(--mobile-nav-height) + 16px)",
+      "scroll-padding-bottom: calc(var(--mobile-nav-height) + 56px)",
     );
   });
 
@@ -38,7 +38,7 @@ describe("native phone layout", () => {
     expect(menu).toContain("calc(100vw - 32px)");
   });
 
-  it("uses five equal destinations with no unlabeled floating action", () => {
+  it("keeps five equal destinations and a large centered voice action", () => {
     expect(styles).toContain(
       "grid-template-columns: repeat(5, minmax(0, 1fr))",
     );
@@ -51,7 +51,15 @@ describe("native phone layout", () => {
     expect(button).toContain("font-weight: 500");
     expect(button).toContain("height: 56px");
     expect(button).toContain("background: transparent");
-    expect(styles).not.toContain("os-mobile-nav__assistant");
+    const microphone = styles.match(
+      /\.os-shell:not\(\[data-platform="desktop"\]\) \.os-mobile-nav__assistant \{([^}]+)\}/,
+    )?.[1];
+    expect(microphone).toContain("width: 64px");
+    expect(microphone).toContain("height: 64px");
+    expect(microphone).toContain("left: 50%");
+    expect(microphone).toContain("top: -40px");
+    expect(microphone).toContain("grid-row: auto");
+    expect(styles).toContain("padding: 24px 8px");
   });
 
   it("prevents desktop greeting motion and line heights leaking onto phones", () => {

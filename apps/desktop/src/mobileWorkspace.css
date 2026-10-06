@@ -2,7 +2,7 @@
 @media (max-width: 720px) {
   .os-shell:not([data-platform="desktop"]) {
     --mobile-top-clearance: max(12px, var(--safe-area-top));
-    --mobile-nav-height: calc(56px + max(8px, var(--safe-area-bottom)));
+    --mobile-nav-height: calc(80px + max(8px, var(--safe-area-bottom)));
     grid-template-columns: minmax(0, 1fr);
   }
   .os-shell:not([data-platform="desktop"]) .os-topbar {
@@ -15,8 +15,8 @@
     min-height: 0;
     padding-inline: 16px;
     padding-top: 12px;
-    padding-bottom: calc(var(--mobile-nav-height) + 16px);
-    scroll-padding-bottom: calc(var(--mobile-nav-height) + 16px);
+    padding-bottom: calc(var(--mobile-nav-height) + 56px);
+    scroll-padding-bottom: calc(var(--mobile-nav-height) + 56px);
   }
   .os-shell:not([data-platform="desktop"]) .os-content__view {
     min-height: 0;
@@ -26,7 +26,7 @@
     grid-template-columns: repeat(5, minmax(0, 1fr));
     height: var(--mobile-nav-height);
     min-height: var(--mobile-nav-height);
-    padding: 0 8px max(8px, var(--safe-area-bottom));
+    padding: 24px 8px max(8px, var(--safe-area-bottom));
     align-items: center;
     background: var(--surface);
   }
@@ -43,16 +43,12 @@
     grid-column: 2;
     grid-row: 1;
   }
-  .os-shell:not([data-platform="desktop"]) .os-mobile-nav > :nth-child(3) {
+  .os-shell:not([data-platform="desktop"]) .os-mobile-nav > :nth-child(4) {
     grid-column: 3;
     grid-row: 1;
   }
-  .os-shell:not([data-platform="desktop"]) .os-mobile-nav > :nth-child(4) {
-    grid-column: 4;
-    grid-row: 1;
-  }
   .os-shell:not([data-platform="desktop"]) .os-mobile-nav > :nth-child(5) {
-    grid-column: 5;
+    grid-column: 4;
     grid-row: 1;
   }
   .os-shell:not([data-platform="desktop"]) .os-mobile-nav > .os-mobile-more {
@@ -103,8 +99,32 @@
     transform: none;
     stroke-width: 2;
   }
+  .os-shell:not([data-platform="desktop"]) .os-mobile-nav__assistant {
+    position: absolute;
+    top: -40px;
+    left: 50%;
+    grid-column: auto;
+    grid-row: auto;
+    width: 64px;
+    height: 64px;
+    min-height: 64px;
+    padding: 0;
+    transform: translateX(-50%);
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--on-accent);
+    box-shadow: var(--shadow-float);
+  }
+  .os-shell:not([data-platform="desktop"]) .os-mobile-nav__assistant svg {
+    flex: none;
+    width: 28px;
+    height: 28px;
+  }
+  .os-shell:not([data-platform="desktop"]) .os-mobile-nav__assistant:active {
+    transform: translateX(-50%) scale(0.96);
+  }
   .os-shell:not([data-platform="desktop"]) .os-mobile-more__items {
-    bottom: calc(100% + 12px);
+    bottom: calc(100% + 48px);
     right: 16px;
     width: min(240px, calc(100vw - 32px));
     padding: 8px;

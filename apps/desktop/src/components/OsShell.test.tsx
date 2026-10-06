@@ -33,17 +33,20 @@ describe("OS shell platform layout", () => {
   });
 
   it.each(["web", "android", "ios"] as const)(
-    "keeps five destinations and a labeled voice action in More on %s",
+    "keeps five destinations and the large direct voice action on %s",
     (platform) => {
       const markup = renderShell(platform);
       const bottom = markup.slice(markup.indexOf('<nav class="os-mobile-nav"'));
       expect(bottom).toContain("회의");
       expect(bottom).toContain("더보기");
-      expect(bottom).not.toContain("os-mobile-nav__assistant");
+      expect(bottom).toContain("os-mobile-nav__assistant");
       expect(bottom).toContain('aria-label="지민에게 말하기"');
       expect(bottom.indexOf("프로젝트")).toBeLessThan(bottom.indexOf("일정"));
-      expect(bottom.indexOf("os-mobile-more__items")).toBeLessThan(
+      expect(bottom.indexOf("프로젝트")).toBeLessThan(
         bottom.indexOf('aria-label="지민에게 말하기"'),
+      );
+      expect(bottom.indexOf('aria-label="지민에게 말하기"')).toBeLessThan(
+        bottom.indexOf("일정"),
       );
       expect(bottom.indexOf("일정")).toBeLessThan(bottom.indexOf("회의"));
       expect(bottom.indexOf("회의")).toBeLessThan(bottom.indexOf("더보기"));
