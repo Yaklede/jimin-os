@@ -409,7 +409,7 @@ export function VoiceCommandSheet({
         role="dialog"
         tabIndex={-1}
         data-dragging={dragging}
-        style={{ transform: `translateY(${dragOffset}px)` }}
+        style={{ transform: `translateY(${Math.round(dragOffset)}px)` }}
       >
         <div
           className="voice-sheet__grab-area"

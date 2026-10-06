@@ -159,8 +159,8 @@ export const projectCopy = {
   collapseProjectOverview: "프로젝트 정보 접기",
   editTitle: "프로젝트 수정",
   editDescription: "목표와 현재 상태, 다음 행동을 최신 내용으로 바꿔요.",
-  stopEditing: "수정 그만두기",
-  saveChanges: "변경 내용 저장하기",
+  saveChanges: "저장하기",
+  deleteAction: "삭제",
   projectUpdated: "프로젝트를 최신 내용으로 바꿨어요.",
   projectUpdateNotice:
     "프로젝트를 바꾸지 못했어요. 최신 상태를 불러온 뒤 다시 시도해 주세요.",
@@ -218,7 +218,24 @@ export const projectCopy = {
   inflowHomeEyebrow: "새로 들어온 업무",
   inflowHomeTitle: "새로운 업무 요청을 정리했어요",
   inflowHomeDescription:
-    "AI가 대화 맥락을 읽고 새 업무만 정리했어요. 담당자와 마감일을 확인해 주세요.",
+    "Google Chat에서 AI가 찾은 업무 후보예요. 할 일인지 확인하고 담당자와 마감일을 정해 등록해 주세요.",
+  inflowHomeViews: "업무 요청 보기",
+  inflowHomeListView: "목록",
+  inflowHomeCalendarView: "받은 날짜",
+  inflowHomeCalendarHint: "받은 날짜를 선택하면 업무 요청을 볼 수 있어요.",
+  inflowHomeCalendarScope:
+    "아직 등록하지 않은 업무 후보를 받은 날짜 기준으로 보여줘요.",
+  inflowHomeRequestCount: (count: number) => `업무 요청 ${count}건`,
+  inflowHomeCalendarCount: (count: number) => `${count}건`,
+  inflowHomeCalendarDate: (label: string, count: number) =>
+    `${label}, 업무 요청 ${count}건`,
+  inflowHomeDateEmpty: "이 날짜에 받은 업무 요청이 없어요",
+  inflowHomeDateEmptyHelp:
+    "표시가 있는 날짜를 선택하거나 목록에서 전체 요청을 확인해 보세요.",
+  inflowHomeDatePending: "받은 날짜 확인 필요",
+  inflowHomeCloseDetail: "상세 닫기",
+  inflowHomeScrollHint: "목록 안에서 스크롤해 더 볼 수 있어요.",
+  inflowHomeReceivedOn: (label: string) => `${label} 받은 요청`,
   inflowHomeQueueTitle: "확인할 요청",
   inflowHomeSelectedLabel: "선택한 업무",
   inflowHomeSelectedRequest: (senderName: string) =>
@@ -247,8 +264,9 @@ export const projectCopy = {
     "할 일 등록과 원문 표시, 마감일 답글 상태를 함께 확인할 수 있어요.",
   inflowNoSource: "아직 확인할 Chat 공간을 연결하지 않았어요.",
   inflowPromote: "할 일로 정리하기",
+  inflowRegister: "등록하기",
   inflowPromoteAndNotify: "할 일로 정리하고 알리기",
-  inflowPromoting: "할 일로 정리하는 중",
+  inflowPromoting: "등록하는 중",
   inflowDismiss: "업무 아님",
   inflowAnalyzing: "대화 맥락을 읽고 업무 내용을 정리하고 있어요.",
   inflowAnalysisHelp:

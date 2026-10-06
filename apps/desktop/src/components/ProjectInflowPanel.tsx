@@ -200,6 +200,7 @@ export function ProjectInflowPanel({
           <label>
             <span>{copy.projects.inflowAccountLabel}</span>
             <select
+              aria-label={copy.projects.inflowAccountLabel}
               value={accountId}
               disabled={saving}
               onChange={(event) => {
@@ -217,6 +218,7 @@ export function ProjectInflowPanel({
           <label>
             <span>{copy.projects.inflowSpaceLabel}</span>
             <select
+              aria-label={copy.projects.inflowSpaceLabel}
               value={spaceName}
               disabled={loading || saving}
               onChange={(event) => setSpaceName(event.target.value)}
@@ -233,6 +235,7 @@ export function ProjectInflowPanel({
             <label className="project-inflow__acknowledge">
               <input
                 type="checkbox"
+                aria-label={copy.projects.inflowAckLabel}
                 checked={acknowledge}
                 disabled={saving}
                 onChange={(event) => setAcknowledge(event.target.checked)}
@@ -242,6 +245,7 @@ export function ProjectInflowPanel({
             <label className="project-inflow__acknowledge">
               <input
                 type="checkbox"
+                aria-label={copy.projects.inflowImportHistoryLabel}
                 checked={importHistory}
                 disabled={saving}
                 onChange={(event) => setImportHistory(event.target.checked)}
@@ -446,6 +450,9 @@ export function InflowItemRow({
     [conversationId],
   );
   const [editing, setEditing] = useState(Boolean(restoredDraft));
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  const editButtonRef = useRef<HTMLButtonElement>(null);
+  const wasEditingRef = useRef(editing);
   const [promoting, setPromoting] = useState(false);
   const [promotionError, setPromotionError] = useState<string>();
   const messages = item.messages ?? [
@@ -516,6 +523,12 @@ export function InflowItemRow({
   const canNotifyAssignee = Boolean(
     assigneeName && item.notifiableAssigneeNames?.includes(assigneeName),
   );
+
+  useEffect(() => {
+    if (editing) titleInputRef.current?.focus();
+    else if (wasEditingRef.current) editButtonRef.current?.focus();
+    wasEditingRef.current = editing;
+  }, [editing]);
 
   useEffect(() => {
     if (!hasUsableAnalysis) return;
@@ -670,7 +683,11 @@ export function InflowItemRow({
         <span>{item.sourceName}</span>
         <span>대화 {messageCount}개</span>
         <span>{formatConversationRange(firstReceivedAt, item.receivedAt)}</span>
-        {item.acknowledged && <span>👀 표시 완료</span>}
+        {item.acknowledged && (
+          <span className="project-inflow-item__acknowledged">
+            <Eye aria-hidden="true" /> 표시 완료
+          </span>
+        )}
       </div>
       <div className="project-inflow-item__summary">
         <strong>{suggestedTitle}</strong>
@@ -946,6 +963,8 @@ export function InflowItemRow({
             <label className="project-inflow-item__title-field">
               <span>{copy.projects.inflowTaskTitleLabel}</span>
               <input
+                ref={titleInputRef}
+                aria-label={copy.projects.inflowTaskTitleLabel}
                 value={title}
                 maxLength={300}
                 disabled={saving}
@@ -962,6 +981,7 @@ export function InflowItemRow({
             <label className="project-inflow-item__notes-field">
               <span>{copy.projects.inflowTaskNotesLabel}</span>
               <textarea
+                aria-label={copy.projects.inflowTaskNotesLabel}
                 value={notes}
                 maxLength={10_000}
                 rows={8}
@@ -979,6 +999,7 @@ export function InflowItemRow({
             <label>
               <span>{copy.projects.inflowAssigneeLabel}</span>
               <select
+                aria-label={copy.projects.inflowAssigneeLabel}
                 value={assigneeName}
                 disabled={saving}
                 onChange={(event) => {
@@ -992,6 +1013,22 @@ export function InflowItemRow({
                     {name}
                   </option>
                 ))}
+              </select>
+            </label>
+            <label>
+              <span>{copy.projects.inflowPriorityLabel}</span>
+              <select
+                aria-label={copy.projects.inflowPriorityLabel}
+                value={priority}
+                disabled={saving}
+                onChange={(event) => {
+                  markDirty("priority");
+                  setPriority(event.target.value);
+                }}
+              >
+                <option value="1">{copy.forms.priorityNormal}</option>
+                <option value="2">{copy.forms.priorityImportant}</option>
+                <option value="3">{copy.forms.priorityHighest}</option>
               </select>
             </label>
             <div className="project-inflow-item__deadline-field">
@@ -1022,6 +1059,8 @@ export function InflowItemRow({
             <label className="project-inflow-item__no-deadline">
               <input
                 type="checkbox"
+                role="switch"
+                aria-label={copy.projects.inflowWithoutDeadline}
                 checked={withoutDeadline}
                 disabled={saving}
                 onChange={(event) => {
@@ -1032,21 +1071,6 @@ export function InflowItemRow({
                 }}
               />
               <span>{copy.projects.inflowWithoutDeadline}</span>
-            </label>
-            <label>
-              <span>{copy.projects.inflowPriorityLabel}</span>
-              <select
-                value={priority}
-                disabled={saving}
-                onChange={(event) => {
-                  markDirty("priority");
-                  setPriority(event.target.value);
-                }}
-              >
-                <option value="1">{copy.forms.priorityNormal}</option>
-                <option value="2">{copy.forms.priorityImportant}</option>
-                <option value="3">{copy.forms.priorityHighest}</option>
-              </select>
             </label>
           </div>
           {promotionError && (
@@ -1065,7 +1089,7 @@ export function InflowItemRow({
                 : copy.projects.inflowAssigneeNotificationOff}
             </p>
           )}
-          <div>
+          <div className="project-inflow-item__register-actions">
             <button
               className="primary-button focus-visible-control"
               type="submit"
@@ -1088,9 +1112,7 @@ export function InflowItemRow({
               )}
               {promoting
                 ? copy.projects.inflowPromoting
-                : canNotifyAssignee
-                  ? copy.projects.inflowPromoteAndNotify
-                  : copy.projects.inflowPromote}
+                : copy.projects.inflowRegister}
             </button>
             <button
               className="secondary-button focus-visible-control"
@@ -1110,6 +1132,7 @@ export function InflowItemRow({
       ) : (
         <div className="project-inflow-item__actions">
           <button
+            ref={editButtonRef}
             className="primary-button focus-visible-control"
             type="button"
             disabled={saving}

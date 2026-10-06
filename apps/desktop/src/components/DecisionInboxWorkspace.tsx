@@ -1,5 +1,4 @@
 import {
-  ArrowRight,
   CheckCircle2,
   Clock3,
   Inbox,
@@ -17,7 +16,6 @@ import {
 import { type RecommendationDecision } from "../api/intelligence";
 import { type ProjectItsmDecisionCandidate } from "../api/itsm";
 import { copy } from "../copy";
-import { EmptySurface } from "./HomeWorkspace";
 
 type DecisionInboxWorkspaceProps = {
   recommendations: Recommendation[];
@@ -228,6 +226,23 @@ function ItsmConfirmationSection({
   );
 }
 
+function DecisionEmptySurface({
+  title,
+  description,
+}: {
+  title: string;
+  description: string;
+}) {
+  return (
+    <div className="empty-surface">
+      <div>
+        <strong>{title}</strong>
+        <p>{description}</p>
+      </div>
+    </div>
+  );
+}
+
 function InflowDecisionSection({
   items,
   openingId,
@@ -244,7 +259,7 @@ function InflowDecisionSection({
         <span>{copy.decisions.count(items.length)}</span>
       </header>
       {items.length === 0 ? (
-        <EmptySurface
+        <DecisionEmptySurface
           title={copy.decisions.emptyInflowTitle}
           description={copy.decisions.emptyInflowDescription}
         />
@@ -262,7 +277,6 @@ function InflowDecisionSection({
               <div className="decision-card__body">
                 <div className="decision-card__title-row">
                   <h3>{item.suggestedTaskTitle}</h3>
-                  <span>{copy.decisions.inflowStatus}</span>
                 </div>
                 <p>
                   {item.analysisSummary?.trim() ||
@@ -285,8 +299,11 @@ function InflowDecisionSection({
                 </time>
               </div>
               <div className="decision-card__actions">
+                <span className="decision-card__status">
+                  {copy.decisions.inflowStatus}
+                </span>
                 <button
-                  className="primary-button focus-visible-control"
+                  className="primary-button decision-card__project-action focus-visible-control"
                   type="button"
                   disabled={Boolean(openingId)}
                   onClick={() => void onOpen(item)}
@@ -295,7 +312,6 @@ function InflowDecisionSection({
                     <span className="button-spinner" aria-hidden="true" />
                   )}
                   {copy.decisions.openInProject}
-                  <ArrowRight aria-hidden="true" />
                 </button>
               </div>
             </li>
@@ -356,7 +372,10 @@ function DecisionSection({
         <span>{copy.decisions.count(items.length)}</span>
       </header>
       {items.length === 0 ? (
-        <EmptySurface title={emptyTitle} description={emptyDescription} />
+        <DecisionEmptySurface
+          title={emptyTitle}
+          description={emptyDescription}
+        />
       ) : (
         <ol>
           {items.map((recommendation) => (

@@ -155,7 +155,9 @@ describe("Gmail settings presentation", () => {
       ],
     });
 
-    expect(loadFailure).toContain("계정 다시 확인하기");
+    expect(loadFailure).toContain("확인 필요");
+    expect(loadFailure).toContain("settings-connection-refresh");
+    expect(loadFailure).not.toContain("계정 다시 확인하기");
     expect(reconnect).toContain("다시 연결하기");
   });
 

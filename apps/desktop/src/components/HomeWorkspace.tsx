@@ -1,3 +1,4 @@
+import { TaskSelectionControl } from "./TaskSelectionControl";
 import {
   AlertTriangle,
   AudioLines,
@@ -174,6 +175,7 @@ export function HomeWorkspace({
   onRetryGmailInflowAnalysis,
 }: HomeWorkspaceProps) {
   const [completingTaskId, setCompletingTaskId] = useState<string>();
+  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
   const [assistantFocused, setAssistantFocused] = useState(false);
   const [highlightedHomeTaskId, setHighlightedHomeTaskId] = useState<string>();
   const [overviewFocusTarget, setOverviewFocusTarget] = useState<
@@ -251,6 +253,25 @@ export function HomeWorkspace({
     setOverviewFocusTarget(undefined);
   }, [assistantFocused, overviewFocusTarget]);
 
+  useEffect(() => {
+    const available = new Set(snapshot?.tasks.map((task) => task.id) ?? []);
+    setSelectedTaskIds((ids) => ids.filter((id) => available.has(id)));
+  }, [snapshot?.tasks]);
+
+  async function completeSelectedTasks() {
+    if (completingTaskId) return;
+    const tasks =
+      snapshot?.tasks.filter((task) => selectedTaskIds.includes(task.id)) ?? [];
+    try {
+      for (const task of tasks) {
+        setCompletingTaskId(task.id);
+        await onCompleteTask(task);
+      }
+    } finally {
+      setCompletingTaskId(undefined);
+    }
+  }
+
   async function complete(task: Task) {
     if (completingTaskId) return;
     setCompletingTaskId(task.id);
@@ -278,6 +299,7 @@ export function HomeWorkspace({
             className="home-greeting__decisions home-greeting__meetings focus-visible-control"
             type="button"
             onClick={onOpenMeetings}
+            aria-label={copy.home.openMeetings}
           >
             <AudioLines aria-hidden="true" />
             <span>{copy.home.openMeetings}</span>
@@ -286,6 +308,7 @@ export function HomeWorkspace({
             className="home-greeting__decisions home-greeting__mobile-settings focus-visible-control"
             type="button"
             onClick={onOpenSettings}
+            aria-label={copy.navigation.settings}
           >
             <Settings2 aria-hidden="true" />
             <span>{copy.navigation.settings}</span>
@@ -294,6 +317,7 @@ export function HomeWorkspace({
             className="home-greeting__decisions focus-visible-control"
             type="button"
             onClick={onOpenDecisionInbox}
+            aria-label={copy.home.openDecisionInbox}
           >
             <Inbox aria-hidden="true" />
             <span>{copy.home.openDecisionInbox}</span>
@@ -304,7 +328,7 @@ export function HomeWorkspace({
             onClick={onOpenAssistant}
             aria-label={copy.actions.startAssistantConversation}
           >
-            <Sparkles aria-hidden="true" />
+            <Mic aria-hidden="true" />
           </button>
         </div>
       </header>
@@ -318,13 +342,23 @@ export function HomeWorkspace({
         {recommendationAnnouncement}
       </p>
 
+      {!showingSkeleton && Boolean(snapshot?.inflow.length) && (
+        <HomeInflowReview
+          items={snapshot?.inflow ?? []}
+          saving={inflowSaving}
+          onPromote={onPromoteInflow}
+          onDismiss={onDismissInflow}
+          onRetryAnalysis={onRetryInflowAnalysis}
+          onRetryCompletion={onRetryInflowCompletion}
+        />
+      )}
+
       {assistantFocused && (
         <nav
           className="home-context-strip"
           aria-labelledby="home-context-strip-title"
         >
           <div className="home-context-strip__heading">
-            <Sparkles aria-hidden="true" />
             <div>
               <strong id="home-context-strip-title">
                 {copy.home.verifiedContextLabel}
@@ -425,17 +459,6 @@ export function HomeWorkspace({
               await onOpenTask(task);
             }}
           />
-
-          {!showingSkeleton && Boolean(snapshot?.inflow.length) && (
-            <HomeInflowReview
-              items={snapshot?.inflow ?? []}
-              saving={inflowSaving}
-              onPromote={onPromoteInflow}
-              onDismiss={onDismissInflow}
-              onRetryAnalysis={onRetryInflowAnalysis}
-              onRetryCompletion={onRetryInflowCompletion}
-            />
-          )}
 
           {!showingSkeleton && Boolean(snapshot?.weeklyReports.length) && (
             <WeeklyOperationsBrief
@@ -580,6 +603,7 @@ export function HomeWorkspace({
                             : undefined
                         }
                         data-highlighted={highlightedHomeTaskId === task.id}
+                        data-selected={selectedTaskIds.includes(task.id)}
                         tabIndex={
                           highlightedHomeTaskId === task.id ? -1 : undefined
                         }
@@ -587,15 +611,25 @@ export function HomeWorkspace({
                         <button
                           className="home-task-list__complete focus-visible-control"
                           type="button"
-                          onClick={() => void complete(task)}
+                          role="checkbox"
+                          aria-checked={selectedTaskIds.includes(task.id)}
+                          onClick={() =>
+                            setSelectedTaskIds((ids) =>
+                              ids.includes(task.id)
+                                ? ids.filter((id) => id !== task.id)
+                                : [...ids, task.id],
+                            )
+                          }
                           disabled={Boolean(completingTaskId)}
-                          aria-label={copy.home.completeTask(task.title)}
+                          aria-label={`${task.title} 선택`}
                         >
                           {completingTaskId === task.id ? (
                             <span
                               className="button-spinner"
                               aria-hidden="true"
                             />
+                          ) : selectedTaskIds.includes(task.id) ? (
+                            <CheckCircle2 aria-hidden="true" />
                           ) : (
                             <Circle aria-hidden="true" />
                           )}
@@ -637,6 +671,21 @@ export function HomeWorkspace({
                     ))}
                   </ul>
                 ) : null}
+                {selectedTaskIds.length > 0 && (
+                  <div className="home-task-selection">
+                    <span role="status">{selectedTaskIds.length}개 선택됨</span>
+                    <button
+                      className="primary-button focus-visible-control"
+                      type="button"
+                      disabled={Boolean(completingTaskId)}
+                      onClick={() => void completeSelectedTasks()}
+                    >
+                      {completingTaskId
+                        ? "완료 처리 중…"
+                        : "선택한 할 일 완료하기"}
+                    </button>
+                  </div>
+                )}
                 {!showingSkeleton && taskCount > 3 && (
                   <button
                     className="home-tasks__mobile-more focus-visible-control"
@@ -1090,16 +1139,6 @@ function HomeAssistantCommand({
               </h3>
               <p>{copy.home.followUpContext}</p>
             </div>
-            <button
-              className="text-button focus-visible-control"
-              type="button"
-              onClick={() => void startNewRequest()}
-              disabled={sending || active || startingNew}
-            >
-              {startingNew
-                ? copy.home.startingNewRequest
-                : copy.home.startNewRequest}
-            </button>
           </div>
           {composer}
         </section>
@@ -1207,19 +1246,13 @@ function WeeklyOperationsBrief({
           <ul>
             {priorityTasks.map((task) => (
               <li key={task.id}>
-                <button
+                <TaskSelectionControl
+                  title={task.title}
                   className="home-weekly-operations__complete focus-visible-control"
-                  type="button"
                   disabled={Boolean(completingTaskId)}
-                  onClick={() => void onCompleteTask(task)}
-                  aria-label={copy.home.completeTask(task.title)}
-                >
-                  {completingTaskId === task.id ? (
-                    <span className="button-spinner" aria-hidden="true" />
-                  ) : (
-                    <Circle aria-hidden="true" />
-                  )}
-                </button>
+                  busy={completingTaskId === task.id}
+                  onComplete={() => onCompleteTask(task)}
+                />
                 <button
                   className="home-weekly-operations__task focus-visible-control"
                   type="button"
@@ -1570,19 +1603,13 @@ function DeadlineBrief({
           const state = taskDueState(task);
           return (
             <li key={task.id} data-due-state={state}>
-              <button
+              <TaskSelectionControl
+                title={task.title}
                 className="home-deadline-brief__complete focus-visible-control"
-                type="button"
                 disabled={Boolean(completingTaskId)}
-                onClick={() => void onCompleteTask(task)}
-                aria-label={copy.home.completeTask(task.title)}
-              >
-                {completingTaskId === task.id ? (
-                  <span className="button-spinner" aria-hidden="true" />
-                ) : (
-                  <Circle aria-hidden="true" />
-                )}
-              </button>
+                busy={completingTaskId === task.id}
+                onComplete={() => onCompleteTask(task)}
+              />
               <button
                 className="home-deadline-brief__task focus-visible-control"
                 type="button"
