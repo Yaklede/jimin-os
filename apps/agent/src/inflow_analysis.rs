@@ -6,7 +6,6 @@ use jimin_storage::{
     inflow_analysis::{
         ClaimedInflowAnalysis, InflowAnalysisResult, InflowClassification, InflowReferenceDocument,
     },
-    itsm::ProjectItsmCandidateOutcome,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -83,30 +82,12 @@ where
             return Ok(true);
         }
     };
-    let mut itsm_resolution = match (job.itsm_enrichment_enabled, itsm_client) {
-        (true, Some(itsm_client)) => {
-            itsm_client
-                .resolve_messages(job.itsm_project_id.as_deref(), &job.messages)
-                .await
-        }
+    let itsm_resolution = match (job.itsm_enrichment_enabled, itsm_client) {
+        (true, Some(itsm_client)) => itsm_client.resolve_messages(&job.messages).await,
         _ => crate::itsm::ItsmResolution {
             references: Vec::new(),
-            detected_project: None,
         },
     };
-    let mut itsm_confirmation_required = false;
-    if let Some(detected_project) = itsm_resolution.detected_project.as_ref() {
-        let candidate = database
-            .propose_project_itsm_candidate(
-                job.user_id,
-                job.project_id,
-                &detected_project.id,
-                &detected_project.name,
-            )
-            .await?;
-        itsm_confirmation_required = candidate == ProjectItsmCandidateOutcome::ConfirmationRequired;
-        enforce_itsm_candidate(&mut itsm_resolution, candidate);
-    }
     let itsm_references = itsm_resolution.references;
     let completed = client
         .run_structured_turn_with_response_streaming_with_options(
@@ -122,7 +103,6 @@ where
         Ok(completed) => completed,
         Err(error) => {
             fail(database, &job, runner_id, error.code()).await?;
-            requeue_after_itsm_confirmation(database, &job, itsm_confirmation_required).await?;
             return Ok(true);
         }
     };
@@ -134,7 +114,6 @@ where
             "inflow.invalid_structured_response",
         )
         .await?;
-        requeue_after_itsm_confirmation(database, &job, itsm_confirmation_required).await?;
         return Ok(true);
     };
     result.reference_documents = itsm_references
@@ -154,40 +133,7 @@ where
     {
         return Err(WorkerError::LostLease);
     }
-    requeue_after_itsm_confirmation(database, &job, itsm_confirmation_required).await?;
     Ok(true)
-}
-
-async fn requeue_after_itsm_confirmation(
-    database: &Database,
-    job: &ClaimedInflowAnalysis,
-    confirmation_required: bool,
-) -> Result<(), WorkerError> {
-    if confirmation_required {
-        database
-            .requeue_inflow_analysis_after_itsm_confirmation(job.user_id, job.project_id, job.id)
-            .await?;
-    }
-    Ok(())
-}
-
-fn enforce_itsm_candidate(
-    resolution: &mut crate::itsm::ItsmResolution,
-    outcome: ProjectItsmCandidateOutcome,
-) {
-    match outcome {
-        ProjectItsmCandidateOutcome::Confirmed => {}
-        ProjectItsmCandidateOutcome::ConfirmationRequired => {
-            resolution.redact("itsm.confirmation_required");
-        }
-        ProjectItsmCandidateOutcome::ProjectMismatch
-        | ProjectItsmCandidateOutcome::CandidateMismatch => {
-            resolution.redact("itsm.project_mismatch");
-        }
-        ProjectItsmCandidateOutcome::ConnectionUnavailable => {
-            resolution.redact("itsm.connection_unavailable");
-        }
-    }
 }
 
 fn analysis_prompt(
@@ -344,6 +290,7 @@ fn append_analysis_instructions(prompt: &mut String) {
         "대화 전체를 하나의 스레드로 읽고 새 할 일인지, 기존 할 일의 후속 댓글인지, 질문·상태 공유·잡담·중복인지 판단하세요.",
         "인사말, 멘션, 전달 문구, 같은 내용의 반복 댓글을 제목이나 요약에 그대로 복사하지 마세요. 실제로 해야 할 행동과 완료 결과를 자연스러운 한국어로 다시 작성하세요.",
         "URL은 제목에 넣지 않되 삭제하거나 무시하지 마세요. 관련 문서·이슈·가이드의 근거이므로 주변 문맥을 업무 판단에 반영하세요. 원문 URL은 앱이 별도 관련 링크로 보존합니다.",
+        "조회한 ITSM 원문은 실제 요구사항과 상세 범위를 정리하는 근거로 사용하세요. ITSM 프로젝트명은 원문 메타데이터이며, 현재 앱 프로젝트와 달라도 제공된 링크를 분석하세요. 프로젝트 불일치를 이유로 내용을 제외하거나 연결 확인을 요청하지 마세요. 할 일은 현재 앱 프로젝트에서 정리하며 프로젝트를 임의로 변경하지 마세요.",
         "new_task일 때만 taskTitle, actionItems, completionCriteria, assigneeName, dueAt, priority를 채우세요. 다른 분류에서는 이 필드를 빈 문자열·빈 배열·0으로 반환하세요.",
         "담당자는 등록된 후보에 명확히 포함된 이름만 사용하고, 마감일은 대화에 명시된 경우에만 RFC3339로 반환하세요. 기본 시간대는 Asia/Seoul이며 추측하지 마세요.",
         "기존 연결 할 일이 있으면 단순 재촉, 확인 요청, 진행 공유는 follow_up으로 분류하세요. 별개의 결과물이 명확히 추가된 경우에만 new_task입니다.",
@@ -473,12 +420,11 @@ async fn fail(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_PROMPT_CHARS, analysis_prompt, enforce_itsm_candidate, validated_analysis};
-    use crate::itsm::{DetectedItsmProject, ItsmReferenceSnapshot, ItsmResolution};
+    use super::{MAX_PROMPT_CHARS, analysis_prompt, validated_analysis};
+    use crate::itsm::ItsmReferenceSnapshot;
     use jimin_storage::inflow_analysis::{
         ClaimedInflowAnalysis, InflowAnalysisMessage, InflowClassification,
     };
-    use jimin_storage::itsm::ProjectItsmCandidateOutcome;
     use time::OffsetDateTime;
     use uuid::Uuid;
 
@@ -522,71 +468,99 @@ mod tests {
     }
 
     #[test]
-    fn references_are_redacted_until_the_owner_confirms_the_candidate() {
-        for (outcome, expected_error) in [
-            (
-                ProjectItsmCandidateOutcome::ConfirmationRequired,
-                "itsm.confirmation_required",
-            ),
-            (
-                ProjectItsmCandidateOutcome::ProjectMismatch,
-                "itsm.project_mismatch",
-            ),
-            (
-                ProjectItsmCandidateOutcome::CandidateMismatch,
-                "itsm.project_mismatch",
-            ),
-            (
-                ProjectItsmCandidateOutcome::ConnectionUnavailable,
-                "itsm.connection_unavailable",
-            ),
-        ] {
-            let mut resolution = ItsmResolution {
-                references: vec![ItsmReferenceSnapshot {
-                    url: "https://itsm.bix.bz/issues/3876".to_owned(),
-                    external_id: "3876".to_owned(),
-                    title: Some("외부 프로젝트 제목".to_owned()),
-                    original_content: Some("외부 프로젝트 원문".to_owned()),
-                    error_code: None,
-                }],
-                detected_project: Some(DetectedItsmProject {
-                    id: "42".to_owned(),
-                    name: "외부 후보 프로젝트".to_owned(),
-                }),
-            };
-            enforce_itsm_candidate(&mut resolution, outcome);
-            assert!(resolution.detected_project.is_none());
-            assert!(resolution.references[0].title.is_none());
-            assert!(resolution.references[0].original_content.is_none());
-            assert_eq!(resolution.references[0].error_code, Some(expected_error));
-            let prompt = analysis_prompt(&job(), &resolution.references);
-            assert!(!prompt.contains("외부 프로젝트 제목"));
-            assert!(!prompt.contains("외부 프로젝트 원문"));
-            assert!(!prompt.contains("외부 후보 프로젝트"));
-        }
+    fn failed_reference_is_reported_without_inventing_original_content() {
+        let prompt = analysis_prompt(
+            &job(),
+            &[ItsmReferenceSnapshot {
+                url: "https://itsm.bix.bz/issues/3876".to_owned(),
+                external_id: "3876".to_owned(),
+                title: None,
+                original_content: None,
+                error_code: Some("itsm.authentication_required"),
+            }],
+        );
+        assert!(prompt.contains("원문 조회 상태: itsm.authentication_required"));
+        assert!(prompt.contains("https://itsm.bix.bz/issues/3876"));
     }
 
     #[test]
-    fn confirmed_candidate_keeps_the_trusted_reference_for_analysis() {
-        let mut resolution = ItsmResolution {
-            references: vec![ItsmReferenceSnapshot {
+    fn supplied_links_are_analyzed_without_changing_the_app_project() {
+        let prompt = analysis_prompt(
+            &job(),
+            &[ItsmReferenceSnapshot {
                 url: "https://itsm.bix.bz/issues/3876".to_owned(),
                 external_id: "3876".to_owned(),
                 title: Some("거래내역 정산방식 표시".to_owned()),
-                original_content: Some("확인된 프로젝트 원문".to_owned()),
+                original_content: Some(
+                    "ITSM 프로젝트: 외부 프로젝트 (43)\n실제 요구사항: 정산방식 표시".to_owned(),
+                ),
                 error_code: None,
             }],
-            detected_project: Some(DetectedItsmProject {
-                id: "42".to_owned(),
-                name: "비스킷링크".to_owned(),
-            }),
-        };
+        );
+        assert!(prompt.contains("프로젝트: 비스킷링크"));
+        assert!(prompt.contains("ITSM 프로젝트: 외부 프로젝트 (43)"));
+        assert!(prompt.contains("실제 요구사항: 정산방식 표시"));
+        assert!(
+            prompt
+                .contains("프로젝트 불일치를 이유로 내용을 제외하거나 연결 확인을 요청하지 마세요")
+        );
+        assert!(prompt.contains("프로젝트를 임의로 변경하지 마세요"));
+    }
 
-        enforce_itsm_candidate(&mut resolution, ProjectItsmCandidateOutcome::Confirmed);
-
-        assert_eq!(
-            resolution.references[0].original_content.as_deref(),
-            Some("확인된 프로젝트 원문")
+    #[tokio::test]
+    #[ignore = "explicit live smoke uses a configured Codex-managed account"]
+    async fn live_gpt_6_1_sol_analyzes_itsm_evidence_as_structured_work() {
+        let binary = std::env::var_os("JIMIN_CODEX_SMOKE_BIN").expect("explicit smoke binary");
+        let workspace = std::env::temp_dir();
+        let mut fixture = job();
+        fixture.messages[0].content_text = "https://itsm.example.test/issues/123 원문을 보고 등록 화면에 MID를 표시해 주세요. 담당자는 김경주입니다.".to_owned();
+        let references = vec![ItsmReferenceSnapshot {
+            url: "https://itsm.example.test/issues/123".to_owned(),
+            external_id: "123".to_owned(),
+            title: Some("등록 화면 MID 표시".to_owned()),
+            original_content: Some("ITSM 프로젝트: 외부 참고 프로젝트 (99)\n원문 설명\n등록 화면에 MID를 표시한다. 화면 조회 응답에 MID 필드를 추가하고 표시 여부를 확인한다.".to_owned()),
+            error_code: None,
+        }];
+        let mut process =
+            jimin_codex_client::AppServerProcess::spawn(std::path::Path::new(&binary))
+                .await
+                .expect("compatible smoke runtime");
+        let result = tokio::time::timeout(std::time::Duration::from_mins(2), async {
+            let client = process.client_mut();
+            client.initialize().await.expect("smoke initialize");
+            let thread = client
+                .start_ephemeral_thread_in(&workspace, Some("gpt-6.1-sol"))
+                .await
+                .expect("smoke thread");
+            client
+                .run_structured_turn_with_response_streaming_with_options(
+                    &thread,
+                    &analysis_prompt(&fixture, &references),
+                    Some("gpt-6.1-sol"),
+                    Some("low"),
+                    &super::analysis_schema(),
+                    |_| {},
+                )
+                .await
+        })
+        .await;
+        process.shutdown().await.expect("smoke cleanup");
+        let completed = result.expect("smoke timeout").expect("structured turn");
+        let analysis = validated_analysis(&completed.response).expect("valid structured result");
+        assert_eq!(analysis.classification, InflowClassification::NewTask);
+        assert!(
+            analysis
+                .suggested_task_title
+                .as_deref()
+                .is_some_and(|title| title.contains("MID"))
+        );
+        assert_eq!(analysis.suggested_assignee_name.as_deref(), Some("김경주"));
+        assert!(!analysis.summary.contains("프로젝트 불일치"));
+        assert!(
+            analysis
+                .suggested_action_items
+                .iter()
+                .any(|item| item.contains("MID"))
         );
     }
 

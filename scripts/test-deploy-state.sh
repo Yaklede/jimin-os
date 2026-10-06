@@ -46,7 +46,7 @@ CODEX_VERSION=9.9.9
 export JIMIN_BUILD_SHA CODEX_VERSION
 unset JIMIN_RELEASE_ENV
 [[ "$(effective_value JIMIN_BUILD_SHA)" == "$(printf '0%.0s' {1..39})3" ]]
-[[ "$(effective_value CODEX_VERSION)" == "0.144.1" ]]
+[[ "$(effective_value CODEX_VERSION)" == "0.159.0" ]]
 JIMIN_RELEASE_ENV="${release_file}"
 export JIMIN_RELEASE_ENV
 [[ "$(effective_value JIMIN_BUILD_SHA)" == "$(printf '0%.0s' {1..39})4" ]]

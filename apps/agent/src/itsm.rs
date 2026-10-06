@@ -39,18 +39,6 @@ pub(crate) struct ItsmReferenceSnapshot {
 
 pub(crate) struct ItsmResolution {
     pub references: Vec<ItsmReferenceSnapshot>,
-    pub detected_project: Option<DetectedItsmProject>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct DetectedItsmProject {
-    pub id: String,
-    pub name: String,
-}
-
-struct FetchedItsmReference {
-    snapshot: ItsmReferenceSnapshot,
-    project: Option<DetectedItsmProject>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,15 +131,8 @@ impl ItsmClient {
 
     pub(crate) async fn resolve_messages(
         &self,
-        expected_project_id: Option<&str>,
         messages: &[InflowAnalysisMessage],
     ) -> ItsmResolution {
-        if expected_project_id.is_some_and(|project_id| !valid_project_id(project_id)) {
-            return ItsmResolution {
-                references: Vec::new(),
-                detected_project: None,
-            };
-        }
         let mut issue_ids = BTreeSet::new();
         for message in messages {
             for candidate in http_links(&message.content_text) {
@@ -172,15 +153,14 @@ impl ItsmClient {
         for issue_id in issue_ids {
             let Ok(reference) = tokio::time::timeout_at(deadline, self.fetch_issue(issue_id)).await
             else {
-                fetched_references.push(FetchedItsmReference {
-                    snapshot: self.failed_issue_snapshot(issue_id, "itsm.unavailable"),
-                    project: None,
-                });
+                fetched_references.push(self.failed_issue_snapshot(issue_id, "itsm.unavailable"));
                 break;
             };
             fetched_references.push(reference);
         }
-        scope_checked_resolution(expected_project_id, fetched_references)
+        ItsmResolution {
+            references: fetched_references,
+        }
     }
 
     fn issue_id(&self, candidate: &str) -> Option<u64> {
@@ -225,7 +205,7 @@ impl ItsmClient {
         failed_snapshot(self.issue_page_url(issue_id), issue_id, code)
     }
 
-    async fn fetch_issue(&self, issue_id: u64) -> FetchedItsmReference {
+    async fn fetch_issue(&self, issue_id: u64) -> ItsmReferenceSnapshot {
         let page_url = self.issue_page_url(issue_id);
         let mut api_url = self
             .base_url
@@ -279,34 +259,27 @@ impl ItsmClient {
     }
 }
 
-fn snapshot_from_issue(page_url: Url, issue_id: u64, issue: &RedmineIssue) -> FetchedItsmReference {
+fn snapshot_from_issue(
+    page_url: Url,
+    issue_id: u64,
+    issue: &RedmineIssue,
+) -> ItsmReferenceSnapshot {
     if issue.id != issue_id || issue.subject.trim().is_empty() {
         return failed_reference(page_url, issue_id, "itsm.invalid_response");
     }
     let project_id = issue.project.id.to_string();
-    let Some(project_name) = issue
-        .project
-        .name
-        .as_deref()
-        .and_then(sanitized_project_name)
-    else {
-        return failed_reference(page_url, issue_id, "itsm.invalid_response");
-    };
     if !valid_project_id(&project_id) {
         return failed_reference(page_url, issue_id, "itsm.invalid_response");
     }
-    FetchedItsmReference {
-        snapshot: ItsmReferenceSnapshot {
-            url: page_url.into(),
-            external_id: issue_id.to_string(),
-            title: Some(bounded_title(&issue.subject)),
-            original_content: Some(render_original_content(issue)),
-            error_code: None,
-        },
-        project: Some(DetectedItsmProject {
-            id: project_id,
-            name: project_name,
-        }),
+    // The API key's upstream authorization decides whether this issue is
+    // readable. Its upstream project is reference metadata, not a Jimin OS
+    // assignment boundary or a prerequisite for reading the supplied link.
+    ItsmReferenceSnapshot {
+        url: page_url.into(),
+        external_id: issue_id.to_string(),
+        title: Some(bounded_title(&issue.subject)),
+        original_content: Some(render_original_content(issue)),
+        error_code: None,
     }
 }
 
@@ -322,47 +295,6 @@ fn sanitized_project_name(value: &str) -> Option<String> {
         return None;
     }
     Some(bounded_chars(value, MAX_PROJECT_NAME_CHARS, "…"))
-}
-
-fn scope_checked_resolution(
-    expected_project_id: Option<&str>,
-    fetched_references: Vec<FetchedItsmReference>,
-) -> ItsmResolution {
-    let projects = fetched_references
-        .iter()
-        .filter_map(|reference| reference.project.as_ref())
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let scope_mismatch = projects.len() > 1
-        || expected_project_id.is_some_and(|expected| {
-            projects
-                .iter()
-                .any(|project| project.id.as_str() != expected)
-        });
-    let detected_project = (!scope_mismatch && projects.len() == 1)
-        .then(|| projects.first().expect("one project").clone());
-    let mut resolution = ItsmResolution {
-        references: fetched_references
-            .into_iter()
-            .map(|reference| reference.snapshot)
-            .collect(),
-        detected_project,
-    };
-    if scope_mismatch {
-        resolution.redact("itsm.project_mismatch");
-    }
-    resolution
-}
-
-impl ItsmResolution {
-    pub(crate) fn redact(&mut self, error_code: &'static str) {
-        self.detected_project = None;
-        for reference in &mut self.references {
-            reference.title = None;
-            reference.original_content = None;
-            reference.error_code = Some(error_code);
-        }
-    }
 }
 
 fn append_bounded_response(target: &mut Vec<u8>, chunk: &[u8]) -> bool {
@@ -387,11 +319,8 @@ fn failed_snapshot(url: Url, issue_id: u64, code: &'static str) -> ItsmReference
     }
 }
 
-fn failed_reference(url: Url, issue_id: u64, code: &'static str) -> FetchedItsmReference {
-    FetchedItsmReference {
-        snapshot: failed_snapshot(url, issue_id, code),
-        project: None,
-    }
+fn failed_reference(url: Url, issue_id: u64, code: &'static str) -> ItsmReferenceSnapshot {
+    failed_snapshot(url, issue_id, code)
 }
 
 fn render_original_content(issue: &RedmineIssue) -> String {
@@ -405,8 +334,7 @@ fn render_original_content(issue: &RedmineIssue) -> String {
         .project
         .name
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+        .and_then(sanitized_project_name);
     sections.push(project_name.map_or_else(
         || format!("ITSM 프로젝트: {}", issue.project.id),
         |name| format!("ITSM 프로젝트: {name} ({})", issue.project.id),
@@ -541,7 +469,7 @@ mod tests {
     use super::{
         ItsmClient, MAX_ORIGINAL_CONTENT_CHARS, MAX_RESPONSE_BYTES, MAX_TITLE_CHARS,
         RedmineIssueEnvelope, append_bounded_response, bounded_title, render_original_content,
-        scope_checked_resolution, snapshot_from_issue,
+        snapshot_from_issue,
     };
     use reqwest::Url;
     use secrecy::SecretString;
@@ -562,6 +490,12 @@ mod tests {
             Some(3_876)
         );
         assert_eq!(client.issue_id("https://evil.example/issues/3876"), None);
+        assert_eq!(client.issue_id("http://itsm.bix.bz/issues/3876"), None);
+        assert_eq!(client.issue_id("https://itsm.bix.bz:444/issues/3876"), None);
+        assert_eq!(
+            client.issue_id("https://user@itsm.bix.bz/issues/3876"),
+            None
+        );
         assert_eq!(
             client.issue_id("https://itsm.bix.bz/issues/not-a-number"),
             None
@@ -619,53 +553,35 @@ mod tests {
     }
 
     #[test]
-    fn bound_project_rejects_another_project_without_exposing_original_content() {
+    fn authorized_issue_keeps_original_content_without_a_project_mapping() {
         let envelope: RedmineIssueEnvelope = serde_json::from_str(
             r#"{
               "issue": {
                 "id": 3876,
-                "project": {"id": 43, "name": "다른 비공개 프로젝트"},
+                "project": {"id": 43, "name": "다른 프로젝트"},
                 "subject": "다른 프로젝트 제목",
-                "description": "노출되면 안 되는 다른 프로젝트 원문"
+                "description": "제공된 링크의 실제 요구사항"
               }
             }"#,
         )
         .expect("numeric Redmine project fixture should parse");
-        let resolution = scope_checked_resolution(
-            Some("42"),
-            vec![snapshot_from_issue(
-                Url::parse("https://itsm.bix.bz/issues/3876").expect("fixture URL should parse"),
-                3_876,
-                &envelope.issue,
-            )],
+        let snapshot = snapshot_from_issue(
+            Url::parse("https://itsm.bix.bz/issues/3876").expect("fixture URL should parse"),
+            3_876,
+            &envelope.issue,
         );
-        let snapshot = &resolution.references[0];
-
-        assert_eq!(snapshot.error_code, Some("itsm.project_mismatch"));
-        assert!(snapshot.title.is_none());
-        assert!(snapshot.original_content.is_none());
-        assert!(!format!("{snapshot:?}").contains("비공개 프로젝트"));
-
-        let matching_resolution = scope_checked_resolution(
-            Some("43"),
-            vec![snapshot_from_issue(
-                Url::parse("https://itsm.bix.bz/issues/3876").expect("fixture URL should parse"),
-                3_876,
-                &envelope.issue,
-            )],
-        );
-        let matching_snapshot = &matching_resolution.references[0];
-        assert!(matching_snapshot.error_code.is_none());
+        assert!(snapshot.error_code.is_none());
+        assert_eq!(snapshot.title.as_deref(), Some("다른 프로젝트 제목"));
         assert!(
-            matching_snapshot
+            snapshot
                 .original_content
                 .as_deref()
-                .is_some_and(|content| content.contains("다른 프로젝트 원문"))
+                .is_some_and(|content| content.contains("제공된 링크의 실제 요구사항"))
         );
     }
 
     #[test]
-    fn unbound_project_detects_one_scope_and_redacts_mixed_scopes() {
+    fn references_from_different_upstream_projects_are_kept_independently() {
         let first: RedmineIssueEnvelope = serde_json::from_str(
             r#"{"issue":{"id":3876,"project":{"id":42,"name":"비스킷링크"},"subject":"첫 이슈","description":"첫 원문"}}"#,
         )
@@ -674,26 +590,8 @@ mod tests {
             r#"{"issue":{"id":3877,"project":{"id":43,"name":"다른 프로젝트"},"subject":"다른 이슈","description":"다른 원문"}}"#,
         )
         .expect("second fixture should parse");
-        let single = scope_checked_resolution(
-            None,
-            vec![snapshot_from_issue(
-                Url::parse("https://itsm.bix.bz/issues/3876").expect("fixture URL should parse"),
-                3_876,
-                &first.issue,
-            )],
-        );
-        assert_eq!(
-            single.detected_project.as_ref(),
-            Some(&super::DetectedItsmProject {
-                id: "42".to_owned(),
-                name: "비스킷링크".to_owned(),
-            })
-        );
-        assert!(single.references[0].original_content.is_some());
-
-        let mixed = scope_checked_resolution(
-            None,
-            vec![
+        let mixed = super::ItsmResolution {
+            references: vec![
                 snapshot_from_issue(
                     Url::parse("https://itsm.bix.bz/issues/3876")
                         .expect("fixture URL should parse"),
@@ -707,39 +605,49 @@ mod tests {
                     &second.issue,
                 ),
             ],
+        };
+        assert!(
+            mixed
+                .references
+                .iter()
+                .all(|reference| reference.error_code.is_none())
         );
-        assert!(mixed.detected_project.is_none());
-        assert!(mixed.references.iter().all(|reference| {
-            reference.title.is_none()
-                && reference.original_content.is_none()
-                && reference.error_code == Some("itsm.project_mismatch")
-        }));
-        assert!(!format!("{:?}", mixed.references).contains("첫 원문"));
-        assert!(!format!("{:?}", mixed.references).contains("다른 원문"));
+        assert!(
+            mixed.references[0]
+                .original_content
+                .as_deref()
+                .unwrap()
+                .contains("첫 원문")
+        );
+        assert!(
+            mixed.references[1]
+                .original_content
+                .as_deref()
+                .unwrap()
+                .contains("다른 원문")
+        );
     }
 
     #[test]
-    fn unbound_candidate_requires_a_bounded_project_name() {
+    fn missing_project_name_does_not_discard_an_authorized_issue() {
         let missing_name: RedmineIssueEnvelope = serde_json::from_str(
             r#"{"issue":{"id":3876,"project":{"id":42},"subject":"원문 제목","description":"원문 내용"}}"#,
         )
         .expect("missing Redmine project name should deserialize as optional");
-        let resolution = scope_checked_resolution(
-            None,
-            vec![snapshot_from_issue(
-                Url::parse("https://itsm.bix.bz/issues/3876").expect("fixture URL should parse"),
-                3_876,
-                &missing_name.issue,
-            )],
+        let snapshot = snapshot_from_issue(
+            Url::parse("https://itsm.bix.bz/issues/3876").expect("fixture URL should parse"),
+            3_876,
+            &missing_name.issue,
         );
-
-        assert!(resolution.detected_project.is_none());
-        assert_eq!(
-            resolution.references[0].error_code,
-            Some("itsm.invalid_response")
+        assert!(snapshot.error_code.is_none());
+        assert_eq!(snapshot.title.as_deref(), Some("원문 제목"));
+        assert!(
+            snapshot
+                .original_content
+                .as_deref()
+                .unwrap()
+                .contains("ITSM 프로젝트: 42")
         );
-        assert!(resolution.references[0].title.is_none());
-        assert!(resolution.references[0].original_content.is_none());
     }
 
     #[test]
@@ -760,6 +668,34 @@ mod tests {
                 "unexpected project shapes must fail closed"
             );
         }
+    }
+
+    #[test]
+    fn a_failed_lookup_does_not_discard_other_authorized_references() {
+        let envelope: RedmineIssueEnvelope = serde_json::from_str(
+            r#"{"issue":{"id":3876,"project":{"id":42,"name":"참고 프로젝트"},"subject":"조회된 요구사항","description":"유효한 원문"}}"#,
+        ).expect("fixture");
+        let resolution = super::ItsmResolution {
+            references: vec![
+                snapshot_from_issue(
+                    Url::parse("https://itsm.bix.bz/issues/3876").unwrap(),
+                    3876,
+                    &envelope.issue,
+                ),
+                super::failed_reference(
+                    Url::parse("https://itsm.bix.bz/issues/3877").unwrap(),
+                    3877,
+                    "itsm.authentication_required",
+                ),
+            ],
+        };
+        assert!(resolution.references[0].original_content.is_some());
+        assert!(resolution.references[0].error_code.is_none());
+        assert!(resolution.references[1].original_content.is_none());
+        assert_eq!(
+            resolution.references[1].error_code,
+            Some("itsm.authentication_required")
+        );
     }
 
     #[test]

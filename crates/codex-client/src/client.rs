@@ -43,7 +43,8 @@ pub struct TurnSummary {
 /// A model currently exposed by the managed Codex runtime. The model ID is
 /// passed back to `thread/start` or `thread/resume`; no provider model names
 /// are compiled into Jimin OS.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProcessingModel {
     pub id: String,
     pub display_name: String,
@@ -53,7 +54,8 @@ pub struct ProcessingModel {
     pub supported_reasoning_efforts: Vec<ProcessingReasoningEffort>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProcessingReasoningEffort {
     pub id: String,
     pub description: String,
