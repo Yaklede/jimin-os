@@ -1,6 +1,6 @@
 import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   type GoogleChatAccount,
@@ -22,6 +22,33 @@ import {
 } from "./ProjectInflowPanel";
 
 describe("project inflow deadline", () => {
+  it("restores a saved draft without automatically opening the registration modal", () => {
+    vi.stubGlobal("window", {
+      sessionStorage: {
+        getItem: () =>
+          JSON.stringify({
+            savedAt: Date.now(),
+            baseRevision: 1,
+            dirtyFields: ["title", "assigneeName", "dueAt"],
+            title: "작성 중인 제목",
+            notes: "작성 중인 설명",
+            assigneeName: "김경주",
+            priority: "2",
+            dueAt: "2026-10-06T23:45",
+            withoutDeadline: false,
+          }),
+        removeItem() {},
+      },
+    });
+    try {
+      const markup = renderPanel({ items: [inflowItem("saved-draft")] });
+      expect(markup).toContain(copy.projects.inflowPromote);
+      expect(markup).not.toContain("<dialog");
+      expect(markup).not.toContain("<textarea");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it("keeps a selected local deadline when promoting a Chat request", () => {
     const input = "2026-07-24T18:30";
 

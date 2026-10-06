@@ -27,6 +27,10 @@ import {
   seoulLocalDateTimeToIso,
 } from "./DeadlinePicker";
 import { LinkifiedText, SafeExternalLink } from "./ExternalTextLink";
+import {
+  InflowPromotionDialog,
+  inflowPromotionDialogCopy,
+} from "./InflowPromotionDialog";
 
 type ProjectInflowPanelProps = {
   accountsAvailable: boolean;
@@ -494,7 +498,8 @@ export function InflowItemRow({
     () => readInflowDraft(conversationId),
     [conversationId],
   );
-  const [editing, setEditing] = useState(Boolean(restoredDraft));
+  const [editing, setEditing] = useState(false);
+  const [hasDraft, setHasDraft] = useState(Boolean(restoredDraft));
   const titleInputRef = useRef<HTMLInputElement>(null);
   const editButtonRef = useRef<HTMLButtonElement>(null);
   const wasEditingRef = useRef(editing);
@@ -556,6 +561,7 @@ export function InflowItemRow({
   );
   const [contextOpen, setContextOpen] = useState(false);
   const contextSummaryRef = useRef<HTMLElement | null>(null);
+  const modalContextSummaryRef = useRef<HTMLElement | null>(null);
   const contextFocusFrameRef = useRef<number | undefined>(undefined);
   const analysisReady = item.analysisStatus === "ready";
   const analysisFailed = item.analysisStatus === "failed";
@@ -593,7 +599,7 @@ export function InflowItemRow({
         withoutDeadline: false,
         priority: String(item.suggestedPriority ?? 1),
       },
-      editing ? dirtyFields : [],
+      hasDraft ? dirtyFields : [],
     );
     setTitle(merged.title);
     setNotes(merged.notes);
@@ -601,13 +607,13 @@ export function InflowItemRow({
     setDueAt(merged.dueAt);
     setWithoutDeadline(merged.withoutDeadline);
     setPriority(merged.priority);
-    if (!editing) dirtyFields.clear();
+    if (!hasDraft) dirtyFields.clear();
     setDraftBaseRevision((current) =>
-      nextInflowDraftBaseRevision(current, analyzedRevision, editing),
+      nextInflowDraftBaseRevision(current, analyzedRevision, hasDraft),
     );
   }, [
     analyzedRevision,
-    editing,
+    hasDraft,
     hasUsableAnalysis,
     assigneeName,
     dueAt,
@@ -627,7 +633,7 @@ export function InflowItemRow({
       clearInflowDraft(conversationId);
       return;
     }
-    if (!editing) return;
+    if (!hasDraft) return;
     writeInflowDraft(conversationId, {
       savedAt: Date.now(),
       baseRevision: draftBaseRevision,
@@ -644,7 +650,7 @@ export function InflowItemRow({
     conversationId,
     draftBaseRevision,
     dueAt,
-    editing,
+    hasDraft,
     item.promotedTaskId,
     item.status,
     notes,
@@ -675,12 +681,25 @@ export function InflowItemRow({
       window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     contextFocusFrameRef.current = window.requestAnimationFrame(() => {
       contextFocusFrameRef.current = undefined;
-      contextSummaryRef.current?.focus({ preventScroll: true });
-      contextSummaryRef.current?.scrollIntoView({
+      const summary = editing
+        ? modalContextSummaryRef.current
+        : contextSummaryRef.current;
+      summary?.focus({ preventScroll: true });
+      summary?.scrollIntoView({
         block: "nearest",
         behavior: inflowContextScrollBehavior(reduceMotion),
       });
     });
+  }
+
+  function discardPromotion() {
+    if (saving || promoting) return;
+    setPromotionError(undefined);
+    setDueProblem(false);
+    setEditing(false);
+    setHasDraft(false);
+    dirtyFieldsRef.current.clear();
+    clearInflowDraft(conversationId);
   }
 
   async function dismissItem() {
@@ -753,6 +772,7 @@ export function InflowItemRow({
         ...deadline,
       });
       setEditing(false);
+      setHasDraft(false);
       clearInflowDraft(conversationId);
     } catch {
       setPromotionError(copy.projects.inflowDecisionProblem);
@@ -1011,249 +1031,284 @@ export function InflowItemRow({
           </div>
         </div>
       ) : editing ? (
-        <form
-          className="project-inflow-item__promote"
-          onSubmit={(event) => void submitPromotion(event)}
+        <InflowPromotionDialog
+          open={editing}
+          busy={saving || promoting}
+          dirty={dirtyFieldsRef.current.size > 0}
+          onClose={discardPromotion}
         >
-          {promotionProblem && (
-            <div
-              className="project-inflow-item__analysis-state"
-              id={`inflow-promotion-problem-${item.id}`}
-              role="status"
+          {(requestClose) => (
+            <form
+              className="project-inflow-item__promote"
+              onSubmit={(event) => void submitPromotion(event)}
             >
-              <p>{promotionProblem}</p>
-              <div>
-                <button
-                  className="secondary-button focus-visible-control"
-                  type="button"
-                  disabled={saving}
-                  onClick={() => void onRetryAnalysis(item)}
-                >
-                  <RefreshCw aria-hidden="true" />
-                  {copy.projects.inflowAnalysisRetry}
-                </button>
-              </div>
-            </div>
-          )}
-          {hasNewReplies && (
-            <div
-              className="project-inflow-item__revision-alert"
-              role="status"
-              aria-live="polite"
-            >
-              <div>
-                <strong>
-                  {copy.projects.inflowNewRepliesTitle(newReplyCount)}
-                </strong>
-                <p>
-                  {analysisRefreshing
-                    ? copy.projects.inflowNewRepliesRefreshing
-                    : analysisStale
-                      ? copy.projects.inflowNewRepliesStale
-                      : copy.projects.inflowNewRepliesDescription}
-                </p>
-              </div>
-              <div>
-                <button
-                  className="secondary-button focus-visible-control"
-                  type="button"
-                  disabled={saving}
-                  onClick={openConversationContext}
-                >
-                  {copy.projects.inflowNewRepliesOpen}
-                </button>
-                {!analysisRefreshing && (
-                  <button
-                    className="secondary-button focus-visible-control"
-                    type="button"
-                    disabled={saving}
-                    onClick={() => void onRetryAnalysis(item)}
+              <div className="inflow-promotion-dialog__body">
+                {promotionProblem && (
+                  <div
+                    className="project-inflow-item__analysis-state"
+                    id={`inflow-promotion-problem-${item.id}`}
+                    role="status"
                   >
-                    <RefreshCw aria-hidden="true" />
-                    {copy.projects.inflowNewRepliesApply}
-                  </button>
+                    <p>{promotionProblem}</p>
+                    <div>
+                      <button
+                        className="secondary-button focus-visible-control"
+                        type="button"
+                        disabled={saving}
+                        onClick={() => void onRetryAnalysis(item)}
+                      >
+                        <RefreshCw aria-hidden="true" />
+                        {copy.projects.inflowAnalysisRetry}
+                      </button>
+                    </div>
+                  </div>
                 )}
+                {hasNewReplies && (
+                  <details
+                    className="project-inflow-item__context"
+                    open={contextOpen}
+                    onToggle={(event) =>
+                      setContextOpen(event.currentTarget.open)
+                    }
+                  >
+                    <summary
+                      ref={modalContextSummaryRef}
+                      className="focus-visible-control"
+                    >
+                      {copy.projects.inflowNewRepliesOpen}
+                    </summary>
+                    {messages.map((message, index) => (
+                      <div key={index}>
+                        <strong>
+                          {message.senderName ||
+                            copy.projects.inflowSenderPending}
+                        </strong>
+                        <p>
+                          <LinkifiedText text={message.contentText} />
+                        </p>
+                      </div>
+                    ))}
+                  </details>
+                )}
+                {hasNewReplies && (
+                  <div
+                    className="project-inflow-item__revision-alert"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    <div>
+                      <strong>
+                        {copy.projects.inflowNewRepliesTitle(newReplyCount)}
+                      </strong>
+                      <p>
+                        {analysisRefreshing
+                          ? copy.projects.inflowNewRepliesRefreshing
+                          : analysisStale
+                            ? copy.projects.inflowNewRepliesStale
+                            : copy.projects.inflowNewRepliesDescription}
+                      </p>
+                    </div>
+                    <div>
+                      <button
+                        className="secondary-button focus-visible-control"
+                        type="button"
+                        disabled={saving}
+                        onClick={openConversationContext}
+                      >
+                        {copy.projects.inflowNewRepliesOpen}
+                      </button>
+                      {!analysisRefreshing && (
+                        <button
+                          className="secondary-button focus-visible-control"
+                          type="button"
+                          disabled={saving}
+                          onClick={() => void onRetryAnalysis(item)}
+                        >
+                          <RefreshCw aria-hidden="true" />
+                          {copy.projects.inflowNewRepliesApply}
+                        </button>
+                      )}
+                      <button
+                        className="text-button focus-visible-control"
+                        type="button"
+                        disabled={saving}
+                        onClick={() => setDraftBaseRevision(sourceRevision)}
+                      >
+                        {copy.projects.inflowNewRepliesKeepDraft}
+                      </button>
+                    </div>
+                  </div>
+                )}
+                <div className="project-inflow-item__fields">
+                  <label className="project-inflow-item__title-field">
+                    <span>{copy.projects.inflowTaskTitleLabel}</span>
+                    <input
+                      ref={titleInputRef}
+                      aria-label={copy.projects.inflowTaskTitleLabel}
+                      value={title}
+                      maxLength={300}
+                      disabled={saving}
+                      aria-describedby={`inflow-task-title-help-${item.id}`}
+                      onChange={(event) => {
+                        markDirty("title");
+                        setTitle(event.target.value);
+                      }}
+                    />
+                    <small id={`inflow-task-title-help-${item.id}`}>
+                      {copy.projects.inflowTaskTitleHint}
+                    </small>
+                  </label>
+                  <label className="project-inflow-item__notes-field">
+                    <span>{copy.projects.inflowTaskNotesLabel}</span>
+                    <textarea
+                      aria-label={copy.projects.inflowTaskNotesLabel}
+                      value={notes}
+                      maxLength={10_000}
+                      rows={5}
+                      disabled={saving}
+                      aria-describedby={`inflow-task-notes-help-${item.id}`}
+                      onChange={(event) => {
+                        markDirty("notes");
+                        setNotes(event.target.value);
+                      }}
+                    />
+                    <small id={`inflow-task-notes-help-${item.id}`}>
+                      {copy.projects.inflowTaskNotesHint}
+                    </small>
+                  </label>
+                  <label>
+                    <span>{copy.projects.inflowAssigneeLabel}</span>
+                    <select
+                      aria-label={copy.projects.inflowAssigneeLabel}
+                      value={assigneeName}
+                      disabled={saving}
+                      onChange={(event) => {
+                        markDirty("assigneeName");
+                        setAssigneeName(event.target.value);
+                      }}
+                    >
+                      <option value="">{copy.projects.inflowNoAssignee}</option>
+                      {assigneeOptions.map((name) => (
+                        <option key={name} value={name}>
+                          {name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>{copy.projects.inflowPriorityLabel}</span>
+                    <select
+                      aria-label={copy.projects.inflowPriorityLabel}
+                      value={priority}
+                      disabled={saving}
+                      onChange={(event) => {
+                        markDirty("priority");
+                        setPriority(event.target.value);
+                      }}
+                    >
+                      <option value="1">{copy.forms.priorityNormal}</option>
+                      <option value="2">{copy.forms.priorityImportant}</option>
+                      <option value="3">{copy.forms.priorityHighest}</option>
+                    </select>
+                  </label>
+                  <div className="project-inflow-item__deadline-field">
+                    <DeadlinePicker
+                      id={`inflow-due-${item.id}`}
+                      label={copy.projects.inflowDueAtLabel}
+                      value={dueAt}
+                      disabled={saving || withoutDeadline}
+                      invalid={dueProblem}
+                      describedBy={
+                        dueProblem ? `inflow-due-problem-${item.id}` : undefined
+                      }
+                      showPresets
+                      allowClear={false}
+                      onChange={(value) => {
+                        markDirty("dueAt");
+                        setDueAt(value);
+                        setDueProblem(false);
+                        setPromotionError(undefined);
+                      }}
+                    />
+                    {dueProblem && (
+                      <small id={`inflow-due-problem-${item.id}`} role="alert">
+                        {copy.projects.inflowDueAtProblem}
+                      </small>
+                    )}
+                  </div>
+                  <label className="project-inflow-item__no-deadline">
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      aria-label={copy.projects.inflowWithoutDeadline}
+                      checked={withoutDeadline}
+                      disabled={saving}
+                      onChange={(event) => {
+                        markDirty("withoutDeadline");
+                        setWithoutDeadline(event.currentTarget.checked);
+                        setDueProblem(false);
+                        setPromotionError(undefined);
+                      }}
+                    />
+                    <span>{copy.projects.inflowWithoutDeadline}</span>
+                  </label>
+                </div>
+                {promotionError && (
+                  <p
+                    className="assistant-inline-alert"
+                    role="alert"
+                    aria-live="assertive"
+                  >
+                    {promotionError}
+                  </p>
+                )}
+                {assigneeName && (
+                  <p className="project-inflow-item__notification-note">
+                    {canNotifyAssignee
+                      ? copy.projects.inflowAssigneeWillBeNotified(assigneeName)
+                      : copy.projects.inflowAssigneeNotificationOff}
+                  </p>
+                )}
+              </div>
+              <div className="project-inflow-item__register-actions">
                 <button
-                  className="text-button focus-visible-control"
-                  type="button"
-                  disabled={saving}
-                  onClick={() => setDraftBaseRevision(sourceRevision)}
+                  className="primary-button focus-visible-control"
+                  type="submit"
+                  disabled={
+                    !title.trim() ||
+                    saving ||
+                    promoting ||
+                    !promotionReadiness.canPromote
+                  }
+                  aria-describedby={
+                    promotionProblem
+                      ? `inflow-promotion-problem-${item.id}`
+                      : undefined
+                  }
                 >
-                  {copy.projects.inflowNewRepliesKeepDraft}
+                  {promoting ? (
+                    <span className="button-spinner" aria-hidden="true" />
+                  ) : (
+                    <Check aria-hidden="true" />
+                  )}
+                  {promoting
+                    ? copy.projects.inflowPromoting
+                    : canNotifyAssignee
+                      ? inflowPromotionDialogCopy.registerAndNotify
+                      : copy.projects.inflowRegister}
+                </button>
+                <button
+                  className="secondary-button focus-visible-control"
+                  type="button"
+                  disabled={saving || promoting}
+                  onClick={requestClose}
+                >
+                  <X aria-hidden="true" /> 취소
                 </button>
               </div>
-            </div>
+            </form>
           )}
-          <div className="project-inflow-item__fields">
-            <label className="project-inflow-item__title-field">
-              <span>{copy.projects.inflowTaskTitleLabel}</span>
-              <input
-                ref={titleInputRef}
-                aria-label={copy.projects.inflowTaskTitleLabel}
-                value={title}
-                maxLength={300}
-                disabled={saving}
-                aria-describedby={`inflow-task-title-help-${item.id}`}
-                onChange={(event) => {
-                  markDirty("title");
-                  setTitle(event.target.value);
-                }}
-              />
-              <small id={`inflow-task-title-help-${item.id}`}>
-                {copy.projects.inflowTaskTitleHint}
-              </small>
-            </label>
-            <label className="project-inflow-item__notes-field">
-              <span>{copy.projects.inflowTaskNotesLabel}</span>
-              <textarea
-                aria-label={copy.projects.inflowTaskNotesLabel}
-                value={notes}
-                maxLength={10_000}
-                rows={8}
-                disabled={saving}
-                aria-describedby={`inflow-task-notes-help-${item.id}`}
-                onChange={(event) => {
-                  markDirty("notes");
-                  setNotes(event.target.value);
-                }}
-              />
-              <small id={`inflow-task-notes-help-${item.id}`}>
-                {copy.projects.inflowTaskNotesHint}
-              </small>
-            </label>
-            <label>
-              <span>{copy.projects.inflowAssigneeLabel}</span>
-              <select
-                aria-label={copy.projects.inflowAssigneeLabel}
-                value={assigneeName}
-                disabled={saving}
-                onChange={(event) => {
-                  markDirty("assigneeName");
-                  setAssigneeName(event.target.value);
-                }}
-              >
-                <option value="">{copy.projects.inflowNoAssignee}</option>
-                {assigneeOptions.map((name) => (
-                  <option key={name} value={name}>
-                    {name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span>{copy.projects.inflowPriorityLabel}</span>
-              <select
-                aria-label={copy.projects.inflowPriorityLabel}
-                value={priority}
-                disabled={saving}
-                onChange={(event) => {
-                  markDirty("priority");
-                  setPriority(event.target.value);
-                }}
-              >
-                <option value="1">{copy.forms.priorityNormal}</option>
-                <option value="2">{copy.forms.priorityImportant}</option>
-                <option value="3">{copy.forms.priorityHighest}</option>
-              </select>
-            </label>
-            <div className="project-inflow-item__deadline-field">
-              <DeadlinePicker
-                id={`inflow-due-${item.id}`}
-                label={copy.projects.inflowDueAtLabel}
-                value={dueAt}
-                disabled={saving || withoutDeadline}
-                invalid={dueProblem}
-                describedBy={
-                  dueProblem ? `inflow-due-problem-${item.id}` : undefined
-                }
-                showPresets
-                allowClear={false}
-                onChange={(value) => {
-                  markDirty("dueAt");
-                  setDueAt(value);
-                  setDueProblem(false);
-                  setPromotionError(undefined);
-                }}
-              />
-              {dueProblem && (
-                <small id={`inflow-due-problem-${item.id}`} role="alert">
-                  {copy.projects.inflowDueAtProblem}
-                </small>
-              )}
-            </div>
-            <label className="project-inflow-item__no-deadline">
-              <input
-                type="checkbox"
-                role="switch"
-                aria-label={copy.projects.inflowWithoutDeadline}
-                checked={withoutDeadline}
-                disabled={saving}
-                onChange={(event) => {
-                  markDirty("withoutDeadline");
-                  setWithoutDeadline(event.currentTarget.checked);
-                  setDueProblem(false);
-                  setPromotionError(undefined);
-                }}
-              />
-              <span>{copy.projects.inflowWithoutDeadline}</span>
-            </label>
-          </div>
-          {promotionError && (
-            <p
-              className="assistant-inline-alert"
-              role="alert"
-              aria-live="assertive"
-            >
-              {promotionError}
-            </p>
-          )}
-          {assigneeName && (
-            <p className="project-inflow-item__notification-note">
-              {canNotifyAssignee
-                ? copy.projects.inflowAssigneeWillBeNotified(assigneeName)
-                : copy.projects.inflowAssigneeNotificationOff}
-            </p>
-          )}
-          <div className="project-inflow-item__register-actions">
-            <button
-              className="primary-button focus-visible-control"
-              type="submit"
-              disabled={
-                !title.trim() ||
-                saving ||
-                promoting ||
-                !promotionReadiness.canPromote
-              }
-              aria-describedby={
-                promotionProblem
-                  ? `inflow-promotion-problem-${item.id}`
-                  : undefined
-              }
-            >
-              {promoting ? (
-                <span className="button-spinner" aria-hidden="true" />
-              ) : (
-                <Check aria-hidden="true" />
-              )}
-              {promoting
-                ? copy.projects.inflowPromoting
-                : copy.projects.inflowRegister}
-            </button>
-            <button
-              className="secondary-button focus-visible-control"
-              type="button"
-              disabled={saving || promoting}
-              onClick={() => {
-                setPromotionError(undefined);
-                setEditing(false);
-                dirtyFieldsRef.current.clear();
-                clearInflowDraft(conversationId);
-              }}
-            >
-              <X aria-hidden="true" /> 취소
-            </button>
-          </div>
-        </form>
+        </InflowPromotionDialog>
       ) : (
         <div className="project-inflow-item__actions">
           <button
@@ -1263,7 +1318,9 @@ export function InflowItemRow({
             disabled={saving}
             onClick={() => {
               setPromotionError(undefined);
-              setDraftBaseRevision(analyzedRevision ?? sourceRevision);
+              if (!hasDraft)
+                setDraftBaseRevision(analyzedRevision ?? sourceRevision);
+              setHasDraft(true);
               setEditing(true);
             }}
           >
