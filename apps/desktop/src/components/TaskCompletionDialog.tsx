@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { PlanningRequestError, type Task } from "../api/planning";
 import { LinkifiedText } from "./ExternalTextLink";
+import "./taskCompletion.css";
 import {
   InflowPromotionDialog,
   inflowPromotionDialogCopy,
@@ -8,23 +9,22 @@ import {
 
 export const taskCompletionCopy = {
   ...inflowPromotionDialogCopy,
-  title: "확인 결과 남기기",
+  title: "할 일 완료하기",
   description:
-    "결과를 일감에 저장해요. Google Chat에서 받은 일감이면 원래 대화에도 답글을 남겨요.",
+    "답글은 선택 사항이에요. 작성하면 일감에 저장하고, Google Chat에서 받은 일감은 원래 대화에도 전달해요.",
   close: "완료 화면 닫기",
-  discardTitle: "확인 결과 작성을 취소할까요?",
-  discardDescription: "작성한 결과는 저장되지 않고, 일감은 완료하지 않아요.",
-  label: "확인 결과",
-  placeholder: "예: 거래내역 20건을 확인했고, 정산 금액이 모두 일치해요.",
-  save: "결과를 남기고 완료하기",
-  skip: "결과 없이 완료하기",
+  discardTitle: "답글 작성을 취소할까요?",
+  discardDescription: "작성한 답글은 저장되지 않고, 일감은 완료하지 않아요.",
+  label: "완료 답글 (선택)",
+  placeholder:
+    "예: 요청한 내용을 반영했어요. 확인한 결과나 전달할 내용을 남겨 주세요.",
+  complete: "완료하기",
   cancel: "취소",
-  busy: "결과를 저장하고 있어요",
+  busy: "일감을 완료하고 있어요",
   failure:
-    "완료하지 못했어요. 작성한 결과는 그대로 있어요. 다시 시도해 주세요.",
+    "완료하지 못했어요. 작성한 답글은 그대로 있어요. 다시 시도해 주세요.",
   conflict:
-    "다른 곳에서 일감이 변경됐어요. 작성한 결과를 복사한 뒤 창을 닫고, 최신 일감을 다시 열어 주세요.",
-  required: "확인 결과를 적거나, 결과 없이 완료하기를 눌러 주세요.",
+    "다른 곳에서 일감이 변경됐어요. 작성한 답글을 복사한 뒤 창을 닫고, 최신 일감을 다시 열어 주세요.",
 };
 
 export function TaskCompletionDialog({
@@ -40,17 +40,13 @@ export function TaskCompletionDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const inFlight = useRef(false);
-  async function finish(withResult: boolean) {
+  async function finish() {
     if (inFlight.current) return;
-    if (withResult && !note.trim()) {
-      setError(taskCompletionCopy.required);
-      return;
-    }
     inFlight.current = true;
     setBusy(true);
     setError(undefined);
     try {
-      await onComplete(withResult ? note.trim() : undefined);
+      await onComplete(note.trim() || undefined);
     } catch (cause) {
       setError(
         cause instanceof PlanningRequestError && cause.code === "conflict"
@@ -76,7 +72,7 @@ export function TaskCompletionDialog({
           className="task-completion-form"
           onSubmit={(event) => {
             event.preventDefault();
-            void finish(true);
+            void finish();
           }}
         >
           <strong>
@@ -109,16 +105,8 @@ export function TaskCompletionDialog({
             >
               {taskCompletionCopy.cancel}
             </button>
-            <button
-              type="button"
-              className="secondary-button"
-              disabled={busy}
-              onClick={() => void finish(false)}
-            >
-              {taskCompletionCopy.skip}
-            </button>
             <button type="submit" className="primary-button" disabled={busy}>
-              {taskCompletionCopy.save}
+              {taskCompletionCopy.complete}
             </button>
           </div>
         </form>
@@ -149,7 +137,6 @@ export function useTaskCompletion(
       return request.current.task.id === task.id
         ? request.current.promise
         : Promise.resolve(task);
-    if (task.workKind !== "verification") return complete(task);
     let resolve!: (value: Task) => void;
     const promise = new Promise<Task>((accept) => {
       resolve = accept;

@@ -1690,6 +1690,7 @@ struct AgentTurnInput {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CompleteTaskRequest {
     expected_version: i64,
+    /// Optional reply for any task, up to 2,000 characters. Omit to complete without a custom reply.
     completion_note: Option<String>,
 }
 
@@ -8148,13 +8149,12 @@ fn google_chat_completion_reply(delivery: &GoogleChatCompletionDelivery) -> Stri
 fn google_chat_task_completion_reply(delivery: &GoogleChatTaskCompletionDelivery) -> String {
     let assignee = delivery.assignee_name.as_deref().unwrap_or("정하지 않음");
     let mut message = format!(
-        "✅ 요청하신 작업을 완료했어요.\n할 일: {}\n업무 유형: {}\n담당자: {assignee}\n완료일: {}",
+        "✅ 요청하신 작업을 완료했어요.\n할 일: {}\n담당자: {assignee}\n완료일: {}",
         delivery.task_title,
-        jimin_storage::planning::task_work_kind_label(&delivery.work_kind),
         format_google_chat_due_at(delivery.completed_at)
     );
     if let Some(note) = &delivery.completion_note {
-        message.push_str("\n\n확인 결과:\n");
+        message.push_str("\n\n완료 답글:\n");
         message.push_str(note);
     }
     message
@@ -12304,6 +12304,7 @@ mod tests {
         assert!(reply.starts_with("새 할 일이 배정됐어요."));
         assert!(reply.contains("프로젝트: 비스킷링크"));
         assert!(reply.contains("할 일: 정산 오류 원인 확인"));
+        assert!(!reply.contains("업무 유형:"));
         assert!(reply.contains("담당자: 김경주"));
         assert!(reply.contains("마감: 2026년 7월 24일 11:30"));
         assert!(reply.contains("권한 오류의 재현 조건과 영향을 확인합니다."));
@@ -12311,29 +12312,37 @@ mod tests {
     }
 
     #[test]
-    fn google_chat_task_completion_reply_includes_the_saved_verification_result() {
+    fn google_chat_task_completion_reply_includes_an_optional_reply_for_every_legacy_kind() {
         let completed_at = OffsetDateTime::parse("2026-07-27T05:45:00Z", &Rfc3339)
             .expect("completion time should parse");
-        let reply = google_chat_task_completion_reply(&GoogleChatTaskCompletionDelivery {
-            work_kind: "verification".to_owned(),
-            completion_note: Some("거래내역 20건을 확인했고 모두 일치해요.".to_owned()),
-            inflow_id: Uuid::now_v7(),
-            user_id: Uuid::now_v7(),
-            source_id: Uuid::now_v7(),
-            provider_thread_name: Some("spaces/company/threads/thread-1".to_owned()),
-            task_id: Uuid::now_v7(),
-            task_version: 2,
-            task_title: "권한 오류 수정".to_owned(),
-            assignee_name: Some("주홍석".to_owned()),
-            completed_at,
-            reply_completed: false,
-            attempt_count: 0,
-        });
+        for kind in ["general", "verification", "development"] {
+            let mut delivery = GoogleChatTaskCompletionDelivery {
+                work_kind: kind.to_owned(),
+                completion_note: Some("거래내역 20건을 확인했고 모두 일치해요.".to_owned()),
+                inflow_id: Uuid::now_v7(),
+                user_id: Uuid::now_v7(),
+                source_id: Uuid::now_v7(),
+                provider_thread_name: Some("spaces/company/threads/thread-1".to_owned()),
+                task_id: Uuid::now_v7(),
+                task_version: 2,
+                task_title: "권한 오류 수정".to_owned(),
+                assignee_name: Some("주홍석".to_owned()),
+                completed_at,
+                reply_completed: false,
+                attempt_count: 0,
+            };
+            let reply = google_chat_task_completion_reply(&delivery);
 
-        assert_eq!(
-            reply,
-            "✅ 요청하신 작업을 완료했어요.\n할 일: 권한 오류 수정\n업무 유형: 확인 업무\n담당자: 주홍석\n완료일: 2026년 7월 27일 14:45\n\n확인 결과:\n거래내역 20건을 확인했고 모두 일치해요."
-        );
+            assert_eq!(
+                reply,
+                "✅ 요청하신 작업을 완료했어요.\n할 일: 권한 오류 수정\n담당자: 주홍석\n완료일: 2026년 7월 27일 14:45\n\n완료 답글:\n거래내역 20건을 확인했고 모두 일치해요."
+            );
+            delivery.completion_note = None;
+            let without_reply = google_chat_task_completion_reply(&delivery);
+            assert!(without_reply.starts_with("✅ 요청하신 작업을 완료했어요."));
+            assert!(!without_reply.contains("완료 답글:"));
+            assert!(!without_reply.contains("업무 유형:"));
+        }
     }
 
     #[test]

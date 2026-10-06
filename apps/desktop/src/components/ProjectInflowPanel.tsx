@@ -21,7 +21,6 @@ import {
   projectInflowPromotionReadiness,
 } from "../api/googleChat";
 import type { TaskWorkKind } from "../api/planning";
-import { TaskWorkKindSelect } from "./TaskWorkKind";
 import { copy } from "../copy";
 import {
   DeadlinePicker,
@@ -553,9 +552,6 @@ export function InflowItemRow({
   const [assigneeName, setAssigneeName] = useState(
     () => restoredDraft?.assigneeName ?? suggestedAssignee,
   );
-  const [workKind, setWorkKind] = useState<TaskWorkKind>(
-    () => restoredDraft?.workKind ?? "general",
-  );
   const [dueAt, setDueAt] = useState(
     () => restoredDraft?.dueAt ?? isoToSeoulLocalDateTime(item.suggestedDueAt),
   );
@@ -610,7 +606,6 @@ export function InflowItemRow({
         priority,
         dueAt,
         withoutDeadline,
-        workKind,
       },
       {
         title: suggestedTitle,
@@ -628,7 +623,6 @@ export function InflowItemRow({
     setDueAt(merged.dueAt);
     setWithoutDeadline(merged.withoutDeadline);
     setPriority(merged.priority);
-    setWorkKind(merged.workKind ?? "general");
     if (!hasDraft) dirtyFields.clear();
     setDraftBaseRevision((current) =>
       nextInflowDraftBaseRevision(current, analyzedRevision, hasDraft),
@@ -648,7 +642,6 @@ export function InflowItemRow({
     suggestedTitle,
     title,
     withoutDeadline,
-    workKind,
   ]);
 
   useEffect(() => {
@@ -666,7 +659,6 @@ export function InflowItemRow({
       priority,
       dueAt,
       withoutDeadline,
-      workKind,
       dirtyFields: [...dirtyFieldsRef.current],
     });
   }, [
@@ -681,7 +673,6 @@ export function InflowItemRow({
     priority,
     title,
     withoutDeadline,
-    workKind,
   ]);
 
   useEffect(
@@ -794,7 +785,6 @@ export function InflowItemRow({
         notes: notes.trim(),
         assigneeName: assigneeName || undefined,
         priority: Number(priority),
-        workKind,
         ...deadline,
       });
       setEditing(false);
@@ -1221,14 +1211,6 @@ export function InflowItemRow({
                       ))}
                     </select>
                   </label>
-                  <TaskWorkKindSelect
-                    value={workKind}
-                    disabled={saving || promoting}
-                    onChange={(value) => {
-                      markDirty("workKind");
-                      setWorkKind(value);
-                    }}
-                  />
                   <label>
                     <span>{copy.projects.inflowPriorityLabel}</span>
                     <select

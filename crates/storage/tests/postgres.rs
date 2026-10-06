@@ -4967,6 +4967,68 @@ async fn task_hierarchy_is_one_level_and_parent_completion_waits_for_children() 
 }
 
 #[tokio::test]
+async fn optional_completion_replies_work_for_every_legacy_task_kind() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(database_url), 1, Duration::from_secs(2))
+            .expect("test database URL should be valid");
+    database.migrate().await.expect("migration should succeed");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("fixture owner should exist");
+    for kind in ["general", "verification", "development"] {
+        for note in [
+            None,
+            Some("  요청 내용을 반영했어요.\n결과를 확인해 주세요.  "),
+        ] {
+            let task = database
+                .create_task_with_work_kind(
+                    &NewTask {
+                        id: Uuid::now_v7(),
+                        user_id: owner.profile.id,
+                        project_id: None,
+                        parent_task_id: None,
+                        title: "선택적 완료 답글".to_owned(),
+                        notes: None,
+                        assignee_name: None,
+                        priority: 1,
+                        due_at: None,
+                    },
+                    kind,
+                )
+                .await
+                .expect("task should persist");
+            assert!(
+                database
+                    .complete_task_with_note(Uuid::now_v7(), task.id, task.version, note)
+                    .await
+                    .expect("foreign owner should not mutate")
+                    .is_none()
+            );
+            assert!(
+                database
+                    .complete_task_with_note(owner.profile.id, task.id, task.version + 1, note)
+                    .await
+                    .expect("stale version should not mutate")
+                    .is_none()
+            );
+            let completed = database
+                .complete_task_with_note(owner.profile.id, task.id, task.version, note)
+                .await
+                .expect("completion should succeed")
+                .expect("open task should complete");
+            assert_eq!(completed.status, TaskStatus::Completed);
+            assert_eq!(completed.work_kind, kind);
+            assert_eq!(completed.completion_note.as_deref(), note.map(str::trim));
+        }
+    }
+    database.close().await;
+}
+
+#[tokio::test]
 async fn tasks_are_scoped_and_emit_current_state() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;

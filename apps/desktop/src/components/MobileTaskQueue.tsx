@@ -9,7 +9,6 @@ import {
   type MobileTaskGrouping,
 } from "../mobileTaskView";
 import { LinkifiedText } from "./ExternalTextLink";
-import { TaskWorkKindBadge } from "./TaskWorkKind";
 
 type Props = {
   tasks: Task[];
@@ -212,7 +211,6 @@ export function MobileTaskQueue({
                     className="mobile-task-detail"
                     id={`mobile-task-${task.id}`}
                   >
-                    <TaskWorkKindBadge kind={task.workKind} />
                     <p>
                       {task.assigneeName || "담당자 미정"} ·{" "}
                       {dueLabel(task.dueAt)}

@@ -1,4 +1,3 @@
-import { TaskWorkKindBadge } from "./TaskWorkKind";
 import {
   ArrowRight,
   CalendarDays,
@@ -725,7 +724,6 @@ function ItemDetail({
           aria-busy={taskDetailLoading}
         >
           <div className="assistant-canvas__task-badges">
-            <TaskWorkKindBadge kind={taskDetail?.workKind} />
             <span
               className="assistant-canvas__task-status"
               data-status={status}
