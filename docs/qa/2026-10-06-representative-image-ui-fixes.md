@@ -17,7 +17,7 @@
 
 ## Verification
 
-- Frontend: 401 tests passed in 64 files; typecheck and Prettier check passed.
+- Frontend: 402 tests passed in 64 files after the native image-CSP regression was added; typecheck and Prettier check passed.
 - `git diff --check`: passed.
 - Image upload, reload persistence, unsupported-file rejection preserving prior image, and default restore: verified in isolated localhost preview.
 - Image resize, MIME/data URL validation, quota/storage failure, abort cleanup and subscription cleanup: unit tests passed.
@@ -35,6 +35,21 @@
 - `/tmp/jimin-representative-image-qa/inflow-assignment-mobile.png`
 - `/tmp/jimin-representative-image-qa/inflow-assignment-macos.png`
 
-## Release boundary
+## Development verification boundary (before deployment authorization)
 
-These changes are development-only. No production server migration, production app replacement or physical Android installation was performed. Native verification uses the separate `io.jimin.os.dev` bundle. Representative-image preferences are device-local, not cross-device synced. Native Android file-picker behavior remains unverified on a physical device.
+At this verification stage the changes were development-only. No production server migration, production app replacement or physical Android installation had been performed. Native verification used the separate `io.jimin.os.dev` bundle. Representative-image preferences are device-local, not cross-device synced. Native Android file-picker behavior remains unverified on a physical device.
+
+## Production release (subsequent user authorization)
+
+- User explicitly requested production deployment after development QA.
+- PR #3 merged: `https://github.com/Yaklede/jimin-os/pull/3`. Main `b7346be5b5d8029b579d5032a3b405568acf333b` has the same tree as reviewed release head `d4a85a7`; no code changes were introduced by merge.
+- Production macOS build passed with `VITE_DESIGN_PREVIEW=0`, `VITE_LOCAL_PHONE_TEST=0`, and `https://os.jimin.ai.kr`. Assets have no preview-home, preview-inflow, design-preview fixtures or loopback server override.
+- Signed installed bundle `/Applications/Jimin OS.app`: identifier `io.jimin.os`, stable signing team `9L5V75TP2R`; strict signature verification passed. Executable SHA-256: `1c5e947c871c958802930072221403e3b5eff67cb2733068e0b99afa910d54e0`.
+- Previous installed bundle preserved at `/tmp/jimin-os-release-ui-fixes-20261006/previous-installed.app`; actual replaced bundle also preserved as `replaced-installed.app`.
+- The running app was not quit because a real assignment draft was open. Restart approval was requested; until approved or manually restarted, the running process still uses the previous executable. Installation alone is not claimed as live new-UI verification.
+- Build-configuration guards, six mobile QA safety tests and secret scan passed.
+- Designated infrastructure task confirmed backend code, migrations and production Compose unchanged: backend `7414ed94…`, schema 57, five services healthy, internal/Twingate live and ready 200. No API restart, transcriber image pull, migration or server deployment was needed. Report: `/Users/jimin/Desktop/local-pc/reports/2026-10-06-jimin-os-representative-image-server-check.md`.
+- Production Android arm64 release build and APK safety verification passed: application ID `io.jimin.os`, non-debuggable, signed, one ABI, size 12,192,300 bytes (below the 12 MiB cap). APK: `/Users/jimin/Desktop/study/jimin-os/releases/ui-fixes-20261006/jimin-os-production-arm64.apk`; SHA-256 `1024fc13fffd1703cadc0765ba0eb2cbab972e8b602c7ba09a6563445500bc88`.
+- Android production assets contain the private-server origin and no preview fixtures or loopback override. The temporary Firebase build configuration was removed by the build helper.
+- Final `adb devices -l` inventory is empty. No physical Android installation or physical file-picker verification is claimed.
+- Final macOS signature and installed executable checksum checks passed; the old process (PID 3602) remains running while restart approval is pending.
