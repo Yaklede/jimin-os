@@ -12176,7 +12176,8 @@ svg {
   }
 
   .os-shell[data-destination="chat"] .os-content {
-    height: 100dvh;
+    /* The shell grid already reserves space for the topbar. */
+    height: 100%;
     min-height: 0;
     padding-top: var(--mobile-top-clearance);
     padding-bottom: calc(140px + var(--safe-area-bottom));
@@ -16682,7 +16683,7 @@ svg {
     padding-bottom: calc(100px + var(--safe-area-bottom));
   }
   .os-shell[data-platform="web"][data-destination="chat"] .os-content {
-    padding-bottom: calc(90px + var(--safe-area-bottom));
+    padding-bottom: calc(100px + var(--safe-area-bottom));
   }
   .os-shell[data-platform="web"] .os-mobile-nav {
     align-items: center;
@@ -18516,8 +18517,8 @@ body {
 }
 /* One continuous neutral composer surface, with one rounded focus indicator. */
 :root[data-preview-theme="light"] .assistant-request-field {
-  background: var(--surface-subtle);
-  box-shadow: none;
+  background: color-mix(in srgb, var(--control-contrast) 90%, var(--muted));
+  box-shadow: var(--shadow-panel);
 }
 :root[data-preview-theme="light"] .assistant-request-field:focus-within {
   box-shadow: inset 0 0 0 2px var(--focus);
