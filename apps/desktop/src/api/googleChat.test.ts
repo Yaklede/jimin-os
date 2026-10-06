@@ -17,14 +17,12 @@ afterEach(() => {
 
 describe("Google Chat work intake API", () => {
   it("sends exclusion reason and source reply only on explicit user choice", async () => {
-    const fetch = vi
-      .fn()
-      .mockResolvedValue(
-        new Response(JSON.stringify({ id: "inflow", status: "dismissed" }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
+    const fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ id: "inflow", status: "dismissed" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
     vi.stubGlobal("fetch", fetch);
     await decideProjectInflow(
       "https://example.test",

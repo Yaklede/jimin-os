@@ -133,11 +133,12 @@ export function ConversationWorkspace({
     appliedInitialDraftId.current = initialDraft.id;
     setDraft(initialDraft.text);
     onInitialDraftApplied();
-    requestAnimationFrame(() => composer.current?.focus());
+    const focusFrame = requestAnimationFrame(() => composer.current?.focus());
 
     if (initialDraft.autoSend && canSend) {
       void sendText(initialDraft.text);
     }
+    return () => cancelAnimationFrame(focusFrame);
   }, [canSend, initialDraft, onInitialDraftApplied]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -460,6 +461,14 @@ function ConversationThread({
                   data-role={message.role}
                   data-streaming={streaming}
                 >
+                  {message.role === "assistant" && (
+                    <span
+                      className="assistant-message__avatar"
+                      aria-hidden="true"
+                    >
+                      <img src="/images/hamster-home-wave.png" alt="" />
+                    </span>
+                  )}
                   <div className="assistant-message__meta">
                     <strong>
                       {message.role === "user"

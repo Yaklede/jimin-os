@@ -16,7 +16,6 @@ import {
 import { type RecommendationDecision } from "../api/intelligence";
 import { type ProjectItsmDecisionCandidate } from "../api/itsm";
 import { copy } from "../copy";
-import { EmptySurface } from "./HomeWorkspace";
 import {
   GmailInflowReview,
   type GmailInflowReviewProps,
@@ -297,6 +296,23 @@ function ItsmConfirmationSection({
   );
 }
 
+function DecisionEmptySurface({
+  title,
+  description,
+}: {
+  title: string;
+  description: string;
+}) {
+  return (
+    <div className="empty-surface">
+      <div>
+        <strong>{title}</strong>
+        <p>{description}</p>
+      </div>
+    </div>
+  );
+}
+
 function InflowDecisionSection({
   items,
   saving,
@@ -324,7 +340,7 @@ function InflowDecisionSection({
         <span>{copy.decisions.count(items.length)}</span>
       </header>
       {items.length === 0 ? (
-        <EmptySurface
+        <DecisionEmptySurface
           title={copy.decisions.emptyInflowTitle}
           description={copy.decisions.emptyInflowDescription}
         />
@@ -398,7 +414,10 @@ function DecisionSection({
         <span>{copy.decisions.count(items.length)}</span>
       </header>
       {items.length === 0 ? (
-        <EmptySurface title={emptyTitle} description={emptyDescription} />
+        <DecisionEmptySurface
+          title={emptyTitle}
+          description={emptyDescription}
+        />
       ) : (
         <ol>
           {items.map((recommendation) => (

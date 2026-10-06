@@ -1,5 +1,6 @@
 import { meetingSpeakerRecoveryCopy } from "./copy/meetingSpeakerRecovery";
 import { projectCopy } from "./copy/projects";
+import { appearanceCopy } from "./copy/appearance";
 
 const settingsTab = "설정";
 
@@ -40,6 +41,7 @@ function calendarConnectionSummary(
 }
 
 export const copy = {
+  appearance: appearanceCopy,
   productName: "Jimin OS",
   scope: "개인 서버",
   launch: {
@@ -60,6 +62,9 @@ export const copy = {
     saveChanges: "변경 내용 저장하기",
     createProject: "프로젝트 만들기",
     cancel: "취소",
+    deleteContent: "내용 삭제",
+    deleteContentCompact: "내용삭제",
+    save: "저장",
     saving: "저장하는 중",
     deleting: "삭제하는 중",
     deleteSchedule: "일정 삭제",
@@ -89,6 +94,7 @@ export const copy = {
     label: "Jimin OS 탐색",
     home: "나의 하루",
     mobileHome: "홈",
+    more: "더보기",
     schedule: "일정",
     projects: "프로젝트",
     decisions: "결정할 일",
@@ -141,7 +147,7 @@ export const copy = {
     resultOpening: "화면을 여는 중이에요",
     resultOpenFailed: "화면을 열지 못했어요. 아래 버튼을 다시 눌러 주세요.",
     resultEditFailed: "수정 화면을 열지 못했어요. 다시 열어 주세요.",
-    resultTaskComplete: "완료하기",
+    resultTaskComplete: "완료",
     resultTaskCompleting: "완료하는 중",
     resultTaskCompleteFailed: "완료하지 못했어요. 확인하고 다시 눌러 주세요.",
     resultTaskRestore: "다시 할 일로 열기",
@@ -185,7 +191,7 @@ export const copy = {
     projectTaskCount: (count: number) => `열린 일감 ${count}개`,
     projectNextActionLabel: "다음 행동",
     openTaskAction: "일감 보기",
-    editTaskAction: "바로 수정",
+    editTaskAction: "수정",
     editScheduleAction: "일정 수정",
     openProjectAction: "프로젝트에서 보기",
     openScheduleAction: "일정에서 보기",
@@ -196,11 +202,11 @@ export const copy = {
       "요청과 일치하는 프로젝트가 없어요. 프로젝트 이름을 확인해 주세요.",
     noScheduleResult: "오늘 등록된 일정이 없어요.",
     taskDestinationNotice:
-      "일정 화면에서 할 일을 찾지 못했어요. 새로고침한 뒤 다시 시도해 주세요.",
+      "할 일을 찾지 못했어요. 새로고침한 뒤 다시 시도해 주세요.",
     scheduleDestinationNotice:
       "일정 화면에서 해당 일정을 찾지 못했어요. 새로고침한 뒤 다시 시도해 주세요.",
     morningGreeting: "좋은 아침이에요!",
-    afternoonGreeting: "좋은 오후예요",
+    afternoonGreeting: "좋은 오후에요",
     eveningGreeting: "오늘도 수고했어요",
     title: "지민에게 말만 하면 제가 처리해둘게요.",
     description: "오늘 일정과 할 일을 먼저 정리해 볼게요.",
@@ -720,6 +726,24 @@ export const copy = {
     readOnlyCalendar: "보기 전용 캘린더",
     rangeControls: "일정 기간 탐색",
     rangeMode: "표시 기간",
+    monthCalendar: "월 달력",
+    weekCalendar: "주 달력",
+    weekCalendarHint:
+      "날짜나 내용을 선택해 확인하세요. 좁은 화면에서는 달력을 좌우로 움직일 수 있어요.",
+    weekTimeGrid: "주간 시간표",
+    calendarTime: "시간",
+    calendarAllDay: "종일",
+    calendarReceivedTime: (time: string) => `${time} 받음`,
+    weekTimeEmpty: "시간이 정해진 일정이 없어요.",
+    selectCalendarDate: "달력 날짜 선택",
+    calendarKeyboardHint: "방향키로 날짜를 이동하고 Enter나 Space로 선택해요.",
+    calendarTask: "할 일",
+    calendarDateLabel: (label: string, tasks: number, schedule: number) =>
+      `${label}, 할 일 ${tasks}개, 일정 ${schedule}개`,
+    calendarMore: (count: number) => `+${count}개`,
+    selectedDate: (label: string) => `${label}의 할 일과 일정`,
+    selectedDateEmptyTitle: "선택한 날짜에 일정이 없어요",
+    selectedDateEmpty: "필요한 시간을 일정으로 추가해 보세요.",
     dayRange: "일",
     weekRange: "주",
     monthRange: "월",
@@ -921,7 +945,7 @@ export const copy = {
     gmailCancelConnection: "연결 취소",
     gmailEmpty: "아직 연결한 Gmail 계정이 없어요.",
     gmailChecking: "Gmail 계정을 확인하고 있어요.",
-    gmailRetry: "계정 다시 확인하기",
+    gmailRetry: "다시 확인하기",
     gmailSync: "메일 가져오기",
     gmailSyncing: "메일 가져오는 중",
     gmailReconnect: "다시 연결하기",

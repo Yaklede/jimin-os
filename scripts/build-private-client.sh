@@ -13,7 +13,7 @@ server_url="$(production_server_url "${requested_server_url}")"
 assets_dir="${REPO_ROOT}/apps/desktop/dist/assets"
 
 build_macos() {
-  VITE_API_BASE_URL="${server_url}" \
+  VITE_DESIGN_PREVIEW=0 VITE_API_BASE_URL="${server_url}" \
     VITE_LOCAL_PHONE_TEST=0 \
     pnpm --filter @jimin-os/desktop tauri:build
   verify_production_web_assets "${assets_dir}" "${server_url}"
@@ -29,7 +29,7 @@ build_android() {
     # release-mode APK with that same certificate so Rust symbols and unused
     # Android resources are stripped without forcing an uninstall/data loss.
     ORG_GRADLE_PROJECT_jiminPrivateReleaseDebugSigning=true \
-    VITE_API_BASE_URL="${server_url}" \
+    VITE_DESIGN_PREVIEW=0 VITE_API_BASE_URL="${server_url}" \
       VITE_LOCAL_PHONE_TEST=0 \
       pnpm --filter @jimin-os/desktop tauri android build \
         --apk --target aarch64 --split-per-abi --ci
@@ -46,7 +46,7 @@ build_android() {
 cd "${REPO_ROOT}"
 case "${target}" in
   web)
-    VITE_API_BASE_URL="${server_url}" \
+    VITE_DESIGN_PREVIEW=0 VITE_API_BASE_URL="${server_url}" \
       VITE_LOCAL_PHONE_TEST=0 \
       pnpm --filter @jimin-os/desktop build
     verify_production_web_assets "${assets_dir}" "${server_url}"

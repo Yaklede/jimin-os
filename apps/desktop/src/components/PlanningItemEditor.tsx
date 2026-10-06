@@ -486,26 +486,15 @@ export function PlanningItemEditor({
           </section>
         ) : (
           <footer className="planning-editor__actions">
+            <span className="planning-editor__action-spacer" />
             <button
               ref={deleteTriggerRef}
-              className="text-button text-button--danger focus-visible-control"
+              className="secondary-button focus-visible-control"
               type="button"
               onClick={() => setConfirmingDelete(true)}
               disabled={saving}
             >
-              <Trash2 aria-hidden="true" />
-              {taskTarget
-                ? copy.actions.deleteTask
-                : copy.actions.deleteSchedule}
-            </button>
-            <span className="planning-editor__action-spacer" />
-            <button
-              className="secondary-button focus-visible-control"
-              type="button"
-              onClick={requestClose}
-              disabled={saving}
-            >
-              {copy.actions.cancel}
+              {copy.actions.deleteContent}
             </button>
             <button
               className="primary-button focus-visible-control"

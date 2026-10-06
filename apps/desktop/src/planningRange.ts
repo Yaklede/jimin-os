@@ -119,3 +119,53 @@ function startOfLocalDay(value: Date): Date {
 function endOfLocalDay(value: Date): Date {
   return new Date(value.getFullYear(), value.getMonth(), value.getDate() + 1);
 }
+
+// Calendar cells follow the same Monday-based local-day boundaries as ranges.
+export function planningCalendarDays(range: PlanningViewRange): Date[] {
+  if (range.mode === "day") return [range.anchor];
+  if (range.mode === "week") {
+    return Array.from(
+      { length: 7 },
+      (_, offset) =>
+        new Date(
+          range.from.getFullYear(),
+          range.from.getMonth(),
+          range.from.getDate() + offset,
+        ),
+    );
+  }
+  const first = new Date(
+    range.anchor.getFullYear(),
+    range.anchor.getMonth(),
+    1,
+  );
+  const offset = (first.getDay() + 6) % 7;
+  const dayCount = new Date(
+    first.getFullYear(),
+    first.getMonth() + 1,
+    0,
+  ).getDate();
+  const cellCount = Math.ceil((offset + dayCount) / 7) * 7;
+  return Array.from(
+    { length: cellCount },
+    (_, index) =>
+      new Date(first.getFullYear(), first.getMonth(), 1 - offset + index),
+  );
+}
+
+export function samePlanningDay(left: Date, right: Date): boolean {
+  return (
+    left.getFullYear() === right.getFullYear() &&
+    left.getMonth() === right.getMonth() &&
+    left.getDate() === right.getDate()
+  );
+}
+
+export function scheduleOverlapsPlanningDay(
+  entry: { startsAt: string; endsAt: string },
+  day: Date,
+): boolean {
+  const start = startOfLocalDay(day);
+  const end = endOfLocalDay(day);
+  return new Date(entry.startsAt) < end && new Date(entry.endsAt) > start;
+}

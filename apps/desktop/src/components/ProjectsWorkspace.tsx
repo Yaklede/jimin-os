@@ -1,3 +1,4 @@
+import { TaskSelectionControl } from "./TaskSelectionControl";
 import {
   ArrowLeft,
   BarChart3,
@@ -368,7 +369,11 @@ export function ProjectsWorkspace({
   }, [restoreListFocus, selectedProjectId]);
 
   useEffect(() => {
-    if (!highlightedTaskId) return;
+    if (highlightedTaskId) setActiveProjectTab("tasks");
+  }, [highlightedTaskId, selectedProjectId]);
+
+  useEffect(() => {
+    if (!highlightedTaskId || activeProjectTab !== "tasks") return;
     const element = highlightedTaskRef.current;
     if (!element) return;
     element.scrollIntoView({
@@ -376,7 +381,7 @@ export function ProjectsWorkspace({
       behavior: preferredScrollBehavior(),
     });
     element.focus({ preventScroll: true });
-  }, [highlightedTaskId, tasks]);
+  }, [activeProjectTab, highlightedTaskId, tasks]);
 
   useEffect(() => {
     if (!highlightedInflowId) return;
@@ -588,32 +593,43 @@ export function ProjectsWorkspace({
               placeholder={copy.projects.nextActionHint}
             />
           </label>
-          <div className="project-create-form__split">
+          <div className="project-management-fields">
             <label htmlFor="project-management-mode">
-              <span>{copy.projects.managementModeLabel}</span>
-              <select
-                id="project-management-mode"
-                value={managementMode}
-                onChange={(event) => {
-                  const nextMode = event.target
-                    .value as Project["managementMode"];
-                  setManagementMode(nextMode);
-                  if (nextMode === "operation") setDueDate("");
-                }}
-                disabled={saving}
-              >
-                <option value="completion">
-                  {copy.projects.managementModes.completion}
-                </option>
-                <option value="operation">
-                  {copy.projects.managementModes.operation}
-                </option>
-              </select>
-              <small>
-                {copy.projects.managementModeDescription[managementMode]}
-              </small>
+              {copy.projects.managementModeLabel}
             </label>
-            {managementMode === "operation" ? (
+            <label className="project-reporting-toggle">
+              <input
+                type="checkbox"
+                aria-label={copy.projects.weeklyReportingLabel}
+                checked={reportingEnabled}
+                onChange={(event) => setReportingEnabled(event.target.checked)}
+                disabled={saving}
+              />
+              <span>{copy.projects.weeklyReportingLabel}</span>
+              <small>{copy.projects.weeklyReportingDescription}</small>
+            </label>
+            <select
+              id="project-management-mode"
+              value={managementMode}
+              onChange={(event) => {
+                const nextMode = event.target
+                  .value as Project["managementMode"];
+                setManagementMode(nextMode);
+                if (nextMode === "operation") setDueDate("");
+              }}
+              disabled={saving}
+            >
+              <option value="completion">
+                {copy.projects.managementModes.completion}
+              </option>
+              <option value="operation">
+                {copy.projects.managementModes.operation}
+              </option>
+            </select>
+            <small>
+              {copy.projects.managementModeDescription[managementMode]}
+            </small>
+            {managementMode === "operation" && (
               <label htmlFor="project-stale-threshold">
                 <span>{copy.projects.staleThresholdLabel}</span>
                 <select
@@ -632,35 +648,8 @@ export function ProjectsWorkspace({
                 </select>
                 <small>{copy.projects.staleThresholdDescription}</small>
               </label>
-            ) : (
-              <label className="project-reporting-toggle">
-                <input
-                  type="checkbox"
-                  aria-label={copy.projects.weeklyReportingLabel}
-                  checked={reportingEnabled}
-                  onChange={(event) =>
-                    setReportingEnabled(event.target.checked)
-                  }
-                  disabled={saving}
-                />
-                <span>{copy.projects.weeklyReportingLabel}</span>
-                <small>{copy.projects.weeklyReportingDescription}</small>
-              </label>
             )}
           </div>
-          {managementMode === "operation" && (
-            <label className="project-reporting-toggle">
-              <input
-                type="checkbox"
-                aria-label={copy.projects.weeklyReportingLabel}
-                checked={reportingEnabled}
-                onChange={(event) => setReportingEnabled(event.target.checked)}
-                disabled={saving}
-              />
-              <span>{copy.projects.weeklyReportingLabel}</span>
-              <small>{copy.projects.weeklyReportingDescription}</small>
-            </label>
-          )}
           <div className="project-create-form__split">
             <label htmlFor="project-risk-level">
               <span>{copy.projects.riskLabel}</span>
@@ -750,7 +739,6 @@ export function ProjectsWorkspace({
         >
           <div className="projects-section-heading">
             <div>
-              <FolderKanban aria-hidden="true" />
               <h2
                 id="projects-list-title"
                 ref={projectListHeadingRef}
@@ -784,21 +772,46 @@ export function ProjectsWorkspace({
                         <strong>{project.title}</strong>
                       </span>
                       <span className="project-list__meta">
-                        <span>
-                          {project.managementMode === "completion"
-                            ? copy.projects.projectProgress(
+                        {project.managementMode === "completion" ? (
+                          <>
+                            <span>
+                              {copy.projects.projectProgress(
                                 project.progressPercent,
-                              )
-                            : copy.projects.operationSummary(
-                                project.openTaskCount,
-                                project.backlogDelta,
                               )}
-                        </span>
-                        <small>
-                          {copy.projects.openTaskCount(project.openTaskCount)}
-                        </small>
-                        <ChevronRight aria-hidden="true" />
+                            </span>
+                            <span
+                              className="project-list__progress"
+                              role="progressbar"
+                              aria-label={copy.projects.projectProgress(
+                                project.progressPercent,
+                              )}
+                              aria-valuemin={0}
+                              aria-valuemax={100}
+                              aria-valuenow={Math.max(
+                                0,
+                                Math.min(100, project.progressPercent),
+                              )}
+                            >
+                              <span
+                                style={{
+                                  width: `${Math.round(Math.max(0, Math.min(100, project.progressPercent)))}%`,
+                                }}
+                              />
+                            </span>
+                          </>
+                        ) : (
+                          <span>
+                            {copy.projects.operationSummary(
+                              project.openTaskCount,
+                              project.backlogDelta,
+                            )}
+                          </span>
+                        )}
                       </span>
+                      <ChevronRight
+                        className="project-list__arrow"
+                        aria-hidden="true"
+                      />
                     </button>
                   </li>
                 ))}
@@ -887,8 +900,8 @@ export function ProjectsWorkspace({
               <section className="project-detail__panel project-detail__overview">
                 <div className="project-detail__heading">
                   <div>
-                    <p>{copy.projects.projectDetailLabel}</p>
                     <h2 id="project-detail-title">{selectedProject.title}</h2>
+                    <p>{copy.projects.projectDetailLabel}</p>
                     <span>
                       {selectedProject.objective ||
                         copy.projects.objectiveEmpty}
@@ -905,7 +918,7 @@ export function ProjectsWorkspace({
                       </span>
                     )}
                     <button
-                      className="secondary-button focus-visible-control"
+                      className="secondary-button project-detail__edit-button focus-visible-control"
                       type="button"
                       aria-label={copy.projects.editProject}
                       disabled={saving}
@@ -991,10 +1004,6 @@ export function ProjectsWorkspace({
                     key={`${selectedProject.id}:${selectedProject.version}`}
                     project={selectedProject}
                     saving={saving}
-                    onCancel={() => {
-                      setFormError(undefined);
-                      setEditingProjectId(undefined);
-                    }}
                     onSave={async (input) => {
                       setFormError(undefined);
                       try {
@@ -1025,7 +1034,6 @@ export function ProjectsWorkspace({
                 >
                   <div className="projects-section-heading">
                     <div>
-                      <ListTodo aria-hidden="true" />
                       <h3>{copy.projects.workItemsTitle}</h3>
                     </div>
                     <span>{copy.projects.openTaskCount(openTasks.length)}</span>
@@ -1046,20 +1054,18 @@ export function ProjectsWorkspace({
                             highlightedTaskId === task.id ? -1 : undefined
                           }
                         >
-                          <button
+                          <TaskSelectionControl
+                            title={task.title}
                             className="project-task-list__complete focus-visible-control"
-                            type="button"
                             disabled={saving || childCount > 0}
-                            aria-label={copy.home.completeTask(task.title)}
-                            title={
+                            busy={false}
+                            hint={
                               childCount > 0
                                 ? copy.projects.completeChildrenFirst
                                 : undefined
                             }
-                            onClick={() => void onCompleteTask(task)}
-                          >
-                            <Circle aria-hidden="true" />
-                          </button>
+                            onComplete={() => onCompleteTask(task)}
+                          />
                           <button
                             className="project-task-list__content focus-visible-control"
                             type="button"
@@ -1081,6 +1087,7 @@ export function ProjectsWorkspace({
                             <span
                               className="project-task-list__assignee"
                               data-assigned={Boolean(task.assigneeName)}
+                              data-assignee={task.assigneeName ?? ""}
                             >
                               {copy.projects.taskAssignee(
                                 task.assigneeName ?? undefined,
@@ -1239,7 +1246,7 @@ export function ProjectsWorkspace({
                       </div>
                       <ul className="project-task-list project-task-list--completed">
                         {completedTasks.map((task) => (
-                          <li key={task.id}>
+                          <li key={task.id} data-task-status="completed">
                             <button
                               className="project-task-list__complete focus-visible-control"
                               type="button"
@@ -1279,6 +1286,7 @@ export function ProjectsWorkspace({
                               <span
                                 className="project-task-list__assignee"
                                 data-assigned={Boolean(task.assigneeName)}
+                                data-assignee={task.assigneeName ?? ""}
                               >
                                 {copy.projects.taskAssignee(
                                   task.assigneeName ?? undefined,
@@ -1407,10 +1415,12 @@ export function ProjectsWorkspace({
             </>
           ) : (
             <div className="project-detail__panel project-detail__selection">
-              <EmptySurface
-                title={copy.projects.selectTitle}
-                description={copy.projects.selectDescription}
-              />
+              <div className="empty-surface">
+                <div>
+                  <strong>{copy.projects.selectTitle}</strong>
+                  <p>{copy.projects.selectDescription}</p>
+                </div>
+              </div>
             </div>
           )}
         </section>
@@ -1488,7 +1498,6 @@ function ProjectDetailTabButton({
         });
       }}
     >
-      {icon}
       <span className="project-detail-tabs__label">{label}</span>
       <span className="project-detail-tabs__mobile-label">{mobileLabel}</span>
       {count > 0 && <small>{count}</small>}
@@ -1540,13 +1549,15 @@ function WeeklyWorkspaceOverview({
     ) : null;
   }
   return (
-    <details className="project-weekly-overview">
-      <summary className="focus-visible-control">
-        <span className="project-weekly-overview__icon" aria-hidden="true">
-          <BarChart3 />
-        </span>
+    <section
+      className="project-weekly-overview"
+      aria-labelledby="project-weekly-overview-title"
+    >
+      <header className="project-weekly-overview__heading">
         <span>
-          <strong>{copy.projects.weeklyReportTitle}</strong>
+          <h2 id="project-weekly-overview-title">
+            {copy.projects.weeklyReportTitle}
+          </h2>
           <small>
             {copy.projects.weeklyReportSummary(
               report.createdTaskCount,
@@ -1558,8 +1569,7 @@ function WeeklyWorkspaceOverview({
         <span className="project-weekly-overview__period">
           {formatWeeklyPeriod(report.periodStart, report.periodEnd)}
         </span>
-        <ChevronRight aria-hidden="true" />
-      </summary>
+      </header>
       <div className="project-weekly-overview__body">
         <dl className="project-weekly-metrics">
           <WeeklyMetric
@@ -1625,7 +1635,7 @@ function WeeklyWorkspaceOverview({
           ))}
         </div>
       </div>
-    </details>
+    </section>
   );
 }
 
@@ -1986,7 +1996,7 @@ function CompletionProjectProgress({ project }: { project: Project }) {
       >
         <span
           style={{
-            width: `${Math.max(0, Math.min(100, project.progressPercent))}%`,
+            width: `${Math.round(Math.max(0, Math.min(100, project.progressPercent)))}%`,
           }}
         />
       </div>
@@ -2087,13 +2097,11 @@ function OperationProjectHealth({ project }: { project: Project }) {
 function ProjectEditForm({
   project,
   saving,
-  onCancel,
   onSave,
   onDelete,
 }: {
   project: Project;
   saving: boolean;
-  onCancel(): void;
   onSave(input: {
     title: string;
     objective?: string;
@@ -2229,27 +2237,38 @@ function ProjectEditForm({
           onChange={(event) => setNextAction(event.target.value)}
         />
       </label>
-      <div className="project-edit-form__fields">
+      <div className="project-management-fields">
         <label htmlFor="project-edit-management-mode">
-          <span>{copy.projects.managementModeLabel}</span>
-          <select
-            id="project-edit-management-mode"
-            value={managementMode}
-            disabled={busy}
-            onChange={(event) => {
-              const nextMode = event.target.value as Project["managementMode"];
-              setManagementMode(nextMode);
-              if (nextMode === "operation") setDueDate("");
-            }}
-          >
-            <option value="completion">
-              {copy.projects.managementModes.completion}
-            </option>
-            <option value="operation">
-              {copy.projects.managementModes.operation}
-            </option>
-          </select>
+          {copy.projects.managementModeLabel}
         </label>
+        <label className="project-reporting-toggle">
+          <input
+            type="checkbox"
+            aria-label={copy.projects.weeklyReportingLabel}
+            checked={reportingEnabled}
+            disabled={busy}
+            onChange={(event) => setReportingEnabled(event.target.checked)}
+          />
+          <span>{copy.projects.weeklyReportingLabel}</span>
+          <small>{copy.projects.weeklyReportingDescription}</small>
+        </label>
+        <select
+          id="project-edit-management-mode"
+          value={managementMode}
+          disabled={busy}
+          onChange={(event) => {
+            const nextMode = event.target.value as Project["managementMode"];
+            setManagementMode(nextMode);
+            if (nextMode === "operation") setDueDate("");
+          }}
+        >
+          <option value="completion">
+            {copy.projects.managementModes.completion}
+          </option>
+          <option value="operation">
+            {copy.projects.managementModes.operation}
+          </option>
+        </select>
         {managementMode === "operation" && (
           <label htmlFor="project-edit-stale-threshold">
             <span>{copy.projects.staleThresholdLabel}</span>
@@ -2267,17 +2286,6 @@ function ProjectEditForm({
             </select>
           </label>
         )}
-        <label className="project-reporting-toggle">
-          <input
-            type="checkbox"
-            aria-label={copy.projects.weeklyReportingLabel}
-            checked={reportingEnabled}
-            disabled={busy}
-            onChange={(event) => setReportingEnabled(event.target.checked)}
-          />
-          <span>{copy.projects.weeklyReportingLabel}</span>
-          <small>{copy.projects.weeklyReportingDescription}</small>
-        </label>
       </div>
       <div className="project-edit-form__fields">
         <label htmlFor="project-edit-status">
@@ -2367,22 +2375,12 @@ function ProjectEditForm({
         <div className="project-edit-form__actions">
           <button
             ref={deleteTriggerRef}
-            className="destructive-quiet-button focus-visible-control"
+            className="secondary-button focus-visible-control"
             type="button"
             disabled={busy}
             onClick={() => setConfirmingDelete(true)}
           >
-            <Trash2 aria-hidden="true" />
-            {copy.projects.deleteProject}
-          </button>
-          <span />
-          <button
-            className="secondary-button focus-visible-control"
-            type="button"
-            disabled={busy}
-            onClick={onCancel}
-          >
-            {copy.projects.stopEditing}
+            {copy.projects.deleteAction}
           </button>
           <button
             className="primary-button focus-visible-control"
@@ -2659,29 +2657,19 @@ function TaskEditForm({
         <div className="project-task-edit-form__actions">
           <button
             ref={removeTriggerRef}
-            className="destructive-quiet-button focus-visible-control"
+            className="secondary-button focus-visible-control"
             type="button"
             disabled={busy}
             onClick={() => setConfirmingRemoval(true)}
           >
-            <Trash2 aria-hidden="true" />
-            {copy.projects.removeWorkItem}
-          </button>
-          <span />
-          <button
-            className="secondary-button focus-visible-control"
-            type="button"
-            disabled={busy}
-            onClick={onCancel}
-          >
-            {copy.projects.stopEditingWorkItem}
+            {copy.actions.deleteContentCompact}
           </button>
           <button
             className="primary-button focus-visible-control"
             type="submit"
             disabled={busy}
           >
-            {saving ? copy.actions.saving : copy.projects.saveWorkItem}
+            {saving ? copy.actions.saving : copy.actions.save}
           </button>
         </div>
       )}

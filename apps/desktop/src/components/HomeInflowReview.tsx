@@ -1,16 +1,24 @@
-import { ChevronDown, MessageCircleMore } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { ChevronDown, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { type ProjectInflowItem } from "../api/googleChat";
 import { copy } from "../copy";
 import {
+  homeInflowByReceivedDate,
+  homeInflowOnDate,
+} from "../home-inflow-dates";
+import { planningViewRange } from "../planningRange";
+import { HomeInflowCalendarView } from "./home-inflow-calendar-view";
+import {
   InflowItemRow,
   InflowItemList,
   inflowConversationKey,
+  isProjectInflowAttentionItem,
   type PromoteInflowInput,
 } from "./ProjectInflowPanel";
 
 type HomeInflowReviewProps = {
+  initialView?: "list" | "calendar";
   items: ProjectInflowItem[];
   saving: boolean;
   onPromote(item: ProjectInflowItem, input: PromoteInflowInput): Promise<void>;
@@ -133,40 +141,63 @@ function HomeInflowGroup({
   onRetryCompletion,
   onOpenTask,
   kind,
+  initialView = "calendar",
 }: HomeInflowReviewProps & { kind: "new" | "existing" }) {
   const titleId = `home-inflow-title-${kind}`;
   const detailId = `home-inflow-detail-title-${kind}`;
-  const pendingItems = useMemo(() => homeInflowPendingItems(items), [items]);
-  const [showAll, setShowAll] = useState(false);
-  const visibleItems = useMemo(
-    () => visibleHomeInflowItems(pendingItems, showAll),
-    [pendingItems, showAll],
+  const queueTitleId = `home-inflow-queue-title-${kind}`;
+  const reviewRef = useRef<HTMLDivElement>(null);
+  const queueRef = useRef<HTMLOListElement>(null);
+  const [queueOverflows, setQueueOverflows] = useState(false);
+  const allItems = useMemo(
+    () => homeInflowByReceivedDate(items.filter(isProjectInflowAttentionItem)),
+    [items],
   );
+  const [view, setView] = useState<"list" | "calendar">(initialView);
+  const [range, setRange] = useState(() => planningViewRange("month"));
+  const [calendarDetailOpen, setCalendarDetailOpen] = useState(false);
+  const visibleItems = useMemo(
+    () =>
+      view === "calendar" ? homeInflowOnDate(allItems, range.anchor) : allItems,
+    [allItems, view, range.anchor],
+  );
+  const showDetail = view === "list" || calendarDetailOpen;
+
+  useEffect(() => {
+    const queue = queueRef.current;
+    if (!queue || !showDetail) return;
+    queue.scrollTop = 0;
+    const measure = () => {
+      setQueueOverflows(queue.scrollHeight > queue.clientHeight + 1);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(queue);
+    for (const row of queue.children) observer.observe(row);
+    return () => observer.disconnect();
+  }, [visibleItems, showDetail]);
   const [selectedConversationId, setSelectedConversationId] = useState(
     visibleItems[0] ? inflowConversationKey(visibleItems[0]) : undefined,
   );
-  const [mobileExpanded, setMobileExpanded] = useState(false);
-  const selectedItem = resolveHomeInflowSelection(
-    visibleItems,
-    selectedConversationId,
-  );
 
-  useEffect(() => {
-    const nextSelection = selectedItem
-      ? inflowConversationKey(selectedItem)
-      : undefined;
-    if (selectedConversationId !== nextSelection) {
-      setSelectedConversationId(nextSelection);
-    }
-  }, [selectedConversationId, selectedItem]);
+  const selectedItem =
+    visibleItems.find(
+      (item) => inflowConversationKey(item) === selectedConversationId,
+    ) ?? visibleItems[0];
 
-  if (!selectedItem) return null;
+  if (!allItems.length) return null;
+  const dateLabel = new Intl.DateTimeFormat("ko-KR", {
+    month: "long",
+    day: "numeric",
+    weekday: "short",
+  }).format(range.anchor);
 
   return (
     <section
       className="home-inflow"
       aria-labelledby={titleId}
-      data-mobile-expanded={mobileExpanded}
+      data-view={view}
+      data-detail-open={showDetail}
     >
       <header className="home-inflow__heading">
         <div className="home-inflow__heading-copy">
@@ -186,117 +217,167 @@ function HomeInflowGroup({
               : copy.projects.inflowExistingDescription}
           </p>
         </div>
-        <strong aria-label={`${pendingItems.length}개의 업무 요청`}>
-          {pendingItems.length}
+        <strong
+          aria-label={copy.projects.inflowHomeRequestCount(allItems.length)}
+        >
+          {allItems.length}
         </strong>
       </header>
 
-      <button
-        className="home-inflow__mobile-toggle focus-visible-control"
-        type="button"
-        aria-expanded={mobileExpanded}
-        onClick={() => setMobileExpanded((current) => !current)}
+      <div
+        className="home-inflow__view-controls"
+        role="group"
+        aria-label={copy.projects.inflowHomeViews}
       >
-        <MessageCircleMore aria-hidden="true" />
-        <span>
-          {mobileExpanded
-            ? kind === "new"
-              ? copy.projects.inflowHomeCollapse
-              : copy.projects.inflowExistingCollapse
-            : kind === "new"
-              ? copy.projects.inflowHomeOpen(pendingItems.length)
-              : copy.projects.inflowExistingOpen(pendingItems.length)}
-        </span>
-        <ChevronDown aria-hidden="true" />
-      </button>
-
-      <div className="home-inflow-review">
-        <aside
-          className="home-inflow-review__queue"
-          aria-labelledby={`home-inflow-queue-title-${kind}`}
-        >
-          <div className="home-inflow-review__queue-heading">
-            <MessageCircleMore aria-hidden="true" />
-            <strong id={`home-inflow-queue-title-${kind}`}>
-              {kind === "new"
-                ? copy.projects.inflowHomeQueueTitle
-                : copy.projects.inflowExistingQueueTitle}
-            </strong>
-            <span>{visibleItems.length}</span>
-          </div>
-          <ol>
-            {visibleItems.map((item) => {
-              const conversationId = inflowConversationKey(item);
-              const active =
-                conversationId === inflowConversationKey(selectedItem);
-              return (
-                <li key={conversationId}>
-                  <button
-                    className="home-inflow-review__queue-item focus-visible-control"
-                    type="button"
-                    aria-pressed={active}
-                    data-active={active}
-                    onClick={() => setSelectedConversationId(conversationId)}
-                  >
-                    <span className="home-inflow-review__queue-meta">
-                      <strong>
-                        {item.senderName ?? copy.projects.inflowSenderPending}
-                      </strong>
-                      <time dateTime={item.receivedAt}>
-                        {formatHomeInflowTime(item.receivedAt)}
-                      </time>
-                    </span>
-                    <span className="home-inflow-review__queue-title">
-                      {item.suggestedTaskTitle}
-                    </span>
-                    <small>{item.sourceName}</small>
-                  </button>
-                </li>
+        {(["list", "calendar"] as const).map((mode) => (
+          <button
+            type="button"
+            key={mode}
+            className="focus-visible-control"
+            aria-pressed={view === mode}
+            data-active={view === mode}
+            onClick={() => setView(mode)}
+          >
+            {mode === "list"
+              ? copy.projects.inflowHomeListView
+              : copy.projects.inflowHomeCalendarView}
+          </button>
+        ))}
+      </div>
+      <div className="home-inflow-review" ref={reviewRef}>
+        {view === "calendar" && (
+          <HomeInflowCalendarView
+            kind={kind}
+            range={range}
+            items={allItems}
+            onRangeChange={(next) => {
+              setRange(next);
+              setSelectedConversationId(undefined);
+            }}
+            onSelectItem={(item) => {
+              setRange(
+                planningViewRange(range.mode, new Date(item.receivedAt)),
               );
-            })}
-          </ol>
-          {pendingItems.length > 5 && (
-            <button
-              className="home-inflow-review__show-all focus-visible-control"
-              type="button"
-              aria-expanded={showAll}
-              onClick={() => setShowAll((current) => !current)}
+              setSelectedConversationId(inflowConversationKey(item));
+              setCalendarDetailOpen(true);
+            }}
+            onSelectDate={(date) => {
+              setRange(planningViewRange(range.mode, date));
+              setSelectedConversationId(undefined);
+              setCalendarDetailOpen(true);
+            }}
+          />
+        )}
+        {showDetail && (
+          <div className="home-inflow-review__selection">
+            <aside
+              className="home-inflow-review__queue"
+              aria-labelledby={queueTitleId}
             >
-              <span>
-                {showAll
-                  ? copy.projects.inflowHomeShowLess
-                  : copy.projects.inflowHomeShowAll(pendingItems.length)}
-              </span>
-              <ChevronDown aria-hidden="true" />
-            </button>
-          )}
-        </aside>
-
-        <section
-          className="home-inflow-review__detail"
-          aria-labelledby={detailId}
-        >
-          <header>
-            <span>{copy.projects.inflowHomeSelectedLabel}</span>
-            <strong id={detailId}>
-              {copy.projects.inflowHomeSelectedRequest(
-                selectedItem.senderName || "",
+              <div className="home-inflow-review__queue-heading">
+                <strong id={queueTitleId}>
+                  {view === "calendar"
+                    ? copy.projects.inflowHomeReceivedOn(dateLabel)
+                    : copy.projects.inflowHomeQueueTitle}
+                </strong>
+                <span>{visibleItems.length}</span>
+                {view === "calendar" && (
+                  <button
+                    type="button"
+                    className="home-inflow-review__close focus-visible-control"
+                    aria-label={copy.projects.inflowHomeCloseDetail}
+                    onClick={() => {
+                      setCalendarDetailOpen(false);
+                      reviewRef.current
+                        ?.querySelector<HTMLButtonElement>(
+                          '.planning-calendar__day[aria-pressed="true"], .planning-week__date[aria-pressed="true"]',
+                        )
+                        ?.focus({ preventScroll: true });
+                    }}
+                  >
+                    <X aria-hidden="true" />
+                  </button>
+                )}
+              </div>
+              <ol ref={queueRef}>
+                {visibleItems.map((item) => {
+                  const conversationId = inflowConversationKey(item);
+                  const active =
+                    conversationId ===
+                    (selectedItem
+                      ? inflowConversationKey(selectedItem)
+                      : undefined);
+                  return (
+                    <li key={conversationId}>
+                      <button
+                        className="home-inflow-review__queue-item focus-visible-control"
+                        type="button"
+                        aria-pressed={active}
+                        data-active={active}
+                        onClick={() =>
+                          setSelectedConversationId(conversationId)
+                        }
+                      >
+                        <span className="home-inflow-review__queue-meta">
+                          <strong>
+                            {item.senderName ??
+                              copy.projects.inflowSenderPending}
+                          </strong>
+                          <time dateTime={item.receivedAt}>
+                            {formatHomeInflowTime(item.receivedAt)}
+                          </time>
+                        </span>
+                        <span className="home-inflow-review__queue-title">
+                          {item.suggestedTaskTitle}
+                        </span>
+                        <small>{item.sourceName}</small>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ol>
+              {queueOverflows && (
+                <p className="home-inflow-review__scroll-hint">
+                  <ChevronDown aria-hidden="true" />
+                  {copy.projects.inflowHomeScrollHint}
+                </p>
               )}
-            </strong>
-          </header>
-          <ul>
-            <InflowItemRow
-              key={inflowConversationKey(selectedItem)}
-              item={selectedItem}
-              saving={saving}
-              onPromote={onPromote}
-              onDismiss={onDismiss}
-              onRetryAnalysis={onRetryAnalysis}
-              onRetryCompletion={onRetryCompletion}
-              onOpenTask={(taskId) => void onOpenTask(taskId)}
-            />
-          </ul>
-        </section>
+            </aside>
+
+            {selectedItem ? (
+              <section
+                className="home-inflow-review__detail"
+                aria-labelledby={detailId}
+              >
+                <header>
+                  <span>{copy.projects.inflowHomeSelectedLabel}</span>
+                  <strong id={detailId}>
+                    {copy.projects.inflowHomeSelectedRequest(
+                      selectedItem.senderName || "",
+                    )}
+                  </strong>
+                </header>
+                <ul>
+                  <InflowItemRow
+                    key={inflowConversationKey(selectedItem)}
+                    item={selectedItem}
+                    saving={saving}
+                    onPromote={onPromote}
+                    onDismiss={onDismiss}
+                    onRetryAnalysis={onRetryAnalysis}
+                    onRetryCompletion={onRetryCompletion}
+                    onOpenTask={(taskId) => void onOpenTask(taskId)}
+                  />
+                </ul>
+              </section>
+            ) : (
+              <div className="home-inflow-review__empty" role="status">
+                <strong>{copy.projects.inflowHomeDateEmpty}</strong>
+                <p>{copy.projects.inflowHomeDateEmptyHelp}</p>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </section>
   );
@@ -328,7 +409,7 @@ export function resolveHomeInflowSelection(
 
 function formatHomeInflowTime(value: string): string {
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "받은 시간 확인 필요";
+  if (Number.isNaN(date.getTime())) return copy.projects.inflowHomeDatePending;
   return new Intl.DateTimeFormat("ko-KR", {
     hour: "2-digit",
     minute: "2-digit",

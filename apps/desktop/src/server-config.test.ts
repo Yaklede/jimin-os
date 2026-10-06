@@ -3,6 +3,16 @@ import { describe, expect, it } from "vitest";
 import { serverBaseUrlFromEnvironment } from "./server-config";
 
 describe("serverBaseUrlFromEnvironment", () => {
+  it("keeps explicitly published design previews on the intercepted local API", () => {
+    expect(
+      serverBaseUrlFromEnvironment({
+        DEV: false,
+        VITE_DESIGN_PREVIEW: "1",
+        VITE_API_BASE_URL: "https://os.jimin.ai.kr",
+      }),
+    ).toBe("/server");
+  });
+
   it("uses the fixed HTTPS server configured at build time", () => {
     expect(
       serverBaseUrlFromEnvironment({

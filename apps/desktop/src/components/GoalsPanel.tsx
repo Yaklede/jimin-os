@@ -1,7 +1,6 @@
 import {
   Check,
   ChevronRight,
-  Flag,
   Pause,
   Pencil,
   Plus,
@@ -132,9 +131,6 @@ export function GoalsPanel({
     >
       <header className="goals-panel__heading">
         <div>
-          <span className="goals-panel__icon" aria-hidden="true">
-            <Flag />
-          </span>
           <div>
             <h2 id="goals-panel-title">{copy.goals.title}</h2>
             <p>{copy.goals.description}</p>
@@ -344,7 +340,11 @@ function GoalRow({
             aria-valuemax={100}
             aria-valuenow={goal.progressPercent}
           >
-            <span style={{ width: `${goal.progressPercent}%` }} />
+            <span
+              style={{
+                width: `${Math.round(Math.max(0, Math.min(100, goal.progressPercent)))}%`,
+              }}
+            />
           </span>
         </div>
         <div className="goal-row__evidence" aria-label={copy.goals.evidence}>

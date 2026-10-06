@@ -81,10 +81,9 @@ describe("home inflow review", () => {
     );
     const markup = renderReview(items);
 
-    expect(markup).toContain(copy.projects.inflowHomeShowAll(7));
-    expect(markup).toContain('aria-expanded="false"');
+    expect(markup).toContain('class="home-inflow-review__queue"');
     expect(markup).toContain("업무 5");
-    expect(markup).not.toContain("업무 7");
+    expect(markup).toContain("업무 7");
     expect(visibleHomeInflowItems(items, true)).toHaveLength(7);
   });
 
@@ -119,10 +118,34 @@ describe("home inflow review", () => {
 
     expect(resolveHomeInflowSelection(collapsed, "7")).toBe(collapsed[0]);
   });
+
+  it("offers a received-date calendar without mixing existing task updates into new requests", () => {
+    const markup = renderReview(
+      [
+        inflow("new", { receivedAt: new Date().toISOString() }),
+        inflow("existing", {
+          promotedTaskId: "task",
+          receivedAt: new Date().toISOString(),
+        }),
+      ],
+      "calendar",
+    );
+    expect(markup).toContain('data-view="calendar"');
+    expect(markup).toContain(copy.projects.inflowHomeCalendarHint);
+    expect(markup).toContain(copy.projects.inflowExistingCalendarScope);
+    expect(markup).toContain('aria-labelledby="home-inflow-title-new"');
+    expect(markup).toContain('aria-labelledby="home-inflow-title-existing"');
+    expect(markup).toContain('aria-controls="home-inflow-panel-existing"');
+    expect(markup).toContain('role="tabpanel"');
+  });
 });
 
-function renderReview(items: ProjectInflowItem[]): string {
+function renderReview(
+  items: ProjectInflowItem[],
+  initialView: "list" | "calendar" = "list",
+): string {
   const props: ComponentProps<typeof HomeInflowReview> = {
+    initialView,
     items,
     saving: false,
     onPromote: async () => undefined,

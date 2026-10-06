@@ -1,5 +1,6 @@
 interface ClientEnvironment {
   readonly DEV?: boolean;
+  readonly VITE_DESIGN_PREVIEW?: string;
   readonly VITE_API_BASE_URL?: string;
   readonly VITE_LOCAL_PHONE_TEST?: string;
 }
@@ -13,6 +14,7 @@ export const personalServerBaseUrl = serverBaseUrlFromEnvironment(
 export function serverBaseUrlFromEnvironment(
   environment: ClientEnvironment,
 ): string | undefined {
+  if (environment.VITE_DESIGN_PREVIEW === "1") return "/server";
   const configured = environment.VITE_API_BASE_URL?.trim();
   if (configured) {
     return normalizeConfiguredServerUrl(

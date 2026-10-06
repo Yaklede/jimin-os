@@ -590,7 +590,7 @@ export function SettingsWorkspace({
           <strong>{copy.settings.connectionsTitle}</strong>
           <p>{copy.settings.connectionsDescription}</p>
         </div>
-        <div className="settings-row">
+        <div className="settings-row" data-state={ready ? "active" : undefined}>
           <span className="settings-row__icon" aria-hidden="true">
             {ready ? (
               <CheckCircle2 />
@@ -604,7 +604,7 @@ export function SettingsWorkspace({
           </span>
           <div className="settings-row__copy">
             <strong>{copy.settings.chatgptTitle}</strong>
-            <p>{detail}</p>
+            {!ready && <p>{detail}</p>}
             {awaitingAuthorization ? (
               <div className="settings-authentication">
                 <div className="settings-authentication__code">
@@ -648,11 +648,7 @@ export function SettingsWorkspace({
               </div>
             ) : null}
           </div>
-          {ready ? (
-            <span className="settings-row__state">
-              {copy.settings.chatgptReady}
-            </span>
-          ) : awaitingAuthorization ? null : (
+          {ready || awaitingAuthorization ? null : (
             <button
               className="text-button focus-visible-control"
               type="button"
@@ -690,7 +686,7 @@ export function SettingsWorkspace({
           </span>
           <div className="settings-row__copy">
             <strong>{copy.settings.calendarTitle}</strong>
-            <p>{calendarDetail}</p>
+            {!calendarError && <p>{calendarDetail}</p>}
             {calendarError && (
               <p className="settings-row__error" role="alert">
                 {calendarError}
@@ -704,19 +700,13 @@ export function SettingsWorkspace({
               </span>
             ) : !calendarConnection ? (
               <button
-                className="text-button focus-visible-control"
+                className="settings-connection-badge settings-connection-badge--attention settings-connection-refresh focus-visible-control"
                 type="button"
                 disabled={calendarLoading}
                 onClick={() => void onReloadCalendarConnection()}
               >
-                {calendarLoading ? (
-                  <LoaderCircle className="spin" aria-hidden="true" />
-                ) : (
-                  <RefreshCw aria-hidden="true" />
-                )}
-                {calendarLoading
-                  ? copy.settings.calendarChecking
-                  : copy.settings.calendarRetry}
+                <span className="settings-connection-dot" aria-hidden="true" />
+                확인 필요
               </button>
             ) : calendarReady ? (
               <>
@@ -786,17 +776,13 @@ export function SettingsWorkspace({
               </>
             ) : calendarAuthorizationPending ? (
               <button
-                className="text-button focus-visible-control"
+                className="settings-connection-badge settings-connection-badge--attention settings-connection-refresh focus-visible-control"
                 type="button"
                 disabled={calendarBusy}
                 onClick={() => void onReloadCalendarConnection()}
               >
-                {calendarLoading ? (
-                  <LoaderCircle className="spin" aria-hidden="true" />
-                ) : null}
-                {calendarLoading
-                  ? copy.settings.calendarChecking
-                  : copy.settings.calendarCheckConnection}
+                <span className="settings-connection-dot" aria-hidden="true" />
+                확인 필요
               </button>
             ) : (
               <button
@@ -829,17 +815,16 @@ export function SettingsWorkspace({
         >
           <div className="settings-gmail__heading">
             <span className="settings-row__icon" aria-hidden="true">
-              {gmailBusy ? (
-                <LoaderCircle className="spin" />
-              ) : gmailError || !gmailAvailable ? (
-                <CircleAlert />
-              ) : (
-                <Mail />
-              )}
+              {gmailBusy ? <LoaderCircle className="spin" /> : <Mail />}
             </span>
             <div>
               <strong>{copy.settings.gmailTitle}</strong>
               <p>{copy.settings.gmailDescription}</p>
+              {gmailError ? (
+                <p className="settings-row__error" role="alert">
+                  {gmailError}
+                </p>
+              ) : null}
             </div>
             {gmailLoading ? (
               <span className="settings-row__state" role="status">
@@ -852,21 +837,17 @@ export function SettingsWorkspace({
               </span>
             ) : gmailError ? (
               <button
-                className="text-button focus-visible-control"
+                className="settings-connection-badge settings-connection-badge--attention settings-connection-refresh focus-visible-control"
                 type="button"
                 disabled={gmailLoading}
                 onClick={() => void onReloadGmailAccounts()}
               >
-                <RefreshCw aria-hidden="true" />
-                {copy.settings.gmailRetry}
+                <span className="settings-connection-dot" aria-hidden="true" />
+                확인 필요
               </button>
             ) : null}
           </div>
-          {gmailError ? (
-            <p className="settings-row__error" role="alert">
-              {gmailError}
-            </p>
-          ) : null}
+
           {gmailWorkspaceGroups.length === 0 ? (
             <div className="settings-gmail__empty">
               <CircleAlert aria-hidden="true" />
@@ -898,38 +879,18 @@ export function SettingsWorkspace({
                   >
                     <header>
                       <div>
-                        <span>
+                        <strong id={`gmail-workspace-${workspace.id}`}>
                           {workspace.scope === "company"
                             ? copy.settings.gmailCompanyWorkspace
-                            : copy.settings.gmailPersonalWorkspace}
-                        </span>
-                        <strong id={`gmail-workspace-${workspace.id}`}>
-                          {workspace.name}
+                            : copy.settings.gmailPersonalWorkspace}{" "}
+                          Gmail
                         </strong>
+                        <p>{workspace.name}</p>
                       </div>
-                      <button
-                        className="text-button focus-visible-control"
-                        type="button"
-                        disabled={
-                          !gmailAvailable ||
-                          gmailLoading ||
-                          authorizing ||
-                          anotherWorkspaceAuthorizing ||
-                          authorizationPending
-                        }
-                        onClick={() =>
-                          void onStartGmailConnection(workspace.id)
-                        }
-                      >
-                        {authorizing ? (
-                          <LoaderCircle className="spin" aria-hidden="true" />
-                        ) : (
-                          <Plus aria-hidden="true" />
-                        )}
-                        {authorizing
-                          ? copy.settings.gmailOpening
-                          : copy.settings.gmailAddAccount}
-                      </button>
+
+                      <span className="settings-gmail__count">
+                        연결 계정 {accounts.length}개
+                      </span>
                     </header>
                     {authorizationPending ? (
                       <div className="settings-gmail__pending" role="status">
@@ -1150,6 +1111,31 @@ export function SettingsWorkspace({
                         })}
                       </div>
                     )}
+                    <footer className="settings-gmail__workspace-footer">
+                      <button
+                        className="primary-button settings-gmail__add-account focus-visible-control"
+                        type="button"
+                        disabled={
+                          !gmailAvailable ||
+                          gmailLoading ||
+                          authorizing ||
+                          anotherWorkspaceAuthorizing ||
+                          authorizationPending
+                        }
+                        onClick={() =>
+                          void onStartGmailConnection(workspace.id)
+                        }
+                      >
+                        {authorizing ? (
+                          <LoaderCircle className="spin" aria-hidden="true" />
+                        ) : (
+                          <Plus aria-hidden="true" />
+                        )}
+                        {authorizing
+                          ? copy.settings.gmailOpening
+                          : copy.settings.gmailAddAccount}
+                      </button>
+                    </footer>
                   </section>
                 );
               })}
@@ -1218,17 +1204,13 @@ export function SettingsWorkspace({
               </button>
             ) : (
               <button
-                className="text-button focus-visible-control"
+                className="settings-connection-badge settings-connection-badge--disconnected settings-connection-refresh focus-visible-control"
                 type="button"
                 disabled={deviceSignalsLoading}
                 onClick={() => void onRefreshDeviceSignals()}
               >
-                {deviceSignalsLoading ? (
-                  <LoaderCircle className="spin" aria-hidden="true" />
-                ) : (
-                  <RefreshCw aria-hidden="true" />
-                )}
-                {copy.settings.deviceSignalsRefresh}
+                <span className="settings-connection-dot" aria-hidden="true" />
+                연결 안 됨
               </button>
             )}
           </div>
