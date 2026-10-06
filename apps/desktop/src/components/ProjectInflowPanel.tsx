@@ -113,7 +113,7 @@ export function ProjectInflowPanel({
   const [spaceName, setSpaceName] = useState("");
   const [acknowledge, setAcknowledge] = useState(true);
   const [importHistory, setImportHistory] = useState(false);
-  const pendingItems = items.filter(isProjectInflowAttentionItem);
+  const pendingItems = items.filter((item) => item.status === "pending");
   const newItems = pendingItems.filter(
     (item) => !item.promotedTaskId && !item.reviewed,
   );

@@ -157,6 +157,15 @@ describe("project inflow deadline", () => {
 });
 
 describe("project inflow attention", () => {
+  it("keeps reviewed pending requests in a collapsed section without counting them as unread", () => {
+    const item = inflowItem("reviewed", { reviewed: true });
+    expect(projectInflowAttentionCount([item])).toBe(0);
+    const markup = renderPanel({ items: [item] });
+    expect(markup).toContain(copy.projects.inflowReviewedTitle);
+    expect(markup).toContain(copy.projects.inflowPromote);
+    expect(markup).toContain('class="project-inflow__history"');
+    expect(markup).not.toContain('class="project-inflow__history" open=""');
+  });
   it("counts only pending conversations as attention items", () => {
     expect(
       projectInflowAttentionCount([
