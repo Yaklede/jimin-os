@@ -23,8 +23,8 @@
 - [x] Backend tests/Clippy/format, isolated PostgreSQL and assistant/client/mobile contracts pass.
 - [x] Dark/light and all five colors persist across reload; 320/390/430/1440/2000 widths have no page overflow.
 - [x] Scoped keyboard/tab/detail focus checked; reduced-motion rules retained; loading/error/empty/populated rendering checked.
-- [ ] Release contains production origin, no preview fixtures or localhost overrides.
-- [ ] Reviewed merge, infrastructure deployment, production client installation and health checks.
+- [x] Release contains production origin, no preview fixtures or localhost overrides.
+- [x] Reviewed merge, infrastructure readiness check and available production desktop installation; Android release prepared, physical installation unavailable without a connected device.
 
 ## Issue ledger
 
@@ -57,4 +57,12 @@
 
 ## Deployment
 
-Pending reviewed merge and designated infrastructure thread deployment. Keep installed production app and rollback copy until the candidate is signed and server readiness is confirmed.
+- PR #2 was merged using the reviewed integration head ee6898e10c075aad7452648bcf21035fe4095320. PR #1 is also confirmed merged. Production main is 78308a3f7c13d92cd8a14f1041c1f3707c4d552f; its tree 11a7ea2ec788295e5542988c31875b2ca68202d6 is identical to the tested integration tree.
+- The designated infrastructure thread confirmed that Nginx/Caddy serve API only, not static web UI (/ and /index.html both 404). Backend/API/Agent/migrations/production Compose are unchanged, so no unnecessary rebuild/restart/migration was performed.
+- Server verification: backend 7414ed94aba418fee43ca25c572d20b4288e7e16, schema 57/57/57, migration failures 0; five services healthy; internal and Twingate live/ready checks 200. Existing image digests, persistent data, secrets and rollback backups preserved. Server-side UI asset verification is not applicable because no UI assets are hosted there.
+- Production macOS uses io.jimin.os and the same stable signing identity/team (9L5V75TP2R) as the previous app. Signed candidate was staged, signature-verified and atomically installed at /Applications/Jimin OS.app. Installed executable SHA-256: 4bddaf7df28695f8659b76e6df0f549b06be21b36d59ce4cf178b72365786be8. Rollback copy: /tmp/jimin-os-release-design-integration-20261006/previous-installed.app; additionally preserved the actual replaced bundle as replaced-installed.app in that directory.
+- Android production release build passed, including production-origin and APK safety checks (io.jimin.os, non-debuggable, arm64-only, size limit, valid signature). APK: /Users/jimin/Desktop/study/jimin-os/releases/design-integration-20261006/jimin-os-production-arm64.apk; SHA-256 502efcb46681a36fbfb75f6adbb2337b6b5b8a2842b70d5e332953b4dedda26b. Only emulator-5554 is currently connected. No physical-device installation is claimed.
+- The user first requested waiting for an active request; no quit occurred during that wait. When the request remained in processing, the user explicitly asked to restart. The app was then quit via native UI and relaunched after installation. The prior request result reloaded from the real server after restart; its answer requested missing task/ITSM identifiers. No resend or business-task mutation was performed by this release workflow.
+- Installed production UI verified with the real server: today tasks 5, scheduled work 1 with next run 17:30, new inflow 3/existing update 1, calendar/list controls, real source links and original/analysis disclosures, theme/color popover. User subsequently interacted with the updated UI, so further automated production clicks were stopped to avoid interfering. Proof: /tmp/jimin-design-integration-production.png.
+- Isolated browser viewport override was reset, the agent-created preview tab/server and emulator were stopped, the temporary native QA script removed. Emulator-only debug APK was moved out of the workspace build output to the release rollback directory; it was never installed on a physical device. Production release APK remains available separately.
+- Server confirmation: /Users/jimin/Desktop/local-pc/reports/2026-10-06-jimin-os-design-integration-server-check.md.
