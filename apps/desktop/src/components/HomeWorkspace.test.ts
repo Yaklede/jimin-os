@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { readFileSync } from "node:fs";
 
 import { type Task } from "../api/planning";
 import { type WeeklyReport } from "../api/projects";
@@ -8,6 +9,23 @@ import {
   HomeAssistantCommand,
   selectWeeklyPriorityTasks,
 } from "./HomeWorkspace";
+
+it("limits deadline badge styling to the status label, not the task copy", () => {
+  const styles = readFileSync(
+    new URL("../styles.css", import.meta.url),
+    "utf8",
+  );
+  const component = readFileSync(
+    new URL("./HomeWorkspace.tsx", import.meta.url),
+    "utf8",
+  );
+  expect(styles).not.toMatch(/\.home-deadline-brief__task\s*>\s*span\b/);
+  expect(styles).toMatch(
+    /\.home-deadline-brief__task\s*>\s*\.home-deadline-brief__due-state/,
+  );
+  expect(component).toContain('className="home-deadline-brief__due-state"');
+  expect(component).toContain('className="home-deadline-brief__copy"');
+});
 
 describe("home new request action", () => {
   const base: ComponentProps<typeof HomeAssistantCommand> = {

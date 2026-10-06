@@ -66,6 +66,8 @@ import {
   useDelayedSkeleton,
 } from "./ContentSkeleton";
 import { LinkifiedText } from "./ExternalTextLink";
+import { useMobileLayout } from "../useMobileLayout";
+import { MobileDisclosure } from "./MobileDisclosure";
 import { EmptySurface } from "./HomeWorkspace";
 import { GoalsPanel } from "./GoalsPanel";
 import { ProjectWebhookPanel } from "./ProjectWebhookPanel";
@@ -308,6 +310,7 @@ export function ProjectsWorkspace({
   onRetryInflowAnalysis,
   onRetryInflowCompletion,
 }: ProjectsWorkspaceProps) {
+  const mobile = useMobileLayout();
   const [formOpen, setFormOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [objective, setObjective] = useState("");
@@ -521,7 +524,9 @@ export function ProjectsWorkspace({
         </button>
       </header>
 
-      {scheduledWork}
+      <MobileDisclosure mobile={mobile} title="반복 알림">
+        {scheduledWork}
+      </MobileDisclosure>
 
       <div
         className="workspace-tabs"
@@ -728,13 +733,17 @@ export function ProjectsWorkspace({
         </form>
       )}
 
-      {(weeklyReport || weeklyReportError) && projects.length > 0 && (
-        <WeeklyWorkspaceOverview
-          report={weeklyReport}
-          error={weeklyReportError}
-          onSelectProject={onSelectProject}
-        />
-      )}
+      {(weeklyReport || weeklyReportError) &&
+        projects.length > 0 &&
+        !(mobile && selectedProject) && (
+          <MobileDisclosure mobile={mobile} title="이번 주 운영 리포트">
+            <WeeklyWorkspaceOverview
+              report={weeklyReport}
+              error={weeklyReportError}
+              onSelectProject={onSelectProject}
+            />
+          </MobileDisclosure>
+        )}
 
       <div
         className="projects-layout"
@@ -927,7 +936,13 @@ export function ProjectsWorkspace({
                   onSelect={setActiveProjectTab}
                 />
               </nav>
-              <section className="project-detail__panel project-detail__overview">
+              <section
+                className="project-detail__panel project-detail__overview"
+                data-mobile-expanded={
+                  mobileProjectOverviewOpen ||
+                  editingProjectId === selectedProject.id
+                }
+              >
                 <div className="project-detail__heading">
                   <div>
                     <h2 id="project-detail-title">{selectedProject.title}</h2>
@@ -965,7 +980,10 @@ export function ProjectsWorkspace({
                   </div>
                 </div>
                 {editingProjectId !== selectedProject.id && (
-                  <div className="project-next-action">
+                  <div
+                    className="project-next-action"
+                    data-has-next-action={Boolean(selectedProject.nextAction)}
+                  >
                     <span>{copy.projects.nextActionLabel}</span>
                     <strong>
                       {selectedProject.nextAction || copy.projects.noNextAction}

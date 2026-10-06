@@ -74,10 +74,42 @@ export function PlanningCreateDialog({
   const [linkedTaskId, setLinkedTaskId] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+  const baseline = useRef("");
+  const closeRequestRef = useRef<() => void>(() => undefined);
+  const draft = JSON.stringify([
+    title,
+    notes,
+    priority,
+    workKind,
+    dueAt,
+    startsAt,
+    endsAt,
+    linkedTaskId,
+  ]);
+  closeRequestRef.current = () => {
+    if (saving) return;
+    if (draft !== baseline.current) {
+      setConfirmingDiscard(true);
+      return;
+    }
+    dialogRef.current?.close();
+  };
 
   useEffect(() => {
     if (!kind) return;
     const scheduleRange = defaultScheduleRange();
+    baseline.current = JSON.stringify([
+      "",
+      "",
+      1,
+      "general",
+      "",
+      scheduleRange.startsAt,
+      scheduleRange.endsAt,
+      "",
+    ]);
+    setConfirmingDiscard(false);
     openerRef.current =
       document.activeElement instanceof HTMLElement
         ? document.activeElement
@@ -110,7 +142,7 @@ export function PlanningCreateDialog({
     if (!kind) return;
     return registerMobileBackHandler(() => {
       if (saving) return true;
-      dialogRef.current?.close();
+      closeRequestRef.current();
       return true;
     }, 100);
   }, [kind, saving]);
@@ -124,8 +156,7 @@ export function PlanningCreateDialog({
     : copy.forms.scheduleCreateDescription;
 
   function requestClose() {
-    if (saving) return;
-    dialogRef.current?.close();
+    closeRequestRef.current();
   }
 
   function handleClose() {
@@ -357,30 +388,60 @@ export function PlanningCreateDialog({
           </p>
         )}
 
-        <footer className="planning-editor__actions">
-          <button
-            className="secondary-button focus-visible-control"
-            type="button"
-            onClick={requestClose}
-            disabled={saving}
+        {confirmingDiscard ? (
+          <section
+            className="planning-editor__discard-confirmation"
+            role="group"
+            aria-label="입력 내용 확인"
           >
-            {copy.actions.cancel}
-          </button>
-          <button
-            className="primary-button focus-visible-control"
-            type="submit"
-            disabled={saving || !title.trim()}
-          >
-            {saving ? (
-              <span className="button-spinner" aria-hidden="true" />
-            ) : null}
-            {saving
-              ? copy.actions.saving
-              : taskMode
-                ? copy.actions.addTask
-                : copy.actions.addSchedule}
-          </button>
-        </footer>
+            <p>아직 저장하지 않았어요. 닫으면 입력 내용이 사라져요.</p>
+            <div>
+              <button
+                className="secondary-button focus-visible-control"
+                type="button"
+                autoFocus
+                onClick={() => {
+                  setConfirmingDiscard(false);
+                  titleInputRef.current?.focus();
+                }}
+              >
+                계속 작성하기
+              </button>
+              <button
+                className="danger-button focus-visible-control"
+                type="button"
+                onClick={() => dialogRef.current?.close()}
+              >
+                저장하지 않고 닫기
+              </button>
+            </div>
+          </section>
+        ) : (
+          <footer className="planning-editor__actions">
+            <button
+              className="secondary-button focus-visible-control"
+              type="button"
+              onClick={requestClose}
+              disabled={saving}
+            >
+              {copy.actions.cancel}
+            </button>
+            <button
+              className="primary-button focus-visible-control"
+              type="submit"
+              disabled={saving || !title.trim()}
+            >
+              {saving ? (
+                <span className="button-spinner" aria-hidden="true" />
+              ) : null}
+              {saving
+                ? copy.actions.saving
+                : taskMode
+                  ? copy.actions.addTask
+                  : copy.actions.addSchedule}
+            </button>
+          </footer>
+        )}
       </form>
     </dialog>
   );

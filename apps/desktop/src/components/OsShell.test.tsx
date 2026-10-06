@@ -32,6 +32,20 @@ describe("OS shell platform layout", () => {
     expect(renderShell("ios")).toContain('data-platform="ios"');
   });
 
+  it.each(["web", "android", "ios"] as const)(
+    "has five destinations and no obstructing voice button on %s",
+    (platform) => {
+      const markup = renderShell(platform);
+      const bottom = markup.slice(markup.indexOf('<nav class="os-mobile-nav"'));
+      expect(bottom).toContain("회의");
+      expect(bottom).toContain("더보기");
+      expect(bottom).not.toContain("os-mobile-nav__assistant");
+      expect(bottom.indexOf("프로젝트")).toBeLessThan(bottom.indexOf("일정"));
+      expect(bottom.indexOf("일정")).toBeLessThan(bottom.indexOf("회의"));
+      expect(bottom.indexOf("회의")).toBeLessThan(bottom.indexOf("더보기"));
+    },
+  );
+
   it("keeps the wide desktop grid and a compact desktop rail at narrow widths", () => {
     const styles = readFileSync(
       new URL("../styles.css", import.meta.url),

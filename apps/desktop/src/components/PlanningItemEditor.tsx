@@ -82,9 +82,50 @@ export function PlanningItemEditor({
   const [saving, setSaving] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [error, setError] = useState<string>();
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+  const initializedTarget = useRef<string | undefined>(undefined);
+  const baseline = useRef("");
+  const closeRequestRef = useRef<() => void>(() => undefined);
+  const draft = JSON.stringify([
+    title,
+    notes,
+    assigneeName,
+    priority,
+    workKind,
+    dueAt,
+    startsAt,
+    endsAt,
+    linkedTaskId,
+  ]);
+  closeRequestRef.current = () => {
+    if (saving) return;
+    if (draft !== baseline.current) {
+      setConfirmingDiscard(true);
+      return;
+    }
+    dialogRef.current?.close();
+  };
 
   useEffect(() => {
-    if (!target) return;
+    if (!target) {
+      initializedTarget.current = undefined;
+      return;
+    }
+    const targetKey = `${target.kind}:${target.item.id}`;
+    if (initializedTarget.current === targetKey) return;
+    initializedTarget.current = targetKey;
+    baseline.current = JSON.stringify([
+      target.item.title,
+      target.item.notes ?? "",
+      target.kind === "task" ? (target.item.assigneeName ?? "") : "",
+      target.kind === "task" ? target.item.priority : 1,
+      target.kind === "task" ? (target.item.workKind ?? "general") : "general",
+      target.kind === "task" ? isoToLocalInput(target.item.dueAt) : "",
+      target.kind === "schedule" ? isoToLocalInput(target.item.startsAt) : "",
+      target.kind === "schedule" ? isoToLocalInput(target.item.endsAt) : "",
+      target.kind === "schedule" ? (target.item.taskId ?? "") : "",
+    ]);
+    setConfirmingDiscard(false);
     let focusFrame: number | undefined;
     openerRef.current =
       document.activeElement instanceof HTMLElement
@@ -143,7 +184,7 @@ export function PlanningItemEditor({
     if (!target) return;
     return registerMobileBackHandler(() => {
       if (saving) return true;
-      dialogRef.current?.close();
+      closeRequestRef.current();
       return true;
     }, 100);
   }, [saving, target]);
@@ -160,8 +201,7 @@ export function PlanningItemEditor({
     : copy.forms.editScheduleDescription;
 
   function requestClose() {
-    if (saving) return;
-    dialogRef.current?.close();
+    closeRequestRef.current();
   }
 
   function handleClose() {
@@ -449,7 +489,37 @@ export function PlanningItemEditor({
           </p>
         )}
 
-        {confirmingDelete ? (
+        {confirmingDiscard ? (
+          <section
+            className="planning-editor__discard-confirmation"
+            role="group"
+            aria-label="변경 내용 확인"
+          >
+            <p>
+              저장하지 않은 변경 내용이 있어요. 닫으면 변경 내용이 사라져요.
+            </p>
+            <div>
+              <button
+                className="secondary-button focus-visible-control"
+                type="button"
+                autoFocus
+                onClick={() => {
+                  setConfirmingDiscard(false);
+                  titleInputRef.current?.focus();
+                }}
+              >
+                계속 수정하기
+              </button>
+              <button
+                className="danger-button focus-visible-control"
+                type="button"
+                onClick={() => dialogRef.current?.close()}
+              >
+                저장하지 않고 닫기
+              </button>
+            </div>
+          </section>
+        ) : confirmingDelete ? (
           <section
             className="planning-editor__delete-confirmation"
             role="group"

@@ -194,6 +194,29 @@ export async function fetchPlanning(
   };
 }
 
+/** The server returns every open task for this user (no page limit). */
+export async function fetchOpenTasks(
+  baseUrl: string,
+  access: string,
+): Promise<Task[]> {
+  const response = await fetch(
+    `${normalizeBaseUrl(baseUrl)}/v1/tasks?status=open`,
+    {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${access}`,
+      },
+    },
+  );
+  const body = await readJson(response);
+  if (!response.ok) throw errorFromStatus(response.status);
+  if (!isListResponse<Task>(body) || body.nextCursor != null) {
+    // Never present a truncated response as the complete list.
+    throw new PlanningRequestError("unavailable");
+  }
+  return body.items;
+}
+
 export async function createTask(
   baseUrl: string,
   access: string,

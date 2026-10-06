@@ -4,6 +4,7 @@ import { ScheduledWorkPanel } from "./components/ScheduledWorkPanel";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   lazy,
+  startTransition,
   Suspense,
   useCallback,
   useEffect,
@@ -20,6 +21,7 @@ import {
   synchronizeGoogleCalendar,
   type GoogleCalendarConnection,
 } from "./api/calendar";
+import { useMobileLayout } from "./useMobileLayout";
 import {
   disconnectGmailAccount,
   fetchGmailAccounts,
@@ -51,6 +53,7 @@ import {
   updateTask,
   updateScheduleEntry,
   fetchPlanning,
+  fetchOpenTasks,
   PlanningRequestError,
   type PlanningSnapshot,
   type ScheduleEntry,
@@ -290,6 +293,7 @@ const SettingsWorkspace = lazy(() =>
 );
 
 export default function App() {
+  const mobileLayout = useMobileLayout();
   const apiBaseUrl = personalServerBaseUrl ?? "";
   const [tokens, setTokens] = useState<SessionTokens | undefined>(undefined);
   const [sessionLoaded, setSessionLoaded] = useState(false);
@@ -4859,7 +4863,8 @@ export default function App() {
         destination,
       ];
     }
-    setDestination(nextDestination);
+    if (mobileLayout) startTransition(() => setDestination(nextDestination));
+    else setDestination(nextDestination);
     if (
       nextDestination === "home" &&
       homeConversationId &&
@@ -4995,6 +5000,11 @@ export default function App() {
                   />
                 }
                 snapshot={homeSnapshot}
+                onLoadAllTasks={() =>
+                  withAuthenticatedSession((accessToken) =>
+                    fetchOpenTasks(apiBaseUrl, accessToken),
+                  )
+                }
                 loading={homeLoading || mode === "loading"}
                 error={homeError ?? (mode === "error" ? message : undefined)}
                 assistantReady={agentAuthentication?.state === "ready"}
