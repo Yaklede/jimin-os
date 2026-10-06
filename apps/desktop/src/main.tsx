@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import { initializeAppearance } from "./appearance-preferences";
 import "./styles.css";
+import "./mobileWorkspace.css";
 
 const root = document.getElementById("root");
 

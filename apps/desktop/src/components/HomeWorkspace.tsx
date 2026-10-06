@@ -1,4 +1,7 @@
 import { TaskWorkKindBadge } from "./TaskWorkKind";
+import { useMobileLayout } from "../useMobileLayout";
+import { MobileTaskQueue } from "./MobileTaskQueue";
+import { MobileDisclosure } from "./MobileDisclosure";
 import { TaskSelectionControl } from "./TaskSelectionControl";
 import {
   AlertTriangle,
@@ -57,7 +60,7 @@ import {
   useDelayedSkeleton,
 } from "./ContentSkeleton";
 import { AssistantInteractiveCanvas } from "./AssistantInteractiveCanvas";
-import { HomeInflowReview } from "./HomeInflowReview";
+import { HomeInflowReview, homeInflowPendingItems } from "./HomeInflowReview";
 import {
   GmailInflowReview,
   type PromoteGmailInflowInput,
@@ -66,6 +69,7 @@ import { type PromoteInflowInput } from "./ProjectInflowPanel";
 
 type HomeWorkspaceProps = {
   scheduledWork?: ReactNode;
+  onLoadAllTasks?(): Promise<Task[]>;
   snapshot: HomeSnapshot | undefined;
   loading: boolean;
   error: string | undefined;
@@ -140,6 +144,7 @@ type HomeWorkspaceProps = {
 
 export function HomeWorkspace({
   scheduledWork,
+  onLoadAllTasks,
   snapshot,
   loading,
   error,
@@ -188,6 +193,11 @@ export function HomeWorkspace({
   onDeferGmailInflow,
   onRetryGmailInflowAnalysis,
 }: HomeWorkspaceProps) {
+  const mobile = useMobileLayout();
+  const [mobileAssistantOpen, setMobileAssistantOpen] = useState(false);
+  const mobileAssistantActive =
+    mobileAssistantOpen ||
+    Boolean(assistantJob && !isTerminalJob(assistantJob.state));
   const [completingTaskId, setCompletingTaskId] = useState<string>();
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
   const [assistantFocused, setAssistantFocused] = useState(false);
@@ -347,7 +357,34 @@ export function HomeWorkspace({
         </div>
       </header>
 
-      {scheduledWork}
+      {mobile && onLoadAllTasks && (
+        <MobileTaskQueue
+          tasks={snapshot?.tasks ?? []}
+          loading={loading}
+          onLoadAll={onLoadAllTasks}
+          onComplete={onCompleteTask}
+          onEdit={onEditTask}
+        />
+      )}
+
+      {mobile && nextSchedule && (
+        <section className="mobile-home-next" aria-label="다음 일정">
+          <h2>다음 일정</h2>
+          <ScheduleHighlight
+            entry={nextSchedule}
+            onOpen={() => void onOpenSchedule(nextSchedule)}
+            onEdit={
+              nextSchedule.source === "manual"
+                ? () => onEditSchedule(nextSchedule)
+                : undefined
+            }
+          />
+        </section>
+      )}
+
+      <MobileDisclosure mobile={mobile} title="반복 알림">
+        {scheduledWork}
+      </MobileDisclosure>
 
       {error && (
         <p className="inline-alert" role="alert">
@@ -359,29 +396,35 @@ export function HomeWorkspace({
       </p>
 
       {!showingSkeleton && Boolean(snapshot?.inflow.length) && (
-        <HomeInflowReview
-          items={snapshot?.inflow ?? []}
-          saving={inflowSaving}
-          onPromote={onPromoteInflow}
-          onDismiss={onDismissInflow}
-          onRetryAnalysis={onRetryInflowAnalysis}
-          onRetryCompletion={onRetryInflowCompletion}
-          onOpenTask={async (taskId) => {
-            const task = await onLoadAssistantTask({
-              id: taskId,
-              projectId: null,
-            });
-            await onOpenTask(task);
-            if (!task.projectId) {
-              setHighlightedHomeTaskId(task.id);
-              setOverviewFocusTarget("tasks");
-              setAssistantFocused(false);
-            }
-          }}
-        />
+        <MobileDisclosure
+          mobile={mobile}
+          title={`들어온 대화 · ${homeInflowPendingItems(snapshot?.inflow ?? []).filter((item) => !item.reviewed).length}개`}
+        >
+          <HomeInflowReview
+            initialView={mobile ? "list" : "calendar"}
+            items={snapshot?.inflow ?? []}
+            saving={inflowSaving}
+            onPromote={onPromoteInflow}
+            onDismiss={onDismissInflow}
+            onRetryAnalysis={onRetryInflowAnalysis}
+            onRetryCompletion={onRetryInflowCompletion}
+            onOpenTask={async (taskId) => {
+              const task = await onLoadAssistantTask({
+                id: taskId,
+                projectId: null,
+              });
+              await onOpenTask(task);
+              if (!task.projectId) {
+                setHighlightedHomeTaskId(task.id);
+                setOverviewFocusTarget("tasks");
+                setAssistantFocused(false);
+              }
+            }}
+          />
+        </MobileDisclosure>
       )}
 
-      {assistantFocused && (
+      {!mobile && assistantFocused && (
         <nav
           className="home-context-strip"
           aria-labelledby="home-context-strip-title"
@@ -432,80 +475,94 @@ export function HomeWorkspace({
         </nav>
       )}
 
-      <HomeAssistantCommand
-        ready={assistantReady}
-        conversationId={assistantConversationId}
-        request={assistantRequest}
-        job={assistantJob}
-        message={assistantMessage}
-        focused={assistantFocused}
-        onFocusChange={setAssistantFocused}
-        onOpenAssistant={onOpenAssistant}
-        onStartNew={onStartNewAssistant}
-        onSend={onSendAssistant}
-        onLoadTask={onLoadAssistantTask}
-        onCompleteTask={onCompleteAssistantTask}
-        onRestoreTask={onRestoreAssistantTask}
-        onEditTask={onEditAssistantTask}
-        onEditSchedule={onEditAssistantSchedule}
-        onOpenTask={async (task) => {
-          if (task.projectId) {
+      <MobileDisclosure
+        mobile={mobile}
+        title="지민에게 요청하기"
+        open={mobileAssistantActive}
+        onOpenChange={setMobileAssistantOpen}
+      >
+        <HomeAssistantCommand
+          ready={assistantReady}
+          conversationId={assistantConversationId}
+          request={assistantRequest}
+          job={assistantJob}
+          message={assistantMessage}
+          focused={assistantFocused && (!mobile || mobileAssistantActive)}
+          onFocusChange={setAssistantFocused}
+          onOpenAssistant={onOpenAssistant}
+          onStartNew={onStartNewAssistant}
+          onSend={onSendAssistant}
+          onLoadTask={onLoadAssistantTask}
+          onCompleteTask={onCompleteAssistantTask}
+          onRestoreTask={onRestoreAssistantTask}
+          onEditTask={onEditAssistantTask}
+          onEditSchedule={onEditAssistantSchedule}
+          onOpenTask={async (task) => {
+            if (task.projectId) {
+              await onOpenTask(task);
+              return;
+            }
             await onOpenTask(task);
-            return;
-          }
-          await onOpenTask(task);
-          setHighlightedHomeTaskId(task.id);
-          setOverviewFocusTarget("tasks");
-          setAssistantFocused(false);
-        }}
-        onOpenProject={onOpenProject}
-        onOpenSchedule={onOpenSchedule}
-      />
+            setHighlightedHomeTaskId(task.id);
+            setOverviewFocusTarget("tasks");
+            setAssistantFocused(false);
+          }}
+          onOpenProject={onOpenProject}
+          onOpenSchedule={onOpenSchedule}
+        />
+      </MobileDisclosure>
 
       {!assistantFocused && (
         <>
-          <GmailInflowReview
-            items={gmailInflowItems}
-            projects={gmailInflowProjects}
-            loading={gmailInflowLoading}
-            loadingMore={gmailInflowLoadingMore}
-            loadMoreError={gmailInflowLoadMoreError}
-            hasMore={gmailInflowHasMore}
-            error={gmailInflowError}
-            savingId={gmailInflowSavingId}
-            onReload={onReloadGmailInflow}
-            onLoadMore={onLoadMoreGmailInflow}
-            onPromote={onPromoteGmailInflow}
-            onDismiss={onDismissGmailInflow}
-            onDefer={onDeferGmailInflow}
-            onRetryAnalysis={onRetryGmailInflowAnalysis}
-            onOpenTask={async (taskId) => {
-              const task = await onLoadAssistantTask({
-                id: taskId,
-                projectId: null,
-              });
-              await onOpenTask(task);
-              if (!task.projectId) {
-                setHighlightedHomeTaskId(task.id);
-                setOverviewFocusTarget("tasks");
-                setAssistantFocused(false);
-              }
-            }}
-          />
+          <MobileDisclosure
+            mobile={mobile}
+            title={`들어온 메일 · ${gmailInflowItems.length}개`}
+          >
+            <GmailInflowReview
+              items={gmailInflowItems}
+              projects={gmailInflowProjects}
+              loading={gmailInflowLoading}
+              loadingMore={gmailInflowLoadingMore}
+              loadMoreError={gmailInflowLoadMoreError}
+              hasMore={gmailInflowHasMore}
+              error={gmailInflowError}
+              savingId={gmailInflowSavingId}
+              onReload={onReloadGmailInflow}
+              onLoadMore={onLoadMoreGmailInflow}
+              onPromote={onPromoteGmailInflow}
+              onDismiss={onDismissGmailInflow}
+              onDefer={onDeferGmailInflow}
+              onRetryAnalysis={onRetryGmailInflowAnalysis}
+              onOpenTask={async (taskId) => {
+                const task = await onLoadAssistantTask({
+                  id: taskId,
+                  projectId: null,
+                });
+                await onOpenTask(task);
+                if (!task.projectId) {
+                  setHighlightedHomeTaskId(task.id);
+                  setOverviewFocusTarget("tasks");
+                  setAssistantFocused(false);
+                }
+              }}
+            />
+          </MobileDisclosure>
 
           {!showingSkeleton && Boolean(snapshot?.weeklyReports.length) && (
-            <WeeklyOperationsBrief
-              reports={snapshot?.weeklyReports ?? []}
-              priorityTasks={weeklyPriorityTasks}
-              completingTaskId={completingTaskId}
-              onCompleteTask={complete}
-              onEditTask={onEditTask}
-              onOpenTask={onOpenPlanningTask}
-              onOpenProject={onOpenProject}
-            />
+            <MobileDisclosure mobile={mobile} title="이번 주 운영 리포트">
+              <WeeklyOperationsBrief
+                reports={snapshot?.weeklyReports ?? []}
+                priorityTasks={weeklyPriorityTasks}
+                completingTaskId={completingTaskId}
+                onCompleteTask={complete}
+                onEditTask={onEditTask}
+                onOpenTask={onOpenPlanningTask}
+                onOpenProject={onOpenProject}
+              />
+            </MobileDisclosure>
           )}
 
-          {!showingSkeleton && remainingDueTasks.length > 0 && (
+          {!mobile && !showingSkeleton && remainingDueTasks.length > 0 && (
             <DeadlineBrief
               tasks={remainingDueTasks}
               completingTaskId={completingTaskId}
@@ -516,56 +573,62 @@ export function HomeWorkspace({
           )}
 
           {!showingSkeleton && Boolean(snapshot?.recommendations.length) && (
-            <NowBrief
-              recommendations={snapshot?.recommendations ?? []}
-              period={briefPeriod}
-              onDecide={onDecideRecommendation}
-              onOpenTask={onOpenTask}
-              onOpenProject={onOpenProject}
-              onAnnounce={setRecommendationAnnouncement}
-            />
+            <MobileDisclosure mobile={mobile} title="결정할 일">
+              <NowBrief
+                recommendations={snapshot?.recommendations ?? []}
+                period={briefPeriod}
+                onDecide={onDecideRecommendation}
+                onOpenTask={onOpenTask}
+                onOpenProject={onOpenProject}
+                onAnnounce={setRecommendationAnnouncement}
+              />
+            </MobileDisclosure>
           )}
 
-          <button
-            className="home-briefing focus-visible-control"
-            type="button"
-            onClick={onOpenPlanning}
-            aria-label={copy.home.openPlanning}
-          >
-            {showingSkeleton ? (
-              <HomeBriefingSkeleton visible={skeletonVisible} />
-            ) : (
-              <>
-                <span className="home-briefing__symbol" aria-hidden="true">
-                  <Sparkles />
-                </span>
-                <span className="home-briefing__copy">
-                  <strong>
-                    {briefingHeading(nextSchedule, scheduleCount)}
-                  </strong>
-                  <span>{briefingSummary(scheduleCount, taskCount)}</span>
-                </span>
-                <ChevronRight aria-hidden="true" />
-              </>
-            )}
-          </button>
+          {!mobile && (
+            <button
+              className="home-briefing focus-visible-control"
+              type="button"
+              onClick={onOpenPlanning}
+              aria-label={copy.home.openPlanning}
+            >
+              {showingSkeleton ? (
+                <HomeBriefingSkeleton visible={skeletonVisible} />
+              ) : (
+                <>
+                  <span className="home-briefing__symbol" aria-hidden="true">
+                    <Sparkles />
+                  </span>
+                  <span className="home-briefing__copy">
+                    <strong>
+                      {briefingHeading(nextSchedule, scheduleCount)}
+                    </strong>
+                    <span>{briefingSummary(scheduleCount, taskCount)}</span>
+                  </span>
+                  <ChevronRight aria-hidden="true" />
+                </>
+              )}
+            </button>
+          )}
 
-          <button
-            className="home-voice-callout focus-visible-control"
-            type="button"
-            onClick={onOpenAssistant}
-          >
-            <span className="home-voice-callout__icon" aria-hidden="true">
-              <Mic />
-            </span>
-            <span>
-              <strong>{copy.home.askAssistant}</strong>
-              <span>{copy.home.description}</span>
-            </span>
-            <ChevronRight aria-hidden="true" />
-          </button>
+          {!mobile && (
+            <button
+              className="home-voice-callout focus-visible-control"
+              type="button"
+              onClick={onOpenAssistant}
+            >
+              <span className="home-voice-callout__icon" aria-hidden="true">
+                <Mic />
+              </span>
+              <span>
+                <strong>{copy.home.askAssistant}</strong>
+                <span>{copy.home.description}</span>
+              </span>
+              <ChevronRight aria-hidden="true" />
+            </button>
+          )}
 
-          {showSchedulePanel && (
+          {!mobile && showSchedulePanel && (
             <section
               className="home-next-schedule"
               aria-labelledby="next-schedule-title"
@@ -598,7 +661,7 @@ export function HomeWorkspace({
             </section>
           )}
 
-          {showTaskPanel && (
+          {!mobile && showTaskPanel && (
             <section
               className="home-tasks"
               aria-labelledby="today-task-title"
@@ -1700,7 +1763,9 @@ function DeadlineBrief({
                 type="button"
                 onClick={() => void onOpenTask(task)}
               >
-                <span>{dueStateLabel(state)}</span>
+                <span className="home-deadline-brief__due-state">
+                  {dueStateLabel(state)}
+                </span>
                 <span className="home-deadline-brief__copy">
                   <strong>
                     {task.title} <TaskWorkKindBadge kind={task.workKind} />

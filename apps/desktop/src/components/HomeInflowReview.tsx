@@ -1,7 +1,9 @@
-import { ChevronDown, X } from "lucide-react";
+import { ArrowLeft, ChevronDown, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { type ProjectInflowItem } from "../api/googleChat";
+import { useMobileLayout } from "../useMobileLayout";
+import { registerMobileBackHandler } from "../mobileBack";
 import { copy } from "../copy";
 import {
   homeInflowByReceivedDate,
@@ -143,11 +145,32 @@ function HomeInflowGroup({
   kind,
   initialView = "calendar",
 }: HomeInflowReviewProps & { kind: "new" | "existing" }) {
+  const mobile = useMobileLayout();
+  const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
+  useEffect(() => {
+    if (!mobile || !mobileDetailOpen) return;
+    return registerMobileBackHandler(() => {
+      if (!reviewRef.current?.getClientRects().length) return false;
+      setMobileDetailOpen(false);
+      return true;
+    }, 60);
+  }, [mobile, mobileDetailOpen]);
   const titleId = `home-inflow-title-${kind}`;
   const detailId = `home-inflow-detail-title-${kind}`;
   const queueTitleId = `home-inflow-queue-title-${kind}`;
   const reviewRef = useRef<HTMLDivElement>(null);
   const queueRef = useRef<HTMLOListElement>(null);
+  const mobileBackRef = useRef<HTMLButtonElement>(null);
+  const mobilePreviouslyOpen = useRef(false);
+  useEffect(() => {
+    if (!mobile) return;
+    if (mobileDetailOpen) mobileBackRef.current?.focus({ preventScroll: true });
+    else if (mobilePreviouslyOpen.current)
+      queueRef.current
+        ?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')
+        ?.focus({ preventScroll: true });
+    mobilePreviouslyOpen.current = mobileDetailOpen;
+  }, [mobile, mobileDetailOpen]);
   const [queueOverflows, setQueueOverflows] = useState(false);
   const allItems = useMemo(
     () => homeInflowByReceivedDate(items.filter(isProjectInflowAttentionItem)),
@@ -269,7 +292,10 @@ function HomeInflowGroup({
           />
         )}
         {showDetail && (
-          <div className="home-inflow-review__selection">
+          <div
+            className="home-inflow-review__selection"
+            data-mobile-detail={mobileDetailOpen}
+          >
             <aside
               className="home-inflow-review__queue"
               aria-labelledby={queueTitleId}
@@ -314,9 +340,10 @@ function HomeInflowGroup({
                         type="button"
                         aria-pressed={active}
                         data-active={active}
-                        onClick={() =>
-                          setSelectedConversationId(conversationId)
-                        }
+                        onClick={() => {
+                          setSelectedConversationId(conversationId);
+                          setMobileDetailOpen(true);
+                        }}
                       >
                         <span className="home-inflow-review__queue-meta">
                           <strong>
@@ -344,12 +371,25 @@ function HomeInflowGroup({
               )}
             </aside>
 
-            {selectedItem ? (
+            {selectedItem && (!mobile || mobileDetailOpen) ? (
               <section
                 className="home-inflow-review__detail"
                 aria-labelledby={detailId}
               >
                 <header>
+                  {mobile && (
+                    <button
+                      ref={mobileBackRef}
+                      type="button"
+                      className="secondary-button focus-visible-control"
+                      onClick={() => {
+                        setMobileDetailOpen(false);
+                      }}
+                    >
+                      <ArrowLeft aria-hidden="true" />
+                      요청 목록으로
+                    </button>
+                  )}
                   <span>{copy.projects.inflowHomeSelectedLabel}</span>
                   <strong id={detailId}>
                     {copy.projects.inflowHomeSelectedRequest(
@@ -371,10 +411,12 @@ function HomeInflowGroup({
                 </ul>
               </section>
             ) : (
-              <div className="home-inflow-review__empty" role="status">
-                <strong>{copy.projects.inflowHomeDateEmpty}</strong>
-                <p>{copy.projects.inflowHomeDateEmptyHelp}</p>
-              </div>
+              !selectedItem && (
+                <div className="home-inflow-review__empty" role="status">
+                  <strong>{copy.projects.inflowHomeDateEmpty}</strong>
+                  <p>{copy.projects.inflowHomeDateEmptyHelp}</p>
+                </div>
+              )
             )}
           </div>
         )}

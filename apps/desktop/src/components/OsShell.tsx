@@ -21,6 +21,7 @@ import {
 } from "react";
 
 import { copy } from "../copy";
+import { useMobileViewport } from "../useMobileLayout";
 import { AppearanceControl } from "./appearance-control";
 import { RepresentativeImage } from "./RepresentativeImage";
 import { type VoiceCommandOutcome } from "./VoiceCommandSheet";
@@ -67,6 +68,7 @@ export function OsShell({
   refreshing,
   platform: platformOverride,
 }: OsShellProps) {
+  useMobileViewport();
   const navigateFromSidebar = (target: OsDestination) => onNavigate(target);
   const [voiceSheetOpen, setVoiceSheetOpen] = useState(false);
   const [runtimePlatform] = useState(
@@ -94,6 +96,17 @@ export function OsShell({
       return true;
     }, 100);
   }, [voiceSheetOpen]);
+
+  useEffect(
+    () =>
+      registerMobileBackHandler(() => {
+        if (!mobileMoreRef.current?.open) return false;
+        mobileMoreRef.current.open = false;
+        mobileMoreRef.current.querySelector("summary")?.focus();
+        return true;
+      }, 80),
+    [],
+  );
 
   function openTextInput(value?: string) {
     setVoiceSheetOpen(false);
@@ -197,7 +210,11 @@ export function OsShell({
             <button
               className="os-command-launcher focus-visible-control"
               type="button"
-              onClick={openChat}
+              onClick={
+                runtimePlatform === "android" || runtimePlatform === "ios"
+                  ? openVoiceSheet
+                  : openChat
+              }
             >
               <Mic aria-hidden="true" />
               <span>{copy.home.commandPlaceholder}</span>
@@ -262,89 +279,69 @@ export function OsShell({
           label={copy.navigation.projects}
           onClick={() => onNavigate("projects")}
         />
-        <button
-          className="os-mobile-nav__assistant focus-visible-control"
-          type="button"
-          aria-label={copy.actions.startAssistantConversation}
-          onClick={runtimePlatform === "web" ? openChat : openVoiceSheet}
-        >
-          <Mic aria-hidden="true" />
-        </button>
         <NavigationButton
           active={destination === "calendar"}
           icon={<CalendarDays aria-hidden="true" />}
           label={copy.navigation.schedule}
           onClick={() => onNavigate("calendar")}
         />
-        {runtimePlatform === "web" ? (
-          <details
-            className="os-mobile-more"
-            ref={mobileMoreRef}
-            onKeyDown={(event) => {
-              if (event.key !== "Escape") return;
-              event.currentTarget.open = false;
-              event.currentTarget.querySelector("summary")?.focus();
-            }}
+        <NavigationButton
+          active={destination === "meetings"}
+          icon={<AudioLines aria-hidden="true" />}
+          label={copy.navigation.meetings}
+          onClick={() => onNavigate("meetings")}
+        />
+        <details
+          className="os-mobile-more"
+          ref={mobileMoreRef}
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.currentTarget.open = false;
+            event.currentTarget.querySelector("summary")?.focus();
+          }}
+        >
+          <summary
+            className="os-nav__button focus-visible-control"
+            data-active={["decisions", "memory", "settings"].includes(
+              destination,
+            )}
           >
-            <summary
-              className="os-nav__button focus-visible-control"
-              data-active={[
-                "decisions",
-                "meetings",
-                "memory",
-                "settings",
-              ].includes(destination)}
-            >
-              <MoreHorizontal aria-hidden="true" />
-              <span>{copy.navigation.more}</span>
-            </summary>
-            <div className="os-mobile-more__items">
-              {(
+            <MoreHorizontal aria-hidden="true" />
+            <span>{copy.navigation.more}</span>
+          </summary>
+          <div className="os-mobile-more__items">
+            {(
+              [
                 [
-                  [
-                    "decisions",
-                    copy.navigation.decisions,
-                    <Inbox aria-hidden="true" />,
-                  ],
-                  [
-                    "meetings",
-                    copy.navigation.meetings,
-                    <AudioLines aria-hidden="true" />,
-                  ],
-                  [
-                    "memory",
-                    copy.navigation.memory,
-                    <BrainCircuit aria-hidden="true" />,
-                  ],
-                  [
-                    "settings",
-                    copy.navigation.settings,
-                    <Settings2 aria-hidden="true" />,
-                  ],
-                ] as const
-              ).map(([target, label, icon]) => (
-                <NavigationButton
-                  key={target}
-                  active={destination === target}
-                  icon={icon}
-                  label={label}
-                  onClick={() => {
-                    if (mobileMoreRef.current)
-                      mobileMoreRef.current.open = false;
-                    onNavigate(target);
-                  }}
-                />
-              ))}
-            </div>
-          </details>
-        ) : (
-          <NavigationButton
-            active={destination === "meetings"}
-            icon={<AudioLines aria-hidden="true" />}
-            label={copy.navigation.meetings}
-            onClick={() => onNavigate("meetings")}
-          />
-        )}
+                  "decisions",
+                  copy.navigation.decisions,
+                  <Inbox aria-hidden="true" />,
+                ],
+                [
+                  "memory",
+                  copy.navigation.memory,
+                  <BrainCircuit aria-hidden="true" />,
+                ],
+                [
+                  "settings",
+                  copy.navigation.settings,
+                  <Settings2 aria-hidden="true" />,
+                ],
+              ] as const
+            ).map(([target, label, icon]) => (
+              <NavigationButton
+                key={target}
+                active={destination === target}
+                icon={icon}
+                label={label}
+                onClick={() => {
+                  if (mobileMoreRef.current) mobileMoreRef.current.open = false;
+                  onNavigate(target);
+                }}
+              />
+            ))}
+          </div>
+        </details>
       </nav>
 
       {voiceSheetOpen && (

@@ -2596,14 +2596,14 @@ svg {
   background: var(--surface-hover);
 }
 
-.home-deadline-brief__task > span,
+.home-deadline-brief__task > .home-deadline-brief__due-state,
 .home-deadline-brief__task time {
   font-size: 14px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-.home-deadline-brief__task > span {
+.home-deadline-brief__task > .home-deadline-brief__due-state {
   color: var(--warning);
   font-weight: 600;
 }
@@ -2611,7 +2611,7 @@ svg {
 .home-deadline-brief
   li[data-due-state="overdue"]
   .home-deadline-brief__task
-  > span {
+  > .home-deadline-brief__due-state {
   color: var(--danger);
 }
 
@@ -15657,7 +15657,7 @@ svg {
   }
 }
 
-.home-deadline-brief__task > span {
+.home-deadline-brief__task > .home-deadline-brief__due-state {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -15672,7 +15672,7 @@ svg {
 .home-deadline-brief
   li[data-due-state="overdue"]
   .home-deadline-brief__task
-  > span {
+  > .home-deadline-brief__due-state {
   background: var(--danger-tint);
   color: var(--danger);
 }
@@ -16213,7 +16213,7 @@ svg {
 .task-status-badge,
 .home-task-list time[data-due-state],
 .planning-task-list time[data-due-state],
-.home-deadline-brief__task > span {
+.home-deadline-brief__task > .home-deadline-brief__due-state {
   border-radius: 999px;
   padding: 6px 16px;
   min-height: 32px;
@@ -16223,7 +16223,7 @@ svg {
 .home-deadline-brief
   li[data-due-state="overdue"]
   .home-deadline-brief__task
-  > span {
+  > .home-deadline-brief__due-state {
   background: color-mix(in srgb, #ff627d 22%, var(--surface));
   color: #ff8096;
 }
@@ -16231,7 +16231,7 @@ svg {
 .home-task-list time[data-due-state="tomorrow"],
 .planning-task-list time[data-due-state="today"],
 .planning-task-list time[data-due-state="tomorrow"],
-.home-deadline-brief__task > span {
+.home-deadline-brief__task > .home-deadline-brief__due-state {
   background: color-mix(in srgb, #ffb43b 22%, var(--surface));
   color: #ffc45c;
 }
@@ -16250,14 +16250,14 @@ svg {
 .home-deadline-brief
   li[data-due-state="overdue"]
   .home-deadline-brief__task
-  > span {
+  > .home-deadline-brief__due-state {
   color: #ffb3c1;
 }
 .home-task-list time[data-due-state="today"],
 .home-task-list time[data-due-state="tomorrow"],
 .planning-task-list time[data-due-state="today"],
 .planning-task-list time[data-due-state="tomorrow"],
-.home-deadline-brief__task > span {
+.home-deadline-brief__task > .home-deadline-brief__due-state {
   color: #ffda91;
 }
 .settings-row[data-state="active"] > .settings-row__state {
@@ -16280,7 +16280,7 @@ svg {
 .home-deadline-brief
   li[data-due-state="overdue"]
   .home-deadline-brief__task
-  > span {
+  > .home-deadline-brief__due-state {
   background: var(--badge-overdue-background);
   color: var(--badge-label);
   font-weight: 500;
@@ -16289,7 +16289,7 @@ svg {
 .home-task-list time[data-due-state="tomorrow"],
 .planning-task-list time[data-due-state="today"],
 .planning-task-list time[data-due-state="tomorrow"],
-.home-deadline-brief__task > span {
+.home-deadline-brief__task > .home-deadline-brief__due-state {
   background: var(--badge-due-background);
   color: var(--badge-label);
   font-weight: 500;
@@ -16306,7 +16306,7 @@ svg {
 .home-deadline-brief
   li[data-due-state="overdue"]
   .home-deadline-brief__task
-  > span {
+  > .home-deadline-brief__due-state {
   background: var(--badge-overdue-background);
   color: var(--badge-overdue-label);
   font-weight: 600;
@@ -16315,7 +16315,7 @@ svg {
 .home-task-list time[data-due-state="tomorrow"],
 .planning-task-list time[data-due-state="today"],
 .planning-task-list time[data-due-state="tomorrow"],
-.home-deadline-brief__task > span {
+.home-deadline-brief__task > .home-deadline-brief__due-state {
   background: var(--badge-due-background);
   color: var(--badge-due-label);
   font-weight: 600;
@@ -18912,7 +18912,7 @@ body {
     .task-status-badge,
     .home-task-list time[data-due-state],
     .planning-task-list time[data-due-state],
-    .home-deadline-brief__task > span,
+    .home-deadline-brief__task > .home-deadline-brief__due-state,
     .project-task-list__assignee,
     .assistant-canvas__task-badges > span,
     .decision-card__title-row > span,

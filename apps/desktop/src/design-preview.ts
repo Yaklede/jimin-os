@@ -29,7 +29,17 @@ export function installDesignPreview(): void {
     workKind: index % 2 === 0 ? "verification" : "development",
     completionNote: null,
     priority: 2,
-    dueAt: new Date(Date.now() + index * 86400000).toISOString(),
+    dueAt:
+      index === 7
+        ? null
+        : new Date(
+            Date.now() +
+              (index < 3
+                ? 2 * 3600000
+                : index < 5
+                  ? -86400000
+                  : (index - 4) * 86400000),
+          ).toISOString(),
     completedAt: null,
     version: 1,
   }));
