@@ -1,5 +1,18 @@
 # Android UI integration release — 2026-10-06
 
+## Four-destination correction — 2026-10-07 (DEV only)
+
+- Supersedes the five-destination microphone restoration below. The original composition is Home / Projects / large microphone / Calendar / Meetings. More is no longer a fifth bottom destination.
+- The center grid track is reserved for the 64px microphone, with two destinations on each side. Selected destinations still have no filled background.
+- More moved to a 44px top-bar control; decisions, memory and settings remain available. Desktop navigation is unchanged and does not display this phone-only control.
+- Found and fixed a verification issue: the relocated More popup was initially painted behind the animated content and did not receive clicks. The mobile top bar now forms a higher stacking layer.
+- Browser checks: 320px and 411px have no horizontal overflow; all four targets and the microphone are separate. The top menu stays inside the screen, Settings navigation works, Escape closes the menu and restores focus. At 1440px both phone navigation and phone More are hidden.
+- Android checks: only AVD JiminOS_Test_API_36 / emulator-5554 / io.jimin.os.dev used. Home, Projects, Calendar and Meetings navigate successfully. Top More opens, Settings navigation works, Android Back closes the menu. Mic opens the native recording permission flow; permission dismissed without granting access, fallback sheet opens and Android Back closes it.
+- At the page end, the last disclosure ends at physical y=1981 and the microphone begins at y=2023, leaving 42px of physical clearance.
+- 70 test files / 439 tests, TypeScript, scoped Prettier and diff whitespace checks pass. Final Android DEV APK and production web build pass; production asset guard passes. No server, production desktop or physical phone deployment in this correction.
+- UX Writing review preserves existing shared labels. Static writing harness reports three false positives for source-code null/undefined literals, not rendered copy. No source behavior was changed merely to suppress those warnings; this is a documented checker limitation, not an approved UI-copy exception. Scoped writing manifest: .opendock/runs/ux-writing/2026-10-07-mobile-four-tabs/manifest.md.
+- Native screenshot: /tmp/jimin-mobile-four-tabs-final.png. Live recording/transcription was not tested.
+
 ## Scope
 
 - Integrate Android layout commits `4633d36` and `5daedf9` onto deployed main `75ba28f`.

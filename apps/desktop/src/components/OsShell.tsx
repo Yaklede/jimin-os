@@ -122,6 +122,59 @@ export function OsShell({
     onNavigate(destination);
   }
 
+  const mobileMoreMenu = (
+    <details
+      className="os-mobile-more"
+      ref={mobileMoreRef}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.currentTarget.open = false;
+        event.currentTarget.querySelector("summary")?.focus();
+      }}
+    >
+      <summary
+        className="os-nav__button focus-visible-control"
+        aria-label={copy.navigation.more}
+        data-active={["decisions", "memory", "settings"].includes(destination)}
+      >
+        <MoreHorizontal aria-hidden="true" />
+        <span className="sr-only">{copy.navigation.more}</span>
+      </summary>
+      <nav className="os-mobile-more__items" aria-label={copy.navigation.more}>
+        {(
+          [
+            [
+              "decisions",
+              copy.navigation.decisions,
+              <Inbox aria-hidden="true" />,
+            ],
+            [
+              "memory",
+              copy.navigation.memory,
+              <BrainCircuit aria-hidden="true" />,
+            ],
+            [
+              "settings",
+              copy.navigation.settings,
+              <Settings2 aria-hidden="true" />,
+            ],
+          ] as const
+        ).map(([target, label, icon]) => (
+          <NavigationButton
+            key={target}
+            active={destination === target}
+            icon={icon}
+            label={label}
+            onClick={() => {
+              if (mobileMoreRef.current) mobileMoreRef.current.open = false;
+              onNavigate(target);
+            }}
+          />
+        ))}
+      </nav>
+    </details>
+  );
+
   return (
     <div
       className="os-shell"
@@ -240,6 +293,7 @@ export function OsShell({
                 />
               </button>
               <AppearanceControl />
+              {mobileMoreMenu}
             </div>
           </div>
         </header>
@@ -299,57 +353,6 @@ export function OsShell({
           label={copy.navigation.meetings}
           onClick={() => onNavigate("meetings")}
         />
-        <details
-          className="os-mobile-more"
-          ref={mobileMoreRef}
-          onKeyDown={(event) => {
-            if (event.key !== "Escape") return;
-            event.currentTarget.open = false;
-            event.currentTarget.querySelector("summary")?.focus();
-          }}
-        >
-          <summary
-            className="os-nav__button focus-visible-control"
-            data-active={["decisions", "memory", "settings"].includes(
-              destination,
-            )}
-          >
-            <MoreHorizontal aria-hidden="true" />
-            <span>{copy.navigation.more}</span>
-          </summary>
-          <div className="os-mobile-more__items">
-            {(
-              [
-                [
-                  "decisions",
-                  copy.navigation.decisions,
-                  <Inbox aria-hidden="true" />,
-                ],
-                [
-                  "memory",
-                  copy.navigation.memory,
-                  <BrainCircuit aria-hidden="true" />,
-                ],
-                [
-                  "settings",
-                  copy.navigation.settings,
-                  <Settings2 aria-hidden="true" />,
-                ],
-              ] as const
-            ).map(([target, label, icon]) => (
-              <NavigationButton
-                key={target}
-                active={destination === target}
-                icon={icon}
-                label={label}
-                onClick={() => {
-                  if (mobileMoreRef.current) mobileMoreRef.current.open = false;
-                  onNavigate(target);
-                }}
-              />
-            ))}
-          </div>
-        </details>
       </nav>
 
       {voiceSheetOpen && (
