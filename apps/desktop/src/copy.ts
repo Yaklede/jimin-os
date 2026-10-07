@@ -1009,13 +1009,13 @@ export const copy = {
     notificationsReady:
       "일정 시작과 할 일 기한이 다가오면 휴대폰에서 알려드려요.",
     notificationsRemoteReady:
-      "앱을 닫아도 새 일정과 할 일 알림을 받을 수 있어요.",
+      "앱이 열려 있지 않아도 새 업무 요청·새 답글·일정과 할 일 알림을 받아요.",
     notificationsLocalOnly:
       "이 휴대폰에 준비된 일정과 할 일은 알림으로 알려드려요.",
     notificationsRemoteProblem:
       "휴대폰 알림은 준비했지만 새 알림을 개인 서버와 연결하지 못했어요. 다시 준비해 주세요.",
     notificationsNeedsPermission:
-      "일정과 할 일 알림을 받으려면 휴대폰에서 알림을 허용해 주세요.",
+      "새 업무 요청과 일정·할 일 알림을 받으려면 휴대폰에서 알림을 허용해 주세요.",
     notificationsNeedsSettings:
       "휴대폰 설정에서 Jimin OS 알림을 허용해 주세요.",
     notificationsSyncing: "앞으로 90일의 일정과 할 일 알림을 준비하고 있어요.",

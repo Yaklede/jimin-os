@@ -55,6 +55,40 @@ function androidRuntime(nativeInvoke = vi.fn().mockResolvedValue(undefined)) {
 }
 
 describe("local notification runtime", () => {
+  it.each([
+    "google_chat_inflow",
+    "gmail_inflow",
+    "brief",
+    "weekly_report",
+  ] as const)(
+    "accepts %s push navigation without changing timed reminder types",
+    async (itemType) => {
+      const navigation = {
+        itemType,
+        itemId: task.id,
+        destination: "home",
+        targetAtEpochMillis: now,
+      };
+      const nativeInvoke = vi.fn().mockResolvedValue(navigation);
+      await expect(
+        peekPendingReminderNavigation(androidRuntime(nativeInvoke)),
+      ).resolves.toEqual(navigation);
+    },
+  );
+
+  it("rejects unknown push types instead of routing them as tasks", async () => {
+    await expect(
+      peekPendingReminderNavigation(
+        androidRuntime(
+          vi.fn().mockResolvedValue({
+            itemType: "unexpected",
+            itemId: task.id,
+            destination: "home",
+          }),
+        ),
+      ),
+    ).rejects.toThrow("invalid reminder navigation");
+  });
   it("only enables native reminders for Android Tauri", () => {
     expect(notificationRuntimeAvailable(true, "Android 16")).toBe(true);
     expect(notificationRuntimeAvailable(false, "Android 16")).toBe(false);

@@ -321,7 +321,9 @@ class JiminFirebaseMessagingService : FirebaseMessagingService() {
     val targetAtEpochMillis = data["targetAtEpochMillis"]?.toLongOrNull() ?: return
     if (
       !validNavigationSemantics(itemType, itemId, destination, projectId, targetAtEpochMillis) ||
-      title.isEmpty() || title.length > 120 || body.isEmpty() || body.length > 240
+      targetAtEpochMillis <= System.currentTimeMillis() ||
+      title.isEmpty() || title.codePointCount(0, title.length) > 120 ||
+      body.isEmpty() || body.codePointCount(0, body.length) > 240
     ) {
       return
     }
@@ -657,7 +659,7 @@ private fun validNavigationSemantics(
   projectId: String?,
   targetAtEpochMillis: Long,
 ): Boolean =
-  validItemType(itemType) &&
+  validNotificationItemType(itemType) &&
     validIdentifier(itemId) &&
     destination in setOf("home", "calendar", "projects") &&
     (projectId == null || validIdentifier(projectId)) &&
@@ -693,6 +695,9 @@ private fun validateScheduleArgs(
 }
 
 private fun validItemType(value: String): Boolean = value == "task" || value == "schedule"
+
+private fun validNotificationItemType(value: String): Boolean =
+  validItemType(value) || value in setOf("google_chat_inflow", "gmail_inflow", "brief", "weekly_report")
 
 private fun validIdentifier(value: String): Boolean =
   value.length in 1..128 && value.all { it.isLetterOrDigit() || it == '-' || it == '_' }

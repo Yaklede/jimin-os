@@ -30,8 +30,16 @@ export type LocalReminder = {
 
 export type ReminderNavigation = Pick<
   LocalReminder,
-  "itemType" | "itemId" | "destination" | "projectId"
-> & { targetAtEpochMillis?: number };
+  "itemId" | "destination" | "projectId"
+> & {
+  itemType:
+    | LocalReminder["itemType"]
+    | "google_chat_inflow"
+    | "gmail_inflow"
+    | "brief"
+    | "weekly_report";
+  targetAtEpochMillis?: number;
+};
 
 type NativeInvoke = <T>(
   command: string,
@@ -292,7 +300,14 @@ function parseReminderNavigation(
   if (result == null) return undefined;
   if (!isRecord(result)) throw new Error("invalid reminder navigation");
   if (
-    (result.itemType !== "task" && result.itemType !== "schedule") ||
+    ![
+      "task",
+      "schedule",
+      "google_chat_inflow",
+      "gmail_inflow",
+      "brief",
+      "weekly_report",
+    ].includes(String(result.itemType)) ||
     typeof result.itemId !== "string" ||
     (result.destination !== "home" &&
       result.destination !== "calendar" &&

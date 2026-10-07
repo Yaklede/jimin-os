@@ -2,6 +2,14 @@ import { useTaskCompletion } from "./components/TaskCompletionDialog";
 import { Server, Sparkles } from "lucide-react";
 import { ScheduledWorkPanel } from "./components/ScheduledWorkPanel";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { listen } from "@tauri-apps/api/event";
+import {
+  configureDesktopInflowNotifications,
+  desktopInflowNotificationsSupported,
+  desktopInflowNotificationsEnabled,
+  desktopNotificationPreferenceEvent,
+} from "./desktop-inflow-notifications";
+import { fetchPushRegistration } from "./api/push";
 import {
   lazy,
   startTransition,
@@ -2372,6 +2380,42 @@ export default function App() {
   }, [mode, synchronizeDeviceSignals, tokens]);
 
   useEffect(() => {
+    if (!desktopInflowNotificationsSupported()) return;
+    let active = true;
+    let enabled = desktopInflowNotificationsEnabled();
+    const configure = () =>
+      configureDesktopInflowNotifications(
+        apiBaseUrl,
+        enabled ? tokens?.accessToken : undefined,
+      ).catch(() => undefined);
+    const preferenceChanged = (event: Event) => {
+      enabled = Boolean((event as CustomEvent<boolean>).detail);
+      void configure();
+    };
+    const registration = listen("inflow-notification-auth-required", () => {
+      if (!active || !tokens || !enabled) return;
+      void withAuthenticatedSession(async (accessToken) => {
+        await fetchPushRegistration(apiBaseUrl, accessToken);
+        if (active)
+          await configureDesktopInflowNotifications(apiBaseUrl, accessToken);
+      }).catch(() => undefined);
+    });
+    void configure();
+    window.addEventListener(
+      desktopNotificationPreferenceEvent,
+      preferenceChanged,
+    );
+    return () => {
+      active = false;
+      window.removeEventListener(
+        desktopNotificationPreferenceEvent,
+        preferenceChanged,
+      );
+      void registration.then((unlisten) => unlisten());
+    };
+  }, [apiBaseUrl, tokens, withAuthenticatedSession]);
+
+  useEffect(() => {
     if (!tokens) return;
     let active = true;
     const openPendingReminder = () => {
@@ -2380,6 +2424,45 @@ export default function App() {
       void peekPendingReminderNavigation()
         .then(async (navigation) => {
           if (!active || !navigation) return;
+          if (
+            navigation.itemType === "google_chat_inflow" &&
+            navigation.projectId
+          ) {
+            if (!workspacesReady) return;
+            for (const workspace of workspaces) {
+              const available = await withAuthenticatedSession((accessToken) =>
+                fetchProjects(apiBaseUrl, accessToken, workspace.id),
+              );
+              const project = available.find(
+                (item) => item.id === navigation.projectId,
+              );
+              if (!project) continue;
+              await openProjectFromAssistant(project);
+              const inflow = await loadProjectInflow(project.id);
+              if (!active || !inflow) return;
+              const item = inflow.items.find(
+                (item) =>
+                  item.conversationId === navigation.itemId ||
+                  item.id === navigation.itemId,
+              );
+              setHighlightedProjectInflowId(item?.id);
+              await acknowledgePendingReminderNavigation(navigation);
+              return;
+            }
+            navigate("home");
+            await acknowledgePendingReminderNavigation(navigation);
+            return;
+          }
+          if (
+            ["gmail_inflow", "brief", "weekly_report"].includes(
+              navigation.itemType,
+            )
+          ) {
+            navigate("home");
+            await loadHomeSnapshot();
+            await acknowledgePendingReminderNavigation(navigation);
+            return;
+          }
           if (navigation.destination === "home") {
             navigate("home");
             await acknowledgePendingReminderNavigation(navigation);
