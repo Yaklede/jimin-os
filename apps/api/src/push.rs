@@ -4,7 +4,7 @@ use std::time::Duration as StdDuration;
 
 use axum::{
     Extension, Json,
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -249,8 +249,7 @@ impl PushRuntime {
                 "message": {
                     "token": token.expose_secret(),
                     "data": {
-                        // Installed clients accept task/schedule navigation only. A scheduled
-                        // digest is a timed home notification, not a new native item type.
+                        // Scheduled digests keep their timed home navigation contract.
                         "itemType": if delivery.item_type == "scheduled_work" { "schedule" } else { &delivery.item_type },
                         "itemId": delivery.item_id.to_string(),
                         "destination": delivery.destination,
@@ -259,7 +258,7 @@ impl PushRuntime {
                         "body": delivery.body,
                         "targetAtEpochMillis": target_at_epoch_millis
                     },
-                    "android": { "priority": "HIGH" }
+                    "android": { "priority": "HIGH", "ttl": "3600s" }
                 }
             }))
             .send()
@@ -402,6 +401,127 @@ pub(crate) async fn get_push_registration(
         .await
     {
         Ok(registration) => registration_response(registration).into_response(),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[derive(Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct InflowNotificationQuery {
+    after_epoch_millis: Option<i64>,
+    after_id: Option<Uuid>,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InflowNotificationResponse {
+    id: Uuid,
+    item_type: String,
+    revision: i32,
+    project_id: Option<Uuid>,
+    existing_task: bool,
+    title: String,
+    body: String,
+    occurred_at_epoch_millis: i64,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InflowNotificationFeed {
+    items: Vec<InflowNotificationResponse>,
+    next_epoch_millis: i64,
+    next_id: Uuid,
+    has_more: bool,
+}
+
+#[utoipa::path(
+    get, path = "/v1/push/inflow", tag = "notifications",
+    params(InflowNotificationQuery),
+    responses((status = 200, body = InflowNotificationFeed), (status = 400), (status = 401), (status = 503))
+)]
+pub(crate) async fn get_inflow_notifications(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Query(query): Query<InflowNotificationQuery>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(storage) = state.planning() else {
+        return unavailable_response(request_id);
+    };
+    let now = OffsetDateTime::now_utc();
+    let now_millis = now.unix_timestamp() * 1_000 + i64::from(now.millisecond());
+    let Some(after) = query.after_epoch_millis else {
+        return Json(InflowNotificationFeed {
+            items: vec![],
+            next_epoch_millis: now_millis,
+            next_id: Uuid::nil(),
+            has_more: false,
+        })
+        .into_response();
+    };
+    if after < 0 || after > now_millis {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "notifications.invalid_cursor",
+            "Check the notification cursor.",
+            request_id,
+            false,
+        );
+    }
+    match storage
+        .inflow_notifications(
+            principal.identity().user_id(),
+            after,
+            query.after_id.unwrap_or_default(),
+            now,
+        )
+        .await
+    {
+        Ok(mut rows) => {
+            let has_more = rows.len() > 200;
+            rows.truncate(200);
+            let (next_epoch_millis, next_id) = if has_more {
+                rows.last().map_or((now_millis, Uuid::nil()), |row| {
+                    (row.occurred_at_epoch_millis, row.id)
+                })
+            } else {
+                (now_millis, Uuid::nil())
+            };
+            let items = rows
+                .into_iter()
+                .map(|row| {
+                    let prefix = if row.existing_task {
+                        "일감에 새 답글"
+                    } else {
+                        "새 업무 요청"
+                    };
+                    InflowNotificationResponse {
+                        id: row.id,
+                        item_type: row.item_type,
+                        revision: row.revision,
+                        project_id: row.project_id,
+                        existing_task: row.existing_task,
+                        title: format!("{prefix} · {}", row.title)
+                            .chars()
+                            .take(120)
+                            .collect(),
+                        body: row.body.chars().take(240).collect(),
+                        occurred_at_epoch_millis: row.occurred_at_epoch_millis,
+                    }
+                })
+                .collect();
+            Json(InflowNotificationFeed {
+                items,
+                next_epoch_millis,
+                next_id,
+                has_more,
+            })
+            .into_response()
+        }
         Err(error) => storage_error_response(&error, request_id),
     }
 }

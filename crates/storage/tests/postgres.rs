@@ -9720,6 +9720,13 @@ async fn gmail_inflow_preserves_workspace_revision_decisions_and_promotion_lifec
     let now = OffsetDateTime::now_utc()
         .replace_nanosecond(0)
         .expect("whole second fixture");
+    // This scenario models live mail after connection, not an initial history import.
+    sqlx::query("UPDATE gmail_accounts SET created_at = $2 - INTERVAL '2 minutes' WHERE id = $1")
+        .bind(account)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("live Gmail fixture cutoff");
     let thread_id = format!("inflow-thread-{}", owner.profile.id);
     let partial_account = database
         .apply_gmail_inbox_sync_with_skipped_count(
@@ -9766,6 +9773,20 @@ async fn gmail_inflow_preserves_workspace_revision_decisions_and_promotion_lifec
         .expect("analysis should complete");
     let ready =
         gmail_candidate_for_thread(&database, owner.profile.id, personal.id, &thread_id).await;
+    let feed_now = OffsetDateTime::now_utc();
+    let mail_alerts = database
+        .inflow_notifications(
+            owner.profile.id,
+            (feed_now - TimeDuration::minutes(5)).unix_timestamp() * 1_000,
+            Uuid::nil(),
+            feed_now,
+        )
+        .await
+        .expect("native notification feed should include ready Gmail work");
+    assert_eq!(mail_alerts.len(), 1);
+    assert_eq!(mail_alerts[0].id, ready.id);
+    assert_eq!(mail_alerts[0].item_type, "gmail_inflow");
+    assert!(!mail_alerts[0].existing_task);
     let weekly_report = database
         .weekly_report_for_workspace_at(owner.profile.id, personal.id, None, now)
         .await
@@ -10796,6 +10817,204 @@ fn new_task_gmail_analysis(title: &str) -> GmailInflowAnalysisResult {
         suggested_due_at: None,
         suggested_priority: Some(2),
     }
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Notification eligibility and revision deduplication share one isolated lifecycle fixture."
+)]
+async fn inflow_notifications_skip_history_read_noise_and_cross_owner() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        2,
+        Duration::from_secs(2),
+    )
+    .expect("test pool");
+    database.migrate().await.expect("test migrations");
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .expect("owner");
+    let android = database
+        .provision_login(&provision_android_login_command(
+            owner.profile.id,
+            Uuid::now_v7(),
+        ))
+        .await
+        .expect("android");
+    database
+        .register_push_token(
+            Uuid::now_v7(),
+            owner.profile.id,
+            android.device.id,
+            &EncryptedPushToken {
+                ciphertext: vec![71; 48],
+                nonce: vec![72; 24],
+                fingerprint: vec![73; 32],
+            },
+        )
+        .await
+        .expect("push registration");
+    let workspace = database
+        .workspaces_for_user(owner.profile.id)
+        .await
+        .expect("workspace")
+        .remove(0);
+    let project = database
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            workspace_id: workspace.id,
+            title: "알림 프로젝트".to_owned(),
+            objective: None,
+            management_mode: ProjectManagementMode::Operation,
+            reporting_enabled: false,
+            stale_threshold_days: 7,
+            risk_level: 0,
+            next_action: None,
+            due_at: None,
+        })
+        .await
+        .expect("project");
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("fixture connection");
+    let account = Uuid::now_v7();
+    let source = Uuid::now_v7();
+    let task = Uuid::now_v7();
+    sqlx::query("INSERT INTO google_chat_accounts (id, user_id, provider_subject, email, status) VALUES ($1, $2, '100', 'notification@example.test', 'active')")
+        .bind(account).bind(owner.profile.id).execute(&pool).await.expect("account");
+    sqlx::query("INSERT INTO project_google_chat_sources (id,user_id,project_id,account_id,space_name,display_name,created_at) VALUES ($1,$2,$3,$4,'spaces/notification-test','알림 테스트',NOW()-INTERVAL '1 hour')")
+        .bind(source).bind(owner.profile.id).bind(project.id).bind(account).execute(&pool).await.expect("source");
+    sqlx::query("INSERT INTO tasks (id,user_id,project_id,title,status,priority) VALUES ($1,$2,$3,'기존 일감','open',1)")
+        .bind(task).bind(owner.profile.id).bind(project.id).execute(&pool).await.expect("task");
+    let fresh = Uuid::now_v7();
+    let update = Uuid::now_v7();
+    for (id, marker, sender, classification, old, read, linked) in [
+        (fresh, "fresh", "users/200", "question", false, false, None),
+        (
+            update,
+            "update",
+            "users/200",
+            "status_update",
+            false,
+            false,
+            Some(task),
+        ),
+        (
+            Uuid::now_v7(),
+            "history",
+            "users/200",
+            "question",
+            true,
+            false,
+            None,
+        ),
+        (
+            Uuid::now_v7(),
+            "owner",
+            "users/100",
+            "question",
+            false,
+            false,
+            None,
+        ),
+        (
+            Uuid::now_v7(),
+            "read",
+            "users/200",
+            "question",
+            false,
+            true,
+            None,
+        ),
+        (
+            Uuid::now_v7(),
+            "noise",
+            "users/200",
+            "noise",
+            false,
+            false,
+            None,
+        ),
+    ] {
+        sqlx::query("INSERT INTO project_inflow_items (id,user_id,project_id,source_id,provider_message_name,provider_thread_name,sender_provider_name,content_text,received_at,reviewed_at,promoted_task_id) VALUES ($1,$2,$3,$4,$5,$6,$7,'확인할 대화',CASE WHEN $8 THEN NOW()-INTERVAL '2 hours' ELSE NOW()-INTERVAL '1 minute' END,CASE WHEN $9 THEN NOW() ELSE NULL END,$10)")
+            .bind(id).bind(owner.profile.id).bind(project.id).bind(source).bind(format!("spaces/notification-test/messages/{marker}")).bind(format!("spaces/notification-test/threads/{marker}")).bind(sender).bind(old).bind(read).bind(linked).execute(&pool).await.expect("message");
+        sqlx::query("INSERT INTO project_inflow_analyses (id,user_id,project_id,source_id,conversation_key,representative_item_id,state,classification,confidence,summary,source_revision,analyzed_revision,analyzed_at,linked_task_id) VALUES ($1,$2,$3,$4,$5,$1,'ready',$6,90,'확인할 업무 요약',1,1,NOW(),$7)")
+            .bind(id).bind(owner.profile.id).bind(project.id).bind(source).bind(format!("thread:spaces/notification-test/threads/{marker}")).bind(classification).bind(linked).execute(&pool).await.expect("analysis");
+    }
+    let now = OffsetDateTime::now_utc();
+    let after = (now - TimeDuration::minutes(5)).unix_timestamp() * 1000;
+    let notifications = database
+        .inflow_notifications(owner.profile.id, after, Uuid::nil(), now)
+        .await
+        .expect("feed");
+    assert_eq!(
+        notifications.len(),
+        2,
+        "only a live request and an unread existing-task reply should notify"
+    );
+    assert!(
+        notifications
+            .iter()
+            .any(|item| item.id == update && item.existing_task)
+    );
+    assert!(
+        database
+            .inflow_notifications(Uuid::now_v7(), after, Uuid::nil(), now)
+            .await
+            .expect("owner-scoped feed")
+            .is_empty()
+    );
+    assert!(
+        database
+            .inflow_notifications(owner.profile.id, -1, Uuid::nil(), now)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        database.queue_due_push_reminders(now).await.expect("queue"),
+        2
+    );
+    assert_eq!(
+        database.queue_due_push_reminders(now).await.expect("dedup"),
+        0
+    );
+    sqlx::query("UPDATE project_inflow_analyses SET summary = '같은 대화 재분석' WHERE id = $1")
+        .bind(fresh)
+        .execute(&pool)
+        .await
+        .expect("reanalysis");
+    assert_eq!(
+        database
+            .queue_due_push_reminders(now)
+            .await
+            .expect("revision dedup"),
+        0,
+        "reanalysis of the same message must not notify twice"
+    );
+    sqlx::query("UPDATE project_inflow_items SET reviewed_at = NOW() WHERE id = $1")
+        .bind(fresh)
+        .execute(&pool)
+        .await
+        .expect("review");
+    database
+        .queue_due_push_reminders(now)
+        .await
+        .expect("cancel read delivery");
+    let claimed = database
+        .claim_push_deliveries("notification-test", 10)
+        .await
+        .expect("claim");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].item_id, update);
+    assert!(claimed[0].title.starts_with("일감에 새 답글 · "));
+    pool.close().await;
+    database.close().await;
 }
 
 async fn prepare_gmail_inflow_analysis(

@@ -263,23 +263,34 @@ impl Database {
                )
              UNION ALL
              SELECT analysis.user_id, 'google_chat_inflow'::TEXT AS item_type,
-                    analysis.id AS item_id, analysis.version AS item_version,
+                    analysis.id AS item_id, 1000000000 + analysis.source_revision::BIGINT AS item_version,
                     analysis.project_id,
-                    COALESCE(
+                    CASE WHEN COALESCE(analysis.linked_task_id, representative.promoted_task_id) IS NOT NULL
+                        THEN '일감에 새 답글 · ' ELSE '새 업무 요청 · ' END || COALESCE(
                         analysis.suggested_task_title,
                         analysis.summary,
                         project.title
                     ) AS raw_title,
                     analysis.summary AS raw_body,
                     $1 + INTERVAL '1 day' AS target_at,
-                    $1 AS notify_at
+                    analysis.analyzed_at AS notify_at
              FROM project_inflow_analyses AS analysis
              INNER JOIN projects AS project
                 ON project.id = analysis.project_id
                AND project.user_id = analysis.user_id
+             JOIN project_google_chat_sources source ON source.id = analysis.source_id
+             JOIN google_chat_accounts account ON account.id = source.account_id
+             JOIN project_inflow_items representative ON representative.id = analysis.representative_item_id
              WHERE analysis.state = 'ready'
-               AND analysis.classification IN ('new_task', 'follow_up', 'question')
+               AND source.enabled AND account.status = 'active'
+               AND (analysis.classification IN ('new_task', 'follow_up', 'question')
+                    OR (analysis.classification = 'status_update' AND COALESCE(analysis.linked_task_id, representative.promoted_task_id) IS NOT NULL))
                AND analysis.analyzed_revision = analysis.source_revision
+               AND representative.received_at >= source.created_at
+               AND representative.received_at >= $1 - INTERVAL '1 day'
+               AND representative.reviewed_at IS NULL
+               AND representative.status = 'pending'
+               AND representative.sender_provider_name IS DISTINCT FROM CONCAT('users/', account.provider_subject)
                AND EXISTS (
                    SELECT 1
                    FROM project_inflow_items AS item
@@ -292,19 +303,26 @@ impl Database {
                )
              UNION ALL
              SELECT candidate.user_id, 'gmail_inflow'::TEXT AS item_type,
-                    candidate.id AS item_id, candidate.version AS item_version,
+                    candidate.id AS item_id, 1000000000 + candidate.source_revision::BIGINT AS item_version,
                     candidate.promoted_project_id AS project_id,
-                    COALESCE(
+                    CASE WHEN candidate.promoted_task_id IS NOT NULL
+                        THEN '일감에 새 답글 · ' ELSE '새 업무 요청 · ' END || COALESCE(
                         candidate.suggested_task_title,
                         candidate.summary,
                         '새 메일'
                     ) AS raw_title,
                     candidate.summary AS raw_body,
                     $1 + INTERVAL '1 day' AS target_at,
-                    $1 AS notify_at
+                    candidate.analyzed_at AS notify_at
              FROM gmail_inflow_candidates AS candidate
+             JOIN gmail_accounts account ON account.id = candidate.account_id
+             JOIN gmail_messages message ON message.id = candidate.representative_message_id
              WHERE candidate.analysis_state = 'ready'
-               AND candidate.classification IN ('new_task', 'follow_up', 'question')
+               AND account.status = 'active'
+               AND (candidate.classification IN ('new_task', 'follow_up', 'question')
+                    OR (candidate.classification = 'status_update' AND candidate.promoted_task_id IS NOT NULL))
+               AND message.received_at >= account.created_at
+               AND message.received_at >= $1 - INTERVAL '1 day'
                AND candidate.analyzed_revision = candidate.source_revision
                AND candidate.decision_status = 'pending'
              UNION ALL
@@ -629,13 +647,25 @@ impl Database {
                         AND EXISTS (
                             SELECT 1
                             FROM project_inflow_analyses AS analysis
+                            JOIN project_google_chat_sources source ON source.id = analysis.source_id
+                            JOIN google_chat_accounts account ON account.id = source.account_id
+                            JOIN project_inflow_items representative ON representative.id = analysis.representative_item_id
                             WHERE analysis.id = delivery.item_id
                               AND analysis.user_id = delivery.user_id
-                              AND analysis.version = delivery.item_version
+                              AND 1000000000 + analysis.source_revision::BIGINT = delivery.item_version
                               AND analysis.state = 'ready'
-                              AND analysis.classification IN (
-                                  'new_task', 'follow_up', 'question'
-                              )
+                              AND source.enabled AND account.status = 'active'
+                              AND representative.status = 'pending'
+                              AND representative.reviewed_at IS NULL
+                              AND representative.received_at >= source.created_at
+                              AND representative.sender_provider_name IS DISTINCT FROM CONCAT('users/', account.provider_subject)
+                              AND (analysis.classification IN ('new_task', 'follow_up', 'question')
+                                  OR (analysis.classification = 'status_update' AND EXISTS (
+                                      SELECT 1 FROM project_inflow_items linked
+                                      WHERE linked.source_id = analysis.source_id
+                                        AND linked.promoted_task_id IS NOT NULL
+                                        AND COALESCE('thread:' || linked.provider_thread_name, 'message:' || linked.provider_message_name) = analysis.conversation_key
+                                  )))
                               AND analysis.analyzed_revision =
                                   analysis.source_revision
                               AND EXISTS (
@@ -643,6 +673,7 @@ impl Database {
                                   FROM project_inflow_items AS item
                                   WHERE item.source_id = analysis.source_id
                                     AND item.status = 'pending'
+                                    AND item.reviewed_at IS NULL
                                     AND COALESCE(
                                         'thread:' || item.provider_thread_name,
                                         'message:' || item.provider_message_name
@@ -657,11 +688,10 @@ impl Database {
                             FROM gmail_inflow_candidates AS candidate
                             WHERE candidate.id = delivery.item_id
                               AND candidate.user_id = delivery.user_id
-                              AND candidate.version = delivery.item_version
+                              AND 1000000000 + candidate.source_revision::BIGINT = delivery.item_version
                               AND candidate.analysis_state = 'ready'
-                              AND candidate.classification IN (
-                                  'new_task', 'follow_up', 'question'
-                              )
+                              AND (candidate.classification IN ('new_task', 'follow_up', 'question')
+                                   OR (candidate.classification = 'status_update' AND candidate.promoted_task_id IS NOT NULL))
                               AND candidate.analyzed_revision =
                                   candidate.source_revision
                               AND candidate.decision_status = 'pending'
@@ -683,9 +713,12 @@ async fn queue_candidate(
     let device_ids = sqlx::query_scalar::<_, Uuid>(
         "SELECT device_id FROM push_registrations
          WHERE user_id = $1 AND status = 'active'
+           AND ($2 NOT IN ('google_chat_inflow', 'gmail_inflow') OR created_at <= $3)
          ORDER BY device_id",
     )
     .bind(candidate.user_id)
+    .bind(&candidate.item_type)
+    .bind(candidate.notify_at)
     .fetch_all(&mut **transaction)
     .await
     .map_err(classify)?;
@@ -725,7 +758,13 @@ fn reminder_copy(candidate: &ReminderCandidate) -> (&'static str, String, String
         "task" => format!("곧 마감해요 · {raw_title}"),
         "schedule" => format!("곧 시작해요 · {raw_title}"),
         "weekly_report" => format!("주간 운영 리포트 · {raw_title}"),
-        "google_chat_inflow" => format!("새 Chat 업무 · {raw_title}"),
+        "google_chat_inflow" | "gmail_inflow"
+            if raw_title.starts_with("새 업무 요청 · ")
+                || raw_title.starts_with("일감에 새 답글 · ") =>
+        {
+            raw_title.to_owned()
+        }
+        "google_chat_inflow" => format!("새 업무 요청 · {raw_title}"),
         "gmail_inflow" => format!("새 메일 업무 · {raw_title}"),
         _ => format!("확인이 필요해요 · {raw_title}"),
     };
@@ -911,7 +950,7 @@ mod tests {
         };
         let (destination, title, body) = reminder_copy(&chat);
         assert_eq!(destination, "projects");
-        assert_eq!(title, "새 Chat 업무 · 정산 오류 확인");
+        assert_eq!(title, "새 업무 요청 · 정산 오류 확인");
         assert_eq!(body, "정산 결과가 예상과 달라 확인이 필요해요.");
 
         let gmail = ReminderCandidate {

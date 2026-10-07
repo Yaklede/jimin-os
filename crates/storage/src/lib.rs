@@ -14,6 +14,7 @@ pub mod gmail_inflow;
 pub mod goals;
 pub mod google_chat;
 pub mod inflow_analysis;
+pub mod inflow_notifications;
 pub mod intelligence;
 pub mod itsm;
 pub mod meetings;

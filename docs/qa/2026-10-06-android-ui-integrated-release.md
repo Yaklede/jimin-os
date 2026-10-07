@@ -1,5 +1,18 @@
 # Android UI integration release — 2026-10-06
 
+## Four-destination correction — 2026-10-07 (DEV only)
+
+- Supersedes the five-destination microphone restoration below. The original composition is Home / Projects / large microphone / Calendar / Meetings. More is no longer a fifth bottom destination.
+- The center grid track is reserved for the 64px microphone, with two destinations on each side. Selected destinations still have no filled background.
+- More moved to a 44px top-bar control; decisions, memory and settings remain available. Desktop navigation is unchanged and does not display this phone-only control.
+- Found and fixed a verification issue: the relocated More popup was initially painted behind the animated content and did not receive clicks. The mobile top bar now forms a higher stacking layer.
+- Browser checks: 320px and 411px have no horizontal overflow; all four targets and the microphone are separate. The top menu stays inside the screen, Settings navigation works, Escape closes the menu and restores focus. At 1440px both phone navigation and phone More are hidden.
+- Android checks: only AVD JiminOS_Test_API_36 / emulator-5554 / io.jimin.os.dev used. Home, Projects, Calendar and Meetings navigate successfully. Top More opens, Settings navigation works, Android Back closes the menu. Mic opens the native recording permission flow; permission dismissed without granting access, fallback sheet opens and Android Back closes it.
+- At the page end, the last disclosure ends at physical y=1981 and the microphone begins at y=2023, leaving 42px of physical clearance.
+- 70 test files / 439 tests, TypeScript, scoped Prettier and diff whitespace checks pass. Final Android DEV APK and production web build pass; production asset guard passes. No server, production desktop or physical phone deployment in this correction.
+- UX Writing review preserves existing shared labels. Static writing harness reports three false positives for source-code null/undefined literals, not rendered copy. No source behavior was changed merely to suppress those warnings; this is a documented checker limitation, not an approved UI-copy exception. Scoped writing manifest: .opendock/runs/ux-writing/2026-10-07-mobile-four-tabs/manifest.md.
+- Native screenshot: /tmp/jimin-mobile-four-tabs-final.png. Live recording/transcription was not tested.
+
 ## Scope
 
 - Integrate Android layout commits `4633d36` and `5daedf9` onto deployed main `75ba28f`.
@@ -26,5 +39,45 @@
 
 ## Deployment
 
-- Client installation and release artifact identities will be appended after verification.
-- Physical Android device was not connected at the start of this release.
+- PR #9 merged into production main `7282ad5b2a3c0edf9ebf819c8f680ef833f75233`; implementation checkout has the same tree.
+- macOS production app installed at `/Applications/Jimin OS.app`, retaining bundle ID `io.jimin.os`, signing identity and user data. Strict signature verification and installed/candidate binary comparison passed; production home loaded.
+- macOS executable SHA-256: `da74686c65b6c9d1397a2c38d38bec1635da5022e65f7bacff6ef4bb395fa9b8`.
+- Durable production Android APK: `/Users/jimin/Desktop/study/jimin-os/releases/android-ui-integrated-20261006/jimin-os-production-arm64.apk` (12,200,508 bytes, non-debuggable, `io.jimin.os`).
+- APK SHA-256: `c497c5a7dca4de5d3c04172b27a7d0ca1c12ce34ab5d2e969343224d4fbf62d4`. Production URL/preview guards passed.
+- Missing ignored Tauri Android generated activity/proguard files were restored from the exact installed Tauri 2.11.5 code-generation templates before the successful build. No tracked native source changed.
+- Physical installation remains pending; the phone was disconnected at the end. No DEV package or test workflow was run on the user's phone.
+
+## Emulator-only native QA
+
+- Per user instruction, native UI testing used only AVD `JiminOS_Test_API_36`, Android 16 / API 36, serial `emulator-5554`, 1080×2400.
+- Installed separate fixture application `io.jimin.os.dev`. Fixture API interception isolates task changes and prevents production/provider writes; the durable production APK above is separate from this DEV output.
+- Home task title expands details; optional completion reply dialog opens. Android Back hides the keyboard without losing the dialog. Blank optional reply completion succeeds; today count 3→2 and total 8→7 immediately.
+- Project inline editor scrolls to date/hour/minute and save controls above the bottom navigation. Native hour selector opens; changing 21→18 and saving updates the displayed deadline to 18:49.
+- More popup stays within the viewport. Home, project, calendar and meeting navigation remain available.
+- Home inflow tabs show new/existing separately. Selection opens the mobile detail view; registration modal scrolls to deadline fields and fixed footer controls. Tomorrow 18:00 preset updates all fields; fixture registration succeeds and new-request count 23→22.
+- No AndroidRuntime fatal error found in the bounded end-of-test log.
+- Evidence screenshots: `/tmp/jimin-integrated-emulator-home.png`, `/tmp/jimin-integrated-emulator-final.png`.
+- Limitations: native Korean typing through Mobile MCP was unavailable (non-ASCII unsupported); actual speech recognition, live Google Chat replies and production provider mutations were not exercised. Existing frontend regression tests cover optional reply behavior separately.
+
+## Navigation visual follow-up — DEV only, not deployed
+
+- This microphone-removal direction was rejected by the user and is superseded by the restoration below.
+- User rejected the six-column navigation's visual balance after the integrated release.
+- Scoped targets: `mobileWorkspace.css`, `mobileWorkspace.test.ts`, `components/OsShell.tsx`, `components/OsShell.test.tsx`.
+- Bottom navigation now has five equal destinations: Home, Projects, Calendar, Meetings, More. Removed the isolated filled microphone circle; voice is preserved in the native top command launcher and as a labeled action inside More.
+- Each tab explicitly uses centered column layout, 22px icons, 12px/18px labels at weight 500, transparent background and 56px height. Only the selected icon uses the accent; selected label uses strong neutral text. Safe-area height is shared with content clearance.
+- Full frontend regression: 70 files / 439 tests passed. DEV Android build passed and was installed only as `io.jimin.os.dev` on `emulator-5554`.
+- Browser measurements at 320px: five equal 57.8×56px controls; at 411px: five equal 76×56px controls. No horizontal overflow; More menu remains inside viewport. Desktop 1440px bottom navigation remains hidden.
+- Native emulator measurements: five equal approximately 210×150 physical-pixel destinations, no extra unlabeled action. More voice action reaches the native microphone permission prompt; prompt dismissed without granting access. Voice failure sheet opens and Android Back closes it.
+- Visual proof: `/tmp/jimin-nav-before.png`, `/tmp/jimin-nav-after.png`. Live recording is not covered.
+- Prior installed macOS app and durable production APK are unchanged. This follow-up has not been merged or deployed; review the emulator before a subsequent production release.
+
+## Large microphone restoration — DEV only
+
+- User requires the large direct microphone control. Restored the existing voice-sheet handler to a 64×64px accent circle centered above the bottom navigation. No destination is removed; Home, Projects, Calendar, Meetings and More retain equal 56px-high touch targets.
+- Reserve 24px within the dock for the microphone's lower edge and 56px additional content/scroll clearance above the full safe-area dock height. Explicitly clear inherited assistant grid-row positioning; without this, legacy web styles shifted the floating control into the tabs' touch regions.
+- At 320px and 411px, microphone center matches dock center, no horizontal overflow and no intersection with destination touch rectangles. Desktop navigation visibility is unchanged.
+- Full frontend regression passed: 70 files / 439 tests. Native emulator verification and screenshot are recorded after installing the final DEV APK below. Production remains unchanged.
+- Final DEV APK rebuilt after the grid-row correction and installed only on `emulator-5554` as `io.jimin.os.dev`. Native microphone tap reaches the permission/voice flow; permission prompt dismissed without granting access and Android Back closes the voice sheet. Tapping Calendar below it independently navigates to Calendar.
+- At the home page's scroll end, the last disclosure ends at physical y=1981 and microphone begins at y=2023: final content remains reachable with a clear gap. Screenshots: `/tmp/jimin-nav-microphone-restored.png` and `/tmp/jimin-nav-microphone-restored-bottom.png`.
+- Production frontend typecheck/build and asset-origin guard passed; this does not deploy the follow-up. Actual recording/transcription was not exercised.

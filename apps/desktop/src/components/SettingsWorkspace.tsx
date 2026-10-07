@@ -41,6 +41,7 @@ import {
   type ReminderSyncStatus,
   requestNotificationPermission,
 } from "../local-notifications";
+import { DesktopInflowNotificationSettings } from "./DesktopInflowNotificationSettings";
 
 export type GmailSettingsAction =
   | { kind: "authorizing"; workspaceId: string; accountId?: string }
@@ -1215,6 +1216,7 @@ export function SettingsWorkspace({
             )}
           </div>
         </div>
+        <DesktopInflowNotificationSettings />
         {localNotificationsSupported() ? (
           <div
             className="settings-row"

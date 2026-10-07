@@ -1839,6 +1839,7 @@ pub(crate) fn error_response(
         me,
         devices,
         push::get_push_registration,
+        push::get_inflow_notifications,
         push::register_push_token,
         push::delete_push_registration,
         device_signals::sync_missed_calls,
@@ -2001,6 +2002,8 @@ pub(crate) fn error_response(
         meetings::MeetingActionKindResponse,
         meetings::MeetingActionStatusResponse,
         push::PushRegistrationResponse,
+        push::InflowNotificationFeed,
+        push::InflowNotificationResponse,
         push::RegisterPushTokenRequest
     )),
     tags((name = "health", description = "Process and dependency health"))
@@ -2197,12 +2200,14 @@ fn itsm_router() -> Router<ApiState> {
 }
 
 fn push_router() -> Router<ApiState> {
-    Router::new().route(
-        "/v1/push/registration",
-        get(push::get_push_registration)
-            .put(push::register_push_token)
-            .delete(push::delete_push_registration),
-    )
+    Router::new()
+        .route("/v1/push/inflow", get(push::get_inflow_notifications))
+        .route(
+            "/v1/push/registration",
+            get(push::get_push_registration)
+                .put(push::register_push_token)
+                .delete(push::delete_push_registration),
+        )
 }
 
 fn sync_router() -> Router<ApiState> {
@@ -11088,6 +11093,7 @@ mod tests {
                 "/v1/projects/{project_id}/webhooks/{webhook_id}",
                 "/v1/projects/{project_id}/webhooks/{webhook_id}/messages",
                 "/v1/projects/{project_id}/webhooks/{webhook_id}/test",
+                "/v1/push/inflow",
                 "/v1/push/registration",
                 "/v1/recommendations",
                 "/v1/recommendations/{recommendation_id}/decisions",
@@ -12602,6 +12608,23 @@ mod tests {
                 .oneshot(request)
                 .await
                 .expect("handler should respond");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn inflow_notification_feed_requires_a_live_signed_session() {
+        let (state, _, _) = signed_auth_state(true);
+        for uri in ["/v1/push/inflow", "/v1/push/inflow?afterEpochMillis=0"] {
+            let response = router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("handler");
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
     }

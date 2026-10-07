@@ -1,6 +1,9 @@
 use keyring::{Entry, Error as KeyringError};
 use uuid::Uuid;
 
+#[cfg(target_os = "macos")]
+mod inflow_notifications;
+
 const SESSION_ACCOUNT: &str = "device-session";
 const INSTALLATION_ACCOUNT: &str = "device-installation";
 const MAX_SESSION_BYTES: usize = 8 * 1024;
@@ -109,18 +112,34 @@ fn valid_installation_id(value: &str) -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let result = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(jimin_voice_recognition::init())
         .plugin(jimin_local_notifications::init())
-        .plugin(jimin_device_signals::init())
-        .invoke_handler(tauri::generate_handler![
-            read_device_session,
-            save_device_session,
-            clear_device_session,
-            read_or_create_installation_id
-        ])
-        .run(tauri::generate_context!());
+        .plugin(jimin_device_signals::init());
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            inflow_notifications::initialize(app.handle())?;
+            Ok(())
+        });
+    #[cfg(target_os = "macos")]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        read_device_session,
+        save_device_session,
+        clear_device_session,
+        read_or_create_installation_id,
+        inflow_notifications::configure_inflow_notifications
+    ]);
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        read_device_session,
+        save_device_session,
+        clear_device_session,
+        read_or_create_installation_id
+    ]);
+    let result = builder.run(tauri::generate_context!());
 
     if let Err(error) = result {
         eprintln!("Jimin OS could not start: {error}");

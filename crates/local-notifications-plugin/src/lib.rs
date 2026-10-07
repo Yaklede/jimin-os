@@ -49,6 +49,12 @@ mod tests {
         assert!(SOURCE.contains("override fun onNewToken"));
         assert!(SOURCE.contains("override fun onMessageReceived"));
         assert!(SOURCE.contains("fun pushToken"));
+        assert!(SOURCE.contains("validNotificationItemType(itemType)"));
+        assert!(
+            SOURCE
+                .contains("\"google_chat_inflow\", \"gmail_inflow\", \"brief\", \"weekly_report\"")
+        );
+        assert!(SOURCE.contains("targetAtEpochMillis <= System.currentTimeMillis()"));
     }
 
     #[test]

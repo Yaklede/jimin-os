@@ -23,6 +23,14 @@ jimin-local-notifications = { package = "tauri-plugin-local-notifications", path
 jimin-device-signals = { package = "tauri-plugin-device-signals", path = "../../../crates/device-signals-plugin" }
 uuid.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+secrecy.workspace = true
+tokio.workspace = true
+tauri-plugin-notification = "=2.3.3"
+
 [target.'cfg(target_os = "android")'.dependencies]
 android-native-keyring-store.workspace = true
 
