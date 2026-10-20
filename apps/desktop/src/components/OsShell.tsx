@@ -4,7 +4,6 @@ import {
   CalendarDays,
   FolderKanban,
   House,
-  Inbox,
   Mic,
   MoreHorizontal,
   RefreshCw,
@@ -135,7 +134,7 @@ export function OsShell({
       <summary
         className="os-nav__button focus-visible-control"
         aria-label={copy.navigation.more}
-        data-active={["decisions", "memory", "settings"].includes(destination)}
+        data-active={["memory", "settings"].includes(destination)}
       >
         <MoreHorizontal aria-hidden="true" />
         <span className="sr-only">{copy.navigation.more}</span>
@@ -143,11 +142,6 @@ export function OsShell({
       <nav className="os-mobile-more__items" aria-label={copy.navigation.more}>
         {(
           [
-            [
-              "decisions",
-              copy.navigation.decisions,
-              <Inbox aria-hidden="true" />,
-            ],
             [
               "memory",
               copy.navigation.memory,
@@ -219,12 +213,6 @@ export function OsShell({
             icon={<FolderKanban aria-hidden="true" />}
             label={copy.navigation.projects}
             onClick={() => navigateFromSidebar("projects")}
-          />
-          <NavigationButton
-            active={destination === "decisions"}
-            icon={<Inbox aria-hidden="true" />}
-            label={copy.navigation.decisions}
-            onClick={() => navigateFromSidebar("decisions")}
           />
           <NavigationButton
             active={destination === "meetings"}

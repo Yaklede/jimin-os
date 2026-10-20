@@ -291,7 +291,7 @@ fn append_analysis_instructions(prompt: &mut String) {
         "인사말, 멘션, 전달 문구, 같은 내용의 반복 댓글을 제목이나 요약에 그대로 복사하지 마세요. 실제로 해야 할 행동과 완료 결과를 자연스러운 한국어로 다시 작성하세요.",
         "URL은 제목에 넣지 않되 삭제하거나 무시하지 마세요. 관련 문서·이슈·가이드의 근거이므로 주변 문맥을 업무 판단에 반영하세요. 원문 URL은 앱이 별도 관련 링크로 보존합니다.",
         "조회한 ITSM 원문은 실제 요구사항과 상세 범위를 정리하는 근거로 사용하세요. ITSM 프로젝트명은 원문 메타데이터이며, 현재 앱 프로젝트와 달라도 제공된 링크를 분석하세요. 프로젝트 불일치를 이유로 내용을 제외하거나 연결 확인을 요청하지 마세요. 할 일은 현재 앱 프로젝트에서 정리하며 프로젝트를 임의로 변경하지 마세요.",
-        "new_task일 때만 taskTitle, actionItems, completionCriteria, assigneeName, dueAt, priority를 채우세요. 다른 분류에서는 이 필드를 빈 문자열·빈 배열·0으로 반환하세요.",
+        "new_task에서는 taskTitle, actionItems, completionCriteria, assigneeName, dueAt, priority를 채우세요. 기존 연결 일감의 follow_up에서는 명시적으로 추가·변경된 행동만 actionItems에, 명시된 변경 마감만 dueAt에 넣으세요. 단순 재촉이나 진행 공유에는 변경 제안을 만들지 마세요. 그 외 필드는 빈 문자열·빈 배열·0으로 반환하세요. 변경 제안은 사용자 승인 전에는 적용하지 않습니다.",
         "담당자는 등록된 후보에 명확히 포함된 이름만 사용하고, 마감일은 대화에 명시된 경우에만 RFC3339로 반환하세요. 기본 시간대는 Asia/Seoul이며 추측하지 마세요.",
         "기존 연결 할 일이 있으면 단순 재촉, 확인 요청, 진행 공유는 follow_up으로 분류하세요. 별개의 결과물이 명확히 추가된 경우에만 new_task입니다.",
     ] {
@@ -358,6 +358,7 @@ fn validated_analysis(response: &str) -> Option<InflowAnalysisResult> {
         StructuredInflowClassification::Duplicate => InflowClassification::Duplicate,
     };
     let new_task = classification == InflowClassification::NewTask;
+    let task_change = classification == InflowClassification::FollowUp;
     let task_title = new_task.then(|| structured.task_title.trim().to_owned());
     if task_title
         .as_deref()
@@ -370,7 +371,7 @@ fn validated_analysis(response: &str) -> Option<InflowAnalysisResult> {
         confidence: structured.confidence,
         summary: structured.summary.trim().to_owned(),
         suggested_task_title: task_title,
-        suggested_action_items: if new_task {
+        suggested_action_items: if new_task || task_change {
             structured
                 .action_items
                 .into_iter()
@@ -385,7 +386,7 @@ fn validated_analysis(response: &str) -> Option<InflowAnalysisResult> {
         suggested_assignee_name: new_task
             .then(|| structured.assignee_name.trim().to_owned())
             .filter(|value| !value.is_empty()),
-        suggested_due_at: if new_task && !structured.due_at.trim().is_empty() {
+        suggested_due_at: if (new_task || task_change) && !structured.due_at.trim().is_empty() {
             OffsetDateTime::parse(structured.due_at.trim(), &Rfc3339).ok()
         } else {
             None
@@ -667,5 +668,17 @@ mod tests {
         let result = validated_analysis(response).expect("valid follow-up");
         assert_eq!(result.classification, InflowClassification::FollowUp);
         assert!(result.suggested_task_title.is_none());
+    }
+
+    #[test]
+    fn explicit_follow_up_retains_changes_without_creating_a_new_task() {
+        let result=validated_analysis(r#"{"classification":"follow_up","confidence":95,"summary":"기존 요청에 결과 공유와 마감 변경이 추가됐어요.","taskTitle":"","actionItems":["점검 결과 문서를 공유한다."],"completionCriteria":"","assigneeName":"","dueAt":"2026-10-09T09:00:00+09:00","priority":0}"#).unwrap();
+        assert_eq!(
+            result.suggested_action_items,
+            vec!["점검 결과 문서를 공유한다."]
+        );
+        assert!(result.suggested_due_at.is_some());
+        assert!(result.suggested_task_title.is_none());
+        assert!(result.suggested_assignee_name.is_none());
     }
 }

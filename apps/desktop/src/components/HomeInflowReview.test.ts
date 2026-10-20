@@ -81,8 +81,8 @@ describe("home inflow review", () => {
     expect(markup).toContain('id="home-inflow-queue-title-existing"');
     expect(markup).toContain(copy.projects.inflowMarkSeen);
     expect(markup.match(/role="tablist"/g)).toHaveLength(1);
-    expect(markup.match(/role="tab"/g)).toHaveLength(2);
-    expect(markup.match(/role="tabpanel"/g)).toHaveLength(2);
+    expect(markup.match(/role="tab"/g)).toHaveLength(3);
+    expect(markup.match(/role="tabpanel"/g)).toHaveLength(3);
     expect(markup).toContain('aria-controls="home-inflow-panel-new"');
     expect(markup).toContain('aria-controls="home-inflow-panel-existing"');
     expect(markup).toMatch(/id="home-inflow-tab-new"[^>]*aria-selected="true"/);
@@ -95,6 +95,17 @@ describe("home inflow review", () => {
       /id="home-inflow-tab-existing"[^>]*aria-selected="true"/,
     );
     expect(markup).toMatch(/id="home-inflow-panel-new"[^>]*hidden=""/);
+    expect(markup).toContain(copy.projects.inflowNewEmpty);
+  });
+  it("keeps uncertain requests in their own review tab without allowing automatic promotion", () => {
+    const markup = renderReview([
+      inflow("uncertain", { analysisClassification: "noise" }),
+    ]);
+    expect(markup).toMatch(
+      /id="home-inflow-tab-uncertain"[^>]*aria-selected="true"/,
+    );
+    expect(markup).toContain(copy.projects.inflowUncertainDescription);
+    expect(markup).toContain('id="home-inflow-panel-new"');
     expect(markup).toContain(copy.projects.inflowNewEmpty);
   });
   it("offers the full queue instead of silently truncating after five items", () => {

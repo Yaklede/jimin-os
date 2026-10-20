@@ -56,6 +56,7 @@ export interface Recommendation {
 }
 
 export interface HomeSnapshot {
+  deliveryRecovery?: import("./deliveryRecovery").DeliveryRecovery[];
   schedule: ScheduleEntry[];
   tasks: Task[];
   dueTasks: Task[];
@@ -98,6 +99,9 @@ export async function fetchHomeSnapshot(
     ? body.weeklyReports
     : await fetchWeeklyReportsFromCompatibleServer(baseUrl, access);
   return {
+    deliveryRecovery: Array.isArray(body.deliveryRecovery)
+      ? body.deliveryRecovery
+      : [],
     schedule: body.schedule,
     tasks: body.tasks,
     dueTasks: Array.isArray(body.dueTasks) ? body.dueTasks : [],

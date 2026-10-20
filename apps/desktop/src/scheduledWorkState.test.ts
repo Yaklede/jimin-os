@@ -3,6 +3,7 @@ import {
   latestScheduledFailure,
   mergeScheduledRuns,
   parseAssigneeFilter,
+  scheduledWorkCloseAction,
 } from "./scheduledWorkState";
 import type { ScheduledWorkRun } from "./api/scheduledWork";
 const run = (
@@ -20,6 +21,12 @@ const run = (
   scheduledFor: "2026-09-14T00:00:00Z",
 });
 describe("scheduled work state", () => {
+  it("closes unchanged settings immediately and protects changes and pending saves", () => {
+    expect(scheduledWorkCloseAction(false, false)).toBe("close");
+    expect(scheduledWorkCloseAction(false, true)).toBe("confirm");
+    expect(scheduledWorkCloseAction(true, false)).toBe("blocked");
+    expect(scheduledWorkCloseAction(true, true)).toBe("blocked");
+  });
   it("does not keep an old failure on the home summary after a successful run", () => {
     expect(
       latestScheduledFailure(

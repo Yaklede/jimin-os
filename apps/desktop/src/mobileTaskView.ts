@@ -42,13 +42,22 @@ export function filterMobileTasks(
 export function groupMobileTasks(tasks: Task[], grouping: MobileTaskGrouping) {
   const groups = new Map<string, Task[]>();
   for (const task of tasks) {
-    const label =
+    const labels =
       grouping === "assignee"
-        ? task.assigneeName?.trim() || "담당자 미정"
+        ? [
+            ...new Set(
+              task.assigneeName
+                ?.split(",")
+                .map((name) => name.trim())
+                .filter(Boolean) ?? [],
+            ),
+          ]
         : task.dueAt
-          ? seoulTaskDay(task.dueAt)
-          : "기한 없음";
-    groups.set(label, [...(groups.get(label) ?? []), task]);
+          ? [seoulTaskDay(task.dueAt)]
+          : ["기한 없음"];
+    for (const label of labels.length ? labels : ["담당자 미정"]) {
+      groups.set(label, [...(groups.get(label) ?? []), task]);
+    }
   }
   return [...groups].sort(([a], [b]) =>
     a === "담당자 미정" || a === "기한 없음"

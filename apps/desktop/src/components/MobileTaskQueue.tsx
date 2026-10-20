@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type Ref } from "react";
 import { Check, ChevronDown, Pencil, RefreshCw } from "lucide-react";
 import type { Task } from "../api/planning";
 import {
@@ -9,8 +9,10 @@ import {
   type MobileTaskGrouping,
 } from "../mobileTaskView";
 import { LinkifiedText } from "./ExternalTextLink";
+import "./homeTaskQueue.css";
 
 type Props = {
+  sectionRef?: Ref<HTMLElement>;
   tasks: Task[];
   loading?: boolean;
   onLoadAll(): Promise<Task[]>;
@@ -19,6 +21,7 @@ type Props = {
 };
 
 export function MobileTaskQueue({
+  sectionRef,
   tasks,
   loading,
   onLoadAll,
@@ -33,8 +36,11 @@ export function MobileTaskQueue({
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState<string>();
   const [pending, setPending] = useState<string>();
+  const [workflowFilter, setWorkflowFilter] = useState("all");
   const [now, setNow] = useState(() => new Date());
   const generation = useRef(0);
+  const mounted = useRef(true);
+  const heading = useRef<HTMLHeadingElement>(null);
   const loadRef = useRef(onLoadAll);
   loadRef.current = onLoadAll;
   async function reload() {
@@ -54,9 +60,11 @@ export function MobileTaskQueue({
     }
   }
   useEffect(() => {
+    mounted.current = true;
     void reload();
     const interval = window.setInterval(() => setNow(new Date()), 60_000);
     return () => {
+      mounted.current = false;
       generation.current++;
       window.clearInterval(interval);
     };
@@ -72,7 +80,11 @@ export function MobileTaskQueue({
     () => mergeMobileTasks(allTasks, tasks, loaded),
     [allTasks, tasks, loaded],
   );
-  const visible = filterMobileTasks(merged, filter, now);
+  const visible = filterMobileTasks(merged, filter, now).filter(
+    (task) =>
+      workflowFilter === "all" ||
+      (task.workflowState ?? "not_started") === workflowFilter,
+  );
   const groups = groupMobileTasks(visible, grouping);
   async function complete(task: Task) {
     if (pending) return;
@@ -80,20 +92,28 @@ export function MobileTaskQueue({
     setError("");
     try {
       await onComplete(task);
+      if (!mounted.current) return;
+      setExpanded(undefined);
       await reload();
+      heading.current?.focus({ preventScroll: true });
     } catch {
-      setError("완료 상태를 저장하지 못했어요. 다시 시도해 주세요.");
+      if (mounted.current)
+        setError("완료 상태를 저장하지 못했어요. 다시 시도해 주세요.");
     } finally {
-      setPending(undefined);
+      if (mounted.current) setPending(undefined);
     }
   }
   return (
     <section
-      className="mobile-task-queue"
+      ref={sectionRef}
+      tabIndex={-1}
+      className="mobile-task-queue home-direct-tasks"
       aria-labelledby="mobile-task-queue-title"
     >
       <header className="mobile-task-queue__heading">
-        <h2 id="mobile-task-queue-title">할 일</h2>
+        <h2 ref={heading} tabIndex={-1} id="mobile-task-queue-title">
+          할 일
+        </h2>
         <button
           type="button"
           className="focus-visible-control"
@@ -144,6 +164,18 @@ export function MobileTaskQueue({
           </button>
         ))}
       </div>
+      <label className="home-direct-tasks__workflow">
+        진행 상태
+        <select
+          value={workflowFilter}
+          onChange={(event) => setWorkflowFilter(event.target.value)}
+        >
+          <option value="all">모든 상태</option>
+          <option value="not_started">진행 전</option>
+          <option value="in_progress">진행 중</option>
+          <option value="waiting">대기 중</option>
+        </select>
+      </label>
       <p className="mobile-task-queue__status" role="status">
         {fetching || loading
           ? "일감을 확인하고 있어요."
@@ -154,100 +186,114 @@ export function MobileTaskQueue({
           {error}
         </p>
       )}
-      {groups.map(([label, items]) => (
-        <section className="mobile-task-group" key={label} aria-label={label}>
-          <h3>
-            {grouping === "date" && label !== "기한 없음"
-              ? new Intl.DateTimeFormat("ko-KR", {
-                  timeZone: "Asia/Seoul",
-                  month: "long",
-                  day: "numeric",
-                  weekday: "short",
-                }).format(new Date(`${label}T00:00:00+09:00`))
-              : label}
-            <span>{items.length}개</span>
-          </h3>
-          <ul>
-            {items.map((task) => (
-              <li key={task.id}>
-                <div className="mobile-task-row">
-                  <button
-                    type="button"
-                    className="mobile-task-row__complete focus-visible-control"
-                    aria-label={`${task.title} 완료하기`}
-                    disabled={Boolean(pending)}
-                    onClick={() => void complete(task)}
-                  >
-                    {pending === task.id ? (
-                      <span className="button-spinner" aria-hidden="true" />
-                    ) : (
-                      <span
-                        className="mobile-task-row__circle"
-                        aria-hidden="true"
-                      />
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    className="mobile-task-row__open focus-visible-control"
-                    aria-expanded={expanded === task.id}
-                    aria-controls={`mobile-task-${task.id}`}
-                    onClick={() =>
-                      setExpanded(expanded === task.id ? undefined : task.id)
-                    }
-                  >
-                    <strong>{task.title}</strong>
-                    <span>
-                      {grouping === "date"
-                        ? task.assigneeName || "담당자 미정"
-                        : dueLabel(task.dueAt)}
-                      {task.parentTaskId ? " · 하위 일감" : ""}
-                    </span>
-                    <ChevronDown aria-hidden="true" />
-                  </button>
-                </div>
-                {expanded === task.id && (
-                  <div
-                    className="mobile-task-detail"
-                    id={`mobile-task-${task.id}`}
-                  >
-                    <p>
-                      {task.assigneeName || "담당자 미정"} ·{" "}
-                      {dueLabel(task.dueAt)}
-                    </p>
-                    {task.notes ? (
-                      <div className="mobile-task-detail__notes">
-                        <LinkifiedText text={task.notes} />
-                      </div>
-                    ) : (
-                      <p>설명이 없어요. 수정에서 추가할 수 있어요.</p>
-                    )}
-                    <div className="mobile-task-detail__actions">
-                      <button
-                        type="button"
-                        className="secondary-button focus-visible-control"
-                        onClick={() => onEdit(task)}
-                      >
-                        <Pencil aria-hidden="true" />
-                        수정하기
-                      </button>
-                      <button
-                        type="button"
-                        className="primary-button focus-visible-control"
-                        disabled={Boolean(pending)}
-                        onClick={() => void complete(task)}
-                      >
-                        <Check aria-hidden="true" />
-                        {pending === task.id ? "저장 중" : "완료하기"}
-                      </button>
-                    </div>
+      <div className="home-direct-tasks__groups">
+        {groups.map(([label, items]) => (
+          <section className="mobile-task-group" key={label} aria-label={label}>
+            <h3>
+              {grouping === "date" && label !== "기한 없음"
+                ? new Intl.DateTimeFormat("ko-KR", {
+                    timeZone: "Asia/Seoul",
+                    month: "long",
+                    day: "numeric",
+                    weekday: "short",
+                  }).format(new Date(`${label}T00:00:00+09:00`))
+                : label}
+              <span>{items.length}개</span>
+            </h3>
+            <ul>
+              {items.map((task) => (
+                <li key={task.id}>
+                  <div className="mobile-task-row">
+                    <button
+                      type="button"
+                      className="mobile-task-row__complete focus-visible-control"
+                      aria-label={`${task.title} 완료하기`}
+                      disabled={Boolean(pending)}
+                      onClick={() => void complete(task)}
+                    >
+                      {pending === task.id ? (
+                        <span className="button-spinner" aria-hidden="true" />
+                      ) : (
+                        <span
+                          className="mobile-task-row__circle"
+                          aria-hidden="true"
+                        />
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      className="mobile-task-row__open focus-visible-control"
+                      aria-expanded={expanded === `${label}:${task.id}`}
+                      aria-controls={`mobile-task-${encodeURIComponent(label)}-${task.id}`}
+                      onClick={() =>
+                        setExpanded(
+                          expanded === `${label}:${task.id}`
+                            ? undefined
+                            : `${label}:${task.id}`,
+                        )
+                      }
+                    >
+                      <strong>{task.title}</strong>
+                      <span>
+                        {workflowLabel(task)} ·{" "}
+                        {grouping === "date"
+                          ? task.assigneeName || "담당자 미정"
+                          : dueLabel(task.dueAt)}
+                        {task.parentTaskId ? " · 하위 일감" : ""}
+                      </span>
+                      <ChevronDown aria-hidden="true" />
+                    </button>
                   </div>
-                )}
-              </li>
-            ))}
-          </ul>
-        </section>
-      ))}
+                  {expanded === `${label}:${task.id}` && (
+                    <div
+                      className="mobile-task-detail"
+                      id={`mobile-task-${encodeURIComponent(label)}-${task.id}`}
+                    >
+                      <p>
+                        {workflowLabel(task)} ·{" "}
+                        {task.assigneeName || "담당자 미정"} ·{" "}
+                        {dueLabel(task.dueAt)}
+                      </p>
+                      {task.workflowState === "waiting" &&
+                        task.waitingReason && (
+                          <p className="home-direct-tasks__waiting">
+                            대기 사유: {task.waitingReason}
+                          </p>
+                        )}
+                      {task.notes ? (
+                        <div className="mobile-task-detail__notes">
+                          <LinkifiedText text={task.notes} />
+                        </div>
+                      ) : (
+                        <p>설명이 없어요. 수정에서 추가할 수 있어요.</p>
+                      )}
+                      <div className="mobile-task-detail__actions">
+                        <button
+                          type="button"
+                          className="secondary-button focus-visible-control"
+                          onClick={() => onEdit(task)}
+                        >
+                          <Pencil aria-hidden="true" />
+                          수정하기
+                        </button>
+                        <button
+                          type="button"
+                          className="primary-button focus-visible-control"
+                          disabled={Boolean(pending)}
+                          onClick={() => void complete(task)}
+                        >
+                          <Check aria-hidden="true" />
+                          {pending === task.id ? "저장 중" : "완료하기"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </section>
+        ))}
+      </div>
       {loaded && !fetching && !visible.length && (
         <p className="mobile-task-queue__empty">
           {filter === "today"
@@ -271,4 +317,13 @@ function dueLabel(dueAt: string | null) {
         minute: "2-digit",
       }).format(new Date(dueAt))
     : "기한 없음";
+}
+
+function workflowLabel(task: Task): string {
+  if (task.status === "completed") return "완료";
+  return task.workflowState === "waiting"
+    ? "대기 중"
+    : task.workflowState === "in_progress"
+      ? "진행 중"
+      : "진행 전";
 }

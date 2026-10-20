@@ -4362,6 +4362,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 1,
         };
         let schedule_id = schedule.id;
@@ -4379,6 +4381,8 @@ mod tests {
             completed_at: Some(now),
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 2,
         };
         let completed_task_id = completed_task.id;
@@ -4547,6 +4551,8 @@ mod tests {
             completed_at: Some(completed_at),
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 2,
         };
 
@@ -4768,6 +4774,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 1,
         };
         let goal_task = Task {
@@ -4783,6 +4791,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 1,
         };
         let unrelated = Task {
@@ -4798,6 +4808,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 1,
         };
         let goal = GoalOverview {
@@ -4935,6 +4947,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 1,
         };
         let context = TurnContext {
@@ -4988,6 +5002,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 1,
         };
         let schedule = ScheduleEntry {
@@ -5088,6 +5104,8 @@ mod tests {
             completed_at: Some(completed_at),
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 2,
         };
         let morning = completed_task("아침 완료", day_start + Duration::hours(6));
@@ -5152,6 +5170,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 1,
         };
         let context = TurnContext {
@@ -5204,6 +5224,8 @@ mod tests {
                 completed_at: None,
                 work_kind: "general".to_owned(),
                 completion_note: None,
+                workflow_state: "not_started".to_owned(),
+                waiting_reason: None,
                 version: 1,
             })
             .collect::<Vec<_>>();
@@ -5271,6 +5293,8 @@ mod tests {
                 completed_at: None,
                 work_kind: "general".to_owned(),
                 completion_note: None,
+                workflow_state: "not_started".to_owned(),
+                waiting_reason: None,
                 version: 1,
             })
             .collect::<Vec<_>>();
@@ -5329,6 +5353,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 1,
         };
         let tomorrow = Task {
@@ -5344,6 +5370,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 1,
         };
         let context = TurnContext {
@@ -5506,6 +5534,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 1,
         };
         let context = TurnContext {
@@ -5562,6 +5592,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 3,
         };
         let context = TurnContext {
@@ -5705,6 +5737,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 1,
         };
         let schedule = LinkedScheduleEntry {
@@ -5748,6 +5782,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Complete owned-task fixture verifies linked schedule actions together.
     fn schedule_actions_bind_owned_task_and_project_links() {
         let starts_at = OffsetDateTime::now_utc() + Duration::hours(1);
         let project_id = Uuid::now_v7();
@@ -5767,6 +5802,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 1,
         };
         let context = TurnContext {
@@ -6143,6 +6180,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 7,
         };
         let context = TurnContext {
@@ -6321,6 +6360,8 @@ mod tests {
             completed_at: Some(OffsetDateTime::now_utc()),
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 3,
         };
         let context = TurnContext {
@@ -6397,6 +6438,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 3,
         };
         let second = Task {
@@ -6589,6 +6632,8 @@ mod tests {
             completed_at: Some(OffsetDateTime::now_utc()),
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 7,
         };
         let context = TurnContext {

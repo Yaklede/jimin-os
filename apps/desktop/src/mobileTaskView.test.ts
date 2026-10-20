@@ -56,7 +56,7 @@ describe("mobile task views", () => {
       ),
     ).toHaveLength(177);
   });
-  it("keeps multi-assignee work once and unassigned work visible", () => {
+  it("shows shared work under each individual assignee and counts unique work separately", () => {
     const groups = groupMobileTasks(
       [
         make("a", null, { assigneeName: "송인준, 김경주" }),
@@ -65,10 +65,14 @@ describe("mobile task views", () => {
       "assignee",
     );
     expect(groups.map(([name]) => name)).toEqual([
-      "송인준, 김경주",
+      "김경주",
+      "송인준",
       "담당자 미정",
     ]);
-    expect(groups.flatMap(([, items]) => items)).toHaveLength(2);
+    expect(groups.flatMap(([, items]) => items)).toHaveLength(3);
+    expect(
+      new Set(groups.flatMap(([, items]) => items.map((item) => item.id))).size,
+    ).toBe(2);
   });
   it("groups by due day with undated work last", () => {
     expect(

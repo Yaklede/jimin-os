@@ -1794,8 +1794,23 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
     );
     let due_at = OffsetDateTime::parse("2026-07-27T03:00:00Z", &Rfc3339)
         .expect("task deadline should parse");
+    let reviewed_content =
+        "업무 목적\n회사 요청 확인\n\n확인할 내용\n- 개발 범위와 예상 일정을 확인합니다.";
+    let assignment_webhook = database
+        .create_project_webhook(&NewProjectWebhook {
+            id: Uuid::now_v7(),
+            user_id: owner.profile.id,
+            project_id: first_project.id,
+            provider: WebhookProvider::GoogleChat,
+            destination: encrypted_test_destination(24),
+            destination_hint: "테스트 Chat".to_owned(),
+            mention_directory: GoogleChatMentionDirectory::default(),
+            events: vec!["task.created".to_owned(), "task.updated".to_owned()],
+        })
+        .await
+        .expect("assignment webhook fixture should persist without sending");
     let promoted = database
-        .promote_project_inflow_item_with_work_kind(&PromoteProjectInflowItem {
+        .promote_project_inflow_item_with_reviewed_content(&PromoteProjectInflowItem {
             user_id: owner.profile.id,
             project_id: first_project.id,
             item_id: pending[0].id,
@@ -1815,7 +1830,7 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             assignee_name: Some("개발 담당자".to_owned()),
             priority: 2,
             due_at: Some(due_at),
-        }, "verification")
+        }, "verification", Some(reviewed_content))
         .await
         .expect("owned inflow should promote")
         .expect("pending inflow should still be available");
@@ -1838,6 +1853,72 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         .await
         .expect("completion delivery should load");
     assert_eq!(completion_deliveries.len(), 1);
+    assert_eq!(
+        completion_deliveries[0].reviewed_content.as_deref(),
+        Some(reviewed_content)
+    );
+    let reply = jimin_storage::planning::format_reviewed_task_assignment_message(
+        &jimin_storage::planning::TaskAssignmentMessageInput {
+            work_kind: &completion_deliveries[0].work_kind,
+            project_title: &completion_deliveries[0].project_title,
+            task_title: &completion_deliveries[0].task_title,
+            public_summary: completion_deliveries[0].public_summary.as_deref(),
+            action_items: &completion_deliveries[0].action_items,
+            completion_criteria: completion_deliveries[0].completion_criteria.as_deref(),
+            reference_links: &completion_deliveries[0].reference_links,
+            assignee_name: completion_deliveries[0].assignee_name.as_deref(),
+            priority: completion_deliveries[0].task_priority,
+            due_at: completion_deliveries[0].due_at,
+        },
+        completion_deliveries[0].reviewed_content.as_deref(),
+    );
+    assert!(reply.contains(reviewed_content));
+    assert!(!reply.contains("예상 일정을 관계자에게 공유한다."));
+    let assignment_pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("assignment outbox should be inspectable");
+    let assignment_payload: serde_json::Value = sqlx::query_scalar(
+        "SELECT payload FROM webhook_deliveries WHERE webhook_id = $1 AND event_type = 'task.created'",
+    )
+    .bind(assignment_webhook.id)
+    .fetch_one(&assignment_pool)
+    .await
+    .expect("promotion should atomically queue the reviewed assignment");
+    assert_eq!(assignment_payload["message"], reply);
+    assert_eq!(assignment_payload["notes"], reviewed_content);
+    let itsm_link: (String,i64) = sqlx::query_as("SELECT issue_url,issue_id FROM task_itsm_links WHERE task_id=$1 AND user_id=$2 AND enabled")
+        .bind(promoted.promoted_task_id).bind(owner.profile.id).fetch_one(&assignment_pool).await.unwrap();
+    assert_eq!(
+        itsm_link,
+        ("https://itsm.example.test/issues/3876".to_owned(), 3876)
+    );
+    assert_eq!(assignment_payload["actionItems"], serde_json::json!([]));
+    assert!(assignment_payload["completionCriteria"].is_null());
+    let promoted_task_id = promoted
+        .promoted_task_id
+        .expect("promoted task should exist");
+    sqlx::query("UPDATE tasks SET notes = '비공개 내부 메모' WHERE id = $1 AND user_id = $2")
+        .bind(promoted_task_id)
+        .bind(owner.profile.id)
+        .execute(&assignment_pool)
+        .await
+        .expect("private task memo fixture should update");
+    let public_after_private_edit = database
+        .pending_google_chat_completion_deliveries(source.id, None, 20)
+        .await
+        .expect("source reply should remain retryable");
+    assert_eq!(
+        public_after_private_edit[0].reviewed_content.as_deref(),
+        Some(reviewed_content)
+    );
+    assert!(!format!("{:?}", public_after_private_edit[0]).contains("비공개 내부 메모"));
+    sqlx::query("UPDATE tasks SET notes = $3 WHERE id = $1 AND user_id = $2")
+        .bind(promoted_task_id)
+        .bind(owner.profile.id)
+        .bind(reviewed_content)
+        .execute(&assignment_pool)
+        .await
+        .expect("task memo fixture should restore for later lifecycle checks");
     assert_eq!(
         completion_deliveries[0].provider_message_name,
         "spaces/company-room/messages/message-1.message-1",
@@ -1867,7 +1948,12 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
     );
     assert!(!format!("{:?}", completion_deliveries[0]).contains("비공개 저널"));
     database
-        .record_google_chat_completion_delivery(&completion_deliveries[0], true, true, None)
+        .record_google_chat_completion_delivery(
+            &completion_deliveries[0],
+            true,
+            false,
+            Some("google_chat.completion_reply_provider_unavailable"),
+        )
         .await
         .expect("successful completion delivery should persist");
     let completed_group = database
@@ -1883,9 +1969,24 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         .find(|item| item.completion_requested_at.is_some())
         .expect("the original request should own the completion state");
     assert!(selected_completion.completion_reaction_at.is_some());
-    assert!(selected_completion.completion_reply_at.is_some());
-    assert!(selected_completion.completion_delivery_error_code.is_none());
+    assert!(selected_completion.completion_reply_at.is_none());
+    assert!(selected_completion.completion_delivery_error_code.is_some());
     assert_eq!(selected_completion.completion_delivery_attempt_count, 1);
+    assert_eq!(
+        database
+            .unsettled_project_inflow_for_user(owner.profile.id)
+            .await
+            .expect("recovery queue")
+            .len(),
+        1
+    );
+    assert!(
+        database
+            .unsettled_project_inflow_for_user(Uuid::now_v7())
+            .await
+            .expect("other owner recovery queue")
+            .is_empty()
+    );
     let retry_target = completed_group
         .iter()
         .find(|item| item.id != promoted.id)
@@ -1905,7 +2006,7 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         "retrying from any message in the thread must preserve the original request target"
     );
     assert!(retried.completion_requested_at.is_some());
-    assert!(retried.completion_reaction_at.is_none());
+    assert!(retried.completion_reaction_at.is_some());
     assert!(retried.completion_reply_at.is_none());
     assert_eq!(retried.completion_delivery_attempt_count, 0);
     let retry_deliveries = database
@@ -1914,6 +2015,53 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         .expect("retargeted completion delivery should load");
     assert_eq!(retry_deliveries.len(), 1);
     assert_eq!(retry_deliveries[0].inflow_id, retried.id);
+    assert!(
+        retry_deliveries[0].reaction_completed,
+        "manual retry must not repeat the completed reaction"
+    );
+    assert!(!retry_deliveries[0].reply_completed);
+    database
+        .record_google_chat_completion_delivery(&retry_deliveries[0], false, true, None)
+        .await
+        .expect("remaining reply");
+    assert!(
+        database
+            .unsettled_project_inflow_for_user(owner.profile.id)
+            .await
+            .expect("settled recovery queue")
+            .is_empty()
+    );
+    let settled = database
+        .project_inflow_items(
+            owner.profile.id,
+            first_project.id,
+            Some(ProjectInflowStatus::Promoted),
+        )
+        .await
+        .expect("settled items");
+    let target = settled
+        .iter()
+        .find(|item| item.id == retried.id)
+        .expect("settled target");
+    let completed_retry = database
+        .retry_project_inflow_completion(
+            owner.profile.id,
+            first_project.id,
+            target.id,
+            target.version,
+        )
+        .await
+        .expect("completed retry")
+        .expect("owned completed target");
+    assert!(completed_retry.completion_reaction_at.is_some());
+    assert!(completed_retry.completion_reply_at.is_some());
+    assert!(
+        database
+            .pending_google_chat_completion_deliveries(source.id, Some(target.id), 20)
+            .await
+            .expect("completed target must not send twice")
+            .is_empty()
+    );
     let task_id = promoted
         .promoted_task_id
         .expect("promoted inflow should retain its task");
@@ -2243,11 +2391,10 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
     );
     assert!(
         database
-            .recent_project_inflow_decisions_for_user(owner.profile.id)
+            .unsettled_project_inflow_for_user(owner.profile.id)
             .await
-            .expect("recent decision history should load")
-            .iter()
-            .any(|item| item.id == promoted.id)
+            .expect("successful history must stay out of recovery")
+            .is_empty()
     );
     // Review is persistent but not a terminal decision. Later replies stay unread.
     let review_items = database
@@ -2413,6 +2560,14 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
     assert_eq!(failed.dismissal_reply_status.as_deref(), Some("failed"));
     assert!(
         database
+            .unsettled_project_inflow_for_user(owner.profile.id)
+            .await
+            .expect("failed reason reply recovery")
+            .iter()
+            .any(|item| item.id == failed.id)
+    );
+    assert!(
+        database
             .retry_project_inflow_dismissal_reply(
                 Uuid::now_v7(),
                 first_project.id,
@@ -2445,6 +2600,14 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         .record_google_chat_dismissal_reply(&retry[0], None)
         .await
         .expect("successful reply should persist");
+    assert!(
+        database
+            .unsettled_project_inflow_for_user(owner.profile.id)
+            .await
+            .expect("successful reason reply leaves recovery")
+            .iter()
+            .all(|item| item.id != dismissed.id)
+    );
     assert!(
         database
             .claim_google_chat_dismissal_replies(source.id)
@@ -11013,6 +11176,649 @@ async fn inflow_notifications_skip_history_read_noise_and_cross_owner() {
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].item_id, update);
     assert!(claimed[0].title.starts_with("일감에 새 답글 · "));
+    pool.close().await;
+    database.close().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "One isolated task lifecycle checks compatibility, report parity and safe notification retry."
+)]
+async fn workflow_report_and_delivery_recovery_preserve_owned_task_lifecycle() {
+    use jimin_storage::{planning::TaskWorkflowUpdate, report_evidence::ReportEvidenceQuery};
+    let Ok(url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(url.clone()), 2, Duration::from_secs(2))
+            .unwrap();
+    database.migrate().await.unwrap();
+    let owner = database
+        .provision_login(&provision_android_login_command(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+        ))
+        .await
+        .unwrap();
+    let user = owner.profile.id;
+    let workspace = database.workspaces_for_user(user).await.unwrap().remove(0);
+    let project = database
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: user,
+            workspace_id: workspace.id,
+            title: "상태 및 리포트 검증".into(),
+            objective: None,
+            management_mode: ProjectManagementMode::Operation,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
+            risk_level: 0,
+            next_action: None,
+            due_at: None,
+        })
+        .await
+        .unwrap();
+    let task = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id: user,
+            project_id: Some(project.id),
+            parent_task_id: None,
+            title: "응답 확인".into(),
+            notes: Some("초기 설명".into()),
+            assignee_name: None,
+            priority: 2,
+            due_at: Some(OffsetDateTime::now_utc() + TimeDuration::hours(2)),
+        })
+        .await
+        .unwrap();
+    let mut update = TaskUpdate {
+        id: task.id,
+        user_id: user,
+        project_id: Some(project.id),
+        parent_task_id: None,
+        title: task.title.clone(),
+        notes: task.notes.clone(),
+        assignee_name: None,
+        status: TaskStatus::Open,
+        priority: 2,
+        due_at: task.due_at,
+        expected_version: task.version,
+    };
+    assert!(
+        database
+            .update_task_with_workflow(
+                &update,
+                None,
+                Some(&TaskWorkflowUpdate {
+                    state: "waiting".into(),
+                    waiting_reason: None
+                })
+            )
+            .await
+            .is_err()
+    );
+    let waiting = database
+        .update_task_with_workflow(
+            &update,
+            None,
+            Some(&TaskWorkflowUpdate {
+                state: "waiting".into(),
+                waiting_reason: Some("요청자의 문구 확인을 기다려요.".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(waiting.workflow_state, "waiting");
+    assert_eq!(waiting.version, task.version + 1);
+    assert!(
+        database
+            .update_task_with_workflow(
+                &update,
+                None,
+                Some(&TaskWorkflowUpdate {
+                    state: "in_progress".into(),
+                    waiting_reason: None
+                })
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    update.expected_version = waiting.version;
+    update.notes = Some("이전 버전 클라이언트 설명 수정".into());
+    let legacy = database.update_task(&update).await.unwrap().unwrap();
+    assert_eq!(legacy.workflow_state, "waiting");
+    assert_eq!(legacy.waiting_reason, waiting.waiting_reason);
+    let report = database
+        .weekly_report_for_workspace(user, workspace.id, Some(project.id))
+        .await
+        .unwrap();
+    let query = ReportEvidenceQuery {
+        user_id: user,
+        project_id: project.id,
+        metric: "created".into(),
+        period_start: report.period_start,
+        period_end: report.period_end,
+        after: None,
+    };
+    let evidence = database.weekly_report_evidence(&query).await.unwrap();
+    assert_eq!(
+        i64::try_from(evidence.len()).unwrap(),
+        report.projects[0].created_task_count
+    );
+    assert_eq!(evidence[0].id, task.id);
+    let waiting_evidence = database
+        .weekly_report_evidence(&ReportEvidenceQuery {
+            metric: "waiting".into(),
+            ..query
+        })
+        .await
+        .unwrap();
+    assert_eq!(waiting_evidence[0].waiting_reason, waiting.waiting_reason);
+    assert!(
+        database
+            .weekly_report_evidence(&ReportEvidenceQuery {
+                user_id: Uuid::now_v7(),
+                project_id: project.id,
+                metric: "backlog".into(),
+                period_start: report.period_start,
+                period_end: report.period_end,
+                after: None
+            })
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        database
+            .weekly_report_evidence(&ReportEvidenceQuery {
+                user_id: user,
+                project_id: project.id,
+                metric: "injection".into(),
+                period_start: report.period_start,
+                period_end: report.period_end,
+                after: None
+            })
+            .await
+            .is_err()
+    );
+    database
+        .register_push_token(
+            Uuid::now_v7(),
+            user,
+            owner.device.id,
+            &EncryptedPushToken {
+                ciphertext: vec![71; 48],
+                nonce: vec![72; 24],
+                fingerprint: vec![73; 32],
+            },
+        )
+        .await
+        .unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    let failed = Uuid::now_v7();
+    sqlx::query("INSERT INTO push_deliveries(id,user_id,device_id,item_type,item_id,item_version,destination,title,body,target_at,notify_at,status) VALUES($1,$2,$3,'task',$4,$5,'home','테스트 일감','확인해 주세요.',$6,NOW(),'failed')")
+      .bind(failed).bind(user).bind(owner.device.id).bind(task.id).bind(legacy.version).bind(task.due_at).execute(&pool).await.unwrap();
+    let recovery = database.delivery_recovery_for_user(user).await.unwrap();
+    assert_eq!(recovery.len(), 1);
+    assert!(recovery[0].can_retry);
+    assert!(
+        database
+            .delivery_recovery_for_user(Uuid::now_v7())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !database
+            .retry_failed_push_delivery(Uuid::now_v7(), failed)
+            .await
+            .unwrap()
+    );
+    assert!(
+        database
+            .retry_failed_push_delivery(user, failed)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !database
+            .retry_failed_push_delivery(user, failed)
+            .await
+            .unwrap()
+    );
+    update.expected_version = legacy.version;
+    update.status = TaskStatus::Completed;
+    let completed = database.update_task(&update).await.unwrap().unwrap();
+    assert!(completed.completed_at.is_some());
+    database
+        .queue_due_push_reminders(OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    let state: String = sqlx::query_scalar("SELECT status FROM push_deliveries WHERE id=$1")
+        .bind(failed)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        state, "cancelled",
+        "a retried obsolete task notification must never be dispatched"
+    );
+    update.expected_version = completed.version;
+    update.status = TaskStatus::Open;
+    let reopened = database.update_task(&update).await.unwrap().unwrap();
+    assert_eq!(reopened.workflow_state, "waiting");
+    pool.close().await;
+    database.close().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Atomic change approval verifies source/item/task concurrency guards and bounded public projection together."
+)]
+async fn reply_change_approval_is_atomic_revision_guarded_and_does_not_create_tasks() {
+    use jimin_storage::inflow_changes::ApproveInflowChange;
+    let Ok(url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(url.clone()), 2, Duration::from_secs(2))
+            .unwrap();
+    database.migrate().await.unwrap();
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .unwrap();
+    let user = owner.profile.id;
+    let workspace = database.workspaces_for_user(user).await.unwrap().remove(0);
+    let project = database
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: user,
+            workspace_id: workspace.id,
+            title: "변경 승인".into(),
+            objective: None,
+            management_mode: ProjectManagementMode::Operation,
+            reporting_enabled: true,
+            stale_threshold_days: 7,
+            risk_level: 0,
+            next_action: None,
+            due_at: None,
+        })
+        .await
+        .unwrap();
+    let task = database
+        .create_task(&NewTask {
+            id: Uuid::now_v7(),
+            user_id: user,
+            project_id: Some(project.id),
+            parent_task_id: None,
+            title: "기존 일감".into(),
+            notes: Some("현재 내용".into()),
+            assignee_name: Some("담당자".into()),
+            priority: 2,
+            due_at: None,
+        })
+        .await
+        .unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    let account = Uuid::now_v7();
+    let source = Uuid::now_v7();
+    let item = Uuid::now_v7();
+    let later = Uuid::now_v7();
+    let analysis = Uuid::now_v7();
+    sqlx::query("INSERT INTO google_chat_accounts(id,user_id,provider_subject,email,status) VALUES($1,$2,'100','change@example.test','active')").bind(account).bind(user).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO project_google_chat_sources(id,user_id,project_id,account_id,space_name,display_name) VALUES($1,$2,$3,$4,'spaces/change','변경 대화')").bind(source).bind(user).bind(project.id).bind(account).execute(&pool).await.unwrap();
+    for (id, received) in [
+        (item, OffsetDateTime::now_utc() - TimeDuration::minutes(1)),
+        (later, OffsetDateTime::now_utc()),
+    ] {
+        sqlx::query("INSERT INTO project_inflow_items(id,user_id,project_id,source_id,provider_message_name,provider_thread_name,content_text,received_at,promoted_task_id) VALUES($1,$2,$3,$4,$5,'spaces/change/threads/1','결과 문서 공유 부탁드립니다.',$6,$7)").bind(id).bind(user).bind(project.id).bind(source).bind(format!("spaces/change/messages/{id}")).bind(received).bind(task.id).execute(&pool).await.unwrap();
+    }
+    sqlx::query("INSERT INTO project_inflow_analyses(id,user_id,project_id,source_id,conversation_key,representative_item_id,state,classification,confidence,summary,source_revision,analyzed_revision,analyzed_at,linked_task_id) VALUES($1,$2,$3,$4,'thread:spaces/change/threads/1',$5,'ready','follow_up',95,'문서 공유 요청 추가',2,2,NOW(),$6)").bind(analysis).bind(user).bind(project.id).bind(source).bind(item).bind(task.id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO task_assignment_public_details(task_id,user_id,summary,reference_links) VALUES($1,$2,'기존 설명',ARRAY['https://example.test/document'])").bind(task.id).bind(user).execute(&pool).await.unwrap();
+    let version: i64 = sqlx::query_scalar("SELECT version FROM project_inflow_items WHERE id=$1")
+        .bind(item)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut command = ApproveInflowChange {
+        user_id: user,
+        item_id: item,
+        expected_item_version: version,
+        task_id: task.id,
+        expected_task_version: task.version,
+        source_revision: 3,
+        notes: "상세 변경 내용 ".repeat(700),
+        due_at: Some(OffsetDateTime::now_utc() + TimeDuration::days(1)),
+    };
+    assert!(!database.approve_inflow_change(&command).await.unwrap());
+    command.source_revision = 2;
+    command.user_id = Uuid::now_v7();
+    assert!(!database.approve_inflow_change(&command).await.unwrap());
+    command.user_id = user;
+    command.expected_task_version += 1;
+    assert!(!database.approve_inflow_change(&command).await.unwrap());
+    command.expected_task_version = task.version;
+    assert!(database.approve_inflow_change(&command).await.unwrap());
+    assert!(!database.approve_inflow_change(&command).await.unwrap());
+    let updated = database
+        .task_for_user(user, task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.notes.as_deref(), Some(command.notes.trim()));
+    assert_eq!(
+        updated.due_at.map(OffsetDateTime::unix_timestamp),
+        command.due_at.map(OffsetDateTime::unix_timestamp)
+    );
+    assert_eq!(updated.version, task.version + 1);
+    let counts:(i64,i64)=sqlx::query_as("SELECT (SELECT COUNT(*) FROM tasks WHERE user_id=$1),(SELECT COUNT(*) FROM inflow_change_reviews WHERE user_id=$1)").bind(user).fetch_one(&pool).await.unwrap();
+    assert_eq!(counts, (1, 1));
+    let later_unread: bool =
+        sqlx::query_scalar("SELECT reviewed_at IS NULL FROM project_inflow_items WHERE id=$1")
+            .bind(later)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        later_unread,
+        "later replies are not silently marked reviewed"
+    );
+    let public:(Option<String>,Vec<String>,Vec<String>)=sqlx::query_as("SELECT summary,action_items,reference_links FROM task_assignment_public_details WHERE task_id=$1").bind(task.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        format!("{}{}", public.0.unwrap(), public.1.join("")),
+        command.notes.trim()
+    );
+    assert_eq!(public.2, vec!["https://example.test/document"]);
+    pool.close().await;
+    database.close().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one ticket lifecycle exercises lease recovery, owner isolation and shared completion together"
+)]
+async fn itsm_sync_preserves_task_completion_shared_deadlines_and_retry_fences() {
+    let Ok(url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database =
+        Database::connect_lazy(&SecretString::from(url.clone()), 2, Duration::from_secs(2))
+            .unwrap();
+    database.migrate().await.unwrap();
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .unwrap();
+    let user = owner.profile.id;
+    let due = OffsetDateTime::parse("2026-10-21T15:30:00Z", &Rfc3339).unwrap();
+    let mut tasks = Vec::new();
+    for (title, deadline) in [("첫 작업", due), ("둘째 작업", due + TimeDuration::days(2))] {
+        tasks.push(
+            database
+                .create_task(&NewTask {
+                    id: Uuid::now_v7(),
+                    user_id: user,
+                    project_id: None,
+                    parent_task_id: None,
+                    title: title.into(),
+                    notes: None,
+                    assignee_name: None,
+                    priority: 1,
+                    due_at: Some(deadline),
+                })
+                .await
+                .unwrap(),
+        );
+    }
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    for task in &tasks {
+        sqlx::query("INSERT INTO task_itsm_links(task_id,user_id,enabled,issue_url,issue_id) VALUES($1,$2,TRUE,'https://itsm.example/issues/42',42)")
+            .bind(task.id).bind(user).execute(&pool).await.unwrap();
+    }
+    let first = database
+        .update_task(&TaskUpdate {
+            id: tasks[0].id,
+            user_id: user,
+            project_id: None,
+            parent_task_id: None,
+            title: "첫 작업 수정".into(),
+            notes: None,
+            assignee_name: None,
+            status: TaskStatus::Open,
+            priority: 1,
+            due_at: Some(due),
+            expected_version: tasks[0].version,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let worker = "itsm-test";
+    let old = database.claim_itsm_sync(worker).await.unwrap().unwrap();
+    assert_eq!(old.linked_count, 2);
+    assert_eq!(old.due_at, Some(due + TimeDuration::days(2)));
+    assert!(!old.should_complete);
+    assert!(
+        database
+            .claim_itsm_sync("another-worker")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    database
+        .complete_task(user, first.id, first.version)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!database.itsm_sync_is_current(&old, worker).await.unwrap());
+    assert!(
+        database
+            .finish_itsm_sync(&old, worker, None, false)
+            .await
+            .unwrap()
+    );
+    let after_first = database.claim_itsm_sync(worker).await.unwrap().unwrap();
+    assert!(!after_first.should_complete);
+    assert_eq!(after_first.attempt_count, 1);
+    database
+        .complete_task(user, tasks[1].id, tasks[1].version)
+        .await
+        .unwrap()
+        .unwrap();
+    database
+        .finish_itsm_sync(&after_first, worker, None, false)
+        .await
+        .unwrap();
+    let completed = database.claim_itsm_sync(worker).await.unwrap().unwrap();
+    assert!(completed.should_complete);
+    database
+        .finish_itsm_sync(&completed, worker, Some("itsm.workflow_blocked"), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        database
+            .task_for_user(user, first.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        TaskStatus::Completed
+    );
+    assert!(
+        !database
+            .retry_itsm_sync(Uuid::now_v7(), completed.id)
+            .await
+            .unwrap()
+    );
+    let recovery = database.delivery_recovery_for_user(user).await.unwrap();
+    let failure = recovery.iter().find(|item| item.kind == "itsm").unwrap();
+    assert!(failure.can_retry);
+    assert_eq!(failure.error_code.as_deref(), Some("itsm.workflow_blocked"));
+    assert!(
+        database
+            .delivery_recovery_for_user(Uuid::now_v7())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(database.retry_itsm_sync(user, completed.id).await.unwrap());
+    let expired = database.claim_itsm_sync(worker).await.unwrap().unwrap();
+    sqlx::query(
+        "UPDATE itsm_issue_sync_jobs SET lease_until=NOW()-INTERVAL '1 second' WHERE id=$1",
+    )
+    .bind(expired.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let current = database.claim_itsm_sync(worker).await.unwrap().unwrap();
+    assert!(
+        !database
+            .itsm_sync_is_current(&expired, worker)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !database
+            .finish_itsm_sync(&expired, worker, None, false)
+            .await
+            .unwrap()
+    );
+    assert!(
+        database
+            .finish_itsm_sync(&current, worker, None, false)
+            .await
+            .unwrap()
+    );
+    assert!(
+        database
+            .delivery_recovery_for_user(user)
+            .await
+            .unwrap()
+            .iter()
+            .all(|item| item.kind != "itsm")
+    );
+    let sync_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sync_changes WHERE user_id=$1 AND entity_type='itsm_issue_sync'",
+    )
+    .bind(user)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        sync_count > 0,
+        "provider outcomes must refresh home on other signed-in devices"
+    );
+    // Clearing a previously assigned date is an explicit change, not a legacy no-deadline import.
+    let task = database
+        .task_for_user(user, tasks[1].id)
+        .await
+        .unwrap()
+        .unwrap();
+    database
+        .update_task(&TaskUpdate {
+            id: task.id,
+            user_id: user,
+            project_id: None,
+            parent_task_id: None,
+            title: task.title,
+            notes: None,
+            assignee_name: None,
+            status: TaskStatus::Completed,
+            priority: 1,
+            due_at: None,
+            expected_version: task.version,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let task = database
+        .task_for_user(user, first.id)
+        .await
+        .unwrap()
+        .unwrap();
+    database
+        .update_task(&TaskUpdate {
+            id: task.id,
+            user_id: user,
+            project_id: None,
+            parent_task_id: None,
+            title: task.title,
+            notes: None,
+            assignee_name: None,
+            status: TaskStatus::Completed,
+            priority: 1,
+            due_at: None,
+            expected_version: task.version,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let cleared = database.claim_itsm_sync(worker).await.unwrap().unwrap();
+    assert!(cleared.sync_deadline);
+    assert_eq!(cleared.due_at, None);
+    database
+        .finish_itsm_sync(&cleared, worker, None, false)
+        .await
+        .unwrap();
+    for original in &tasks[..1] {
+        let task = database
+            .task_for_user(user, original.id)
+            .await
+            .unwrap()
+            .unwrap();
+        database
+            .update_task(&TaskUpdate {
+                id: task.id,
+                user_id: user,
+                project_id: None,
+                parent_task_id: None,
+                title: task.title,
+                notes: None,
+                assignee_name: None,
+                status: TaskStatus::Cancelled,
+                priority: 1,
+                due_at: None,
+                expected_version: task.version,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let before_deletion = database.claim_itsm_sync(worker).await.unwrap().unwrap();
+    let last = database
+        .task_for_user(user, tasks[1].id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        database
+            .delete_task(user, last.id, last.version)
+            .await
+            .unwrap(),
+        DeleteTaskOutcome::Deleted
+    );
+    assert!(
+        !database
+            .itsm_sync_is_current(&before_deletion, worker)
+            .await
+            .unwrap()
+    );
+    database
+        .finish_itsm_sync(&before_deletion, worker, None, false)
+        .await
+        .unwrap();
+    let cancelled = database.claim_itsm_sync(worker).await.unwrap().unwrap();
+    assert_eq!(
+        cancelled.linked_count, 0,
+        "cancelling all work must not clear the remote date or close the ticket"
+    );
+    assert!(!cancelled.should_complete);
     pool.close().await;
     database.close().await;
 }

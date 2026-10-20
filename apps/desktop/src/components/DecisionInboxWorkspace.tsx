@@ -9,6 +9,7 @@ import {
 import { useMemo, useState } from "react";
 
 import { type Recommendation } from "../api/home";
+import { type DeliveryRecovery } from "../api/deliveryRecovery";
 import {
   projectInflowPromotionReadiness,
   type ProjectInflowItem,
@@ -16,6 +17,12 @@ import {
 import { type RecommendationDecision } from "../api/intelligence";
 import { type ProjectItsmDecisionCandidate } from "../api/itsm";
 import { copy } from "../copy";
+import {
+  canRetryInflowDelivery,
+  inflowRecoveryItems,
+} from "../inflowDeliveryState";
+import { DeliveryRecoveryPanel } from "./DeliveryRecoveryPanel";
+import { InflowRecoveryPanel } from "./InflowRecoveryPanel";
 import {
   GmailInflowReview,
   type GmailInflowReviewProps,
@@ -27,6 +34,12 @@ import {
 } from "./ProjectInflowPanel";
 
 type DecisionInboxWorkspaceProps = {
+  mode?: "page" | "home";
+  recovery?: {
+    deliveryItems: DeliveryRecovery[];
+    sourceItems: ProjectInflowItem[];
+    onRetryDelivery(item: DeliveryRecovery): Promise<void>;
+  };
   recommendations: Recommendation[];
   inflowItems: ProjectInflowItem[];
   itsmCandidates: ProjectItsmDecisionCandidate[];
@@ -55,6 +68,8 @@ type DecisionInboxWorkspaceProps = {
 };
 
 export function DecisionInboxWorkspace({
+  mode = "page",
+  recovery,
   recommendations,
   inflowItems,
   itsmCandidates,
@@ -101,6 +116,25 @@ export function DecisionInboxWorkspace({
     () => inflowItems.filter(isProjectInflowDecisionItem),
     [inflowItems],
   );
+  const sourceRecovery = inflowRecoveryItems(recovery?.sourceItems ?? []);
+  const sourceFailureCount = sourceRecovery.filter(
+    canRetryInflowDelivery,
+  ).length;
+  const deliveryFailureCount =
+    recovery?.deliveryItems.filter((item) => item.status === "failed").length ??
+    0;
+  const attentionCount =
+    pending.length +
+    retryable.length +
+    itsmCandidates.length +
+    sourceFailureCount +
+    deliveryFailureCount;
+  const processingCount =
+    inProgress.length +
+    sourceRecovery.length -
+    sourceFailureCount +
+    (recovery?.deliveryItems.filter((item) => item.status === "retry_wait")
+      .length ?? 0);
 
   async function decide(
     recommendation: Recommendation,
@@ -140,24 +174,46 @@ export function DecisionInboxWorkspace({
     }
   }
 
-  return (
-    <section className="decision-page" aria-busy={loading}>
-      <header className="page-heading decision-page__heading">
-        <div>
-          <span>{copy.decisions.eyebrow}</span>
-          <h1>{copy.decisions.title}</h1>
-          <p>{copy.decisions.description}</p>
-        </div>
-        <span className="decision-page__symbol" aria-hidden="true">
-          <Inbox />
-        </span>
-      </header>
+  const content = (
+    <section
+      className={`decision-page${mode === "home" ? " decision-page--inline" : ""}`}
+      aria-busy={loading}
+    >
+      {mode !== "home" && (
+        <header className="page-heading decision-page__heading">
+          <div>
+            <span>{copy.decisions.eyebrow}</span>
+            <h1>{copy.decisions.title}</h1>
+            <p>{copy.decisions.description}</p>
+          </div>
+          <span className="decision-page__symbol" aria-hidden="true">
+            <Inbox />
+          </span>
+        </header>
+      )}
 
       {(error || decisionError) && (
         <p className="inline-alert" role="alert">
           {decisionError ?? error}
         </p>
       )}
+
+      {mode === "home" &&
+        recovery &&
+        (recovery.deliveryItems.length > 0 || sourceRecovery.length > 0) && (
+          <div className="home-review-actions__recoveries">
+            <DeliveryRecoveryPanel
+              items={recovery.deliveryItems}
+              onRetry={recovery.onRetryDelivery}
+            />
+            <InflowRecoveryPanel
+              items={sourceRecovery}
+              saving={inflowSaving}
+              onRetry={onRetryInflowCompletion}
+              onOpenTask={onOpenTask}
+            />
+          </div>
+        )}
 
       {loading &&
       recommendations.length === 0 &&
@@ -172,27 +228,31 @@ export function DecisionInboxWorkspace({
             confirmingId={confirmingItsmId}
             onConfirm={confirmItsm}
           />
-          <InflowDecisionSection
-            items={pendingInflow}
-            saving={inflowSaving}
-            onPromote={onPromoteInflow}
-            onDismiss={onDismissInflow}
-            onRetryAnalysis={onRetryInflowAnalysis}
-            onRetryCompletion={onRetryInflowCompletion}
-            onOpenTask={onOpenTask}
-          />
-          <GmailInflowReview {...gmailReview} />
-          <DecisionSection
-            id="pending-decisions"
-            title={copy.decisions.pendingTitle}
-            items={pending}
-            pendingId={pendingId}
-            emptyTitle={copy.decisions.emptyPendingTitle}
-            emptyDescription={copy.decisions.emptyPendingDescription}
-            onOpenConversation={onOpenConversation}
-            onDecide={decide}
-            onRetryAnalysis={retryAnalysis}
-          />
+          {mode !== "home" && (
+            <InflowDecisionSection
+              items={pendingInflow}
+              saving={inflowSaving}
+              onPromote={onPromoteInflow}
+              onDismiss={onDismissInflow}
+              onRetryAnalysis={onRetryInflowAnalysis}
+              onRetryCompletion={onRetryInflowCompletion}
+              onOpenTask={onOpenTask}
+            />
+          )}
+          {mode !== "home" && <GmailInflowReview {...gmailReview} />}
+          {(mode !== "home" || pending.length > 0) && (
+            <DecisionSection
+              id="pending-decisions"
+              title={copy.decisions.pendingTitle}
+              items={pending}
+              pendingId={pendingId}
+              emptyTitle={copy.decisions.emptyPendingTitle}
+              emptyDescription={copy.decisions.emptyPendingDescription}
+              onOpenConversation={onOpenConversation}
+              onDecide={decide}
+              onRetryAnalysis={retryAnalysis}
+            />
+          )}
           {inProgress.length > 0 && (
             <DecisionSection
               id="in-progress-decisions"
@@ -229,6 +289,24 @@ export function DecisionInboxWorkspace({
         </>
       )}
     </section>
+  );
+  if (mode !== "home") return content;
+  return (
+    <details id="home-review-actions" className="home-review-actions">
+      <summary className="focus-visible-control">
+        <span>확인·처리 기록</span>
+        <span>
+          {loading ? "확인 중…" : `${attentionCount}건 확인 필요`}
+          {processingCount > 0 ? ` · ${processingCount}건 처리 중` : ""}
+        </span>
+        <ChevronDown aria-hidden="true" />
+      </summary>
+      <p>
+        알림 전송과 Chat 반영 상태, 승인이 필요한 제안과 처리 기록을 확인해요.
+        새 업무는 위의 업무 요청에서 정리해 주세요.
+      </p>
+      {content}
+    </details>
   );
 }
 

@@ -1,4 +1,7 @@
 import { useTaskCompletion } from "./components/TaskCompletionDialog";
+import { retryDeliveryRecovery } from "./api/deliveryRecovery";
+import { approveInflowChange } from "./api/inflowChanges";
+import { InflowChangeDialog } from "./components/InflowChangeDialog";
 import { Server, Sparkles } from "lucide-react";
 import { ScheduledWorkPanel } from "./components/ScheduledWorkPanel";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -8,6 +11,7 @@ import {
   desktopInflowNotificationsSupported,
   desktopInflowNotificationsEnabled,
   desktopNotificationPreferenceEvent,
+  desktopNotificationConfigurationErrorEvent,
 } from "./desktop-inflow-notifications";
 import { fetchPushRegistration } from "./api/push";
 import {
@@ -74,6 +78,7 @@ import {
   fetchProjects,
   fetchProjectTasks,
   fetchWeeklyReport,
+  fetchReportEvidence,
   fetchWeeklyReportHistory,
   fetchWorkspaces,
   updateProject,
@@ -388,6 +393,7 @@ export default function App() {
   const [reportsLoading, setReportsLoading] = useState(false);
   const [reportsSaving, setReportsSaving] = useState(false);
   const [inflowSaving, setInflowSaving] = useState(false);
+  const [inflowChangeItem, setInflowChangeItem] = useState<ProjectInflowItem>();
   const [inflowError, setInflowError] = useState<string>();
   const [
     googleChatAuthorizationExpiresAt,
@@ -1944,6 +1950,7 @@ export default function App() {
           "recommendation_action_result",
           "project_inflow_item",
           "project_inflow_analysis",
+          "itsm_issue_sync",
         ].some((entityType) => entityTypes.has(entityType));
       const affectsDecisions =
         forceFull ||
@@ -2387,7 +2394,12 @@ export default function App() {
       configureDesktopInflowNotifications(
         apiBaseUrl,
         enabled ? tokens?.accessToken : undefined,
-      ).catch(() => undefined);
+      ).catch(() => {
+        if (active)
+          window.dispatchEvent(
+            new CustomEvent(desktopNotificationConfigurationErrorEvent),
+          );
+      });
     const preferenceChanged = (event: Event) => {
       enabled = Boolean((event as CustomEvent<boolean>).detail);
       void configure();
@@ -2398,7 +2410,12 @@ export default function App() {
         await fetchPushRegistration(apiBaseUrl, accessToken);
         if (active)
           await configureDesktopInflowNotifications(apiBaseUrl, accessToken);
-      }).catch(() => undefined);
+      }).catch(() => {
+        if (active)
+          window.dispatchEvent(
+            new CustomEvent(desktopNotificationConfigurationErrorEvent),
+          );
+      });
     });
     void configure();
     window.addEventListener(
@@ -3468,6 +3485,8 @@ export default function App() {
       assigneeName?: string;
       workKind?: Task["workKind"];
       status: Task["status"];
+      workflowState?: Task["workflowState"];
+      waitingReason?: string | null;
       priority: number;
       dueAt?: string;
     },
@@ -4004,6 +4023,8 @@ export default function App() {
       assigneeName?: string;
       workKind?: Task["workKind"];
       status: Task["status"];
+      workflowState?: Task["workflowState"];
+      waitingReason?: string | null;
       priority: number;
       dueAt?: string;
       parentTaskId?: string | null;
@@ -4545,7 +4566,7 @@ export default function App() {
     setInflowSaving(true);
     setInflowError(undefined);
     try {
-      await withAuthenticatedSession((accessToken) =>
+      const updated = await withAuthenticatedSession((accessToken) =>
         decideProjectInflow(apiBaseUrl, accessToken, item, {
           decision:
             item.status === "dismissed"
@@ -4553,7 +4574,35 @@ export default function App() {
               : "retry_completion",
         }),
       );
-      await loadProjectInflow(item.projectId);
+      setHomeSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              recentInflow: current.recentInflow.map((entry) =>
+                inflowConversationKey(entry) === inflowConversationKey(item)
+                  ? {
+                      ...entry,
+                      version: updated.version,
+                      completionStatus: updated.completionStatus,
+                      completionReactionCompleted:
+                        updated.completionReactionCompleted,
+                      completionReplyCompleted:
+                        updated.completionReplyCompleted,
+                      completionErrorCode: updated.completionErrorCode,
+                      completionAttemptCount: updated.completionAttemptCount,
+                      dismissalReplyStatus: updated.dismissalReplyStatus,
+                    }
+                  : entry,
+              ),
+            }
+          : current,
+      );
+      await Promise.all([
+        loadHomeSnapshot(),
+        selectedProjectId === item.projectId
+          ? loadProjectInflow(item.projectId)
+          : Promise.resolve(),
+      ]);
     } catch (error) {
       setInflowError(copy.projects.inflowDecisionProblem);
       throw error;
@@ -4933,6 +4982,7 @@ export default function App() {
       calendarDataReady?: boolean;
     } = {},
   ): void {
+    if (nextDestination === "decisions") nextDestination = "home";
     if (
       nextDestination !== destination &&
       document.querySelector('.meeting-transcript-editor[data-dirty="true"]') &&
@@ -4995,12 +5045,13 @@ export default function App() {
         setSelectedProjectId(latestProject.id);
       }
     }
-    if (nextDestination === "decisions") {
-      void loadDecisionInbox();
-    }
   }
 
   useEffect(() => installAndroidBackBridge(), []);
+  useEffect(() => {
+    if (destination === "decisions") setDestination("home");
+    if (destination === "home") void loadDecisionInbox();
+  }, [destination, loadDecisionInbox]);
 
   useEffect(
     () =>
@@ -5133,7 +5184,17 @@ export default function App() {
                 onOpenTask={openTaskFromAssistant}
                 onOpenProject={openProjectFromAssistant}
                 onOpenSchedule={openScheduleFromAssistant}
-                onOpenDecisionInbox={() => navigate("decisions")}
+                suppressDecisionSuggestions
+                onOpenDecisionInbox={() => {
+                  const panel = document.getElementById(
+                    "home-review-actions",
+                  ) as HTMLDetailsElement | null;
+                  if (panel) {
+                    panel.open = true;
+                    panel.scrollIntoView({ block: "start" });
+                  }
+                  void loadDecisionInbox();
+                }}
                 onOpenMeetings={() => navigate("meetings")}
                 onOpenSettings={() => navigate("settings")}
                 onDecideRecommendation={decideHomeRecommendation}
@@ -5142,6 +5203,7 @@ export default function App() {
                 onDismissInflow={dismissWorkspaceInflow}
                 onRetryInflowAnalysis={retryWorkspaceInflowAnalysis}
                 onRetryInflowCompletion={retryWorkspaceInflowCompletion}
+                onReviewInflowChange={setInflowChangeItem}
                 gmailInflowItems={gmailInflowItems}
                 gmailInflowProjects={gmailInflowProjects}
                 gmailInflowLoading={gmailInflowLoading}
@@ -5240,6 +5302,19 @@ export default function App() {
                 }
                 error={goalsError ?? projectsError}
                 weeklyReportError={weeklyReportError}
+                onLoadReportEvidence={(projectId, metric, start, end, after) =>
+                  withAuthenticatedSession((access) =>
+                    fetchReportEvidence(
+                      apiBaseUrl,
+                      access,
+                      projectId,
+                      metric,
+                      start,
+                      end,
+                      after,
+                    ),
+                  )
+                }
                 inflowError={inflowError}
                 itsmError={itsmError}
                 onSelectWorkspace={selectWorkspace}
@@ -5291,10 +5366,22 @@ export default function App() {
                 onDismissInflow={dismissWorkspaceInflow}
                 onRetryInflowAnalysis={retryWorkspaceInflowAnalysis}
                 onRetryInflowCompletion={retryWorkspaceInflowCompletion}
+                onReviewInflowChange={setInflowChangeItem}
               />
             )}
-            {destination === "decisions" && (
+            {(destination === "home" || destination === "decisions") && (
               <DecisionInboxWorkspace
+                mode="home"
+                recovery={{
+                  deliveryItems: homeSnapshot?.deliveryRecovery ?? [],
+                  sourceItems: homeSnapshot?.recentInflow ?? [],
+                  onRetryDelivery: async (item) => {
+                    await withAuthenticatedSession((accessToken) =>
+                      retryDeliveryRecovery(apiBaseUrl, accessToken, item),
+                    );
+                    await loadHomeSnapshot();
+                  },
+                }}
                 recommendations={decisionRecommendations}
                 inflowItems={decisionInflowItems}
                 itsmCandidates={decisionItsmCandidates}
@@ -5456,6 +5543,31 @@ export default function App() {
             )}
           </WorkspaceRouteBoundary>
           {completionDialog}
+          {inflowChangeItem && (
+            <InflowChangeDialog
+              key={inflowChangeItem.id}
+              item={inflowChangeItem}
+              onLoad={async (id) =>
+                loadTaskFromAssistant({ id, projectId: null })
+              }
+              onClose={() => setInflowChangeItem(undefined)}
+              onApprove={async (task, notes, dueAt) => {
+                await withAuthenticatedSession((token) =>
+                  approveInflowChange(
+                    apiBaseUrl,
+                    token,
+                    inflowChangeItem,
+                    task,
+                    notes,
+                    dueAt,
+                  ),
+                );
+                await Promise.all([loadHomeSnapshot(), loadPlanningSnapshot()]);
+                if (selectedProjectId)
+                  await loadProjectTasks(selectedProjectId);
+              }}
+            />
+          )}
           {planningEditTarget && (
             <Suspense fallback={null}>
               <PlanningItemEditor

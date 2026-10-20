@@ -35,7 +35,9 @@ import {
   latestScheduledFailure,
   mergeScheduledRuns,
   parseAssigneeFilter,
+  scheduledWorkCloseAction,
 } from "../scheduledWorkState";
+import { ScheduledWorkCloseConfirmation } from "./ScheduledWorkCloseConfirmation";
 import "./scheduledWork.css";
 
 interface Props {
@@ -59,6 +61,8 @@ export function scheduledWorkTemplate(
   template: "deadline" | "followup" | "brief" = "deadline",
 ): ScheduledWorkDefinition {
   return {
+    condition: "always",
+    conditionHours: 24,
     title:
       template === "brief"
         ? "내일 준비 브리핑"
@@ -74,6 +78,7 @@ export function scheduledWorkTemplate(
     timeZone: "Asia/Seoul",
     taskScope: template === "brief" ? "tomorrow" : "today",
     includeOverdue: true,
+    skipHolidays: false,
     assigneeNames: [],
     destination: "in_app",
     mentionAssignees: false,
@@ -116,9 +121,10 @@ export function ScheduledWorkPanel({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [confirm, setConfirm] = useState<
-    "close" | "list" | "delete" | undefined
+    "close" | "list" | "delete" | "run" | undefined
   >();
   const [deleteItem, setDeleteItem] = useState<ScheduledWork>();
+  const [runItem, setRunItem] = useState<ScheduledWork>();
   const dialog = useRef<HTMLDialogElement>(null);
   const confirmation = useRef<HTMLElement>(null);
   const opener = useRef<HTMLElement | null>(null);
@@ -126,7 +132,7 @@ export function ScheduledWorkPanel({
   const runKeys = useRef(new Map<string, string>());
   const newId = useRef(createUuidV7());
   useEffect(() => {
-    if (!confirm) return;
+    if (!confirm || confirm === "close") return;
     confirmation.current?.scrollIntoView({ block: "nearest" });
     confirmation.current?.querySelector("button")?.focus();
   }, [confirm]);
@@ -164,8 +170,12 @@ export function ScheduledWorkPanel({
     };
   }, [reload]);
   const close = useCallback(() => {
-    if (busy) return;
-    if (definition && JSON.stringify(definition) !== initialKey) {
+    const action = scheduledWorkCloseAction(
+      !!busy,
+      !!definition && JSON.stringify(definition) !== initialKey,
+    );
+    if (action === "blocked") return;
+    if (action === "confirm") {
       setConfirm("close");
       return;
     }
@@ -294,6 +304,7 @@ export function ScheduledWorkPanel({
   async function action(
     item: ScheduledWork,
     kind: "run_now" | "skip_once" | "pause" | "delete",
+    allowHoliday = false,
   ) {
     await perform(item.id, async () => {
       const key = runKeys.current.get(item.id) ?? createUuidV7();
@@ -304,6 +315,7 @@ export function ScheduledWorkPanel({
           kind,
           expectedVersion: item.version,
           requestId: kind === "run_now" ? key : null,
+          allowHoliday,
         },
         "POST",
       );
@@ -360,6 +372,7 @@ export function ScheduledWorkPanel({
         ref={dialog}
         className="scheduled-dialog"
         aria-labelledby="scheduled-title"
+        aria-busy={!!busy}
         onCancel={(event) => {
           event.preventDefault();
           close();
@@ -421,13 +434,29 @@ export function ScheduledWorkPanel({
             {notice}
           </p>
         )}
-        {confirm && (
+        <ScheduledWorkCloseConfirmation
+          open={confirm === "close"}
+          onKeepEditing={() => setConfirm(undefined)}
+          onDiscard={() => {
+            setConfirm(undefined);
+            setDefinition(undefined);
+            setEditing(undefined);
+            setOpen(false);
+          }}
+        />
+        {confirm && confirm !== "close" && (
           <section
             ref={confirmation}
             className="scheduled-confirm"
             aria-label="변경 확인"
           >
-            <p>{confirm === "delete" ? c.deleteHelp : c.closeHelp}</p>
+            <p>
+              {confirm === "delete"
+                ? c.deleteHelp
+                : confirm === "run"
+                  ? c.manualHolidayHelp
+                  : c.closeHelp}
+            </p>
             <div className="scheduled-actions">
               <button type="button" onClick={() => setConfirm(undefined)}>
                 돌아가기
@@ -436,18 +465,20 @@ export function ScheduledWorkPanel({
                 type="button"
                 disabled={!!busy}
                 onClick={() =>
-                  confirm === "list"
-                    ? (setDefinition(undefined),
-                      setEditing(undefined),
-                      setConfirm(undefined))
-                    : confirm === "close"
-                      ? (setConfirm(undefined),
-                        setDefinition(undefined),
-                        setOpen(false))
+                  confirm === "run"
+                    ? runItem && void action(runItem, "run_now", true)
+                    : confirm === "list"
+                      ? (setDefinition(undefined),
+                        setEditing(undefined),
+                        setConfirm(undefined))
                       : deleteItem && void action(deleteItem, "delete")
                 }
               >
-                {confirm === "delete" ? "예약 지우기" : "저장하지 않고 닫기"}
+                {confirm === "delete"
+                  ? "예약 지우기"
+                  : confirm === "run"
+                    ? "확인하고 지금 실행"
+                    : "저장하지 않고 닫기"}
               </button>
             </div>
           </section>
@@ -516,7 +547,12 @@ export function ScheduledWorkPanel({
                   <button
                     type="button"
                     disabled={!!busy}
-                    onClick={() => void action(item, "run_now")}
+                    onClick={() => {
+                      if (item.definition.skipHolidays) {
+                        setRunItem(item);
+                        setConfirm("run");
+                      } else void action(item, "run_now");
+                    }}
                   >
                     <Play />
                     지금 실행
@@ -588,6 +624,7 @@ export function ScheduledWorkPanel({
                 <label>
                   시작 양식
                   <select
+                    aria-label="시작 양식"
                     value={
                       definition.includeSchedules
                         ? "brief"
@@ -613,6 +650,7 @@ export function ScheduledWorkPanel({
               <label>
                 예약 이름
                 <input
+                  aria-label="예약 이름"
                   required
                   maxLength={120}
                   value={definition.title}
@@ -623,6 +661,7 @@ export function ScheduledWorkPanel({
                 <label>
                   업무 공간
                   <select
+                    aria-label="업무 공간"
                     required
                     value={definition.workspaceId}
                     onChange={(event) =>
@@ -644,6 +683,7 @@ export function ScheduledWorkPanel({
                 <label>
                   프로젝트
                   <select
+                    aria-label="프로젝트"
                     value={definition.projectId ?? ""}
                     required={definition.destination === "google_chat"}
                     onChange={(event) =>
@@ -686,6 +726,7 @@ export function ScheduledWorkPanel({
                 <label>
                   실행 시각
                   <input
+                    aria-label="실행 시각"
                     type="time"
                     required
                     value={definition.time}
@@ -696,6 +737,7 @@ export function ScheduledWorkPanel({
                 <label>
                   후속 확인 시각 (선택)
                   <input
+                    aria-label="후속 확인 시각 (선택)"
                     type="time"
                     value={definition.followUpTime ?? ""}
                     disabled={definition.includeSchedules}
@@ -709,6 +751,8 @@ export function ScheduledWorkPanel({
               <label>
                 확인할 할 일
                 <select
+                  aria-label="확인할 할 일"
+                  disabled={(definition.condition ?? "always") !== "always"}
                   value={definition.taskScope}
                   onChange={(event) =>
                     update({
@@ -724,8 +768,70 @@ export function ScheduledWorkPanel({
                   <option value="all_open">모든 열린 할 일</option>
                 </select>
               </label>
+              <label>
+                알릴 조건
+                <select
+                  aria-label="알릴 조건"
+                  value={definition.condition ?? "always"}
+                  onChange={(event) =>
+                    update({
+                      condition: event.target
+                        .value as ScheduledWorkDefinition["condition"],
+                      ...(event.target.value !== "always"
+                        ? { includeSchedules: false }
+                        : {}),
+                      ...(event.target.value !== "always"
+                        ? { taskScope: "all_open" }
+                        : {}),
+                    })
+                  }
+                >
+                  <option value="always">범위에 맞는 일 안내</option>
+                  <option value="deadline_near">마감이 가까운 일만</option>
+                  <option value="no_response">대기 중 응답이 없는 일만</option>
+                  <option value="completion_confirmation">
+                    완료 후 응답이 없는 일만
+                  </option>
+                </select>
+              </label>
+              {definition.condition && definition.condition !== "always" && (
+                <label>
+                  {definition.condition === "deadline_near"
+                    ? "마감까지 남은 시간 이내"
+                    : "응답 없이 지난 시간 이상"}
+                  <input
+                    type="number"
+                    min={1}
+                    max={168}
+                    required
+                    value={definition.conditionHours ?? 24}
+                    onChange={(event) =>
+                      update({ conditionHours: Number(event.target.value) })
+                    }
+                  />
+                  <small>
+                    시간 단위예요. 예약 시각마다 최신 상태를 확인해요. 같은
+                    날짜·실행 차례는 중복 전송하지 않아요. 대기 중 응답은 대기
+                    사유를 저장한 이후의 외부 답글로 판단해요. 완료 확인은 최근
+                    30일 내 완료한 일을 대상으로 해요.
+                  </small>
+                </label>
+              )}
               <label className="scheduled-check">
                 <input
+                  aria-label={c.skipHolidays}
+                  type="checkbox"
+                  checked={definition.skipHolidays ?? false}
+                  onChange={(event) =>
+                    update({ skipHolidays: event.target.checked })
+                  }
+                />
+                {c.skipHolidays}
+              </label>
+              <p className="scheduled-hint">{c.holidayHelp}</p>
+              <label className="scheduled-check">
+                <input
+                  aria-label="기한이 지난 일도 포함"
                   type="checkbox"
                   checked={definition.includeOverdue}
                   onChange={(event) =>
@@ -736,8 +842,10 @@ export function ScheduledWorkPanel({
               </label>
               <label className="scheduled-check">
                 <input
+                  aria-label="개인 일정도 함께 확인"
                   type="checkbox"
                   disabled={
+                    (definition.condition ?? "always") !== "always" ||
                     definition.destination === "google_chat" ||
                     !!definition.followUpTime ||
                     workspaces.find((w) => w.id === definition.workspaceId)
@@ -753,6 +861,7 @@ export function ScheduledWorkPanel({
               <label>
                 전달할 곳
                 <select
+                  aria-label="전달할 곳"
                   value={definition.destination}
                   onChange={(event) =>
                     update({
@@ -772,6 +881,7 @@ export function ScheduledWorkPanel({
               <label>
                 알림에 표시할 내용
                 <select
+                  aria-label="알림에 표시할 내용"
                   value={definition.messageDetail ?? "title_only"}
                   aria-describedby="scheduled-message-detail-help"
                   onChange={(event) =>
@@ -795,6 +905,7 @@ export function ScheduledWorkPanel({
                   <label>
                     프로젝트 연결
                     <select
+                      aria-label="프로젝트 연결"
                       required
                       value={definition.webhookId ?? ""}
                       onChange={(event) =>
@@ -817,6 +928,7 @@ export function ScheduledWorkPanel({
                   )}
                   <label className="scheduled-check">
                     <input
+                      aria-label="할 일의 현재 담당자 멘션"
                       type="checkbox"
                       checked={definition.mentionAssignees}
                       onChange={(event) =>
@@ -831,6 +943,7 @@ export function ScheduledWorkPanel({
                       {Object.keys(names).map((name) => (
                         <label className="scheduled-check" key={name}>
                           <input
+                            aria-label={name}
                             type="checkbox"
                             checked={definition.mentionNames.includes(name)}
                             onChange={(event) =>
@@ -853,6 +966,7 @@ export function ScheduledWorkPanel({
               <label>
                 특정 담당자의 일만 확인 (선택)
                 <input
+                  aria-label="특정 담당자의 일만 확인 (선택)"
                   value={assigneeFilter}
                   placeholder="예: 김경주, 주홍석"
                   onChange={(event) => {
@@ -887,7 +1001,19 @@ export function ScheduledWorkPanel({
                   할 일 {preview.taskIds.length}개 · 일정{" "}
                   {preview.scheduleCount}개
                 </h3>
-                <p>다음 실행: {date(preview.nextRunAt)}</p>
+                <p>다음 예약 시각: {date(preview.nextRunAt)}</p>
+                {definition.skipHolidays &&
+                  (preview.holidayStatus?.status === "holiday" ? (
+                    <p role="status">
+                      {preview.holidayStatus.name}에는 전송하지 않아요.
+                    </p>
+                  ) : preview.holidayStatus?.status === "working_day" ? (
+                    <p>다음 예약일은 공휴일이 아니에요.</p>
+                  ) : (
+                    <p className="inline-alert" role="alert">
+                      {c.holidayUnavailable}
+                    </p>
+                  ))}
                 {preview.warnings.map((warning) => (
                   <p role="alert" className="inline-alert" key={warning}>
                     {warning}
@@ -926,7 +1052,10 @@ export function ScheduledWorkPanel({
                   !!busy ||
                   !preview ||
                   previewKey !== key ||
-                  !!preview.warnings.length
+                  !!preview.warnings.length ||
+                  (definition.skipHolidays === true &&
+                    (!preview.holidayStatus ||
+                      preview.holidayStatus.status === "unavailable"))
                 }
                 onClick={() => void save(true)}
               >

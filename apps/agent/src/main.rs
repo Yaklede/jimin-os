@@ -336,6 +336,10 @@ async fn run_serve(codex_binary: &Path, marker_path: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Ticket synchronization must not wait for an LLM turn or ChatGPT login.
+    let _itsm_sync_worker = config
+        .itsm_client()
+        .map(|client| itsm::spawn_sync_worker(database.clone(), client.clone()));
     let mut budget = CrashBudget::new(SERVE_FAILURE_BUDGET, SERVE_STABLE_WINDOW);
     loop {
         let startup = tokio::select! {

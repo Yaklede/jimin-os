@@ -29,6 +29,8 @@ export interface ScheduleEntry {
 export type TaskWorkKind = "general" | "verification" | "development";
 
 export interface Task {
+  workflowState?: "not_started" | "in_progress" | "waiting";
+  waitingReason?: string | null;
   id: string;
   projectId: string | null;
   parentTaskId?: string | null;
@@ -283,6 +285,8 @@ export async function updateTask(
   input: {
     title: string;
     workKind?: TaskWorkKind;
+    workflowState?: Task["workflowState"];
+    waitingReason?: string | null;
     notes?: string;
     assigneeName?: string;
     status: Task["status"];
@@ -305,6 +309,12 @@ export async function updateTask(
     dueAt: input.dueAt || null,
     expectedVersion: task.version,
     ...(input.workKind ? { workKind: input.workKind } : {}),
+    ...(input.workflowState
+      ? {
+          workflowState: input.workflowState,
+          waitingReason: input.waitingReason ?? null,
+        }
+      : {}),
   });
 }
 

@@ -84,6 +84,57 @@ export interface WeeklyReportSnapshot {
 
 type ListResponse<T> = { items: T[]; nextCursor: string | null };
 
+export type ReportEvidenceMetric =
+  | "created"
+  | "completed"
+  | "backlog"
+  | "overdue"
+  | "stale"
+  | "unassigned"
+  | "waiting"
+  | "on_time";
+export type ReportEvidencePage = { items: Task[]; nextCursor: string | null };
+export async function fetchReportEvidence(
+  baseUrl: string,
+  access: string,
+  projectId: string,
+  metric: ReportEvidenceMetric,
+  periodStart: string,
+  periodEnd: string,
+  after?: string,
+): Promise<ReportEvidencePage> {
+  const url = new URL(
+    `${normalizeBaseUrl(baseUrl)}/v1/projects/${encodeURIComponent(projectId)}/weekly-evidence`,
+    browserOrigin(),
+  );
+  for (const [key, value] of Object.entries({
+    metric,
+    periodStart,
+    periodEnd,
+    ...(after ? { after } : {}),
+  }))
+    url.searchParams.set(key, value);
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${access}`, Accept: "application/json" },
+  });
+  if (!response.ok)
+    throw new PlanningRequestError(
+      response.status === 401
+        ? "unauthorized"
+        : response.status === 400
+          ? "invalid"
+          : "unavailable",
+    );
+  const body: unknown = await response.json();
+  if (
+    !body ||
+    typeof body !== "object" ||
+    !Array.isArray((body as ReportEvidencePage).items)
+  )
+    throw new PlanningRequestError("unavailable");
+  return body as ReportEvidencePage;
+}
+
 export async function fetchWorkspaces(
   baseUrl: string,
   access: string,

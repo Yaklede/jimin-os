@@ -68,6 +68,7 @@ import { type PromoteInflowInput } from "./ProjectInflowPanel";
 
 type HomeWorkspaceProps = {
   scheduledWork?: ReactNode;
+  suppressDecisionSuggestions?: boolean;
   onLoadAllTasks?(): Promise<Task[]>;
   snapshot: HomeSnapshot | undefined;
   loading: boolean;
@@ -119,6 +120,7 @@ type HomeWorkspaceProps = {
   ): Promise<void>;
   onRetryInflowAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryInflowCompletion(item: ProjectInflowItem): Promise<void>;
+  onReviewInflowChange?(item: ProjectInflowItem): void;
   gmailInflowItems: GmailInflowCandidate[];
   gmailInflowProjects: Project[];
   gmailInflowLoading: boolean;
@@ -143,6 +145,7 @@ type HomeWorkspaceProps = {
 
 export function HomeWorkspace({
   scheduledWork,
+  suppressDecisionSuggestions = false,
   onLoadAllTasks,
   snapshot,
   loading,
@@ -177,6 +180,7 @@ export function HomeWorkspace({
   onDismissInflow,
   onRetryInflowAnalysis,
   onRetryInflowCompletion,
+  onReviewInflowChange,
   gmailInflowItems,
   gmailInflowProjects,
   gmailInflowLoading,
@@ -356,34 +360,9 @@ export function HomeWorkspace({
         </div>
       </header>
 
-      {mobile && onLoadAllTasks && (
-        <MobileTaskQueue
-          tasks={snapshot?.tasks ?? []}
-          loading={loading}
-          onLoadAll={onLoadAllTasks}
-          onComplete={onCompleteTask}
-          onEdit={onEditTask}
-        />
+      {scheduledWork && (
+        <div className="home-scheduled-work">{scheduledWork}</div>
       )}
-
-      {mobile && nextSchedule && (
-        <section className="mobile-home-next" aria-label="다음 일정">
-          <h2>다음 일정</h2>
-          <ScheduleHighlight
-            entry={nextSchedule}
-            onOpen={() => void onOpenSchedule(nextSchedule)}
-            onEdit={
-              nextSchedule.source === "manual"
-                ? () => onEditSchedule(nextSchedule)
-                : undefined
-            }
-          />
-        </section>
-      )}
-
-      <MobileDisclosure mobile={mobile} title="반복 알림">
-        {scheduledWork}
-      </MobileDisclosure>
 
       {error && (
         <p className="inline-alert" role="alert">
@@ -407,6 +386,7 @@ export function HomeWorkspace({
             onDismiss={onDismissInflow}
             onRetryAnalysis={onRetryInflowAnalysis}
             onRetryCompletion={onRetryInflowCompletion}
+            onReviewChange={onReviewInflowChange}
             onOpenTask={async (taskId) => {
               const task = await onLoadAssistantTask({
                 id: taskId,
@@ -511,6 +491,32 @@ export function HomeWorkspace({
         />
       </MobileDisclosure>
 
+      {onLoadAllTasks && (
+        <MobileTaskQueue
+          sectionRef={taskSectionRef}
+          tasks={snapshot?.tasks ?? []}
+          loading={loading}
+          onLoadAll={onLoadAllTasks}
+          onComplete={onCompleteTask}
+          onEdit={onEditTask}
+        />
+      )}
+
+      {mobile && nextSchedule && (
+        <section className="mobile-home-next" aria-label="다음 일정">
+          <h2>다음 일정</h2>
+          <ScheduleHighlight
+            entry={nextSchedule}
+            onOpen={() => void onOpenSchedule(nextSchedule)}
+            onEdit={
+              nextSchedule.source === "manual"
+                ? () => onEditSchedule(nextSchedule)
+                : undefined
+            }
+          />
+        </section>
+      )}
+
       {!assistantFocused && (
         <>
           <MobileDisclosure
@@ -571,18 +577,20 @@ export function HomeWorkspace({
             />
           )}
 
-          {!showingSkeleton && Boolean(snapshot?.recommendations.length) && (
-            <MobileDisclosure mobile={mobile} title="결정할 일">
-              <NowBrief
-                recommendations={snapshot?.recommendations ?? []}
-                period={briefPeriod}
-                onDecide={onDecideRecommendation}
-                onOpenTask={onOpenTask}
-                onOpenProject={onOpenProject}
-                onAnnounce={setRecommendationAnnouncement}
-              />
-            </MobileDisclosure>
-          )}
+          {!suppressDecisionSuggestions &&
+            !showingSkeleton &&
+            Boolean(snapshot?.recommendations.length) && (
+              <MobileDisclosure mobile={mobile} title="결정할 일">
+                <NowBrief
+                  recommendations={snapshot?.recommendations ?? []}
+                  period={briefPeriod}
+                  onDecide={onDecideRecommendation}
+                  onOpenTask={onOpenTask}
+                  onOpenProject={onOpenProject}
+                  onAnnounce={setRecommendationAnnouncement}
+                />
+              </MobileDisclosure>
+            )}
 
           {!mobile && (
             <button
@@ -660,7 +668,7 @@ export function HomeWorkspace({
             </section>
           )}
 
-          {!mobile && showTaskPanel && (
+          {!mobile && !onLoadAllTasks && showTaskPanel && (
             <section
               className="home-tasks"
               aria-labelledby="today-task-title"

@@ -4,6 +4,9 @@ export type ScheduledWorkScope =
   "today" | "tomorrow" | "today_tomorrow" | "overdue" | "all_open";
 export type ScheduledWorkMessageDetail = "title_only" | "title_and_details";
 export interface ScheduledWorkDefinition {
+  condition?:
+    "always" | "deadline_near" | "no_response" | "completion_confirmation";
+  conditionHours?: number;
   title: string;
   workspaceId: string;
   projectId: string | null;
@@ -21,6 +24,7 @@ export interface ScheduledWorkDefinition {
   includeSchedules: boolean;
   /** Older stored rules omit this field and use title_only. */
   messageDetail?: ScheduledWorkMessageDetail;
+  skipHolidays?: boolean;
 }
 
 export function normalizeScheduledWorkDefinition(
@@ -29,6 +33,9 @@ export function normalizeScheduledWorkDefinition(
   return {
     ...definition,
     messageDetail: definition.messageDetail ?? "title_only",
+    skipHolidays: definition.skipHolidays ?? false,
+    condition: definition.condition ?? "always",
+    conditionHours: definition.conditionHours ?? 24,
   };
 }
 export interface ScheduledWork {
@@ -55,6 +62,9 @@ export interface ScheduledWorkPreview {
   warnings: string[];
   scheduleCount: number;
   nextRunAt: string;
+  holidayStatus?:
+    | { status: "working_day" | "unavailable" }
+    | { status: "holiday"; name: string };
 }
 export interface ScheduledWorkRunPage {
   items: ScheduledWorkRun[];

@@ -298,3 +298,110 @@ and read only by its owner and project scope. Confirm
 `jimin_schema_metadata.schema_version = 55`. The migration is additive; after
 reports are written, rollback uses the schema-54 compatibility image because
 older binaries do not understand report documents.
+
+Migration `0059_holiday_calendar.sql` adds shared, month-covered Korean holiday
+dates. It does not modify tasks or existing schedule definitions; omitted
+`skipHolidays` remains false. Apply to an empty database and a restored schema-58
+backup, and verify version 59, empty-month coverage, atomic refresh, primary and
+follow-up exclusions, no delivery on unavailable/stale data, and explicit manual
+override idempotency. Dry-run by restoring a backup into an isolated database and
+running the migrator; never use the production database as a test fixture.
+Before rollback, pause holiday-aware rules and stop workers. Disabling rules alone
+does not make the old API compatible: its definition parser rejects the added
+field even on disabled rules, and its schema guard expects version 58. Use a
+schema-59-compatible image, or restore a verified schema-58 backup into a separate
+database and account for writes since that backup before switching traffic. Never
+downgrade schema metadata in place or drop cache tables to bypass compatibility
+checks. These additive tables remain when using the compatibility image.
+
+The API reads `JIMIN_HOLIDAY_SERVICE_KEY_FILE` (absolute mounted secret path) or
+`JIMIN_HOLIDAY_SERVICE_KEY`, never both. Use the decoded service key issued for
+the Korea Astronomy and Space Science Institute special-day API. No key is sent
+to clients. The worker checks every five minutes and refreshes each month at
+most daily, retaining the last valid result for seven days during provider
+outages. A missing key or missing/stale month prevents holiday-aware activation
+and automatic delivery; saving a disabled draft is still allowed. Holidays are
+judged by the scheduled date in Asia/Seoul, including substitute holidays in the
+official dataset. Company-specific days off are not included in this version.
+
+Migration `0060_task_workflow.sql` adds `not_started`, `in_progress`, and
+`waiting` metadata without changing the existing open/completed/cancelled
+lifecycle. Waiting requires a nonempty reason of at most 1,000 characters;
+other states clear that reason. Existing tasks default to `not_started`.
+Migration `0061_inflow_change_reviews.sql` records owner-scoped approvals of an
+existing task's notes/deadline, its prior values, and the source analysis
+revision. The unique analysis/revision receipt prevents duplicate approval;
+the task mutation, approval receipt, source review, and delivery outbox commit
+together. Expected schema version is 61.
+
+Before deployment, restore the schema-58 production backup into a separate
+database and run 0059–0061 there. A transaction-only rehearsal must roll back
+to version 58 with no new columns/tables; an applied rehearsal must retain old
+tasks, schedules, owners, and delivery history. Development evidence includes
+fresh-schema tests, a schema-55-to-61 upgrade with legacy scheduled data, and a
+schema-58 transaction rollback. It is not a substitute for a restored
+production-backup rehearsal. After new workflow/approval writes, stop workers
+and use a schema-61-compatible image or a verified backup restore with an
+explicit post-backup-write reconciliation plan. Never drop approval records or
+downgrade the schema metadata in place.
+
+Migration `0062_reviewed_assignment_content.sql` adds a nullable, bounded
+`reviewed_content` snapshot to the task's public assignment details. The
+promotion API accepts optional `assignmentContent`: a provided value is the
+explicitly approved external description, including an intentionally empty
+string. Omission retains the legacy structured AI projection; existing rows
+remain NULL and are not backfilled from potentially private task notes.
+Assignment webhooks and source-thread replies render the same snapshot, while
+ordinary task note edits do not modify it. Explicit source-change approval may
+update an already-reviewed snapshot. The existing webhook payload keys remain
+unchanged; `notes` holds the reviewed public description and stale AI action or
+completion fields are omitted from that projection.
+
+Expected schema version is now 62. Deploy the API/migrator before clients that
+send `assignmentContent`; older APIs reject unknown request fields. Rehearse
+61→62 using a restored backup in an isolated database. The development rehearsal
+applied 62 inside a transaction and verified rollback to version 61 with the
+new column absent, then applied 62 and checked its nullable/10,000-character
+constraint. Fresh-schema PostgreSQL regressions also passed. This does not
+replace a production-backup restore. After reviewed snapshots are written, use
+a schema-62-compatible rollback image or a verified schema-61 backup with
+post-backup-write reconciliation. Never drop reviewed descriptions or downgrade
+metadata in production to bypass the schema guard. Already sent messages and
+existing immutable outbox payloads are not silently rewritten.
+
+## 0063 — ITSM task date and completion synchronization
+
+Current expected schema version is 63. `0063_itsm_task_sync.sql` adds explicit
+task-to-ticket links (including an opt-out) and one durable, leased lane per
+canonical upstream issue URL. It does not backfill or modify historical tickets.
+Promotion accepts optional `itsmIssueUrl` and `skipItsmSync` (default false);
+selection is restricted to successfully fetched ITSM evidence. Multiple verified
+tickets require an explicit selection or opt-out in the updated UI. Older
+clients still register the task/Chat result but do not guess an ambiguous ticket
+for synchronization. Historical tasks can acquire
+a link on their next mutation only when verified evidence identifies one ticket.
+Arbitrary task titles/notes and failed lookups are not write destinations.
+
+The agent reuses the existing mounted secret; only `due_date` and `status_id`
+can be written. Task mutations, links and queue revisions commit atomically.
+The worker rechecks the lease/version immediately before writes, reads back
+remote values, retries transient failures at most five times, and publishes
+owner-scoped `itsm_issue_sync` change-feed receipts for home refresh. A new
+mutation invalidates the old snapshot without losing the newer queue request.
+Expired lease acknowledgements are fenced by revision, worker and attempt.
+
+Rehearsal: in an isolated schema-62 database, apply 63 inside a transaction,
+verify metadata 63, roll back and verify 62 plus absence of both new tables;
+then apply 63 and verify an empty queue. This rehearsal passed in development,
+as did fresh-schema/behavior regressions. A restored production-backup rehearsal
+is still a deployment gate, not replaced by fresh test databases.
+
+Deployment order: stop old workers, back up and rehearse the production restore,
+apply 63, switch to schema-63-compatible API and agent images, then release the
+updated clients. Verify actual company completion status selection before a
+controlled ticket test; ambiguous cases need `JIMIN_ITSM_COMPLETION_STATUS_ID`.
+On rollback, stop writes and use a schema-63-compatible image or a verified
+schema-62 restore with post-backup-write reconciliation. Never drop links/jobs
+or change metadata to bypass guards. A database restore does not undo Redmine
+updates: reconcile those separately against the upstream issue history. Do not
+blindly replay succeeded jobs or reinterpret completion as ticket reopening.

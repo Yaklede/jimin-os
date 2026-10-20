@@ -1,10 +1,14 @@
 //! A native poller keeps checking while the webview is hidden/minimized.
 //! Credentials stay in memory and never enter logs or notification payloads.
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Mutex,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use reqwest::{Client, Url, redirect::Policy};
 use secrecy::{ExposeSecret, SecretString};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::watch;
@@ -15,11 +19,143 @@ struct Configuration {
     access: SecretString,
 }
 
-pub struct InflowNotifications(watch::Sender<Option<Configuration>>);
+pub struct InflowNotifications(watch::Sender<Option<Configuration>>, Mutex<Diagnostics>);
+
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Diagnostics {
+    status: String,
+    last_checked_at: Option<u64>,
+    last_accepted_at: Option<u64>,
+    eligible_count: usize,
+    suppressed_count: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Checkpoint {
+    base_url: String,
+    cursor: (i64, String),
+    seen: Vec<(String, i32, i64)>,
+}
+
+async fn save_checkpoint(
+    app: &tauri::AppHandle,
+    owner: &str,
+    base: &str,
+    cursor: &(i64, String),
+    seen: &HashMap<(String, i32), i64>,
+) {
+    let Some(path) = checkpoint_path(app, owner) else {
+        return;
+    };
+    let saved = Checkpoint {
+        base_url: base.to_owned(),
+        cursor: cursor.clone(),
+        seen: seen
+            .iter()
+            .take(2000)
+            .map(|((id, revision), at)| (id.clone(), *revision, *at))
+            .collect(),
+    };
+    let Ok(bytes) = serde_json::to_vec(&saved) else {
+        return;
+    };
+    if let Some(parent) = path.parent()
+        && tokio::fs::create_dir_all(parent).await.is_err()
+    {
+        return;
+    }
+    let temporary = path.with_extension("json.tmp");
+    if tokio::fs::write(&temporary, bytes).await.is_ok() {
+        let _ = tokio::fs::rename(temporary, path).await;
+    }
+}
+
+fn checkpoint_cursor(saved: &Checkpoint, base: &str, now: i64) -> Option<(i64, String)> {
+    if saved.base_url != base
+        || saved.cursor.0 < 0
+        || saved.cursor.0 > now
+        || uuid::Uuid::parse_str(&saved.cursor.1).is_err()
+    {
+        return None;
+    }
+    Some((
+        saved.cursor.0.max((now - 86_400_000).max(0)),
+        saved.cursor.1.clone(),
+    ))
+}
+
+fn now_millis() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+fn diagnostic_status(
+    app: &tauri::AppHandle,
+    status: &str,
+    checked: bool,
+    eligible: usize,
+    suppressed: usize,
+    accepted: bool,
+) {
+    if let Ok(mut value) = app.state::<InflowNotifications>().1.lock() {
+        status.clone_into(&mut value.status);
+        if checked {
+            value.last_checked_at = Some(now_millis());
+        }
+        value.eligible_count = eligible;
+        value.suppressed_count = suppressed;
+        if accepted {
+            value.last_accepted_at = Some(now_millis());
+        }
+        let _ = app.emit("inflow-notification-diagnostics", value.clone());
+    }
+    let _ = app.emit("inflow-notification-status", status);
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri injects owned state arguments.
+pub fn inflow_notification_diagnostics(
+    state: tauri::State<'_, InflowNotifications>,
+) -> Result<Diagnostics, String> {
+    state
+        .1
+        .lock()
+        .map(|value| value.clone())
+        .map_err(|_| "알림 상태를 다시 확인해 주세요.".to_owned())
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri injects an owned AppHandle.
+pub fn test_inflow_notification(app: tauri::AppHandle) -> Result<(), String> {
+    app.notification()
+        .builder()
+        .title("Jimin OS 알림 확인")
+        .body("이 알림이 보이면 Mac 알림 표시가 허용되어 있어요.")
+        .show()
+        .map_err(|_| "테스트 알림을 보내지 못했어요. Mac 알림 설정을 확인해 주세요.".to_owned())
+}
+
+fn checkpoint_path(app: &tauri::AppHandle, user_id: &str) -> Option<std::path::PathBuf> {
+    let id = uuid::Uuid::parse_str(user_id).ok()?;
+    Some(
+        app.path()
+            .app_local_data_dir()
+            .ok()?
+            .join(format!("inflow-notifications-{id}.json")),
+    )
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Feed {
+    #[serde(default)]
+    user_id: String,
     items: Vec<Item>,
     next_epoch_millis: i64,
     next_id: String,
@@ -42,7 +178,13 @@ pub fn initialize(app: &tauri::AppHandle) -> Result<(), reqwest::Error> {
         .redirect(Policy::none())
         .build()?;
     let (sender, receiver) = watch::channel(None);
-    app.manage(InflowNotifications(sender));
+    app.manage(InflowNotifications(
+        sender,
+        Mutex::new(Diagnostics {
+            status: "checking".to_owned(),
+            ..Diagnostics::default()
+        }),
+    ));
     tauri::async_runtime::spawn(run(app.clone(), client, receiver));
     Ok(())
 }
@@ -178,6 +320,7 @@ fn notify_unseen(
     success
 }
 
+#[allow(clippy::too_many_lines)] // One cancellation-safe polling loop maintains account, cursor and receipt checkpoints together.
 async fn run(
     app: tauri::AppHandle,
     client: Client,
@@ -187,6 +330,7 @@ async fn run(
     let mut floor = 0;
     let mut seen = HashMap::new();
     let mut previous_base: Option<String> = None;
+    let mut owner = String::new();
     loop {
         let config = receiver.borrow_and_update().clone();
         if let Some(config) = config {
@@ -194,6 +338,7 @@ async fn run(
                 cursor = None;
                 seen.clear();
                 previous_base = Some(config.base_url.clone());
+                owner.clear();
             }
             // Configuration changes cancel an in-flight request, preventing
             // notifications from a logged-out or replaced session.
@@ -206,9 +351,39 @@ async fn run(
             };
             match fetched {
                 Ok(feed) => {
+                    if owner != feed.user_id && !feed.user_id.is_empty() {
+                        owner.clone_from(&feed.user_id);
+                        seen.clear();
+                        cursor = None;
+                        if let Some(path) = checkpoint_path(&app, &owner)
+                            && let Ok(bytes) = tokio::fs::read(path).await
+                            && bytes.len() <= 512 * 1024
+                            && let Ok(saved) = serde_json::from_slice::<Checkpoint>(&bytes)
+                            && let Some(restored) =
+                                checkpoint_cursor(&saved, &config.base_url, feed.next_epoch_millis)
+                        {
+                            floor = (feed.next_epoch_millis - 86_400_000).max(0);
+                            cursor = Some(restored);
+                            seen.extend(
+                                saved
+                                    .seen
+                                    .into_iter()
+                                    .take(2000)
+                                    .map(|(id, revision, at)| ((id, revision), at)),
+                            );
+                            continue;
+                        }
+                    }
                     if cursor.is_none() {
                         floor = feed.next_epoch_millis;
                     }
+                    let eligible = feed.items.len();
+                    let suppressed = feed
+                        .items
+                        .iter()
+                        .filter(|item| seen.contains_key(&(item.id.clone(), item.revision)))
+                        .count();
+                    let previous_seen = seen.len();
                     let success = notify_unseen(feed.items, &mut seen, |title, body| {
                         app.notification()
                             .builder()
@@ -217,9 +392,26 @@ async fn run(
                             .show()
                             .is_ok()
                     });
+                    let accepted = seen.len() > previous_seen;
                     if success {
                         if feed.has_more {
                             cursor = Some((feed.next_epoch_millis, feed.next_id));
+                            save_checkpoint(
+                                &app,
+                                &owner,
+                                &config.base_url,
+                                cursor.as_ref().expect("paged cursor exists"),
+                                &seen,
+                            )
+                            .await;
+                            diagnostic_status(
+                                &app,
+                                "connected",
+                                true,
+                                eligible,
+                                suppressed,
+                                accepted,
+                            );
                             continue;
                         }
                         // Transactions can commit after their timestamp. A short
@@ -231,13 +423,28 @@ async fn run(
                         seen.retain(|_, timestamp| {
                             *timestamp >= feed.next_epoch_millis - 86_400_000
                         });
-                        let _ = app.emit("inflow-notification-status", "connected");
+                        save_checkpoint(
+                            &app,
+                            &owner,
+                            &config.base_url,
+                            cursor.as_ref().expect("successful cursor exists"),
+                            &seen,
+                        )
+                        .await;
+                        diagnostic_status(&app, "connected", true, eligible, suppressed, accepted);
                     } else {
-                        let _ = app.emit("inflow-notification-status", "offline");
+                        diagnostic_status(
+                            &app,
+                            "delivery_failed",
+                            true,
+                            eligible,
+                            suppressed,
+                            false,
+                        );
                     }
                 }
                 Err(reason) => {
-                    let _ = app.emit("inflow-notification-status", reason);
+                    diagnostic_status(&app, reason, true, 0, 0, false);
                     if reason == "unauthorized" {
                         let _ = app.emit("inflow-notification-auth-required", ());
                     }
@@ -247,6 +454,8 @@ async fn run(
             cursor = None;
             seen.clear();
             previous_base = None;
+            owner.clear();
+            diagnostic_status(&app, "disabled", false, 0, 0, false);
         }
         tokio::select! {
             () = tokio::time::sleep(Duration::from_secs(30)) => {},
@@ -257,7 +466,7 @@ async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{Item, notify_unseen, valid_base_url};
+    use super::{Checkpoint, Item, checkpoint_cursor, notify_unseen, valid_base_url};
     use std::collections::HashMap;
 
     fn item(id: &str, revision: i32) -> Item {
@@ -268,6 +477,29 @@ mod tests {
             body: "확인해 주세요.".to_owned(),
             occurred_at: 1000,
         }
+    }
+
+    #[test]
+    fn checkpoint_is_server_scoped_bounded_and_never_resumes_a_future_cursor() {
+        let mut value = Checkpoint {
+            base_url: "https://server.example".into(),
+            cursor: (1, uuid::Uuid::nil().to_string()),
+            seen: vec![],
+        };
+        assert_eq!(
+            checkpoint_cursor(&value, "https://server.example", 100_000_000)
+                .unwrap()
+                .0,
+            13_600_000
+        );
+        assert!(checkpoint_cursor(&value, "https://other.example", 100_000_000).is_none());
+        value.cursor.0 = 101_000_000;
+        assert!(checkpoint_cursor(&value, "https://server.example", 100_000_000).is_none());
+        value.cursor = (100, "invalid".into());
+        assert!(checkpoint_cursor(&value, "https://server.example", 100_000_000).is_none());
+        let encoded = serde_json::to_string(&value).unwrap();
+        assert!(!encoded.contains("access"));
+        assert!(!encoded.contains("body"));
     }
 
     #[test]
@@ -313,7 +545,9 @@ mod tests {
     fn rejects_untrusted_redirectable_or_plaintext_hosts() {
         assert!(valid_base_url("https://os.example.test"));
         assert!(!valid_base_url("http://example.test"));
-        assert!(!valid_base_url("https://user:password@example.test"));
+        assert!(!valid_base_url(
+            "https://user:compose-validation-fixture@example.test"
+        ));
         assert!(!valid_base_url("https://example.test?access=anything"));
         assert!(!valid_base_url("file:///tmp/notifications"));
     }

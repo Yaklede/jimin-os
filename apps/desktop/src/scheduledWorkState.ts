@@ -1,5 +1,9 @@
 import type { ScheduledWorkRunPage } from "./api/scheduledWork";
 
+export function scheduledWorkCloseAction(busy: boolean, dirty: boolean) {
+  return busy ? "blocked" : dirty ? "confirm" : "close";
+}
+
 export function mergeScheduledRuns(
   current: ScheduledWorkRunPage,
   latest: ScheduledWorkRunPage,

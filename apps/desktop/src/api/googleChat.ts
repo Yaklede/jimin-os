@@ -76,6 +76,7 @@ export interface ProjectInflowReferenceDocument {
 }
 
 export interface ProjectInflowItem {
+  changeActionItems?: string[];
   id: string;
   conversationId: string | null;
   representativeItemId: string | null;
@@ -340,6 +341,9 @@ export async function decideProjectInflow(
         decision: "promote";
         title: string;
         notes: string;
+        assignmentContent?: string;
+        itsmIssueUrl?: string;
+        skipItsmSync?: boolean;
         assigneeName?: string;
         workKind?: import("./planning").TaskWorkKind;
         priority: number;

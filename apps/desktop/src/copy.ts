@@ -264,7 +264,7 @@ export const copy = {
     recommendationConfirm: "확인했어요",
     recommendationConfirmed: "확인한 내용과 결과를 기록했어요.",
     recommendationDeferred: "4시간 뒤에 다시 알려드릴게요.",
-    openDecisionInbox: "결정할 일 보기",
+    openDecisionInbox: "확인·처리 기록",
     openMeetings: "회의 기록",
     recommendationDecisionNotice:
       "제안을 정리하지 못했어요. 잠시 후 다시 시도해 주세요.",

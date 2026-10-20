@@ -3,6 +3,8 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 const preferenceKey = "jimin-os.desktop-inflow-notifications.v1";
 export const desktopNotificationPreferenceEvent =
   "desktop-inflow-notification-preference";
+export const desktopNotificationConfigurationErrorEvent =
+  "desktop-inflow-notification-configuration-error";
 
 export function desktopInflowNotificationsSupported(): boolean {
   return (
@@ -40,4 +42,20 @@ export async function configureDesktopInflowNotifications(
     baseUrl,
     access: access ?? null,
   });
+}
+
+export interface DesktopNotificationDiagnostics {
+  status: string;
+  lastCheckedAt: number | null;
+  lastAcceptedAt: number | null;
+  eligibleCount: number;
+  suppressedCount: number;
+}
+
+export async function fetchDesktopNotificationDiagnostics(): Promise<DesktopNotificationDiagnostics> {
+  return invoke("inflow_notification_diagnostics");
+}
+
+export async function testDesktopNotification(): Promise<void> {
+  await invoke("test_inflow_notification");
 }

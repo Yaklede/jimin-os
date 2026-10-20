@@ -244,6 +244,10 @@ export const projectCopy = {
   inflowTitle: "확인할 대화",
   inflowNewTitle: "새 업무 요청",
   inflowExistingTitle: "기존 일감 업데이트",
+  inflowUncertainTitle: "확인 필요",
+  inflowUncertainDescription:
+    "새 업무인지 확실하지 않은 대화예요. 원문을 확인한 뒤 다시 분석하거나 업무에서 제외해 주세요.",
+  inflowUncertainEmpty: "분류를 확인할 대화가 없어요.",
   inflowTabsLabel: "업무 요청 구분",
   inflowNewTabShort: "새 요청",
   inflowExistingTabShort: "기존 일감",
@@ -367,8 +371,20 @@ export const projectCopy = {
   inflowTaskTitleLabel: "정리된 할 일",
   inflowTaskTitleHint: "대화에서 해야 할 행동이나 완료 결과를 확인해 주세요.",
   inflowTaskNotesLabel: "정리된 업무 내용",
+  inflowItsmSyncLabel: "ITSM 마감일과 완료 상태도 함께 반영하기",
+  inflowItsmIssueLabel: "함께 반영할 ITSM 티켓",
+  inflowItsmChoose: "티켓을 선택해 주세요",
+  inflowItsmChooseHelp:
+    "연결할 티켓을 하나 선택하거나 ITSM 함께 반영하기를 꺼 주세요.",
+  inflowItsmSyncHelp:
+    "선택한 티켓의 마감일도 바꿔요. 시간은 이 앱에서 관리해요. 같은 티켓에 연결된 할 일을 모두 완료하면 ITSM도 완료로 바꿔요. 처음 기한 없이 등록하면 기존 ITSM 마감일은 유지해요.",
   inflowTaskNotesHint:
-    "보낸 사람 정보와 계정 정보는 빼고, 처리할 내용과 완료 기준만 정리했어요.",
+    "이 내용으로 할 일을 저장하고 Chat에도 공유해요. 비공개 메모와 계정 정보는 넣지 마세요.",
+  inflowAssignmentPreviewTitle: "Chat 전송 내용 미리보기",
+  inflowAssignmentPreviewHint:
+    "원문 답글과 연결된 배정 알림에 보낼 내용이에요. 수정하면 바로 바뀌고, 등록할 때 함께 저장해요. 멘션은 알림 연결 설정에 따라 추가돼요.",
+  inflowAssignmentPreviewTruncated:
+    "내용이 길어 Chat에는 아래에 보이는 부분만 보내요. 전체 내용은 할 일에 저장해요. 더 짧게 정리하면 모두 보낼 수 있어요.",
   inflowAssigneeLabel: "담당자",
   inflowNoAssignee: "담당자 없이 등록",
   inflowDueAtLabel: "마감일",
@@ -379,13 +395,13 @@ export const projectCopy = {
   inflowAssigneeWillBeNotified: (name: string) =>
     `등록하면 ${name}님을 Google Chat에서 멘션해 알려드려요.`,
   inflowAssigneeNotificationOff:
-    "담당자는 저장하지만 Chat에는 알리지 않아요. 프로젝트 설정에서 할 일 알림 연결을 켜 주세요.",
+    "별도의 담당자 배정 알림은 보내지 않아요. 프로젝트 설정에서 할 일 알림 연결을 켜 주세요. 원문 대화에는 등록 결과를 남겨요.",
   inflowPromoted: "할 일로 정리했어요",
   inflowDismissed: "업무 아님으로 정리했어요",
   inflowCompletionSent: "✅ 원문 표시와 마감일 답글을 남겼어요.",
   inflowCompletionPending: "Chat에 처리 결과를 남기고 있어요.",
   inflowCompletionRetrying:
-    "할 일은 등록했어요. Chat 반영은 자동으로 다시 시도해요. 잠시 후 새로고침해 주세요.",
+    "할 일은 저장됐어요. 아래 Chat 반영 상태를 확인해 주세요.",
   inflowCompletionRetry: "Chat에 다시 반영하기",
   inflowReactionDone: "✅ 표시 완료",
   inflowReplyDone: "마감일 답글 완료",

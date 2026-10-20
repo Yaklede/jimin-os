@@ -35,9 +35,30 @@ pub enum WorkMessageDetail {
     TitleAndDetails,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkCondition {
+    #[default]
+    Always,
+    DeadlineNear,
+    NoResponse,
+    CompletionConfirmation,
+}
+fn default_condition_hours() -> u16 {
+    24
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent backward-compatible reminder options, not mutually exclusive states."
+)]
 pub struct ScheduledWorkDefinition {
+    #[serde(default)]
+    pub condition: WorkCondition,
+    #[serde(default = "default_condition_hours")]
+    pub condition_hours: u16,
     pub title: String,
     pub workspace_id: Uuid,
     pub project_id: Option<Uuid>,
@@ -59,6 +80,10 @@ pub struct ScheduledWorkDefinition {
     #[serde(default)]
     #[schema(default = "title_only")]
     pub message_detail: WorkMessageDetail,
+    /// Existing rules keep their current behavior unless explicitly enabled.
+    #[serde(default)]
+    #[schema(default = false)]
+    pub skip_holidays: bool,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow, ToSchema)]
@@ -100,6 +125,7 @@ pub struct ScheduledWorkPreview {
     pub messages: Vec<String>,
     pub warnings: Vec<String>,
     pub schedule_count: usize,
+    pub holiday_status: crate::holidays::HolidayStatus,
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String)]
     pub next_run_at: OffsetDateTime,
@@ -137,6 +163,11 @@ impl ScheduledWorkDefinition {
     /// # Errors
     /// Returns invalid configuration for malformed or ambiguous rules.
     pub fn validate(&self) -> Result<(), StorageError> {
+        if !(1..=168).contains(&self.condition_hours)
+            || (self.condition != WorkCondition::Always && self.include_schedules)
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
         let primary = parse_clock(&self.time)?;
         let names_valid = |values: &[String]| {
             values.len() <= 50
@@ -349,13 +380,14 @@ pub(crate) async fn save_in_transaction(
 ) -> Result<Option<ScheduledWork>, StorageError> {
     definition.validate()?;
     validate_scope(tx, user, definition).await?;
-    if enabled
-        && !execution::preview_in_transaction(tx, user, definition, now, None)
-            .await?
-            .warnings
-            .is_empty()
-    {
-        return Err(StorageError::InvalidConfiguration);
+    if enabled {
+        let preview = execution::preview_in_transaction(tx, user, definition, now, None).await?;
+        if !preview.warnings.is_empty()
+            || (definition.skip_holidays
+                && preview.holiday_status == crate::holidays::HolidayStatus::Unavailable)
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
     }
     let next = definition.next_slot(now)?;
     let result = if let Some(version) = expected {
@@ -411,6 +443,8 @@ mod tests {
     use super::*;
     fn rule() -> ScheduledWorkDefinition {
         ScheduledWorkDefinition {
+            condition: WorkCondition::Always,
+            condition_hours: 24,
             title: "마감 안내".into(),
             workspace_id: Uuid::now_v7(),
             project_id: None,
@@ -427,14 +461,17 @@ mod tests {
             mention_names: vec![],
             include_schedules: false,
             message_detail: WorkMessageDetail::TitleOnly,
+            skip_holidays: false,
         }
     }
     #[test]
     fn message_detail_defaults_for_legacy_rules_and_rejects_unknown_values() {
         let mut value = serde_json::to_value(rule()).unwrap();
         value.as_object_mut().unwrap().remove("messageDetail");
+        value.as_object_mut().unwrap().remove("skipHolidays");
         let legacy: ScheduledWorkDefinition = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(legacy.message_detail, WorkMessageDetail::TitleOnly);
+        assert!(!legacy.skip_holidays);
         for mode in [
             WorkMessageDetail::TitleOnly,
             WorkMessageDetail::TitleAndDetails,

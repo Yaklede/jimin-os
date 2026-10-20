@@ -21,6 +21,16 @@ export const scheduledWorkCopy = {
   deleteHelp:
     "예약과 실행 이력을 지울까요? 이미 전송된 메시지는 지워지지 않아요.",
   closeHelp: "저장하지 않은 변경이 있어요. 닫으면 변경 내용이 사라져요.",
+  discardTitle: "변경 내용을 버리고 닫을까요?",
+  keepEditing: "계속 수정하기",
+  discard: "버리고 닫기",
+  skipHolidays: "한국 공휴일에는 전송하지 않기",
+  holidayHelp:
+    "대체공휴일도 제외해요. 공휴일 자료를 확인하지 못하면 자동 발송을 보류해요. 일감의 마감일은 바뀌지 않아요.",
+  holidayUnavailable:
+    "공휴일 자료를 확인하지 못했어요. 초안으로 저장한 뒤 서버의 공휴일 연결 설정을 확인해 주세요.",
+  manualHolidayHelp:
+    "공휴일 제외를 설정한 예약이에요. 지금 직접 실행하면 공휴일이거나 날짜 자료가 없어도 전송해요. 실행할까요?",
   errors: {
     invalid: "예약 조건과 프로젝트 연결, 멘션할 사람을 확인해 주세요.",
     conflict:
@@ -41,5 +51,8 @@ export const scheduledWorkCopy = {
     delivery_failed:
       "전송하지 못한 메시지가 있어요. 프로젝트 연결의 전송 이력을 확인해 주세요.",
     cancelled: "예약을 변경하거나 정지해 전송을 취소했어요.",
+    holiday_excluded: "공휴일이라 안내와 후속 안내를 전송하지 않았어요.",
+    holiday_calendar_unavailable:
+      "공휴일 자료를 확인하지 못해 발송을 보류했어요. 서버의 공휴일 연결 설정을 확인해 주세요.",
   } as Record<string, string>,
 };

@@ -63,6 +63,8 @@ struct ActionRequest {
     kind: ActionKind,
     expected_version: i64,
     request_id: Option<Uuid>,
+    #[serde(default)]
+    allow_holiday: bool,
 }
 #[derive(Serialize, ToSchema)]
 struct ActionResult {
@@ -202,12 +204,13 @@ async fn action(
             return failure(StorageError::InvalidConfiguration, request_id);
         };
         return match db
-            .run_scheduled_work_now(
+            .run_scheduled_work_now_with_holiday_override(
                 user,
                 id,
                 key,
                 body.expected_version,
                 OffsetDateTime::now_utc(),
+                body.allow_holiday,
             )
             .await
         {
