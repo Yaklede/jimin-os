@@ -124,6 +124,10 @@ describe("Google Chat work intake API", () => {
       title: "QR 결제 통보 연동 개발",
       notes:
         "업무 목적\nQR 결제 통보 연동 개발\n\n완료 기준\n연동 결과를 공유합니다.",
+      assignmentContent:
+        "사용자가 수정한 공유 내용\n검증 결과와 연동 범위를 공유해 주세요.",
+      itsmIssueUrl: "https://itsm.example/issues/42",
+      skipItsmSync: false,
       priority: 1,
       dueAt: "2026-07-27T14:30:00.000Z",
       withoutDeadline: false,
@@ -136,6 +140,10 @@ describe("Google Chat work intake API", () => {
       title: "QR 결제 통보 연동 개발",
       notes:
         "업무 목적\nQR 결제 통보 연동 개발\n\n완료 기준\n연동 결과를 공유합니다.",
+      assignmentContent:
+        "사용자가 수정한 공유 내용\n검증 결과와 연동 범위를 공유해 주세요.",
+      itsmIssueUrl: "https://itsm.example/issues/42",
+      skipItsmSync: false,
       priority: 1,
       dueAt: "2026-07-27T14:30:00.000Z",
       withoutDeadline: false,

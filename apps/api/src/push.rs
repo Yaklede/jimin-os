@@ -428,6 +428,7 @@ pub(crate) struct InflowNotificationResponse {
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct InflowNotificationFeed {
+    user_id: Uuid,
     items: Vec<InflowNotificationResponse>,
     next_epoch_millis: i64,
     next_id: Uuid,
@@ -456,6 +457,7 @@ pub(crate) async fn get_inflow_notifications(
     let now_millis = now.unix_timestamp() * 1_000 + i64::from(now.millisecond());
     let Some(after) = query.after_epoch_millis else {
         return Json(InflowNotificationFeed {
+            user_id: principal.identity().user_id(),
             items: vec![],
             next_epoch_millis: now_millis,
             next_id: Uuid::nil(),
@@ -515,6 +517,7 @@ pub(crate) async fn get_inflow_notifications(
                 })
                 .collect();
             Json(InflowNotificationFeed {
+                user_id: principal.identity().user_id(),
                 items,
                 next_epoch_millis,
                 next_id,

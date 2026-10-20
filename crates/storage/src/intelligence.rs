@@ -1899,6 +1899,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 1,
         };
         let schedule = ScheduleEntry {

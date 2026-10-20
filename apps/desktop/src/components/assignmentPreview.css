@@ -1,0 +1,28 @@
+.inflow-assignment-preview {
+  margin-top: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: 12px 16px;
+  background: var(--surface-subtle);
+  min-width: 0;
+}
+.inflow-assignment-preview > summary {
+  cursor: pointer;
+  min-height: 44px;
+  align-content: center;
+  font-weight: 600;
+}
+.inflow-assignment-preview > p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.inflow-assignment-preview > pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+  margin: 12px 0 0;
+}

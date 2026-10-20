@@ -1,12 +1,16 @@
 pub mod auth;
 pub mod calendar_oauth;
 pub mod config;
+mod delivery_recovery;
 mod device_signals;
 pub mod gmail_oauth;
 pub mod google_chat_oauth;
+mod inflow_changes;
+pub mod korean_holidays;
 mod meetings;
 pub mod probe;
 pub mod push;
+mod report_evidence;
 pub mod scheduled_work;
 mod voice_command;
 pub mod webhook;
@@ -83,7 +87,8 @@ use jimin_storage::{
     planning::{
         DeleteTaskOutcome, LinkedScheduleEntry, NewScheduleEntry, NewTask, ScheduleEntry,
         ScheduleEntryLinkage, ScheduleEntryUpdate, ScheduleSource, ScheduleStatus, Task,
-        TaskAssignmentMessageInput, TaskStatus, TaskUpdate, format_task_assignment_message,
+        TaskAssignmentMessageInput, TaskStatus, TaskUpdate,
+        format_reviewed_task_assignment_message,
     },
     reports::{NewReport, PROJECT_WEEKLY_REPORT, Report, ReportStatus, ReportUpdate},
     sync::SyncChange,
@@ -427,6 +432,8 @@ pub struct TaskResponse {
     completed_at: Option<String>,
     work_kind: String,
     completion_note: Option<String>,
+    workflow_state: String,
+    waiting_reason: Option<String>,
     version: i64,
 }
 
@@ -665,6 +672,7 @@ pub struct WebhookDeliveryListResponse {
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct HomeSnapshotResponse {
+    delivery_recovery: Vec<jimin_storage::delivery_recovery::DeliveryRecovery>,
     schedule: Vec<ScheduleEntryResponse>,
     tasks: Vec<TaskResponse>,
     due_tasks: Vec<TaskResponse>,
@@ -984,6 +992,7 @@ pub struct ConfirmProjectItsmConnectionRequest {
     reason = "The read model exposes independent sender, acknowledgement, assignment, reaction, and reply facets to shared clients."
 )]
 pub struct ProjectInflowItemResponse {
+    change_action_items: Vec<String>,
     id: uuid::Uuid,
     conversation_id: Option<uuid::Uuid>,
     representative_item_id: Option<uuid::Uuid>,
@@ -1094,6 +1103,11 @@ pub struct ProjectInflowDecisionRequest {
     expected_analyzed_revision: Option<i32>,
     title: Option<String>,
     notes: Option<String>,
+    /// Explicit outbound approval, independent from editable/internal task notes.
+    assignment_content: Option<String>,
+    itsm_issue_url: Option<String>,
+    #[serde(default)]
+    skip_itsm_sync: bool,
     assignee_name: Option<String>,
     priority: Option<i16>,
     due_at: Option<String>,
@@ -1472,6 +1486,8 @@ struct CreateTaskRequest {
 #[derive(serde::Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct UpdateTaskRequest {
+    workflow_state: Option<String>,
+    waiting_reason: Option<String>,
     work_kind: Option<String>,
     project_id: Option<uuid::Uuid>,
     parent_task_id: Option<uuid::Uuid>,
@@ -1780,6 +1796,7 @@ pub(crate) fn error_response(
         update_goal,
         list_projects,
         get_weekly_report,
+        report_evidence::get_evidence,
         get_weekly_report_history,
         list_reports,
         create_project_weekly_report,
@@ -1801,6 +1818,8 @@ pub(crate) fn error_response(
         send_webhook_message,
         list_webhook_deliveries,
         retry_webhook_delivery,
+        delivery_recovery::retry_delivery,
+        inflow_changes::approve_change,
         list_open_tasks,
         create_task,
         get_task,
@@ -1912,6 +1931,7 @@ pub(crate) fn error_response(
         ProjectResponse,
         ProjectListResponse,
         WeeklyProjectReportResponse,
+        report_evidence::EvidencePage,
         WeeklyReportResponse,
         WeeklyReportSnapshotResponse,
         WeeklyReportHistoryResponse,
@@ -1927,6 +1947,7 @@ pub(crate) fn error_response(
         VoiceCommandItemResponse,
         VoiceCommandResponse,
         HomeSnapshotResponse,
+        jimin_storage::delivery_recovery::DeliveryRecovery,
         RecommendationResponse,
         RecommendationListResponse,
         RecommendationDecisionKind,
@@ -1958,6 +1979,7 @@ pub(crate) fn error_response(
         WebhookMentionDirectory,
         SendWebhookMessageRequest,
         UpdateTaskRequest,
+        inflow_changes::ApproveInflowChangeRequest,
         DeleteTaskRequest,
         CreateAgentTurnRequest,
         ResolveAgentActionRequest,
@@ -2043,6 +2065,14 @@ pub fn router(state: ApiState) -> Router {
             axum::routing::put(update_schedule_entry).delete(delete_schedule_entry),
         )
         .route("/v1/home", get(get_home_snapshot))
+        .route(
+            "/v1/delivery-recovery/{kind}/{id}/retry",
+            post(delivery_recovery::retry_delivery),
+        )
+        .route(
+            "/v1/inflow/{item_id}/change-approval",
+            post(inflow_changes::approve_change),
+        )
         .route("/v1/briefs/work/refresh", post(refresh_work_brief))
         .route("/v1/recommendations", get(list_recommendations))
         .route(
@@ -2053,6 +2083,10 @@ pub fn router(state: ApiState) -> Router {
         .merge(goal_router())
         .route("/v1/projects", get(list_projects).post(create_project))
         .route("/v1/reports/weekly", get(get_weekly_report))
+        .route(
+            "/v1/projects/{project_id}/weekly-evidence",
+            get(report_evidence::get_evidence),
+        )
         .route("/v1/reports/weekly/history", get(get_weekly_report_history))
         .route("/v1/reports", get(list_reports))
         .route(
@@ -3000,6 +3034,7 @@ async fn create_google_schedule_entry(
     params(("from" = String, Query), ("to" = String, Query)),
     responses((status = 200, body = HomeSnapshotResponse), (status = 400), (status = 401), (status = 503))
 )]
+#[allow(clippy::too_many_lines)] // One authenticated snapshot joins independent home sections without partial ownership checks.
 async fn get_home_snapshot(
     State(state): State<ApiState>,
     Extension(request_id): Extension<RequestId>,
@@ -3029,18 +3064,22 @@ async fn get_home_snapshot(
         due_tasks,
         recommendations,
         inflow_items,
+        unsettled_inflow_items,
         inflow_analyses,
         webhooks,
         workspaces,
+        delivery_recovery,
     ) = match tokio::try_join!(
         planning.schedule_entries_with_linkage_in_range(user_id, from, to),
         planning.home_tasks_for_user(user_id, to),
         planning.deadline_tasks_for_user(user_id, deadline_boundary),
         planning.active_decisions_for_user(user_id, OffsetDateTime::now_utc(), 5),
         planning.pending_project_inflow_for_user(user_id),
+        planning.unsettled_project_inflow_for_user(user_id),
         planning.project_inflow_analyses_for_user(user_id),
         planning.user_project_webhooks(user_id),
         planning.workspaces_for_user(user_id),
+        planning.delivery_recovery_for_user(user_id),
     ) {
         Ok(values) => values,
         Err(error) => return storage_error_response(&error, request_id),
@@ -3084,25 +3123,23 @@ async fn get_home_snapshot(
         return unavailable_response(request_id);
     };
     let contexts = inflow_assignment_contexts(webhooks);
-    let Ok(mut inflow) = group_project_inflow_candidates(inflow_items, inflow_analyses)
-        .into_iter()
-        .map(project_inflow_item_response)
-        .collect::<Result<Vec<_>, _>>()
+    let Ok(recent_inflow) =
+        project_inflow_responses(unsettled_inflow_items, inflow_analyses.clone(), &contexts)
     else {
         return unavailable_response(request_id);
     };
-    for item in &mut inflow {
-        apply_inflow_assignment_context(item, &contexts);
-    }
+    let Ok(inflow) = project_inflow_responses(inflow_items, inflow_analyses, &contexts) else {
+        return unavailable_response(request_id);
+    };
     Json(HomeSnapshotResponse {
+        delivery_recovery,
         schedule,
         tasks,
         due_tasks,
         inflow,
-        // Handled Chat decisions live in project history. Preserve the
-        // response field for installed clients without putting completed
-        // source messages back on the attention-focused home screen.
-        recent_inflow: Vec::new(),
+        // The compatible field now contains unresolved source delivery only,
+        // never successfully handled conversation history.
+        recent_inflow,
         recommendations,
         weekly_reports,
     })
@@ -5175,9 +5212,18 @@ async fn update_task(
     let Some(planning) = state.planning() else {
         return unavailable_response(request_id);
     };
+    if body.workflow_state.is_none() && body.waiting_reason.is_some() {
+        return invalid_request_response(request_id);
+    }
+    let workflow = body
+        .workflow_state
+        .map(|state| jimin_storage::planning::TaskWorkflowUpdate {
+            state,
+            waiting_reason: body.waiting_reason,
+        });
     let user_id = principal.identity().user_id();
     match planning
-        .update_task_with_work_kind(
+        .update_task_with_workflow(
             &TaskUpdate {
                 id: task_id,
                 user_id,
@@ -5192,6 +5238,7 @@ async fn update_task(
                 expected_version: body.expected_version,
             },
             body.work_kind.as_deref(),
+            workflow.as_ref(),
         )
         .await
     {
@@ -7930,7 +7977,7 @@ async fn apply_project_inflow_decision(
             };
             let due_at = project_inflow_deadline(request)?;
             planning
-                .promote_project_inflow_item_with_work_kind(
+                .promote_project_inflow_item_with_integrations(
                     &PromoteProjectInflowItem {
                         user_id,
                         project_id,
@@ -7958,6 +8005,15 @@ async fn apply_project_inflow_decision(
                         due_at,
                     },
                     request.work_kind.as_deref().unwrap_or("general"),
+                    request.assignment_content.as_deref(),
+                    if request.skip_itsm_sync {
+                        jimin_storage::itsm_sync::ItsmLinkChoice::Disabled
+                    } else {
+                        request.itsm_issue_url.as_deref().map_or(
+                            jimin_storage::itsm_sync::ItsmLinkChoice::Automatic,
+                            jimin_storage::itsm_sync::ItsmLinkChoice::Selected,
+                        )
+                    },
                 )
                 .await
         }
@@ -8137,18 +8193,21 @@ async fn deliver_google_chat_completions(
 }
 
 fn google_chat_completion_reply(delivery: &GoogleChatCompletionDelivery) -> String {
-    format_task_assignment_message(&TaskAssignmentMessageInput {
-        work_kind: &delivery.work_kind,
-        project_title: &delivery.project_title,
-        task_title: &delivery.task_title,
-        public_summary: delivery.public_summary.as_deref(),
-        action_items: &delivery.action_items,
-        completion_criteria: delivery.completion_criteria.as_deref(),
-        reference_links: &delivery.reference_links,
-        assignee_name: delivery.assignee_name.as_deref(),
-        priority: delivery.task_priority,
-        due_at: delivery.due_at,
-    })
+    format_reviewed_task_assignment_message(
+        &TaskAssignmentMessageInput {
+            work_kind: &delivery.work_kind,
+            project_title: &delivery.project_title,
+            task_title: &delivery.task_title,
+            public_summary: delivery.public_summary.as_deref(),
+            action_items: &delivery.action_items,
+            completion_criteria: delivery.completion_criteria.as_deref(),
+            reference_links: &delivery.reference_links,
+            assignee_name: delivery.assignee_name.as_deref(),
+            priority: delivery.task_priority,
+            due_at: delivery.due_at,
+        },
+        delivery.reviewed_content.as_deref(),
+    )
 }
 
 fn google_chat_task_completion_reply(delivery: &GoogleChatTaskCompletionDelivery) -> String {
@@ -8692,6 +8751,21 @@ fn apply_inflow_assignment_context(
     response.assignee_notification_available = !context.notifiable_names.is_empty();
 }
 
+fn project_inflow_responses(
+    items: Vec<ProjectInflowItem>,
+    analyses: Vec<ProjectInflowAnalysis>,
+    contexts: &BTreeMap<uuid::Uuid, InflowAssignmentContext>,
+) -> Result<Vec<ProjectInflowItemResponse>, ()> {
+    group_project_inflow_candidates(items, analyses)
+        .into_iter()
+        .map(|candidate| {
+            let mut response = project_inflow_item_response(candidate)?;
+            apply_inflow_assignment_context(&mut response, contexts);
+            Ok(response)
+        })
+        .collect()
+}
+
 fn single_project_inflow_candidate(item: ProjectInflowItem) -> ProjectInflowCandidate {
     ProjectInflowCandidate {
         representative: item.clone(),
@@ -8756,6 +8830,9 @@ fn group_project_inflow_candidates(
                     analysis.state == InflowAnalysisState::Ready
                         && analysis.classification != Some(InflowClassification::NewTask)
                         && !linked_attention_is_visible
+                        && (representative.promoted_task_id.is_some()
+                            || focus.sent_by_owner
+                            || focus.sender_provider_name.as_deref() == Some("users/app"))
                 })
             {
                 return None;
@@ -8902,6 +8979,10 @@ fn project_inflow_item_response(
         })
         .collect::<Result<Vec<_>, ()>>()?;
     Ok(ProjectInflowItemResponse {
+        change_action_items: analysis
+            .as_ref()
+            .filter(|value| value.classification == Some(InflowClassification::FollowUp))
+            .map_or_else(Vec::new, |value| value.suggested_action_items.clone()),
         id: focus.id,
         conversation_id,
         representative_item_id,
@@ -9453,6 +9534,8 @@ fn task_response(task: Task) -> Result<TaskResponse, ()> {
             .transpose()?,
         work_kind: task.work_kind,
         completion_note: task.completion_note,
+        workflow_state: task.workflow_state,
+        waiting_reason: task.waiting_reason,
         version: task.version,
     })
 }
@@ -10846,6 +10929,18 @@ mod tests {
             definition["properties"]["messageDetail"]["default"],
             "title_only"
         );
+        assert_eq!(definition["properties"]["skipHolidays"]["default"], false);
+        assert!(
+            !definition["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("skipHolidays"))
+        );
+        assert!(
+            document["components"]["schemas"]["ScheduledWorkPreview"]["properties"]
+                .get("holidayStatus")
+                .is_some()
+        );
         assert_eq!(
             document["components"]["schemas"]["WorkMessageDetail"]["enum"],
             serde_json::json!(["title_only", "title_and_details"])
@@ -11050,6 +11145,7 @@ mod tests {
                 "/v1/conversations/{conversation_id}/messages",
                 "/v1/conversations/{conversation_id}/stream",
                 "/v1/conversations/{conversation_id}/turns",
+                "/v1/delivery-recovery/{kind}/{id}/retry",
                 "/v1/device-signals/missed-calls",
                 "/v1/device-signals/status",
                 "/v1/devices",
@@ -11066,6 +11162,7 @@ mod tests {
                 "/v1/google-chat/connections/{account_id}",
                 "/v1/google-chat/connections/{account_id}/spaces",
                 "/v1/home",
+                "/v1/inflow/{item_id}/change-approval",
                 "/v1/me",
                 "/v1/meeting-recordings",
                 "/v1/meeting-recordings/{recording_id}/cancel",
@@ -11093,6 +11190,7 @@ mod tests {
                 "/v1/projects/{project_id}/webhooks/{webhook_id}",
                 "/v1/projects/{project_id}/webhooks/{webhook_id}/messages",
                 "/v1/projects/{project_id}/webhooks/{webhook_id}/test",
+                "/v1/projects/{project_id}/weekly-evidence",
                 "/v1/push/inflow",
                 "/v1/push/registration",
                 "/v1/recommendations",
@@ -11895,7 +11993,7 @@ mod tests {
         clippy::too_many_lines,
         reason = "The regression test keeps task and non-task examples together to verify grouping and filtering."
     )]
-    fn inflow_candidates_keep_last_ready_analysis_while_refreshing_and_hide_non_tasks() {
+    fn inflow_candidates_keep_last_ready_analysis_and_preserve_uncertain_external_requests() {
         let project_id = Uuid::now_v7();
         let source_id = Uuid::now_v7();
         let thread_name = Some("spaces/company/threads/request-1".to_owned());
@@ -12016,7 +12114,10 @@ mod tests {
             }
         }
         let reviewed_response = project_inflow_item_response(
-            group_project_inflow_candidates(reviewed_items.clone(), analyses.clone()).remove(0),
+            group_project_inflow_candidates(reviewed_items.clone(), analyses.clone())
+                .into_iter()
+                .find(|candidate| candidate.focus.id == actionable_request_id)
+                .unwrap(),
         )
         .expect("reviewed group should serialize");
         assert!(
@@ -12025,7 +12126,10 @@ mod tests {
         );
         reviewed_items[1].reviewed_at = None;
         let unread_response = project_inflow_item_response(
-            group_project_inflow_candidates(reviewed_items, analyses.clone()).remove(0),
+            group_project_inflow_candidates(reviewed_items, analyses.clone())
+                .into_iter()
+                .find(|candidate| candidate.focus.id == actionable_request_id)
+                .unwrap(),
         )
         .expect("unread group should serialize");
         assert!(
@@ -12034,11 +12138,15 @@ mod tests {
         );
         let candidates = group_project_inflow_candidates(items, analyses);
 
-        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates.len(),
+            2,
+            "external requests must remain available for review, even when classified as noise"
+        );
         let response = project_inflow_item_response(
             candidates
                 .into_iter()
-                .next()
+                .find(|candidate| candidate.focus.id == actionable_request_id)
                 .expect("one candidate should remain"),
         )
         .expect("candidate should serialize");
@@ -12285,7 +12393,8 @@ mod tests {
     fn google_chat_completion_reply_contains_assignment_context_and_details() {
         let due_at =
             OffsetDateTime::parse("2026-07-24T02:30:00Z", &Rfc3339).expect("deadline should parse");
-        let reply = google_chat_completion_reply(&GoogleChatCompletionDelivery {
+        let mut delivery = GoogleChatCompletionDelivery {
+            reviewed_content: None,
             work_kind: "general".to_owned(),
             inflow_id: Uuid::now_v7(),
             user_id: Uuid::now_v7(),
@@ -12305,7 +12414,8 @@ mod tests {
             reaction_completed: false,
             reply_completed: false,
             attempt_count: 0,
-        });
+        };
+        let reply = google_chat_completion_reply(&delivery);
 
         assert!(reply.starts_with("새 할 일이 배정됐어요."));
         assert!(reply.contains("프로젝트: 비스킷링크"));
@@ -12315,6 +12425,14 @@ mod tests {
         assert!(reply.contains("마감: 2026년 7월 24일 11:30"));
         assert!(reply.contains("권한 오류의 재현 조건과 영향을 확인합니다."));
         assert!(reply.contains("https://itsm.example/issues/3876"));
+        delivery.reviewed_content =
+            Some("수정한 공유 내용\n- 다른 재현 조건을 확인해 주세요.".to_owned());
+        let reviewed_reply = google_chat_completion_reply(&delivery);
+        assert!(reviewed_reply.contains(delivery.reviewed_content.as_deref().unwrap()));
+        assert!(!reviewed_reply.contains("권한 오류의 재현 조건과 영향을 확인합니다."));
+        assert!(!reviewed_reply.contains("재현 조건을 검증합니다."));
+        assert!(reviewed_reply.contains("마감: 2026년 7월 24일 11:30"));
+        assert!(reviewed_reply.contains("https://itsm.example/issues/3876"));
     }
 
     #[test]
@@ -12354,6 +12472,9 @@ mod tests {
     #[test]
     fn project_inflow_promotion_requires_an_explicit_deadline_choice() {
         let missing = ProjectInflowDecisionRequest {
+            itsm_issue_url: None,
+            skip_itsm_sync: false,
+            assignment_content: None,
             work_kind: None,
             decision: "promote".to_owned(),
             reason: None,
@@ -12401,6 +12522,9 @@ mod tests {
     #[test]
     fn project_inflow_promotion_rejects_conflicting_deadline_fields() {
         let request = ProjectInflowDecisionRequest {
+            itsm_issue_url: None,
+            skip_itsm_sync: false,
+            assignment_content: None,
             work_kind: None,
             decision: "promote".to_owned(),
             reason: None,

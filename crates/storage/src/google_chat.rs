@@ -334,6 +334,7 @@ impl TryFrom<ProjectInflowItemRow> for ProjectInflowItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoogleChatCompletionDelivery {
+    pub reviewed_content: Option<String>,
     pub work_kind: String,
     pub inflow_id: Uuid,
     pub user_id: Uuid,
@@ -357,6 +358,7 @@ pub struct GoogleChatCompletionDelivery {
 
 #[derive(sqlx::FromRow)]
 struct GoogleChatCompletionDeliveryRow {
+    reviewed_content: Option<String>,
     work_kind: String,
     inflow_id: Uuid,
     user_id: Uuid,
@@ -381,6 +383,7 @@ struct GoogleChatCompletionDeliveryRow {
 impl From<GoogleChatCompletionDeliveryRow> for GoogleChatCompletionDelivery {
     fn from(row: GoogleChatCompletionDeliveryRow) -> Self {
         Self {
+            reviewed_content: row.reviewed_content,
             work_kind: row.work_kind,
             inflow_id: row.inflow_id,
             user_id: row.user_id,
@@ -1215,6 +1218,7 @@ impl Database {
                 task.id AS task_id, project.title AS project_title,
                 task.title AS task_title,
                 COALESCE(details.summary, task.notes) AS public_summary,
+                details.reviewed_content,
                 COALESCE(details.action_items, ARRAY[]::TEXT[]) AS action_items,
                 details.completion_criteria,
                 COALESCE(details.reference_links, ARRAY[]::TEXT[]) AS reference_links,
@@ -1639,14 +1643,13 @@ impl Database {
         rows.into_iter().map(ProjectInflowItem::try_from).collect()
     }
 
-    /// Lists the most recently handled Chat conversations for the home brief.
-    /// This keeps a promoted or dismissed source message visible after it
-    /// leaves the decision queue without exposing provider resource names.
+    /// Lists only handled conversations whose source reaction or reply is not
+    /// finished. Completed history stays out of the home recovery queue.
     ///
     /// # Errors
     ///
     /// Returns a storage error when the bounded owner-scoped read fails.
-    pub async fn recent_project_inflow_decisions_for_user(
+    pub async fn unsettled_project_inflow_for_user(
         &self,
         user_id: Uuid,
     ) -> Result<Vec<ProjectInflowItem>, StorageError> {
@@ -1687,9 +1690,16 @@ impl Database {
              JOIN project_google_chat_sources AS source ON source.id = item.source_id
              JOIN google_chat_accounts AS account ON account.id = source.account_id
              JOIN projects AS project ON project.id = item.project_id
-             WHERE item.user_id = $1 AND item.status <> 'pending'
+             WHERE item.user_id = $1 AND (
+                 (item.status = 'promoted' AND item.completion_requested_at IS NOT NULL
+                   AND (item.completion_reaction_at IS NULL OR item.completion_reply_at IS NULL))
+                 OR (item.status = 'dismissed' AND EXISTS (
+                   SELECT 1 FROM project_inflow_dismissal_replies AS reply
+                   WHERE reply.inflow_id = item.id AND reply.sent_at IS NULL
+                 ))
+             )
              ORDER BY item.updated_at DESC, item.id DESC
-             LIMIT 12",
+             LIMIT 200",
         )
         .bind(user_id)
         .fetch_all(self.pool())
@@ -2035,7 +2045,52 @@ impl Database {
         command: &PromoteProjectInflowItem,
         work_kind: &str,
     ) -> Result<Option<ProjectInflowItem>, StorageError> {
+        self.promote_project_inflow_item_with_reviewed_content(command, work_kind, None)
+            .await
+    }
+
+    /// Saves an explicitly approved outbound description with task creation.
+    /// # Errors
+    /// Returns validation/persistence errors or no item for stale revisions.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "promotion is one revision-fenced transaction"
+    )]
+    pub async fn promote_project_inflow_item_with_reviewed_content(
+        &self,
+        command: &PromoteProjectInflowItem,
+        work_kind: &str,
+        reviewed_content: Option<&str>,
+    ) -> Result<Option<ProjectInflowItem>, StorageError> {
+        self.promote_project_inflow_item_with_integrations(
+            command,
+            work_kind,
+            reviewed_content,
+            crate::itsm_sync::ItsmLinkChoice::Automatic,
+        )
+        .await
+    }
+
+    /// Creates the task and its explicitly selected ticket link atomically.
+    /// # Errors
+    /// Returns validation/persistence errors or no item for stale revisions.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "promotion keeps all provider outboxes in one transaction"
+    )]
+    pub async fn promote_project_inflow_item_with_integrations(
+        &self,
+        command: &PromoteProjectInflowItem,
+        work_kind: &str,
+        reviewed_content: Option<&str>,
+        itsm_choice: crate::itsm_sync::ItsmLinkChoice<'_>,
+    ) -> Result<Option<ProjectInflowItem>, StorageError> {
         crate::planning::validate_work_kind(work_kind)?;
+        if reviewed_content.is_some_and(|content| {
+            content.chars().count() > MAX_TASK_NOTES_CHARS || content.contains('\0')
+        }) {
+            return Err(StorageError::InvalidConfiguration);
+        }
         if ![
             command.user_id,
             command.project_id,
@@ -2080,23 +2135,29 @@ impl Database {
             group.thread_name(),
         )
         .await?;
-        let task_notes = command
-            .notes
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map_or_else(
-                || default_google_chat_task_notes(&command.title, &source_messages),
-                str::to_owned,
-            );
+        let task_notes = reviewed_promotion_task_notes(
+            &command.title,
+            command.notes.as_deref(),
+            reviewed_content,
+            &source_messages,
+        );
         let reference_links =
             public_inflow_reference_links(&source_messages, &analysis.reference_documents.0);
         let task = insert_promoted_task(&mut transaction, command, &task_notes, work_kind).await?;
+        crate::itsm_sync::bind_promoted_itsm_task(
+            &mut transaction,
+            command.user_id,
+            task.id,
+            &analysis.reference_documents.0,
+            itsm_choice,
+        )
+        .await?;
         insert_task_assignment_public_details(
             &mut transaction,
             command,
             &analysis,
             &reference_links,
+            reviewed_content,
         )
         .await?;
         link_promotion_analysis(&mut transaction, command).await?;
@@ -2187,16 +2248,8 @@ impl Database {
         let rows = sqlx::query_as::<_, ProjectInflowItemRow>(
             "UPDATE project_inflow_items AS item
              SET completion_requested_at = CASE
-                     WHEN item.id = $7 THEN NOW()
+                     WHEN item.id = $7 THEN COALESCE(item.completion_requested_at, NOW())
                      ELSE NULL
-                 END,
-                 completion_reaction_at = CASE
-                     WHEN item.id = $7 THEN NULL
-                     ELSE item.completion_reaction_at
-                 END,
-                 completion_reply_at = CASE
-                     WHEN item.id = $7 THEN NULL
-                     ELSE item.completion_reply_at
                  END,
                  completion_delivery_error_code = CASE
                      WHEN item.id = $7 THEN NULL
@@ -2482,6 +2535,21 @@ fn public_inflow_reference_links(
     references
 }
 
+fn reviewed_promotion_task_notes(
+    title: &str,
+    notes: Option<&str>,
+    reviewed_content: Option<&str>,
+    messages: &[InflowMessageEvidence],
+) -> String {
+    notes
+        .map(str::trim)
+        .filter(|value| reviewed_content.is_some() || !value.is_empty())
+        .map_or_else(
+            || default_google_chat_task_notes(title, messages),
+            str::to_owned,
+        )
+}
+
 async fn insert_promoted_task(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     command: &PromoteProjectInflowItem,
@@ -2494,7 +2562,7 @@ async fn insert_promoted_task(
             status, priority, due_at, work_kind
          ) VALUES ($1, $2, $3, $4, $5, $6, 'open', $7, $8, $9)
          RETURNING id, project_id, title, notes, assignee_name,
-            status, priority, due_at, completed_at, work_kind, version",
+            status, priority, due_at, completed_at, work_kind, workflow_state, waiting_reason, version",
     )
     .bind(command.task_id)
     .bind(command.user_id)
@@ -2518,6 +2586,7 @@ async fn insert_task_assignment_public_details(
     command: &PromoteProjectInflowItem,
     analysis: &PromotionAnalysisRow,
     reference_links: &[String],
+    reviewed_content: Option<&str>,
 ) -> Result<(), StorageError> {
     let details = task_assignment_details(
         Some(&analysis.summary),
@@ -2528,8 +2597,8 @@ async fn insert_task_assignment_public_details(
     sqlx::query(
         "INSERT INTO task_assignment_public_details (
             task_id, user_id, summary, action_items,
-            completion_criteria, reference_links
-         ) VALUES ($1, $2, $3, $4, $5, $6)",
+            completion_criteria, reference_links, reviewed_content
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(command.task_id)
     .bind(command.user_id)
@@ -2537,6 +2606,7 @@ async fn insert_task_assignment_public_details(
     .bind(details.action_items)
     .bind(details.completion_criteria)
     .bind(details.reference_links)
+    .bind(reviewed_content.map(str::trim))
     .execute(&mut **transaction)
     .await
     .map_err(classify)?;
@@ -2718,6 +2788,8 @@ struct PromotedTaskRow {
     due_at: Option<OffsetDateTime>,
     completed_at: Option<OffsetDateTime>,
     work_kind: String,
+    workflow_state: String,
+    waiting_reason: Option<String>,
     version: i64,
 }
 
@@ -2739,6 +2811,8 @@ impl PromotedTaskRow {
             completed_at: self.completed_at,
             work_kind: self.work_kind,
             completion_note: None,
+            workflow_state: self.workflow_state,
+            waiting_reason: self.waiting_reason,
             version: self.version,
         })
     }
@@ -3141,6 +3215,21 @@ mod tests {
     }
 
     #[test]
+    fn explicit_empty_reviewed_notes_do_not_restore_the_raw_conversation() {
+        assert!(reviewed_promotion_task_notes("업무 확인", Some("  "), Some(""), &[]).is_empty());
+        assert!(!reviewed_promotion_task_notes("업무 확인", Some("  "), None, &[]).is_empty());
+        assert_eq!(
+            reviewed_promotion_task_notes(
+                "업무 확인",
+                Some(" 수정한 내용 "),
+                Some("수정한 내용"),
+                &[]
+            ),
+            "수정한 내용"
+        );
+    }
+
+    #[test]
     fn completion_delivery_keeps_task_context_for_detailed_source_reply() {
         let public_summary = "정산방식을 표시합니다.";
         let delivery = GoogleChatCompletionDelivery::from(GoogleChatCompletionDeliveryRow {
@@ -3154,6 +3243,7 @@ mod tests {
             project_title: "비스킷링크".to_owned(),
             task_title: "거래내역 정산방식 표시".to_owned(),
             public_summary: Some(public_summary.to_owned()),
+            reviewed_content: None,
             action_items: vec!["표시 기준을 검증합니다.".to_owned()],
             completion_criteria: Some("회귀 검증을 통과합니다.".to_owned()),
             reference_links: vec!["https://itsm.example.test/issues/3876".to_owned()],

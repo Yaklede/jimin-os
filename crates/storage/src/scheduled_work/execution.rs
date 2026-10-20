@@ -6,13 +6,18 @@ use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use super::{
-    ScheduledWork, ScheduledWorkDefinition, ScheduledWorkPreview, ScheduledWorkRun,
+    ScheduledWork, ScheduledWorkDefinition, ScheduledWorkPreview, ScheduledWorkRun, WorkCondition,
     WorkDestination, WorkMessageDetail, WorkScope, classify, korea_offset, validate_scope,
 };
 use crate::{Database, StorageError, webhook::GoogleChatMentionDirectory};
 
 #[derive(sqlx::FromRow)]
 struct ReminderTask {
+    status: String,
+    workflow_state: String,
+    updated_at: OffsetDateTime,
+    completed_at: Option<OffsetDateTime>,
+    latest_external_reply_at: Option<OffsetDateTime>,
     id: Uuid,
     title: String,
     project_title: Option<String>,
@@ -22,6 +27,41 @@ struct ReminderTask {
     action_items: Vec<String>,
     completion_criteria: Option<String>,
     reference_links: Vec<String>,
+}
+
+fn matches_condition(
+    task: &ReminderTask,
+    definition: &ScheduledWorkDefinition,
+    at: OffsetDateTime,
+) -> bool {
+    let window = Duration::hours(i64::from(definition.condition_hours));
+    match definition.condition {
+        WorkCondition::Always => task.status == "open",
+        WorkCondition::DeadlineNear => {
+            task.status == "open"
+                && task
+                    .due_at
+                    .is_some_and(|due| due >= at && due <= at + window)
+        }
+        WorkCondition::NoResponse => {
+            task.status == "open"
+                && task.workflow_state == "waiting"
+                && task.updated_at <= at - window
+                && task
+                    .latest_external_reply_at
+                    .is_none_or(|reply| reply <= task.updated_at)
+        }
+        WorkCondition::CompletionConfirmation => {
+            task.status == "completed"
+                && task.completed_at.is_some_and(|completed| {
+                    completed <= at - window
+                        && completed >= at - Duration::days(30)
+                        && task
+                            .latest_external_reply_at
+                            .is_none_or(|reply| reply <= completed)
+                })
+        }
+    }
 }
 
 impl ReminderTask {
@@ -190,12 +230,19 @@ pub(super) async fn preview_in_transaction(
     validate_scope(tx, user, definition).await?;
     let tasks: Vec<ReminderTask> = sqlx::query_as(
         "SELECT t.id,t.title,p.title AS project_title,t.assignee_name,t.due_at,d.summary,
+         t.status,t.workflow_state,t.updated_at,t.completed_at,
+         (SELECT MAX(i.received_at) FROM project_inflow_items i
+          JOIN project_google_chat_sources s ON s.id=i.source_id
+          JOIN google_chat_accounts a ON a.id=s.account_id
+          WHERE i.user_id=t.user_id AND i.promoted_task_id=t.id
+          AND i.sender_provider_name IS DISTINCT FROM CONCAT('users/',a.provider_subject)
+          AND i.sender_provider_name IS DISTINCT FROM 'users/app') AS latest_external_reply_at,
          COALESCE(d.action_items,'{}') AS action_items,d.completion_criteria,
          COALESCE(d.reference_links,'{}') AS reference_links
          FROM tasks t LEFT JOIN projects p ON p.id=t.project_id AND p.user_id=t.user_id
          LEFT JOIN task_assignment_public_details d ON d.task_id=t.id AND d.user_id=t.user_id
          JOIN workspaces w ON w.id=$2 AND w.user_id=t.user_id
-         WHERE t.user_id=$1 AND t.status='open'
+         WHERE t.user_id=$1 AND (t.status='open' OR ($4::BOOL AND t.status='completed'))
            AND (p.workspace_id=w.id OR (t.project_id IS NULL AND w.scope='personal'))
            AND ($3::UUID IS NULL OR t.project_id=$3)
            AND (p.id IS NULL OR p.status='active')
@@ -204,6 +251,7 @@ pub(super) async fn preview_in_transaction(
     .bind(user)
     .bind(definition.workspace_id)
     .bind(definition.project_id)
+    .bind(definition.condition == WorkCondition::CompletionConfirmation)
     .fetch_all(&mut **tx)
     .await
     .map_err(classify)?;
@@ -215,7 +263,9 @@ pub(super) async fn preview_in_transaction(
     let tasks: Vec<_> = tasks
         .into_iter()
         .filter(|task| {
-            matches_scope(task.due_at, definition, at)
+            (definition.condition != WorkCondition::Always
+                || matches_scope(task.due_at, definition, at))
+                && matches_condition(task, definition, at)
                 && previously_sent.is_none_or(|ids| ids.contains(&task.id))
                 && (assignee_filter.is_empty()
                     || !task.assignee_names().is_disjoint(&assignee_filter))
@@ -332,6 +382,16 @@ pub(super) async fn preview_in_transaction(
         messages,
         warnings,
         schedule_count,
+        holiday_status: if definition.skip_holidays {
+            crate::holidays::holiday_status(
+                tx,
+                definition.next_slot(at)?.to_offset(korea_offset()).date(),
+                at,
+            )
+            .await?
+        } else {
+            crate::holidays::HolidayStatus::WorkingDay
+        },
         next_run_at: definition.next_slot(at)?,
     })
 }
@@ -365,6 +425,24 @@ impl Database {
         version: i64,
         now: OffsetDateTime,
     ) -> Result<Option<ScheduledWorkRun>, StorageError> {
+        self.run_scheduled_work_now_with_holiday_override(user, id, request, version, now, false)
+            .await
+    }
+
+    /// A manual holiday override requires an explicit client confirmation.
+    ///
+    /// # Errors
+    /// Rejects an unconfirmed manual run on a holiday or with unknown coverage.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_scheduled_work_now_with_holiday_override(
+        &self,
+        user: Uuid,
+        id: Uuid,
+        request: Uuid,
+        version: i64,
+        now: OffsetDateTime,
+        allow_holiday: bool,
+    ) -> Result<Option<ScheduledWorkRun>, StorageError> {
         if request.get_version_num() != 7 {
             return Err(StorageError::InvalidConfiguration);
         }
@@ -382,6 +460,14 @@ impl Database {
         }
         if rule.version != version {
             return Ok(None);
+        }
+        if rule.definition.skip_holidays
+            && !allow_holiday
+            && crate::holidays::holiday_status(&mut tx, now.to_offset(korea_offset()).date(), now)
+                .await?
+                != crate::holidays::HolidayStatus::WorkingDay
+        {
+            return Err(StorageError::InvalidConfiguration);
         }
         execute(&mut tx, user, &rule, request, "manual", now, now, None).await?;
         let run = load_run(&mut tx, user, request).await?;
@@ -542,6 +628,53 @@ async fn execute(
     now: OffsetDateTime,
     skip: Option<&str>,
 ) -> Result<(), StorageError> {
+    if kind != "manual" && rule.definition.skip_holidays {
+        match crate::holidays::holiday_status(tx, at.to_offset(korea_offset()).date(), now).await? {
+            crate::holidays::HolidayStatus::Holiday { name } => {
+                return insert_run(
+                    tx,
+                    user,
+                    rule,
+                    id,
+                    kind,
+                    at,
+                    "skipped",
+                    Some("holiday_excluded"),
+                    &[],
+                    &[name],
+                )
+                .await;
+            }
+            crate::holidays::HolidayStatus::Unavailable => {
+                insert_run(
+                    tx,
+                    user,
+                    rule,
+                    id,
+                    kind,
+                    at,
+                    "failed",
+                    Some("holiday_calendar_unavailable"),
+                    &[],
+                    &[],
+                )
+                .await?;
+                // One notice per local day; the follow-up must not repeat it.
+                if kind == "primary" {
+                    queue_push(
+                        tx,
+                        user,
+                        id,
+                        now,
+                        "공휴일 자료를 확인하지 못해 예약 발송을 보류했어요",
+                    )
+                    .await?;
+                }
+                return Ok(());
+            }
+            crate::holidays::HolidayStatus::WorkingDay => {}
+        }
+    }
     if let Some(reason) = skip {
         return insert_run(
             tx,
@@ -694,9 +827,70 @@ async fn queue_push(
 mod tests {
     use super::*;
     #[test]
+    fn conditional_reminders_recheck_deadlines_replies_and_completion() {
+        let at = OffsetDateTime::now_utc();
+        let mut definition:ScheduledWorkDefinition=serde_json::from_value(json!({"title":"조건 안내","workspaceId":Uuid::now_v7(),"projectId":null,"webhookId":null,"weekdays":[1,2,3,4,5],"time":"09:00","followUpTime":null,"timeZone":"Asia/Seoul","taskScope":"all_open","includeOverdue":true,"assigneeNames":[],"destination":"in_app","mentionAssignees":false,"mentionNames":[],"includeSchedules":false,"condition":"deadline_near","conditionHours":24})).unwrap();
+        let mut task = ReminderTask {
+            status: "open".into(),
+            workflow_state: "waiting".into(),
+            updated_at: at - Duration::hours(25),
+            completed_at: None,
+            latest_external_reply_at: None,
+            id: Uuid::now_v7(),
+            title: "조건 일감".into(),
+            project_title: None,
+            assignee_name: None,
+            due_at: Some(at + Duration::hours(24)),
+            summary: None,
+            action_items: vec![],
+            completion_criteria: None,
+            reference_links: vec![],
+        };
+        assert!(matches_condition(&task, &definition, at));
+        task.due_at = Some(at + Duration::hours(24) + Duration::seconds(1));
+        assert!(!matches_condition(&task, &definition, at));
+        task.due_at = Some(at - Duration::seconds(1));
+        assert!(!matches_condition(&task, &definition, at));
+        definition.condition = WorkCondition::NoResponse;
+        assert!(matches_condition(&task, &definition, at));
+        task.latest_external_reply_at = Some(at - Duration::hours(1));
+        assert!(!matches_condition(&task, &definition, at));
+        task.latest_external_reply_at = None;
+        task.workflow_state = "in_progress".into();
+        assert!(!matches_condition(&task, &definition, at));
+        definition.condition = WorkCondition::CompletionConfirmation;
+        task.status = "completed".into();
+        task.completed_at = Some(at - Duration::hours(25));
+        assert!(matches_condition(&task, &definition, at));
+        task.latest_external_reply_at = Some(at - Duration::hours(1));
+        assert!(!matches_condition(&task, &definition, at));
+        task.latest_external_reply_at = None;
+        task.completed_at = Some(at - Duration::days(31));
+        assert!(!matches_condition(&task, &definition, at));
+        definition.condition = WorkCondition::Always;
+        assert!(!matches_condition(&task, &definition, at));
+        task.status = "open".into();
+        assert!(matches_condition(&task, &definition, at));
+        let mut legacy = serde_json::to_value(&definition).unwrap();
+        legacy.as_object_mut().unwrap().remove("condition");
+        legacy.as_object_mut().unwrap().remove("conditionHours");
+        let legacy: ScheduledWorkDefinition = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.condition, WorkCondition::Always);
+        assert_eq!(legacy.condition_hours, 24);
+        definition.condition_hours = 0;
+        assert!(definition.validate().is_err());
+        definition.condition_hours = 169;
+        assert!(definition.validate().is_err());
+    }
+    #[test]
     fn reminder_modes_keep_dates_but_only_details_mode_includes_description_and_links() {
         let at = OffsetDateTime::parse("2026-09-16T09:00:00+09:00", &Rfc3339).unwrap();
         let mut task = ReminderTask {
+            status: "open".into(),
+            workflow_state: "not_started".into(),
+            updated_at: at,
+            completed_at: None,
+            latest_external_reply_at: None,
             id: Uuid::now_v7(),
             title: "  계약서\n 검토  ".into(),
             project_title: Some("계약 프로젝트".into()),
@@ -735,6 +929,11 @@ mod tests {
     #[test]
     fn assignee_names_are_trimmed_deduplicated_and_rendered_individually() {
         let mut task = ReminderTask {
+            status: "open".into(),
+            workflow_state: "not_started".into(),
+            updated_at: OffsetDateTime::now_utc(),
+            completed_at: None,
+            latest_external_reply_at: None,
             id: Uuid::now_v7(),
             title: String::new(),
             project_title: None,

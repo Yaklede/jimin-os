@@ -73,6 +73,8 @@ import {
   type PromoteInflowInput,
 } from "./ProjectInflowPanel";
 import { registerMobileBackHandler } from "../mobileBack";
+import { ReportEvidencePanel } from "./ReportEvidencePanel";
+import type { ReportEvidenceMetric, ReportEvidencePage } from "../api/projects";
 
 type ProjectDetailTab =
   "tasks" | "weekly" | "inflow" | "integrations" | "activity";
@@ -85,6 +87,13 @@ const PROJECT_DETAIL_TABS: ProjectDetailTab[] = [
 ];
 
 type ProjectsWorkspaceProps = {
+  onLoadReportEvidence?(
+    projectId: string,
+    metric: ReportEvidenceMetric,
+    start: string,
+    end: string,
+    after?: string,
+  ): Promise<ReportEvidencePage>;
   scheduledWork?: ReactNode;
   workspaces: Workspace[];
   goals: Goal[];
@@ -177,6 +186,8 @@ type ProjectsWorkspaceProps = {
       assigneeName?: string;
       workKind?: TaskWorkKind;
       status: Task["status"];
+      workflowState?: Task["workflowState"];
+      waitingReason?: string | null;
       priority: number;
       dueAt?: string;
       parentTaskId?: string | null;
@@ -234,6 +245,7 @@ type ProjectsWorkspaceProps = {
   ): Promise<void>;
   onRetryInflowAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryInflowCompletion(item: ProjectInflowItem): Promise<void>;
+  onReviewInflowChange?(item: ProjectInflowItem): void;
 };
 
 export function ProjectsWorkspace({
@@ -268,6 +280,7 @@ export function ProjectsWorkspace({
   saving,
   error,
   weeklyReportError,
+  onLoadReportEvidence,
   inflowError,
   itsmError,
   onSelectWorkspace,
@@ -304,6 +317,7 @@ export function ProjectsWorkspace({
   onDismissInflow,
   onRetryInflowAnalysis,
   onRetryInflowCompletion,
+  onReviewInflowChange,
 }: ProjectsWorkspaceProps) {
   const mobile = useMobileLayout();
   const [formOpen, setFormOpen] = useState(false);
@@ -384,8 +398,18 @@ export function ProjectsWorkspace({
   }, [restoreListFocus, selectedProjectId]);
 
   useEffect(() => {
-    if (highlightedTaskId) setActiveProjectTab("tasks");
-  }, [highlightedTaskId, selectedProjectId]);
+    if (highlightedTaskId) {
+      setActiveProjectTab(
+        tasks.some(
+          (task) =>
+            task.id === highlightedTaskId && task.status === "completed",
+        )
+          ? "activity"
+          : "tasks",
+      );
+      setSelectedTaskId(highlightedTaskId);
+    }
+  }, [highlightedTaskId, selectedProjectId, tasks]);
 
   useEffect(() => {
     if (!highlightedTaskId || activeProjectTab !== "tasks") return;
@@ -1228,6 +1252,32 @@ export function ProjectsWorkspace({
                   aria-label={copy.projects.detailTabs.weekly}
                 >
                   <ProjectWeeklyReportPanel
+                    key={selectedProject.id}
+                    evidenceContext={
+                      weeklyReport
+                        ? `${selectedProject.id}:${weeklyReport.periodStart}:${weeklyReport.periodEnd}`
+                        : selectedProject.id
+                    }
+                    onLoadEvidence={
+                      onLoadReportEvidence && weeklyReport
+                        ? (metric, after) =>
+                            onLoadReportEvidence(
+                              selectedProject.id,
+                              metric,
+                              weeklyReport.periodStart,
+                              weeklyReport.periodEnd,
+                              after,
+                            )
+                        : undefined
+                    }
+                    onOpenEvidenceTask={(task) => {
+                      if (tasks.some((current) => current.id === task.id)) {
+                        setSelectedTaskId(task.id);
+                        setActiveProjectTab(
+                          task.status === "completed" ? "activity" : "tasks",
+                        );
+                      } else onOpenGoalTask(task.id, selectedProject.id);
+                    }}
                     project={selectedProject}
                     report={selectedWeeklyReport}
                     history={selectedWeeklyHistory}
@@ -1237,6 +1287,7 @@ export function ProjectsWorkspace({
                     reportsError={reportsError}
                     error={weeklyReportError}
                     onOpenTasks={() => setActiveProjectTab("tasks")}
+                    onOpenInflow={() => setActiveProjectTab("inflow")}
                     onCreateReport={() =>
                       selectedWorkspaceId
                         ? onCreateWeeklyReport(
@@ -1386,6 +1437,7 @@ export function ProjectsWorkspace({
                   onDismiss={onDismissInflow}
                   onRetryAnalysis={onRetryInflowAnalysis}
                   onRetryCompletion={onRetryInflowCompletion}
+                  onReviewChange={onReviewInflowChange}
                   onOpenTask={(taskId) => {
                     setActiveProjectTab("tasks");
                     setSelectedTaskId(taskId);
@@ -1670,6 +1722,9 @@ function WeeklyWorkspaceOverview({
 }
 
 function ProjectWeeklyReportPanel({
+  evidenceContext,
+  onLoadEvidence,
+  onOpenEvidenceTask,
   project,
   report,
   history,
@@ -1679,10 +1734,17 @@ function ProjectWeeklyReportPanel({
   reportsError,
   error,
   onOpenTasks,
+  onOpenInflow,
   onCreateReport,
   onUpdateReport,
   onFinalizeReport,
 }: {
+  evidenceContext: string;
+  onLoadEvidence?(
+    metric: ReportEvidenceMetric,
+    after?: string,
+  ): Promise<ReportEvidencePage>;
+  onOpenEvidenceTask(task: Task): void;
   project: Project;
   report: WeeklyProjectReport | undefined;
   history: Array<{
@@ -1695,6 +1757,7 @@ function ProjectWeeklyReportPanel({
   reportsError: string | undefined;
   error: string | undefined;
   onOpenTasks(): void;
+  onOpenInflow(): void;
   onCreateReport(): Promise<void>;
   onUpdateReport(
     report: Report,
@@ -1704,6 +1767,9 @@ function ProjectWeeklyReportPanel({
 }) {
   const latestReport = reports[0];
   const latestContent = latestReport?.content;
+  const [evidenceMetric, setEvidenceMetric] = useState<ReportEvidenceMetric>();
+  const openMetric = (metric: ReportEvidenceMetric) =>
+    onLoadEvidence ? () => setEvidenceMetric(metric) : undefined;
   const [summaryDraft, setSummaryDraft] = useState(
     latestContent?.summary ?? "",
   );
@@ -1768,34 +1834,41 @@ function ProjectWeeklyReportPanel({
         <WeeklyMetric
           label={copy.projects.operationMetrics.inflow}
           value={`${report.createdTaskCount}`}
+          onOpen={openMetric("created")}
         />
         <WeeklyMetric
           label={copy.projects.operationMetrics.completed}
           value={`${report.completedTaskCount}`}
+          onOpen={openMetric("completed")}
         />
         <WeeklyMetric
           label={copy.projects.operationMetrics.backlog}
           value={copy.projects.backlogDelta(report.backlogDelta)}
+          onOpen={openMetric("backlog")}
           attention={report.backlogDelta > 0}
         />
         <WeeklyMetric
           label={copy.projects.operationMetrics.overdue}
           value={`${report.overdueTaskCount}`}
+          onOpen={openMetric("overdue")}
           attention={report.overdueTaskCount > 0}
         />
         <WeeklyMetric
           label={copy.projects.operationMetrics.stale}
           value={`${report.staleTaskCount}`}
+          onOpen={openMetric("stale")}
           attention={report.staleTaskCount > 0}
         />
         <WeeklyMetric
           label={copy.projects.operationMetrics.unassigned}
           value={`${report.unassignedTaskCount}`}
+          onOpen={openMetric("unassigned")}
           attention={report.unassignedTaskCount > 0}
         />
         <WeeklyMetric
           label={copy.projects.operationMetrics.cycleTime}
           value={copy.projects.cycleTime(report.averageCycleTimeHours)}
+          onOpen={openMetric("completed")}
         />
         <WeeklyMetric
           label={copy.projects.operationMetrics.onTime}
@@ -1803,8 +1876,47 @@ function ProjectWeeklyReportPanel({
             report.onTimeCompletionPercent ?? undefined,
           )}
           attention={(report.onTimeCompletionPercent ?? 100) < 80}
+          onOpen={openMetric("on_time")}
         />
       </dl>
+      {onLoadEvidence && (
+        <div className="report-evidence-controls">
+          <button
+            type="button"
+            className="secondary-button focus-visible-control"
+            onClick={() => setEvidenceMetric("waiting")}
+          >
+            응답 대기 · 사유 보기
+          </button>
+          <button
+            type="button"
+            className="secondary-button focus-visible-control"
+            onClick={onOpenInflow}
+          >
+            현재 확인할 업무 대화 보기
+          </button>
+          <details>
+            <summary>집계 기준 보기</summary>
+            <p>
+              신규·완료: 이번 주 월요일 0시부터 리포트 생성 시각까지. 남은 일:
+              현재 미완료 일감. 기한 지남: 생성 시각보다 마감이 이른 미완료
+              일감. 오래 변경되지 않은 일: 프로젝트의 정체 기준일을 넘긴 미완료
+              일감. 평균 처리 시간: 이번 주 완료 일감의 등록부터 완료까지. 기한
+              내 완료율: 마감일이 있는 이번 주 완료 일감 중 기한 안에 완료한
+              비율.
+            </p>
+          </details>
+        </div>
+      )}
+      {evidenceMetric && onLoadEvidence && (
+        <ReportEvidencePanel
+          key={evidenceContext}
+          metric={evidenceMetric}
+          onLoad={onLoadEvidence}
+          onOpen={onOpenEvidenceTask}
+          onClose={() => setEvidenceMetric(undefined)}
+        />
+      )}
       <div className="project-weekly-report__focus">
         <div>
           <strong>{copy.projects.weeklyFocusTitle}</strong>
@@ -1985,10 +2097,12 @@ function ProjectWeeklyReportPanel({
 }
 
 function WeeklyMetric({
+  onOpen,
   label,
   value,
   attention = false,
 }: {
+  onOpen?(): void;
   label: string;
   value: string;
   attention?: boolean;
@@ -1996,7 +2110,21 @@ function WeeklyMetric({
   return (
     <div data-attention={attention}>
       <dt>{label}</dt>
-      <dd>{value}</dd>
+      <dd>
+        {onOpen ? (
+          <button
+            type="button"
+            className="focus-visible-control"
+            aria-label={`${label} 관련 일감 보기`}
+            onClick={onOpen}
+          >
+            {value}
+            <ChevronRight aria-hidden="true" />
+          </button>
+        ) : (
+          value
+        )}
+      </dd>
     </div>
   );
 }
@@ -2459,6 +2587,26 @@ function TaskDetail({ task, parentTask }: { task: Task; parentTask?: Task }) {
           <dd>{task.assigneeName || copy.projects.workItemAssigneeEmpty}</dd>
         </div>
         <div>
+          <dt>진행 상태</dt>
+          <dd>
+            {task.status === "completed"
+              ? "완료"
+              : task.status === "cancelled"
+                ? "취소"
+                : task.workflowState === "waiting"
+                  ? "대기 중"
+                  : task.workflowState === "in_progress"
+                    ? "진행 중"
+                    : "진행 전"}
+          </dd>
+        </div>
+        {task.status === "open" && task.workflowState === "waiting" && (
+          <div>
+            <dt>대기 사유</dt>
+            <dd>{task.waitingReason || "수정에서 대기 사유를 적어 주세요."}</dd>
+          </div>
+        )}
+        <div>
           <dt>{copy.projects.workItemPriorityLabel}</dt>
           <dd>
             {copy.projects.taskPriorities[task.priority] ??
@@ -2496,6 +2644,8 @@ function TaskEditForm({
     assigneeName?: string;
     workKind?: TaskWorkKind;
     status: Task["status"];
+    workflowState?: Task["workflowState"];
+    waitingReason?: string | null;
     priority: number;
     dueAt?: string;
     parentTaskId?: string | null;
@@ -2506,6 +2656,10 @@ function TaskEditForm({
   const [notes, setNotes] = useState(task.notes ?? "");
   const [assigneeName, setAssigneeName] = useState(task.assigneeName ?? "");
   const [priority, setPriority] = useState(String(task.priority));
+  const [workflowState, setWorkflowState] = useState<
+    NonNullable<Task["workflowState"]>
+  >(task.workflowState ?? "not_started");
+  const [waitingReason, setWaitingReason] = useState(task.waitingReason ?? "");
   const [dueDate, setDueDate] = useState(isoToSeoulLocalDateTime(task.dueAt));
   const [parentTaskId, setParentTaskId] = useState(task.parentTaskId ?? "");
   const [confirmingRemoval, setConfirmingRemoval] = useState(false);
@@ -2537,6 +2691,14 @@ function TaskEditForm({
       setError(copy.projects.workItemTitleRequired);
       return;
     }
+    if (
+      task.status === "open" &&
+      workflowState === "waiting" &&
+      !waitingReason.trim()
+    ) {
+      setError("대기 사유를 적은 뒤 다시 저장해 주세요.");
+      return;
+    }
     const deadline = resolveOptionalSeoulDateTime(dueDate);
     if (!deadline.valid) {
       setError(deadlinePickerCopy.invalid);
@@ -2549,6 +2711,13 @@ function TaskEditForm({
         notes: notes.trim() || undefined,
         assigneeName: assigneeName.trim() || undefined,
         status: task.status,
+        ...(task.status === "open"
+          ? {
+              workflowState,
+              waitingReason:
+                workflowState === "waiting" ? waitingReason.trim() : null,
+            }
+          : {}),
         priority: Number(priority),
         dueAt: deadline.value,
         parentTaskId: parentTaskId || null,
@@ -2607,6 +2776,39 @@ function TaskEditForm({
         />
       </label>
       <div className="project-task-edit-form__fields">
+        {task.status === "open" && (
+          <label htmlFor={`task-workflow-${task.id}`}>
+            <span>진행 상태</span>
+            <select
+              id={`task-workflow-${task.id}`}
+              value={workflowState}
+              disabled={busy}
+              onChange={(event) =>
+                setWorkflowState(
+                  event.target.value as NonNullable<Task["workflowState"]>,
+                )
+              }
+            >
+              <option value="not_started">진행 전</option>
+              <option value="in_progress">진행 중</option>
+              <option value="waiting">대기 중</option>
+            </select>
+          </label>
+        )}
+        {task.status === "open" && workflowState === "waiting" && (
+          <label htmlFor={`task-waiting-${task.id}`}>
+            <span>대기 사유</span>
+            <textarea
+              id={`task-waiting-${task.id}`}
+              value={waitingReason}
+              required
+              maxLength={1000}
+              rows={2}
+              disabled={busy}
+              onChange={(event) => setWaitingReason(event.target.value)}
+            />
+          </label>
+        )}
         <label htmlFor={`task-parent-${task.id}`}>
           <span>{copy.projects.parentTaskLabel}</span>
           <select

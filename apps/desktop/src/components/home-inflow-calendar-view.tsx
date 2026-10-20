@@ -9,7 +9,7 @@ import {
 import { PlanningCalendar } from "./planning-calendar";
 
 interface HomeInflowCalendarViewProps {
-  kind?: "new" | "existing";
+  kind?: "new" | "existing" | "uncertain";
   range: PlanningViewRange;
   items: ProjectInflowItem[];
   onRangeChange(range: PlanningViewRange): void;

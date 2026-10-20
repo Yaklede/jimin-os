@@ -229,6 +229,13 @@ async fn run_server() -> Result<(), &'static str> {
     let push_delivery_task = spawn_push_delivery_worker(&state);
     let work_brief_task = spawn_work_brief_worker(&state);
     let scheduled_work_task = jimin_api::scheduled_work::spawn_scheduled_work_worker(&state);
+    let holiday_task = jimin_api::korean_holidays::spawn_holiday_worker(
+        database.clone(),
+        match config.holiday_service_key() {
+            SecretSetting::Available(key) => Some(key.clone()),
+            SecretSetting::Missing | SecretSetting::Invalid => None,
+        },
+    );
     let result = serve_with_shutdown(listener, router(state), shutdown_signal())
         .await
         .map_err(|_| "api.serve_failed");
@@ -262,6 +269,10 @@ async fn run_server() -> Result<(), &'static str> {
         let _ = push_delivery_task.await;
     }
     if let Some(task) = scheduled_work_task {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(task) = holiday_task {
         task.abort();
         let _ = task.await;
     }

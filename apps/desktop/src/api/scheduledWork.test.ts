@@ -14,9 +14,12 @@ describe("scheduled reminder display settings", () => {
     (template) => {
       const definition = scheduledWorkTemplate("workspace", template);
       expect(definition.messageDetail).toBe("title_only");
+      expect(definition.skipHolidays).toBe(false);
+      delete definition.skipHolidays;
       delete definition.messageDetail;
       const normalized = normalizeScheduledWorkDefinition(definition);
       expect(normalized.messageDetail).toBe("title_only");
+      expect(normalized.skipHolidays).toBe(false);
       expect(definition.messageDetail).toBeUndefined();
       expect(normalized).toMatchObject(definition);
     },

@@ -967,6 +967,8 @@ impl Database {
             completed_at: None,
             work_kind: work_kind.to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 1,
         };
         append_change(

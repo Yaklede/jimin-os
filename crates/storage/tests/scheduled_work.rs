@@ -13,6 +13,8 @@ fn at(value: &str) -> OffsetDateTime {
 }
 fn rule(workspace: Uuid, project: Uuid, webhook: Uuid) -> ScheduledWorkDefinition {
     ScheduledWorkDefinition {
+        condition: jimin_storage::scheduled_work::WorkCondition::Always,
+        condition_hours: 24,
         title: "마감 안내".into(),
         workspace_id: workspace,
         project_id: Some(project),
@@ -29,6 +31,7 @@ fn rule(workspace: Uuid, project: Uuid, webhook: Uuid) -> ScheduledWorkDefinitio
         mention_names: vec![],
         include_schedules: false,
         message_detail: WorkMessageDetail::TitleAndDetails,
+        skip_holidays: false,
     }
 }
 async fn owner(pool: &PgPool) -> (Uuid, Uuid, Uuid, Uuid) {
@@ -87,7 +90,7 @@ async fn scheduled_work_upgrade_delivery_and_recovery_contract() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(schema, 56);
+    assert_eq!(schema, jimin_storage::EXPECTED_SCHEMA_VERSION);
     let initial = at("2026-09-14T08:00:00+09:00");
     let definition = rule(workspace, project, webhook);
     let id = Uuid::now_v7();
@@ -370,6 +373,391 @@ async fn scheduled_work_upgrade_delivery_and_recovery_contract() {
     assert!(db.delete_scheduled_work(user, id, 5).await.unwrap());
     verify_joint_assignees(&db, &pool).await;
     verify_message_detail_modes(&db, &pool).await;
+    verify_holiday_exclusion(&db, &pool).await;
+    verify_holiday_date_boundaries(&db, &pool).await;
+    verify_conditional_followups(&db, &pool).await;
+}
+
+#[allow(clippy::too_many_lines)] // Clock-boundary fixtures and replies must share one isolated owner and transaction history.
+async fn verify_conditional_followups(db: &Database, pool: &PgPool) {
+    use jimin_storage::scheduled_work::WorkCondition;
+    let (user, workspace, project, webhook) = owner(pool).await;
+    let clock = at("2026-09-14T09:00:00+09:00");
+    let near = task(
+        pool,
+        user,
+        project,
+        "24시간 경계",
+        "2026-09-15T09:00:00+09:00",
+    )
+    .await;
+    task(pool, user, project, "범위 밖", "2026-09-15T09:00:01+09:00").await;
+    task(
+        pool,
+        user,
+        project,
+        "기한 지남",
+        "2026-09-14T08:59:59+09:00",
+    )
+    .await;
+    // Seed historical state at insertion: UPDATE intentionally refreshes updated_at through the production trigger.
+    let waiting = Uuid::now_v7();
+    sqlx::query("INSERT INTO tasks(id,user_id,project_id,title,assignee_name,due_at,workflow_state,waiting_reason,updated_at) VALUES($1,$2,$3,'응답 기다림','홍길동',$4,'waiting','자료 회신 대기',$5)")
+        .bind(waiting).bind(user).bind(project).bind(at("2026-10-14T09:00:00+09:00")).bind(clock-time::Duration::hours(30)).execute(pool).await.unwrap();
+    let completed = task(
+        pool,
+        user,
+        project,
+        "완료 확인 필요",
+        "2026-09-12T09:00:00+09:00",
+    )
+    .await;
+    let fresh = task(
+        pool,
+        user,
+        project,
+        "방금 완료",
+        "2026-09-14T09:00:00+09:00",
+    )
+    .await;
+    let old = task(
+        pool,
+        user,
+        project,
+        "오래된 완료",
+        "2026-08-10T09:00:00+09:00",
+    )
+    .await;
+    for (id, finished) in [
+        (completed, clock - time::Duration::days(2)),
+        (fresh, clock - time::Duration::hours(1)),
+        (old, clock - time::Duration::days(31)),
+    ] {
+        sqlx::query("UPDATE tasks SET status='completed',completed_at=$2 WHERE id=$1")
+            .bind(id)
+            .bind(finished)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    let mut definition = rule(workspace, project, webhook);
+    definition.follow_up_time = None;
+    // The calendar scope is deliberately Today: conditions determine their own windows.
+    definition.condition = WorkCondition::DeadlineNear;
+    let preview = db
+        .preview_scheduled_work(user, &definition, clock)
+        .await
+        .unwrap();
+    assert_eq!(preview.task_ids, vec![near]);
+    definition.condition = WorkCondition::NoResponse;
+    assert_eq!(
+        db.preview_scheduled_work(user, &definition, clock)
+            .await
+            .unwrap()
+            .task_ids,
+        vec![waiting]
+    );
+    definition.condition = WorkCondition::CompletionConfirmation;
+    assert_eq!(
+        db.preview_scheduled_work(user, &definition, clock)
+            .await
+            .unwrap()
+            .task_ids,
+        vec![completed]
+    );
+    let account = Uuid::now_v7();
+    let source = Uuid::now_v7();
+    sqlx::query("INSERT INTO google_chat_accounts(id,user_id,provider_subject,email,status) VALUES($1,$2,'100','conditional@example.test','active')").bind(account).bind(user).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO project_google_chat_sources(id,user_id,project_id,account_id,space_name,display_name) VALUES($1,$2,$3,$4,'spaces/conditional','조건 확인')").bind(source).bind(user).bind(project).bind(account).execute(pool).await.unwrap();
+    let reply = Uuid::now_v7();
+    sqlx::query("INSERT INTO project_inflow_items(id,user_id,project_id,source_id,provider_message_name,content_text,received_at,promoted_task_id,sender_provider_name) VALUES($1,$2,$3,$4,$5,'확인했어요.',$6,$7,'users/100')")
+        .bind(reply).bind(user).bind(project).bind(source).bind(format!("spaces/conditional/messages/{reply}")).bind(clock-time::Duration::hours(1)).bind(waiting).execute(pool).await.unwrap();
+    definition.condition = WorkCondition::NoResponse;
+    assert_eq!(
+        db.preview_scheduled_work(user, &definition, clock)
+            .await
+            .unwrap()
+            .task_ids,
+        vec![waiting],
+        "owner reply does not represent the requested person's response"
+    );
+    sqlx::query("UPDATE project_inflow_items SET sender_provider_name='users/200' WHERE id=$1")
+        .bind(reply)
+        .execute(pool)
+        .await
+        .unwrap();
+    assert!(
+        db.preview_scheduled_work(user, &definition, clock)
+            .await
+            .unwrap()
+            .task_ids
+            .is_empty(),
+        "external reply stops a no-response followup"
+    );
+    sqlx::query("UPDATE project_inflow_items SET promoted_task_id=$2 WHERE id=$1")
+        .bind(reply)
+        .bind(completed)
+        .execute(pool)
+        .await
+        .unwrap();
+    definition.condition = WorkCondition::CompletionConfirmation;
+    assert!(
+        db.preview_scheduled_work(user, &definition, clock)
+            .await
+            .unwrap()
+            .task_ids
+            .is_empty(),
+        "external completion confirmation stops a followup"
+    );
+    definition.condition = WorkCondition::NoResponse;
+    definition.destination = WorkDestination::InApp;
+    definition.webhook_id = None;
+    definition.mention_assignees = false;
+    let rule_id = Uuid::now_v7();
+    db.save_scheduled_work(user, rule_id, &definition, false, None, clock)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        db.preview_scheduled_work(user, &definition, clock)
+            .await
+            .unwrap()
+            .task_ids,
+        vec![waiting]
+    );
+    sqlx::query("UPDATE tasks SET workflow_state='in_progress',waiting_reason=NULL WHERE id=$1")
+        .bind(waiting)
+        .execute(pool)
+        .await
+        .unwrap();
+    let run = db
+        .run_scheduled_work_now(user, rule_id, Uuid::now_v7(), 1, clock)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.status, "skipped");
+    assert_eq!(run.reason.as_deref(), Some("no_matching_work"));
+    assert!(
+        run.task_ids.is_empty(),
+        "execution rechecks changed task state instead of sending preview results"
+    );
+}
+
+async fn verify_holiday_date_boundaries(db: &Database, pool: &PgPool) {
+    // UTC date and delayed worker date must not replace the Korean scheduled date.
+    for (initial, scheduled, executed) in [
+        (
+            "2026-10-08T23:50:00+09:00",
+            "00:30",
+            "2026-10-09T00:35:00+09:00",
+        ),
+        (
+            "2026-10-09T23:00:00+09:00",
+            "23:30",
+            "2026-10-10T00:05:00+09:00",
+        ),
+    ] {
+        let initial = at(initial);
+        let (user, workspace, project, webhook) = owner(pool).await;
+        let mut definition = rule(workspace, project, webhook);
+        definition.skip_holidays = true;
+        definition.weekdays = (1..=7).collect();
+        definition.time = scheduled.into();
+        definition.follow_up_time = None;
+        definition.destination = WorkDestination::InApp;
+        definition.webhook_id = None;
+        definition.mention_assignees = false;
+        db.replace_holiday_month(
+            2026,
+            10,
+            &[(at("2026-10-09T00:00:00+09:00").date(), "한글날".into())],
+            initial,
+        )
+        .await
+        .unwrap();
+        let id = Uuid::now_v7();
+        db.save_scheduled_work(user, id, &definition, true, None, initial)
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query("UPDATE scheduled_work SET enabled=(id=$1)")
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(db.process_due_scheduled_work(at(executed)).await.unwrap());
+        let outcome: (String, String) = sqlx::query_as(
+            "SELECT status,reason FROM scheduled_work_runs WHERE scheduled_work_id=$1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(outcome, ("skipped".into(), "holiday_excluded".into()));
+    }
+}
+
+#[allow(clippy::too_many_lines)] // Both destinations, coverage and manual override form one isolated recurrence contract.
+async fn verify_holiday_exclusion(db: &Database, pool: &PgPool) {
+    use jimin_storage::{StorageError, holidays::HolidayStatus};
+    let initial = at("2026-10-09T08:00:00+09:00");
+    let holiday = initial.date();
+    for destination in [WorkDestination::GoogleChat, WorkDestination::InApp] {
+        let (user, workspace, project, webhook) = owner(pool).await;
+        task(
+            pool,
+            user,
+            project,
+            "휴일에도 마감일 유지",
+            "2026-10-09T23:59:00+09:00",
+        )
+        .await;
+        let mut definition = rule(workspace, project, webhook);
+        definition.skip_holidays = true;
+        definition.weekdays = (1..=7).collect();
+        definition.destination = destination;
+        if destination == WorkDestination::InApp {
+            definition.webhook_id = None;
+            definition.mention_assignees = false;
+        }
+        db.replace_holiday_month(2026, 10, &[(holiday, "한글날".into())], initial)
+            .await
+            .unwrap();
+        let preview = db
+            .preview_scheduled_work(user, &definition, initial)
+            .await
+            .unwrap();
+        assert_eq!(
+            preview.holiday_status,
+            HolidayStatus::Holiday {
+                name: "한글날".into()
+            }
+        );
+        let id = Uuid::now_v7();
+        db.save_scheduled_work(user, id, &definition, true, None, initial)
+            .await
+            .unwrap()
+            .unwrap();
+        for clock in ["2026-10-09T09:00:00+09:00", "2026-10-09T16:00:00+09:00"] {
+            // Isolate this rule from other enabled fixtures in the shared test database.
+            sqlx::query("UPDATE scheduled_work SET enabled=FALSE WHERE id<>$1")
+                .bind(id)
+                .execute(pool)
+                .await
+                .unwrap();
+            assert!(db.process_due_scheduled_work(at(clock)).await.unwrap());
+        }
+        let outcomes: Vec<(String, String)> = sqlx::query_as("SELECT status,reason FROM scheduled_work_runs WHERE scheduled_work_id=$1 ORDER BY scheduled_for")
+            .bind(id).fetch_all(pool).await.unwrap();
+        assert_eq!(
+            outcomes,
+            vec![("skipped".into(), "holiday_excluded".into()); 2]
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM webhook_deliveries WHERE user_id=$1")
+                .bind(user)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            count, 0,
+            "holiday exclusions must not create outbound chat deliveries"
+        );
+        assert!(matches!(
+            db.run_scheduled_work_now(user, id, Uuid::now_v7(), 1, initial)
+                .await,
+            Err(StorageError::InvalidConfiguration)
+        ));
+        let request = Uuid::now_v7();
+        let manual = db
+            .run_scheduled_work_now_with_holiday_override(user, id, request, 1, initial, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(manual.status.as_str(), "completed" | "delivering"));
+        assert_eq!(
+            db.run_scheduled_work_now_with_holiday_override(user, id, request, 1, initial, true)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            request
+        );
+        // Empty, successfully fetched coverage is a working day, not missing data.
+        db.replace_holiday_month(2026, 10, &[], initial)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.preview_scheduled_work(user, &definition, initial)
+                .await
+                .unwrap()
+                .holiday_status,
+            HolidayStatus::WorkingDay
+        );
+        db.replace_holiday_month(2026, 10, &[], initial - time::Duration::days(8))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.preview_scheduled_work(user, &definition, initial)
+                .await
+                .unwrap()
+                .holiday_status,
+            HolidayStatus::Unavailable
+        );
+        // A failed refresh cannot delete previously valid dates/coverage.
+        assert!(
+            db.replace_holiday_month(2026, 11, &[(holiday, "다른 달".into())], initial)
+                .await
+                .is_err()
+        );
+        let unknown = Uuid::now_v7();
+        assert!(matches!(
+            db.save_scheduled_work(user, unknown, &definition, true, None, initial)
+                .await,
+            Err(StorageError::InvalidConfiguration)
+        ));
+        db.save_scheduled_work(user, unknown, &definition, false, None, initial)
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query("UPDATE scheduled_work SET enabled=(id=$1)")
+            .bind(unknown)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(
+            db.process_due_scheduled_work(at("2026-10-09T09:00:00+09:00"))
+                .await
+                .unwrap()
+        );
+        let outcome: (String, String) = sqlx::query_as(
+            "SELECT status,reason FROM scheduled_work_runs WHERE scheduled_work_id=$1",
+        )
+        .bind(unknown)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome,
+            ("failed".into(), "holiday_calendar_unavailable".into())
+        );
+        let count_after: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM webhook_deliveries WHERE user_id=$1")
+                .bind(user)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            count_after,
+            i64::from(destination == WorkDestination::GoogleChat)
+        );
+        let due: OffsetDateTime = sqlx::query_scalar("SELECT due_at FROM tasks WHERE user_id=$1")
+            .bind(user)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(due, at("2026-10-09T23:59:00+09:00"));
+    }
 }
 
 #[allow(clippy::too_many_lines)] // Persisted definitions, previews and durable delivery share the same formatting contract.

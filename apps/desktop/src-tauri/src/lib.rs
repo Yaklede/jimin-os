@@ -130,7 +130,9 @@ pub fn run() {
         save_device_session,
         clear_device_session,
         read_or_create_installation_id,
-        inflow_notifications::configure_inflow_notifications
+        inflow_notifications::configure_inflow_notifications,
+        inflow_notifications::inflow_notification_diagnostics,
+        inflow_notifications::test_inflow_notification
     ]);
     #[cfg(not(target_os = "macos"))]
     let builder = builder.invoke_handler(tauri::generate_handler![

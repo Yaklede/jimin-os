@@ -11,12 +11,30 @@ export function applyDesignPreviewInflowDecision(
     Response.json({ error: "preview_invalid_decision" }, { status: 400 });
   if (!input || typeof input !== "object") return invalid();
   const values = input as Record<string, unknown>;
-  if (item.status !== "pending" || values.expectedVersion !== item.version) {
+  if (values.expectedVersion !== item.version) {
     return Response.json(
       { error: "preview_decision_conflict" },
       { status: 409 },
     );
   }
+  if (values.decision === "retry_completion" && item.status === "promoted") {
+    item.completionStatus = "sent";
+    item.completionReactionCompleted = true;
+    item.completionReplyCompleted = true;
+    item.completionErrorCode = null;
+    item.version += 1;
+    return Response.json(item);
+  }
+  if (
+    values.decision === "retry_dismissal_reply" &&
+    item.status === "dismissed" &&
+    item.dismissalReplyStatus === "failed"
+  ) {
+    item.dismissalReplyStatus = "sent";
+    item.version += 1;
+    return Response.json(item);
+  }
+  if (item.status !== "pending") return invalid();
   if (values.decision === "mark_seen" || values.decision === "dismiss") {
     if (values.decision === "mark_seen") item.reviewed = true;
     else {

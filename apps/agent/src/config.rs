@@ -104,7 +104,21 @@ impl AgentConfig {
             (None, None) => None,
             (Some(base_url), Some(token_file)) => {
                 let token = read_secret_file(&token_file, ConfigError::InvalidItsm)?;
-                Some(ItsmClient::new(&base_url, token).map_err(|_| ConfigError::InvalidItsm)?)
+                let status = env_string("JIMIN_ITSM_COMPLETION_STATUS_ID")?
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| {
+                        value
+                            .parse::<u64>()
+                            .ok()
+                            .filter(|id| *id > 0)
+                            .ok_or(ConfigError::InvalidItsm)
+                    })
+                    .transpose()?;
+                Some(
+                    ItsmClient::new(&base_url, token)
+                        .map_err(|_| ConfigError::InvalidItsm)?
+                        .with_completion_status_id(status),
+                )
             }
             _ => return Err(ConfigError::InvalidItsm),
         };

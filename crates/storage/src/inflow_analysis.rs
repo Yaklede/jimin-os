@@ -227,6 +227,14 @@ impl InflowAnalysisResult {
             {
                 return Err(StorageError::InvalidConfiguration);
             }
+        } else if self.classification == InflowClassification::FollowUp {
+            if self.suggested_task_title.is_some()
+                || self.suggested_completion_criteria.is_some()
+                || self.suggested_assignee_name.is_some()
+                || self.suggested_priority.is_some()
+            {
+                return Err(StorageError::InvalidConfiguration);
+            }
         } else if self.suggested_task_title.is_some()
             || !self.suggested_action_items.is_empty()
             || self.suggested_completion_criteria.is_some()

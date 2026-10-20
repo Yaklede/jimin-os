@@ -22,6 +22,15 @@ import {
 } from "../api/googleChat";
 import type { TaskWorkKind } from "../api/planning";
 import { copy } from "../copy";
+import { inflowRecoveryCopy } from "../copy/inflowRecovery";
+import {
+  canRetryInflowDelivery,
+  inflowDeliveryHelp,
+} from "../inflowDeliveryState";
+import { InflowDeliveryStatus } from "./InflowDeliveryStatus";
+import { reviewedAssignmentPreview } from "../assignmentPreview";
+import { itsmSyncCandidates } from "../itsmSync";
+import "./assignmentPreview.css";
 import {
   DeadlinePicker,
   isoToSeoulLocalDateTime,
@@ -60,6 +69,7 @@ type ProjectInflowPanelProps = {
   ): Promise<void>;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
+  onReviewChange?(item: ProjectInflowItem): void;
   onOpenTask(taskId: string): void;
 };
 
@@ -67,6 +77,9 @@ export type PromoteInflowInput = {
   workKind?: TaskWorkKind;
   title: string;
   notes: string;
+  assignmentContent?: string;
+  itsmIssueUrl?: string;
+  skipItsmSync?: boolean;
   assigneeName?: string;
   priority: number;
   dueAt: string | null;
@@ -80,9 +93,13 @@ export type InflowDraftField =
   | "assigneeName"
   | "priority"
   | "dueAt"
-  | "withoutDeadline";
+  | "withoutDeadline"
+  | "itsmIssueUrl"
+  | "skipItsmSync";
 
 export type InflowDraftValues = {
+  itsmIssueUrl?: string;
+  skipItsmSync?: boolean;
   workKind?: TaskWorkKind;
   title: string;
   notes: string;
@@ -116,6 +133,7 @@ export function ProjectInflowPanel({
   onDismiss,
   onRetryAnalysis,
   onRetryCompletion,
+  onReviewChange,
   onOpenTask,
 }: ProjectInflowPanelProps) {
   const activeAccounts = useMemo(
@@ -366,6 +384,7 @@ export function ProjectInflowPanel({
                 onDismiss={onDismiss}
                 onRetryAnalysis={onRetryAnalysis}
                 onRetryCompletion={onRetryCompletion}
+                onReviewChange={onReviewChange}
                 onOpenTask={onOpenTask}
               />
               <InflowItemList
@@ -376,6 +395,7 @@ export function ProjectInflowPanel({
                 onDismiss={onDismiss}
                 onRetryAnalysis={onRetryAnalysis}
                 onRetryCompletion={onRetryCompletion}
+                onReviewChange={onReviewChange}
                 onOpenTask={onOpenTask}
               />
               {reviewedItems.length > 0 && (
@@ -392,6 +412,7 @@ export function ProjectInflowPanel({
                     onDismiss={onDismiss}
                     onRetryAnalysis={onRetryAnalysis}
                     onRetryCompletion={onRetryCompletion}
+                    onReviewChange={onReviewChange}
                     onOpenTask={onOpenTask}
                   />
                 </details>
@@ -418,6 +439,7 @@ export function ProjectInflowPanel({
                     onDismiss={onDismiss}
                     onRetryAnalysis={onRetryAnalysis}
                     onRetryCompletion={onRetryCompletion}
+                    onReviewChange={onReviewChange}
                     onOpenTask={onOpenTask}
                     hideHeading
                   />
@@ -439,6 +461,7 @@ export function InflowItemList({
   onDismiss,
   onRetryAnalysis,
   onRetryCompletion,
+  onReviewChange,
   onOpenTask,
   hideHeading = false,
 }: {
@@ -452,6 +475,7 @@ export function InflowItemList({
   ): Promise<void>;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
+  onReviewChange?(item: ProjectInflowItem): void;
   onOpenTask(taskId: string): void;
   hideHeading?: boolean;
 }) {
@@ -474,6 +498,7 @@ export function InflowItemList({
             onDismiss={onDismiss}
             onRetryAnalysis={onRetryAnalysis}
             onRetryCompletion={onRetryCompletion}
+            onReviewChange={onReviewChange}
             onOpenTask={onOpenTask}
           />
         ))}
@@ -489,6 +514,7 @@ export function InflowItemRow({
   onDismiss,
   onRetryAnalysis,
   onRetryCompletion,
+  onReviewChange,
   onOpenTask,
 }: {
   item: ProjectInflowItem;
@@ -500,6 +526,7 @@ export function InflowItemRow({
   ): Promise<void>;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
+  onReviewChange?(item: ProjectInflowItem): void;
   onOpenTask?(taskId: string): void;
 }) {
   const conversationId = inflowConversationKey(item);
@@ -519,6 +546,20 @@ export function InflowItemRow({
   const [replyToSource, setReplyToSource] = useState(false);
   const [dismissing, setDismissing] = useState(false);
   const [dismissError, setDismissError] = useState<string>();
+  const [retryingDelivery, setRetryingDelivery] = useState(false);
+  const [deliveryError, setDeliveryError] = useState<string>();
+  async function retryDelivery() {
+    if (saving || retryingDelivery) return;
+    setRetryingDelivery(true);
+    setDeliveryError(undefined);
+    try {
+      await onRetryCompletion(item);
+    } catch {
+      setDeliveryError(inflowRecoveryCopy.requestFailed);
+    } finally {
+      setRetryingDelivery(false);
+    }
+  }
   const messages = item.messages ?? [
     {
       senderName: item.senderName,
@@ -530,6 +571,19 @@ export function InflowItemRow({
     item.suggestedTaskTitle || "대화를 업무로 정리하고 있어요";
   const referenceLinks = item.referenceLinks ?? [];
   const referenceDocuments = item.referenceDocuments ?? [];
+  const itsmCandidates = itsmSyncCandidates(referenceDocuments);
+  const [itsmIssueUrl, setItsmIssueUrl] = useState(
+    () =>
+      restoredDraft?.itsmIssueUrl ??
+      (itsmCandidates.length === 1 ? itsmCandidates[0] : ""),
+  );
+  const [skipItsmSync, setSkipItsmSync] = useState(
+    () => restoredDraft?.skipItsmSync ?? false,
+  );
+  const itsmSelectionRequired =
+    itsmCandidates.length > 0 &&
+    !skipItsmSync &&
+    !itsmCandidates.includes(itsmIssueUrl);
   const messageCount = item.messageCount ?? messages.length;
   const firstReceivedAt = item.firstReceivedAt ?? item.receivedAt;
   const assigneeOptions = useMemo(
@@ -588,6 +642,15 @@ export function InflowItemRow({
   const canNotifyAssignee = Boolean(
     assigneeName && item.notifiableAssigneeNames?.includes(assigneeName),
   );
+  const assignmentPreview = reviewedAssignmentPreview({
+    projectTitle: item.projectName,
+    title,
+    content: notes,
+    assigneeName,
+    priority: Number(priority),
+    dueAt: withoutDeadline ? null : (seoulLocalDateTimeToIso(dueAt) ?? null),
+    referenceLinks,
+  });
 
   useEffect(() => {
     if (editing) titleInputRef.current?.focus();
@@ -651,6 +714,8 @@ export function InflowItemRow({
     }
     if (!hasDraft) return;
     writeInflowDraft(conversationId, {
+      itsmIssueUrl,
+      skipItsmSync,
       savedAt: Date.now(),
       baseRevision: draftBaseRevision,
       title,
@@ -673,6 +738,8 @@ export function InflowItemRow({
     priority,
     title,
     withoutDeadline,
+    itsmIssueUrl,
+    skipItsmSync,
   ]);
 
   useEffect(
@@ -765,6 +832,10 @@ export function InflowItemRow({
   async function submitPromotion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!title.trim() || promoting || saving) return;
+    if (itsmSelectionRequired) {
+      setPromotionError(copy.projects.inflowItsmChooseHelp);
+      return;
+    }
     if (!promotionReadiness.canPromote) {
       setPromotionError(promotionProblem);
       return;
@@ -783,6 +854,13 @@ export function InflowItemRow({
       await onPromote(item, {
         title: title.trim(),
         notes: notes.trim(),
+        assignmentContent: notes.trim(),
+        ...(itsmCandidates.length
+          ? {
+              skipItsmSync,
+              itsmIssueUrl: skipItsmSync ? undefined : itsmIssueUrl,
+            }
+          : {}),
         assigneeName: assigneeName || undefined,
         priority: Number(priority),
         ...deadline,
@@ -893,6 +971,22 @@ export function InflowItemRow({
             <p>{copy.projects.inflowFollowUpDescription}</p>
           </div>
           <div className="project-inflow-item__follow-up-actions">
+            {onReviewChange &&
+            item.analysisStatus === "ready" &&
+            typeof item.sourceRevision === "number" &&
+            item.sourceRevision > 0 &&
+            item.sourceRevision === item.analyzedRevision &&
+            (item.changeActionItems?.length || item.suggestedDueAt) &&
+            !item.reviewed ? (
+              <button
+                type="button"
+                className="primary-button focus-visible-control"
+                disabled={saving}
+                onClick={() => onReviewChange(item)}
+              >
+                내용·기한 변경 검토하기
+              </button>
+            ) : null}
             {onOpenTask && (
               <button
                 className="primary-button focus-visible-control"
@@ -934,23 +1028,18 @@ export function InflowItemRow({
                     ? copy.projects.inflowCompletionRetrying
                     : copy.projects.inflowCompletionPending}
               </p>
-              <div>
-                {item.completionReactionCompleted && (
-                  <span>{copy.projects.inflowReactionDone}</span>
-                )}
-                {item.completionReplyCompleted && (
-                  <span>{copy.projects.inflowReplyDone}</span>
-                )}
-              </div>
-              {item.completionStatus !== "sent" && (
+              <InflowDeliveryStatus item={item} />
+              {canRetryInflowDelivery(item) && (
                 <button
                   className="secondary-button focus-visible-control"
                   type="button"
-                  disabled={saving}
-                  onClick={() => void onRetryCompletion(item)}
+                  disabled={saving || retryingDelivery}
+                  onClick={() => void retryDelivery()}
                 >
                   <RefreshCw aria-hidden="true" />
-                  {copy.projects.inflowCompletionRetry}
+                  {retryingDelivery
+                    ? inflowRecoveryCopy.retrying
+                    : inflowRecoveryCopy.retry}
                 </button>
               )}
             </>
@@ -960,25 +1049,25 @@ export function InflowItemRow({
               {copy.projects.inflowDismissReason}: {item.dismissalReason}
             </p>
           )}
-          {item.dismissalReplyStatus && (
-            <p>
-              {item.dismissalReplyStatus === "sent"
-                ? copy.projects.inflowDismissReplySent
-                : item.dismissalReplyStatus === "failed"
-                  ? copy.projects.inflowDismissReplyFailed
-                  : copy.projects.inflowDismissReplyPending}
-            </p>
-          )}
+          {item.dismissalReplyStatus && <InflowDeliveryStatus item={item} />}
           {item.dismissalReplyStatus === "failed" && (
             <button
               className="secondary-button focus-visible-control"
               type="button"
-              disabled={saving}
-              onClick={() => void onRetryCompletion(item)}
+              disabled={saving || retryingDelivery}
+              onClick={() => void retryDelivery()}
             >
               <RefreshCw aria-hidden="true" />{" "}
-              {copy.projects.inflowDismissReplyRetry}
+              {retryingDelivery
+                ? inflowRecoveryCopy.retrying
+                : inflowRecoveryCopy.retryDismissal}
             </button>
+          )}
+          {canRetryInflowDelivery(item) && <p>{inflowDeliveryHelp(item)}</p>}
+          {deliveryError && (
+            <p className="inline-alert" role="alert">
+              {deliveryError}
+            </p>
           )}
         </div>
       ) : analysisFailed && !editing ? (
@@ -1269,6 +1358,70 @@ export function InflowItemRow({
                     <span>{copy.projects.inflowWithoutDeadline}</span>
                   </label>
                 </div>
+                <details className="inflow-assignment-preview">
+                  <summary className="focus-visible-control">
+                    {copy.projects.inflowAssignmentPreviewTitle}
+                  </summary>
+                  <p>{copy.projects.inflowAssignmentPreviewHint}</p>
+                  {assignmentPreview.truncated && (
+                    <p role="status" className="inline-alert">
+                      {copy.projects.inflowAssignmentPreviewTruncated}
+                    </p>
+                  )}
+                  <pre aria-label={copy.projects.inflowAssignmentPreviewTitle}>
+                    {assignmentPreview.message}
+                  </pre>
+                </details>
+                {itsmCandidates.length > 0 && (
+                  <div className="inflow-assignment-preview">
+                    <label className="project-inflow-item__no-deadline">
+                      <input
+                        type="checkbox"
+                        checked={!skipItsmSync}
+                        disabled={saving || promoting}
+                        onChange={(event) => {
+                          markDirty("skipItsmSync");
+                          setSkipItsmSync(!event.target.checked);
+                        }}
+                      />
+                      <span>{copy.projects.inflowItsmSyncLabel}</span>
+                    </label>
+                    {!skipItsmSync && (
+                      <>
+                        <label>
+                          <span>{copy.projects.inflowItsmIssueLabel}</span>
+                          <select
+                            aria-label={copy.projects.inflowItsmIssueLabel}
+                            value={itsmIssueUrl}
+                            disabled={saving || promoting}
+                            onChange={(event) => {
+                              markDirty("itsmIssueUrl");
+                              setItsmIssueUrl(event.target.value);
+                            }}
+                          >
+                            <option value="">
+                              {copy.projects.inflowItsmChoose}
+                            </option>
+                            {itsmCandidates.map((url) => (
+                              <option key={url} value={url}>
+                                {url.split("/issues/").pop()} ·{" "}
+                                {referenceDocuments.find(
+                                  (doc) => doc.url.split(/[?#]/)[0] === url,
+                                )?.title || "ITSM"}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <p>{copy.projects.inflowItsmSyncHelp}</p>
+                        {itsmSelectionRequired && (
+                          <p role="status">
+                            {copy.projects.inflowItsmChooseHelp}
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
                 {promotionError && (
                   <p
                     className="assistant-inline-alert"
@@ -1294,6 +1447,7 @@ export function InflowItemRow({
                     !title.trim() ||
                     saving ||
                     promoting ||
+                    itsmSelectionRequired ||
                     !promotionReadiness.canPromote
                   }
                   aria-describedby={

@@ -30,6 +30,7 @@ type HomeInflowReviewProps = {
   ): Promise<void>;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
+  onReviewChange?(item: ProjectInflowItem): void;
   onOpenTask(taskId: string): Promise<void>;
 };
 
@@ -38,11 +39,19 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
   const unread = pending.filter((item) => !item.reviewed);
   const reviewed = pending.filter((item) => item.reviewed);
   const groups = {
-    new: unread.filter((item) => !item.promotedTaskId),
+    new: unread.filter(
+      (item) => !item.promotedTaskId && !isUncertainInflow(item),
+    ),
     existing: unread.filter((item) => item.promotedTaskId),
+    uncertain: unread.filter(isUncertainInflow),
   };
-  const [activeTab, setActiveTab] = useState<"new" | "existing">(() =>
-    groups.new.length === 0 && groups.existing.length > 0 ? "existing" : "new",
+  const tabs = ["new", "existing", "uncertain"] as const;
+  const [activeTab, setActiveTab] = useState<(typeof tabs)[number]>(() =>
+    groups.new.length > 0
+      ? "new"
+      : groups.existing.length > 0
+        ? "existing"
+        : "uncertain",
   );
   if (pending.length === 0) return null;
   return (
@@ -52,7 +61,7 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
         role="tablist"
         aria-label={copy.projects.inflowTabsLabel}
       >
-        {(["new", "existing"] as const).map((kind, index) => (
+        {tabs.map((kind, index) => (
           <button
             key={kind}
             id={`home-inflow-tab-${kind}`}
@@ -68,13 +77,15 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
                 event.key === "Home"
                   ? 0
                   : event.key === "End"
-                    ? 1
-                    : event.key === "ArrowRight" || event.key === "ArrowLeft"
-                      ? 1 - index
-                      : null;
+                    ? tabs.length - 1
+                    : event.key === "ArrowRight"
+                      ? (index + 1) % tabs.length
+                      : event.key === "ArrowLeft"
+                        ? (index + tabs.length - 1) % tabs.length
+                        : null;
               if (next === null) return;
               event.preventDefault();
-              setActiveTab(next === 0 ? "new" : "existing");
+              setActiveTab(tabs[next]);
               event.currentTarget.parentElement
                 ?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
                 [next]?.focus();
@@ -83,12 +94,16 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
             <span className="home-inflow-tabs__full-label">
               {kind === "new"
                 ? copy.projects.inflowNewTitle
-                : copy.projects.inflowExistingTitle}
+                : kind === "existing"
+                  ? copy.projects.inflowExistingTitle
+                  : copy.projects.inflowUncertainTitle}
             </span>
             <span className="home-inflow-tabs__short-label">
               {kind === "new"
                 ? copy.projects.inflowNewTabShort
-                : copy.projects.inflowExistingTabShort}
+                : kind === "existing"
+                  ? copy.projects.inflowExistingTabShort
+                  : copy.projects.inflowUncertainTitle}
             </span>
             <span className="home-inflow-tabs__count">
               {groups[kind].length}
@@ -96,7 +111,7 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
           </button>
         ))}
       </div>
-      {(["new", "existing"] as const).map((kind) => (
+      {tabs.map((kind) => (
         <div
           key={kind}
           className="home-inflow-tab-panel"
@@ -112,7 +127,9 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
             <p className="home-inflow-tabs__empty">
               {kind === "new"
                 ? copy.projects.inflowNewEmpty
-                : copy.projects.inflowExistingEmpty}
+                : kind === "existing"
+                  ? copy.projects.inflowExistingEmpty
+                  : copy.projects.inflowUncertainEmpty}
             </p>
           )}
         </div>
@@ -141,10 +158,11 @@ function HomeInflowGroup({
   onDismiss,
   onRetryAnalysis,
   onRetryCompletion,
+  onReviewChange,
   onOpenTask,
   kind,
   initialView = "calendar",
-}: HomeInflowReviewProps & { kind: "new" | "existing" }) {
+}: HomeInflowReviewProps & { kind: "new" | "existing" | "uncertain" }) {
   const mobile = useMobileLayout();
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   useEffect(() => {
@@ -227,17 +245,23 @@ function HomeInflowGroup({
           <span>
             {kind === "new"
               ? copy.projects.inflowHomeEyebrow
-              : copy.projects.inflowExistingEyebrow}
+              : kind === "existing"
+                ? copy.projects.inflowExistingEyebrow
+                : "AI 분류 확인"}
           </span>
           <h2 id={titleId}>
             {kind === "new"
               ? copy.projects.inflowNewTitle
-              : copy.projects.inflowExistingTitle}
+              : kind === "existing"
+                ? copy.projects.inflowExistingTitle
+                : copy.projects.inflowUncertainTitle}
           </h2>
           <p>
             {kind === "new"
               ? copy.projects.inflowHomeDescription
-              : copy.projects.inflowExistingDescription}
+              : kind === "existing"
+                ? copy.projects.inflowExistingDescription
+                : copy.projects.inflowUncertainDescription}
           </p>
         </div>
         <strong
@@ -406,6 +430,7 @@ function HomeInflowGroup({
                     onDismiss={onDismiss}
                     onRetryAnalysis={onRetryAnalysis}
                     onRetryCompletion={onRetryCompletion}
+                    onReviewChange={onReviewChange}
                     onOpenTask={(taskId) => void onOpenTask(taskId)}
                   />
                 </ul>
@@ -429,6 +454,15 @@ export function homeInflowPendingItems(
   items: ProjectInflowItem[],
 ): ProjectInflowItem[] {
   return items.filter((item) => item.status === "pending");
+}
+
+export function isUncertainInflow(item: ProjectInflowItem): boolean {
+  return (
+    !item.promotedTaskId &&
+    (item.analysisStatus === "failed" ||
+      (item.analysisStatus === "ready" &&
+        item.analysisClassification !== "new_task"))
+  );
 }
 
 export function visibleHomeInflowItems(

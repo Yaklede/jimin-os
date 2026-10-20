@@ -22,6 +22,8 @@ export type PlanningEditTarget =
   { kind: "task"; item: Task } | { kind: "schedule"; item: ScheduleEntry };
 
 type TaskEditInput = {
+  workflowState?: Task["workflowState"];
+  waitingReason?: string | null;
   title: string;
   notes?: string;
   assigneeName?: string;
@@ -72,6 +74,9 @@ export function PlanningItemEditor({
   const [title, setTitle] = useState("");
   const [notes, setNotes] = useState("");
   const [assigneeName, setAssigneeName] = useState("");
+  const [workflowState, setWorkflowState] =
+    useState<NonNullable<Task["workflowState"]>>("not_started");
+  const [waitingReason, setWaitingReason] = useState("");
   const [priority, setPriority] = useState(1);
   const [dueAt, setDueAt] = useState("");
   const [startsAt, setStartsAt] = useState("");
@@ -93,6 +98,8 @@ export function PlanningItemEditor({
     startsAt,
     endsAt,
     linkedTaskId,
+    workflowState,
+    waitingReason,
   ]);
   closeRequestRef.current = () => {
     if (saving) return;
@@ -120,6 +127,10 @@ export function PlanningItemEditor({
       target.kind === "schedule" ? isoToLocalInput(target.item.startsAt) : "",
       target.kind === "schedule" ? isoToLocalInput(target.item.endsAt) : "",
       target.kind === "schedule" ? (target.item.taskId ?? "") : "",
+      target.kind === "task"
+        ? (target.item.workflowState ?? "not_started")
+        : "not_started",
+      target.kind === "task" ? (target.item.waitingReason ?? "") : "",
     ]);
     setConfirmingDiscard(false);
     let focusFrame: number | undefined;
@@ -131,6 +142,14 @@ export function PlanningItemEditor({
     setNotes(target.item.notes ?? "");
     setAssigneeName(
       target.kind === "task" ? (target.item.assigneeName ?? "") : "",
+    );
+    setWorkflowState(
+      target.kind === "task"
+        ? (target.item.workflowState ?? "not_started")
+        : "not_started",
+    );
+    setWaitingReason(
+      target.kind === "task" ? (target.item.waitingReason ?? "") : "",
     );
     setPriority(target.kind === "task" ? target.item.priority : 1);
     setDueAt(target.kind === "task" ? isoToLocalInput(target.item.dueAt) : "");
@@ -234,6 +253,15 @@ export function PlanningItemEditor({
         return;
       }
     }
+    if (
+      activeTarget.kind === "task" &&
+      workflowState === "waiting" &&
+      !waitingReason.trim()
+    ) {
+      setError("대기하는 이유를 적고 다시 저장해 주세요.");
+      document.getElementById("planning-edit-waiting-reason")?.focus();
+      return;
+    }
     setSaving(true);
     setError(undefined);
     try {
@@ -243,6 +271,9 @@ export function PlanningItemEditor({
           notes: notes.trim() || undefined,
           assigneeName: assigneeName.trim() || undefined,
           status: activeTarget.item.status,
+          workflowState,
+          waitingReason:
+            workflowState === "waiting" ? waitingReason.trim() : null,
           priority,
           dueAt: taskDueAt,
         });
@@ -409,6 +440,38 @@ export function PlanningItemEditor({
                   onChange={setDueAt}
                 />
               </div>
+              <EditorField label="진행 상태" htmlFor="planning-edit-workflow">
+                <select
+                  id="planning-edit-workflow"
+                  value={workflowState}
+                  disabled={saving}
+                  onChange={(event) =>
+                    setWorkflowState(
+                      event.target.value as NonNullable<Task["workflowState"]>,
+                    )
+                  }
+                >
+                  <option value="not_started">진행 전</option>
+                  <option value="in_progress">진행 중</option>
+                  <option value="waiting">대기 중</option>
+                </select>
+              </EditorField>
+              {workflowState === "waiting" && (
+                <EditorField
+                  label="대기 사유"
+                  htmlFor="planning-edit-waiting-reason"
+                >
+                  <textarea
+                    id="planning-edit-waiting-reason"
+                    required
+                    maxLength={1000}
+                    rows={2}
+                    value={waitingReason}
+                    disabled={saving}
+                    onChange={(event) => setWaitingReason(event.target.value)}
+                  />
+                </EditorField>
+              )}
             </>
           ) : (
             <>

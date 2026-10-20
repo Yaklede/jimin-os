@@ -8,18 +8,23 @@ pub mod agent;
 pub mod auth;
 pub mod calendar;
 pub mod calendar_mutation;
+pub mod delivery_recovery;
 pub mod device_signals;
 pub mod gmail;
 pub mod gmail_inflow;
 pub mod goals;
 pub mod google_chat;
+pub mod holidays;
 pub mod inflow_analysis;
+pub mod inflow_changes;
 pub mod inflow_notifications;
 pub mod intelligence;
 pub mod itsm;
+pub mod itsm_sync;
 pub mod meetings;
 pub mod planning;
 pub mod push;
+pub mod report_evidence;
 pub mod reports;
 pub mod scheduled_work;
 pub mod sync;
@@ -27,7 +32,7 @@ pub mod webhook;
 pub mod weekly_report;
 pub mod work;
 
-pub const EXPECTED_SCHEMA_VERSION: i64 = 58;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 63;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 

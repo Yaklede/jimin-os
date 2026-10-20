@@ -39,6 +39,7 @@ describe("home snapshot API", () => {
       dueTasks: [],
       inflow: [],
       recentInflow: [],
+      deliveryRecovery: [],
       recommendations: [],
       weeklyReports: [],
     });

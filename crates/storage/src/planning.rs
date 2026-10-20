@@ -32,6 +32,8 @@ const MAX_WEBHOOK_ACTION_ITEMS: usize = 20;
 /// Structured task context shared by webhook payloads and provider replies.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TaskAssignmentDetails {
+    /// Explicitly approved outbound content; never inferred from internal notes.
+    pub reviewed_content: Option<String>,
     /// A bounded, explicitly public summary. Imported evidence is never stored here.
     pub notes: Option<String>,
     /// Reviewed public action items stored independently from editable notes.
@@ -58,6 +60,7 @@ pub struct TaskAssignmentMessageInput<'a> {
 
 #[derive(sqlx::FromRow)]
 struct TaskAssignmentPublicDetailsRow {
+    reviewed_content: Option<String>,
     summary: Option<String>,
     action_items: Vec<String>,
     completion_criteria: Option<String>,
@@ -186,6 +189,33 @@ pub struct TaskUpdate {
     pub expected_version: i64,
 }
 
+/// Additive metadata; omitted by older clients so existing workflow is preserved.
+pub struct TaskWorkflowUpdate {
+    pub state: String,
+    pub waiting_reason: Option<String>,
+}
+
+impl TaskWorkflowUpdate {
+    /// Validates workflow metadata without altering existing lifecycle states.
+    ///
+    /// # Errors
+    /// Waiting requires a non-empty reason; other states must not retain one.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        match self.state.as_str() {
+            "waiting"
+                if self
+                    .waiting_reason
+                    .as_deref()
+                    .is_some_and(|value| valid_text(value, 1000, false)) =>
+            {
+                Ok(())
+            }
+            "not_started" | "in_progress" if self.waiting_reason.is_none() => Ok(()),
+            _ => Err(StorageError::InvalidConfiguration),
+        }
+    }
+}
+
 impl NewTask {
     /// Validates a bounded task before it reaches SQL.
     ///
@@ -297,6 +327,8 @@ pub struct Task {
     pub completed_at: Option<OffsetDateTime>,
     pub work_kind: String,
     pub completion_note: Option<String>,
+    pub workflow_state: String,
+    pub waiting_reason: Option<String>,
     pub version: i64,
 }
 
@@ -348,7 +380,7 @@ struct LinkedScheduleRow {
 }
 
 #[derive(sqlx::FromRow)]
-struct TaskRow {
+pub(crate) struct TaskRow {
     id: Uuid,
     project_id: Option<Uuid>,
     parent_task_id: Option<Uuid>,
@@ -361,6 +393,8 @@ struct TaskRow {
     completed_at: Option<OffsetDateTime>,
     work_kind: String,
     completion_note: Option<String>,
+    workflow_state: String,
+    waiting_reason: Option<String>,
     version: i64,
 }
 
@@ -440,6 +474,8 @@ impl TryFrom<TaskRow> for Task {
             completed_at: row.completed_at,
             work_kind: row.work_kind,
             completion_note: row.completion_note,
+            workflow_state: row.workflow_state,
+            waiting_reason: row.waiting_reason,
             version: row.version,
         })
     }
@@ -1087,7 +1123,7 @@ impl Database {
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8, $9, $10)
             RETURNING id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, work_kind, completion_note, version",
+                status, priority, due_at, completed_at, work_kind, completion_note, workflow_state, waiting_reason, version",
         )
         .bind(task.id)
         .bind(task.user_id)
@@ -1157,7 +1193,7 @@ impl Database {
             VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8, $9)
             ON CONFLICT (id) DO NOTHING
             RETURNING id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, work_kind, completion_note, version",
+                status, priority, due_at, completed_at, work_kind, completion_note, workflow_state, waiting_reason, version",
         )
         .bind(task.id)
         .bind(task.user_id)
@@ -1185,7 +1221,7 @@ impl Database {
             let existing = sqlx::query_as::<_, TaskRow>(
                 "\
                 SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-                    status, priority, due_at, completed_at, work_kind, completion_note, version
+                    status, priority, due_at, completed_at, work_kind, completion_note, workflow_state, waiting_reason, version
                 FROM tasks
                 WHERE id = $1 AND user_id = $2 AND status = 'open'",
             )
@@ -1228,7 +1264,7 @@ impl Database {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
             SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, work_kind, completion_note, version
+                status, priority, due_at, completed_at, work_kind, completion_note, workflow_state, waiting_reason, version
             FROM tasks
             WHERE user_id = $1 AND status = 'open'
             ORDER BY priority DESC, due_at NULLS LAST, created_at ASC, id ASC",
@@ -1251,7 +1287,7 @@ impl Database {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
             SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, work_kind, completion_note, version
+                status, priority, due_at, completed_at, work_kind, completion_note, workflow_state, waiting_reason, version
             FROM tasks
             WHERE user_id = $1 AND status = 'completed'
             ORDER BY completed_at DESC NULLS LAST, id DESC",
@@ -1280,7 +1316,7 @@ impl Database {
         let row = sqlx::query_as::<_, TaskRow>(
             "\
             SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, work_kind, completion_note, version
+                status, priority, due_at, completed_at, work_kind, completion_note, workflow_state, waiting_reason, version
             FROM tasks
             WHERE user_id = $1 AND id = $2",
         )
@@ -1307,7 +1343,7 @@ impl Database {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
             SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, work_kind, completion_note, version
+                status, priority, due_at, completed_at, work_kind, completion_note, workflow_state, waiting_reason, version
             FROM tasks
             WHERE user_id = $1
               AND status = 'open'
@@ -1336,7 +1372,7 @@ impl Database {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
             SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, work_kind, completion_note, version
+                status, priority, due_at, completed_at, work_kind, completion_note, workflow_state, waiting_reason, version
             FROM tasks
             WHERE user_id = $1
               AND status = 'open'
@@ -1369,7 +1405,7 @@ impl Database {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
             SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, work_kind, completion_note, version
+                status, priority, due_at, completed_at, work_kind, completion_note, workflow_state, waiting_reason, version
             FROM tasks
             WHERE user_id = $1 AND project_id = $2 AND status = 'open'
             ORDER BY priority DESC, due_at NULLS LAST, created_at ASC, id ASC",
@@ -1401,7 +1437,7 @@ impl Database {
         let rows = sqlx::query_as::<_, TaskRow>(
             "\
             SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, work_kind, completion_note, version
+                status, priority, due_at, completed_at, work_kind, completion_note, workflow_state, waiting_reason, version
             FROM tasks
             WHERE user_id = $1 AND project_id = $2 AND status IN ('open', 'completed')
             ORDER BY
@@ -1441,6 +1477,25 @@ impl Database {
         update: &TaskUpdate,
         work_kind: Option<&str>,
     ) -> Result<Option<Task>, StorageError> {
+        self.update_task_with_workflow(update, work_kind, None)
+            .await
+    }
+
+    /// Applies workflow and content in one version-checked transaction.
+    ///
+    /// # Errors
+    /// Returns validation or persistence errors; conflicts return no task.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Ownership, hierarchy, workflow and outbound changes must commit in one transaction."
+    )]
+    pub async fn update_task_with_workflow(
+        &self,
+        update: &TaskUpdate,
+        work_kind: Option<&str>,
+        workflow: Option<&TaskWorkflowUpdate>,
+    ) -> Result<Option<Task>, StorageError> {
+        workflow.map(TaskWorkflowUpdate::validate).transpose()?;
         work_kind.map(validate_work_kind).transpose()?;
         update.validate()?;
         if let Some(project_id) = update.project_id
@@ -1484,6 +1539,8 @@ impl Database {
                 priority = $10,
                 due_at = $11,
                 work_kind = COALESCE($12, work_kind),
+                workflow_state = COALESCE($13, workflow_state),
+                waiting_reason = CASE WHEN $13 IS NULL THEN waiting_reason ELSE $14 END,
                 completion_note = CASE WHEN $9 = 'completed' THEN completion_note ELSE NULL END,
                 completed_at = CASE
                     WHEN $9 = 'completed' THEN COALESCE(completed_at, NOW())
@@ -1491,7 +1548,7 @@ impl Database {
                 END
             WHERE id = $1 AND user_id = $2 AND version = $3
             RETURNING id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, work_kind, completion_note, version",
+                status, priority, due_at, completed_at, work_kind, completion_note, workflow_state, waiting_reason, version",
         )
         .bind(update.id)
         .bind(update.user_id)
@@ -1517,6 +1574,8 @@ impl Database {
         .bind(update.priority)
         .bind(update.due_at)
         .bind(work_kind)
+        .bind(workflow.map(|value| value.state.as_str()))
+        .bind(workflow.and_then(|value| value.waiting_reason.as_deref()).map(str::trim))
         .fetch_optional(&mut *transaction)
         .await
         .map_err(classify)?;
@@ -1561,7 +1620,7 @@ impl Database {
         let current = sqlx::query_as::<_, TaskRow>(
             "\
             SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, work_kind, completion_note, version
+                status, priority, due_at, completed_at, work_kind, completion_note, workflow_state, waiting_reason, version
             FROM tasks
             WHERE id = $1 AND user_id = $2
             FOR UPDATE",
@@ -1592,7 +1651,7 @@ impl Database {
             SET status = 'cancelled', completed_at = NULL
             WHERE id = $1 AND user_id = $2 AND version = $3
             RETURNING id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, work_kind, completion_note, version",
+                status, priority, due_at, completed_at, work_kind, completion_note, workflow_state, waiting_reason, version",
         )
         .bind(task_id)
         .bind(user_id)
@@ -1613,6 +1672,7 @@ impl Database {
             deleted.version,
         )
         .await?;
+        crate::itsm_sync::queue_task_itsm_sync(&mut transaction, user_id, deleted.id).await?;
         if let Some(project_id) = deleted.project_id {
             let payload = project_event_payload("task.deleted", project_id, deleted.id)?;
             queue_project_event_in_transaction(
@@ -1676,7 +1736,7 @@ impl Database {
             SET status = 'completed', completed_at = NOW(), completion_note = $4
             WHERE id = $1 AND user_id = $2 AND status = 'open' AND version = $3
             RETURNING id, project_id, parent_task_id, title, notes, assignee_name,
-                status, priority, due_at, completed_at, work_kind, completion_note, version",
+                status, priority, due_at, completed_at, work_kind, completion_note, workflow_state, waiting_reason, version",
         )
         .bind(task_id)
         .bind(user_id)
@@ -1717,7 +1777,7 @@ pub fn validate_work_kind(value: &str) -> Result<(), StorageError> {
     }
 }
 
-async fn validate_task_hierarchy_in_transaction(
+pub(crate) async fn validate_task_hierarchy_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
     task_id: Uuid,
@@ -1947,6 +2007,7 @@ pub(crate) async fn queue_task_webhook_in_transaction(
     task: &Task,
     event_type: &str,
 ) -> Result<(), StorageError> {
+    crate::itsm_sync::queue_task_itsm_sync(transaction, user_id, task.id).await?;
     let Some(project_id) = task.project_id else {
         return Ok(());
     };
@@ -2008,19 +2069,27 @@ fn insert_task_assignment_payload_fields(
     object.insert(
         "notes".to_owned(),
         details
-            .notes
-            .clone()
+            .reviewed_content
+            .as_ref()
+            .or(details.notes.as_ref())
+            .cloned()
             .map_or(serde_json::Value::Null, serde_json::Value::String),
     );
     object.insert(
         "actionItems".to_owned(),
-        serde_json::json!(&details.action_items),
+        serde_json::json!(if details.reviewed_content.is_some() {
+            &[][..]
+        } else {
+            &details.action_items[..]
+        }),
     );
     object.insert(
         "completionCriteria".to_owned(),
         details
-            .completion_criteria
-            .clone()
+            .reviewed_content
+            .is_none()
+            .then(|| details.completion_criteria.clone())
+            .flatten()
             .map_or(serde_json::Value::Null, serde_json::Value::String),
     );
     object.insert(
@@ -2036,7 +2105,7 @@ async fn task_assignment_details_for_task(
     fallback_notes: Option<&str>,
 ) -> Result<TaskAssignmentDetails, StorageError> {
     let stored = sqlx::query_as::<_, TaskAssignmentPublicDetailsRow>(
-        "SELECT summary, action_items, completion_criteria, reference_links
+        "SELECT summary, action_items, completion_criteria, reference_links, reviewed_content
          FROM task_assignment_public_details
          WHERE task_id = $1 AND user_id = $2",
     )
@@ -2048,12 +2117,14 @@ async fn task_assignment_details_for_task(
     Ok(stored.map_or_else(
         || task_assignment_details(fallback_notes, &[], None, &[]),
         |details| {
-            task_assignment_details(
+            let mut public = task_assignment_details(
                 details.summary.as_deref(),
                 &details.action_items,
                 details.completion_criteria.as_deref(),
                 &details.reference_links,
-            )
+            );
+            public.reviewed_content = details.reviewed_content;
+            public
         },
     ))
 }
@@ -2067,7 +2138,7 @@ pub(crate) async fn queue_owned_task_webhook_by_id_in_transaction(
     let row = sqlx::query_as::<_, TaskRow>(
         "\
         SELECT id, project_id, parent_task_id, title, notes, assignee_name,
-            status, priority, due_at, completed_at, work_kind, completion_note, version
+            status, priority, due_at, completed_at, work_kind, completion_note, workflow_state, waiting_reason, version
         FROM tasks
         WHERE id = $1 AND user_id = $2",
     )
@@ -2109,6 +2180,7 @@ fn task_event_message(
             priority: task.priority,
             due_at: task.due_at,
         },
+        details.reviewed_content.as_deref(),
     )
 }
 
@@ -2117,15 +2189,30 @@ fn task_event_message(
 /// without maintaining a second summary format.
 #[must_use]
 pub fn format_task_assignment_message(input: &TaskAssignmentMessageInput<'_>) -> String {
+    format_reviewed_task_assignment_message(input, None)
+}
+
+/// Renders the reviewed outbound snapshot, preserving edits and line breaks.
+/// `None` retains the legacy structured AI projection; an empty approved string
+/// intentionally sends no description instead of restoring the old AI text.
+#[must_use]
+pub fn format_reviewed_task_assignment_message(
+    input: &TaskAssignmentMessageInput<'_>,
+    reviewed_content: Option<&str>,
+) -> String {
     let action = if input.assignee_name.is_some() {
         "새 할 일이 배정됐어요."
     } else {
         "새 할 일이 등록됐어요."
     };
-    format_task_message(action, input)
+    format_task_message(action, input, reviewed_content)
 }
 
-fn format_task_message(action: &str, input: &TaskAssignmentMessageInput<'_>) -> String {
+fn format_task_message(
+    action: &str,
+    input: &TaskAssignmentMessageInput<'_>,
+    reviewed_content: Option<&str>,
+) -> String {
     let assignee = input.assignee_name.unwrap_or("미정");
     let title = concise_webhook_text(input.task_title, MAX_TITLE_CHARS)
         .unwrap_or_else(|| "새 할 일".to_owned());
@@ -2158,7 +2245,16 @@ fn format_task_message(action: &str, input: &TaskAssignmentMessageInput<'_>) -> 
             .as_ref()
             .map_or(0, |block| block.chars().count() + 2),
     );
-    append_task_detail_blocks(&mut message, &details, details_limit);
+    if let Some(content) = reviewed_content {
+        let content = content.replace("\r\n", "\n").replace('\r', "\n");
+        let available = details_limit.saturating_sub(message.chars().count() + 8);
+        if let Some(content) = concise_webhook_section(&[content], available) {
+            message.push_str("\n\n업무 내용\n");
+            message.push_str(&content);
+        }
+    } else {
+        append_task_detail_blocks(&mut message, &details, details_limit);
+    }
     if let Some(references) = references
         && message.chars().count() + references.chars().count() + 2 <= MAX_WEBHOOK_MESSAGE_CHARS
     {
@@ -2178,6 +2274,7 @@ pub fn task_assignment_details(
     reference_links: &[String],
 ) -> TaskAssignmentDetails {
     TaskAssignmentDetails {
+        reviewed_content: None,
         notes: public_summary
             .and_then(|value| concise_webhook_text(value, MAX_WEBHOOK_SECTION_CHARS)),
         action_items: action_items
@@ -2472,6 +2569,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 1,
         };
 
@@ -2516,6 +2615,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 1,
         };
 
@@ -2551,6 +2652,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 1,
         };
 
@@ -2596,6 +2699,8 @@ mod tests {
             completed_at: None,
             work_kind: "general".to_owned(),
             completion_note: None,
+            workflow_state: "not_started".to_owned(),
+            waiting_reason: None,
             version: 1,
         };
 
@@ -2787,5 +2892,75 @@ mod tests {
         assert!(message.contains("처리할 내용\n- 화면을 수정합니다."));
         assert!(message.contains("관련 자료\n- https://itsm.example/issues/3876"));
         assert!(message.chars().count() <= MAX_WEBHOOK_MESSAGE_CHARS);
+    }
+
+    #[test]
+    fn reviewed_assignment_matches_the_frontend_contract() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/reviewed-assignment-messages.json"
+        ))
+        .expect("shared contract fixtures");
+        for fixture in fixtures.as_array().expect("fixture array") {
+            let links = fixture["referenceLinks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|link| link.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>();
+            let due = fixture["dueAt"]
+                .as_str()
+                .map(|value| OffsetDateTime::parse(value, &Rfc3339).unwrap());
+            let input = TaskAssignmentMessageInput {
+                work_kind: "general",
+                project_title: fixture["projectTitle"].as_str().unwrap(),
+                task_title: fixture["title"].as_str().unwrap(),
+                public_summary: Some("수정 전 AI 요약"),
+                action_items: &["수정 전 처리 내용".to_owned()],
+                completion_criteria: Some("수정 전 완료 기준"),
+                reference_links: &links,
+                assignee_name: fixture["assigneeName"].as_str(),
+                priority: i16::try_from(fixture["priority"].as_i64().unwrap()).unwrap(),
+                due_at: due,
+            };
+            let message =
+                format_reviewed_task_assignment_message(&input, fixture["content"].as_str());
+            assert_eq!(message, fixture["message"].as_str().unwrap());
+            assert!(!message.contains("수정 전"));
+            let content = "가".repeat(500) + "\n수정한 마지막 요청";
+            assert!(
+                format_reviewed_task_assignment_message(&input, Some(&content))
+                    .contains("수정한 마지막 요청")
+            );
+            let long = format_reviewed_task_assignment_message(&input, Some(&"📝".repeat(2000)));
+            assert!(long.chars().count() <= MAX_WEBHOOK_MESSAGE_CHARS);
+            assert!(long.contains("…\n\n관련 자료"));
+            let empty = format_reviewed_task_assignment_message(&input, Some(""));
+            assert!(!empty.contains("업무 내용"));
+            assert!(!empty.contains("수정 전"));
+            assert!(
+                format_reviewed_task_assignment_message(&input, None).contains("수정 전 AI 요약")
+            );
+        }
+    }
+
+    #[test]
+    fn reviewed_payload_does_not_include_stale_ai_fields() {
+        let mut details = task_assignment_details(
+            Some("수정 전 AI 요약"),
+            &["수정 전 행동".to_owned()],
+            Some("이전 기준"),
+            &[],
+        );
+        details.reviewed_content = Some("수정한 업무 내용".to_owned());
+        let mut payload = serde_json::Map::new();
+        insert_task_assignment_payload_fields(&mut payload, &details);
+        assert_eq!(payload["notes"], "수정한 업무 내용");
+        assert_eq!(payload["actionItems"], serde_json::json!([]));
+        assert!(payload["completionCriteria"].is_null());
+        assert!(
+            !serde_json::Value::Object(payload)
+                .to_string()
+                .contains("수정 전")
+        );
     }
 }

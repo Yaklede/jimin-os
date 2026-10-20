@@ -43,6 +43,35 @@
 .scheduled-dialog::backdrop {
   background: rgb(0 0 0 / 50%);
 }
+.scheduled-discard-dialog {
+  width: min(440px, calc(100vw - 32px));
+  max-width: none;
+  max-height: calc(100dvh - 32px);
+  padding: 24px;
+  border: 0;
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  box-shadow: var(--shadow-panel);
+  color: var(--text);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.scheduled-discard-dialog::backdrop {
+  background: rgb(0 0 0 / 35%);
+}
+.scheduled-discard-dialog h3 {
+  margin: 0 0 12px;
+  color: var(--text-strong);
+  font-size: 20px;
+}
+.scheduled-discard-dialog p {
+  margin: 0 0 24px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.scheduled-discard-dialog .scheduled-actions {
+  justify-content: flex-end;
+}
 .scheduled-heading {
   display: flex;
   align-items: flex-start;
@@ -106,7 +135,7 @@
 }
 .scheduled-dialog button.primary-button {
   background: var(--accent);
-  color: var(--canvas);
+  color: var(--on-accent);
   border-color: var(--accent);
 }
 .scheduled-dialog .scheduled-icon {
@@ -142,7 +171,7 @@
   min-width: 0;
 }
 .scheduled-form > fieldset > legend {
-  font-weight: 700;
+  font-weight: 600;
   margin-bottom: 16px;
 }
 .scheduled-form label {

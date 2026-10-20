@@ -7,6 +7,7 @@ services:
     environment:
       JIMIN_ITSM_BASE_URL: ${JIMIN_ITSM_BASE_URL:?set JIMIN_ITSM_BASE_URL}
       JIMIN_ITSM_API_TOKEN_FILE: /run/secrets/itsm_read_credential
+      JIMIN_ITSM_COMPLETION_STATUS_ID: ${JIMIN_ITSM_COMPLETION_STATUS_ID:-}
     secrets:
       - itsm_read_credential
 

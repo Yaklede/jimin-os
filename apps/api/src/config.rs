@@ -30,6 +30,7 @@ pub struct AppConfig {
     authentication: AuthenticationSetting,
     calendar_oauth: CalendarOAuthSetting,
     firebase_service_account: SecretSetting,
+    holiday_service_key: SecretSetting,
 }
 
 pub enum SecretSetting {
@@ -151,6 +152,13 @@ impl AppConfig {
         let authentication = AuthenticationSetting::load()?;
         let calendar_oauth = CalendarOAuthSetting::load()?;
         let firebase_service_account = firebase_service_account()?;
+        let holiday_service_key = match (
+            env_string("JIMIN_HOLIDAY_SERVICE_KEY"),
+            env_string("JIMIN_HOLIDAY_SERVICE_KEY_FILE"),
+        ) {
+            (Ok(direct), Ok(file)) => resolve_secret(direct, file, read_secret_file),
+            _ => SecretSetting::Invalid,
+        };
 
         Ok(Self {
             bind_addr,
@@ -163,6 +171,7 @@ impl AppConfig {
             authentication,
             calendar_oauth,
             firebase_service_account,
+            holiday_service_key,
         })
     }
 
@@ -214,6 +223,10 @@ impl AppConfig {
     #[must_use]
     pub const fn firebase_service_account(&self) -> &SecretSetting {
         &self.firebase_service_account
+    }
+    #[must_use]
+    pub const fn holiday_service_key(&self) -> &SecretSetting {
+        &self.holiday_service_key
     }
 }
 

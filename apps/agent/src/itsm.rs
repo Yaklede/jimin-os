@@ -1,4 +1,4 @@
-//! Read-only enrichment for trusted ITSM issue links.
+//! Trusted ITSM enrichment and explicitly queued deadline/completion writes.
 //!
 //! Chat messages are untrusted input. This client never follows a URL from a
 //! message directly: it extracts only numeric issue identifiers that match the
@@ -12,6 +12,8 @@ use jimin_storage::inflow_analysis::InflowAnalysisMessage;
 use reqwest::{Client, Url, redirect::Policy};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
+mod sync;
+pub(crate) use sync::spawn_sync_worker;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -22,10 +24,12 @@ const MAX_ORIGINAL_CONTENT_CHARS: usize = 40_000;
 const MAX_TITLE_CHARS: usize = 200;
 const MAX_PROJECT_NAME_CHARS: usize = 160;
 
+#[derive(Clone)]
 pub(crate) struct ItsmClient {
     base_url: Url,
     client: Client,
     api_token: SecretString,
+    completion_status_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,7 +130,13 @@ impl ItsmClient {
             base_url,
             client,
             api_token,
+            completion_status_id: None,
         })
+    }
+
+    pub(crate) fn with_completion_status_id(mut self, id: Option<u64>) -> Self {
+        self.completion_status_id = id;
+        self
     }
 
     pub(crate) async fn resolve_messages(
