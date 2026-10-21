@@ -3,6 +3,8 @@ use uuid::Uuid;
 
 #[cfg(target_os = "macos")]
 mod inflow_notifications;
+#[cfg(target_os = "macos")]
+mod open_deck_bridge;
 
 const SESSION_ACCOUNT: &str = "device-session";
 const INSTALLATION_ACCOUNT: &str = "device-installation";
@@ -122,6 +124,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             inflow_notifications::initialize(app.handle())?;
+            open_deck_bridge::initialize(app.handle())?;
             Ok(())
         });
     #[cfg(target_os = "macos")]
@@ -132,7 +135,9 @@ pub fn run() {
         read_or_create_installation_id,
         inflow_notifications::configure_inflow_notifications,
         inflow_notifications::inflow_notification_diagnostics,
-        inflow_notifications::test_inflow_notification
+        inflow_notifications::test_inflow_notification,
+        open_deck_bridge::publish_open_deck_snapshot,
+        open_deck_bridge::finish_open_deck_action
     ]);
     #[cfg(not(target_os = "macos"))]
     let builder = builder.invoke_handler(tauri::generate_handler![

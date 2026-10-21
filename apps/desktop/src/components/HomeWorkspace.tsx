@@ -67,6 +67,8 @@ import {
 import { type PromoteInflowInput } from "./ProjectInflowPanel";
 
 type HomeWorkspaceProps = {
+  onRequestOpenHandled?(id: number): void;
+  requestOpenRequest?: number;
   scheduledWork?: ReactNode;
   suppressDecisionSuggestions?: boolean;
   onLoadAllTasks?(): Promise<Task[]>;
@@ -144,6 +146,8 @@ type HomeWorkspaceProps = {
 };
 
 export function HomeWorkspace({
+  requestOpenRequest,
+  onRequestOpenHandled,
   scheduledWork,
   suppressDecisionSuggestions = false,
   onLoadAllTasks,
@@ -379,6 +383,8 @@ export function HomeWorkspace({
           title={`들어온 대화 · ${homeInflowPendingItems(snapshot?.inflow ?? []).filter((item) => !item.reviewed).length}개`}
         >
           <HomeInflowReview
+            focusRequest={requestOpenRequest}
+            onFocusHandled={onRequestOpenHandled}
             initialView={mobile ? "list" : "calendar"}
             items={snapshot?.inflow ?? []}
             saving={inflowSaving}

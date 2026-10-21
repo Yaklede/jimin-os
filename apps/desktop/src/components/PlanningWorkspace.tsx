@@ -48,6 +48,8 @@ import {
 } from "./PlanningCreateDialog";
 
 type PlanningWorkspaceProps = {
+  onExternalCreateHandled?(id: number): void;
+  externalCreateRequest?: { id: number; kind: PlanningCreateKind };
   snapshot: PlanningSnapshot | undefined;
   projects: ScheduleProjectReference[];
   range: PlanningViewRange;
@@ -67,6 +69,8 @@ type PlanningWorkspaceProps = {
 };
 
 export function PlanningWorkspace({
+  externalCreateRequest,
+  onExternalCreateHandled,
   snapshot,
   projects,
   range,
@@ -89,6 +93,12 @@ export function PlanningWorkspace({
     action: "complete" | "restore";
   }>();
   const [createKind, setCreateKind] = useState<PlanningCreateKind>();
+  useEffect(() => {
+    if (externalCreateRequest) {
+      setCreateKind(externalCreateRequest.kind);
+      onExternalCreateHandled?.(externalCreateRequest.id);
+    }
+  }, [externalCreateRequest?.id, onExternalCreateHandled]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [completedOpen, setCompletedOpen] = useState(false);
   const highlightedScheduleRef = useRef<HTMLLIElement | null>(null);
