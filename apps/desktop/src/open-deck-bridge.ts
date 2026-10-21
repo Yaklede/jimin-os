@@ -2,6 +2,10 @@ import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { PlanningRequestError } from "./api/planning";
+import {
+  type DeckMutation,
+  type DeckMutationOutcome,
+} from "./open-deck-mutations";
 import { openDeckCopy } from "./open-deck-copy";
 
 export interface DeckAction {
@@ -13,6 +17,7 @@ export interface DeckSnapshot {
   schemaVersion: 1;
   updatedAt: number;
   connected: boolean;
+  capabilities: { scheduleCreate: boolean; taskComplete: boolean };
   timeZone: string;
   range: { from: string; to: string };
   counts: {
@@ -35,6 +40,7 @@ export interface DeckSnapshot {
     dueAt: string | null;
     assignee: string;
     state: string;
+    version: number;
   }[];
   inbox: {
     id: string;
@@ -103,6 +109,7 @@ export function normalizeDeckSnapshot(
     schemaVersion: 1,
     updatedAt: now.getTime(),
     connected: true,
+    capabilities: { scheduleCreate: true, taskComplete: true },
     timeZone: "Asia/Seoul",
     range: deckRange(now),
     counts: {
@@ -148,6 +155,7 @@ export function normalizeDeckSnapshot(
         dueAt: date(x.dueAt) || null,
         assignee: text(x.assigneeName, 60),
         state: text(x.workflowState || "not_started", 30),
+        version: Number(x.version) || 0,
       })),
     inbox: pending
       .filter((x) => validId(x.id))
@@ -277,6 +285,7 @@ export class DeckActionDispatcher {
 interface Options {
   enabled: boolean;
   load(): Promise<DeckSnapshot>;
+  mutate(mutation: DeckMutation): Promise<DeckMutationOutcome>;
   act(action: DeckAction, signal: AbortSignal): Promise<void>;
 }
 export function useOpenDeckBridge(options: Options) {
@@ -301,6 +310,7 @@ export function useOpenDeckBridge(options: Options) {
               schemaVersion: 1,
               updatedAt: Date.now(),
               connected: false,
+              capabilities: { scheduleCreate: false, taskComplete: false },
               timeZone: "Asia/Seoul",
               events: [],
               tasks: [],
@@ -341,6 +351,35 @@ export function useOpenDeckBridge(options: Options) {
         else stop = unlisten;
       })
       .catch(() => {});
+    const mutationWorkers = new Set<string>();
+    let stopMutations: undefined | (() => void);
+    void listen<DeckMutation>("open-deck-mutation", async ({ payload }) => {
+      if (disposed || mutationWorkers.has(payload.mutationId)) return;
+      mutationWorkers.add(payload.mutationId);
+      let outcome: DeckMutationOutcome;
+      try {
+        outcome = await latest.current.mutate(payload);
+      } catch (cause) {
+        outcome = {
+          error:
+            cause instanceof PlanningRequestError &&
+            cause.code === "unauthorized"
+              ? "AUTH_REQUIRED"
+              : "UNKNOWN_RESULT",
+        };
+      }
+      await invoke("finish_open_deck_mutation", {
+        mutationId: payload.mutationId,
+        outcome,
+      }).catch(() => {});
+      mutationWorkers.delete(payload.mutationId);
+      if (!disposed) await publish();
+    })
+      .then((stop) => {
+        if (disposed) stop();
+        else stopMutations = stop;
+      })
+      .catch(() => {});
     void publish();
     const timer = window.setInterval(() => void publish(), 15000);
     return () => {
@@ -348,6 +387,7 @@ export function useOpenDeckBridge(options: Options) {
       dispatcher.dispose();
       window.clearInterval(timer);
       stop?.();
+      stopMutations?.();
     };
   }, [options.enabled]);
 }

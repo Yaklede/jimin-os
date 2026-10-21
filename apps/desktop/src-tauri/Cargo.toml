@@ -25,6 +25,7 @@ uuid.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 axum.workspace = true
+time.workspace = true
 rand.workspace = true
 subtle.workspace = true
 reqwest.workspace = true

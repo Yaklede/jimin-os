@@ -24,3 +24,9 @@ Frontend unit tests verify the minimal data boundary, Korean month range and rea
 The final scoped frontend suite has 25 passing tests, including cancellation, late-response suppression, disposal and worker limits. The scoped design and UX writing harnesses pass. The backend harness passes on the changed-file scope; the full baseline scan reproduces the same five pre-existing findings.
 
 Month-end all-day provider events use a one-day padded server lookup while the displayed calendar month remains exact. Companion snapshots discard lookup-only records outside their published range.
+
+## Native tablet writes
+
+The companion advertises schedule-create/task-complete capabilities and task versions. `POST /v1/mutations` validates either schedule creation or completion, persists a UUIDv7 receipt before dispatch, and never surfaces the Mac window. `GET /v1/mutations/{id}` returns running/succeeded/failed/uncertain status without copying input notes. The descriptor bearer and Origin guards apply to these routes too.
+
+The existing authenticated frontend creates schedules using the receipt UUID as `clientMutationId`; task completion reads current status/version before applying the existing completion API. Retries reconcile already-created schedules and already-completed tasks without resending notes. A reused UUID with changed contents is rejected. Known version conflicts remain failed; ambiguous writes remain uncertain. The private 0600 journal is bounded to 200 entries/24 hours, and startup does not replay work. A stalled receipt becomes uncertain after two minutes. Android explicitly confirms completion and explains that optional notes can reach the original Google Chat conversation through the normal server behavior.

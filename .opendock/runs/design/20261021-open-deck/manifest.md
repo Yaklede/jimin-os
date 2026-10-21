@@ -33,7 +33,7 @@ First Gaze: requested existing destination; no new Jimin OS screen
 Primary Action: existing create form or scheduled-work list
 Section Architecture: existing home/calendar/meetings/assistant structure retained
 Reference Categories: existing project component system
-Reference Notes: StyleSeed preservation rule applied; request adds navigation intents, not visual redesign
+Reference Notes: StyleSeed preservation rule applied; request adds navigation intents and authenticated companion writes without visual redesign
 Do Not Copy: screenshot, exact copy, brand asset, paid/private reference content
 
 ## Component System Planning
@@ -51,7 +51,7 @@ State Coverage: disconnected/auth expired/action failure/dirty modal navigation 
 - Colors: unchanged
 - Spacing: unchanged
 - Radius: unchanged
-- Component decisions: existing forms own create/edit confirmation
+- Component decisions: native tablet forms own companion confirmation; existing OS server validation and synchronization remain authoritative
 - Token usage: no CSS additions
 - Interaction states: bounded acknowledged intents; no background focus change
 - Responsive behavior: bridge enabled only on macOS

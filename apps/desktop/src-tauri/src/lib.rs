@@ -137,7 +137,8 @@ pub fn run() {
         inflow_notifications::inflow_notification_diagnostics,
         inflow_notifications::test_inflow_notification,
         open_deck_bridge::publish_open_deck_snapshot,
-        open_deck_bridge::finish_open_deck_action
+        open_deck_bridge::finish_open_deck_action,
+        open_deck_bridge::mutations::finish_open_deck_mutation
     ]);
     #[cfg(not(target_os = "macos"))]
     let builder = builder.invoke_handler(tauri::generate_handler![

@@ -1,4 +1,6 @@
-//! Authenticated, loopback-only companion surface. Server sessions never leave Jimin OS.
+#[path = "open_deck_mutations.rs"]
+pub mod mutations;
+// Authenticated, loopback-only companion surface. Server sessions never leave Jimin OS.
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
@@ -31,6 +33,7 @@ struct Inner {
     credential: String,
     host: String,
     snapshot: Mutex<Option<Value>>,
+    mutations: Mutex<mutations::Store>,
     pending: Mutex<HashMap<String, Completion>>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -172,6 +175,7 @@ fn valid_snapshot(value: &Value) -> bool {
         "timeZone",
         "range",
         "counts",
+        "capabilities",
         "events",
         "tasks",
         "inbox",
@@ -193,6 +197,9 @@ fn valid_snapshot(value: &Value) -> bool {
                 Value::is_number,
             )
         })
+        && value
+            .get("capabilities")
+            .is_none_or(|v| fields(v, &["scheduleCreate", "taskComplete"], Value::is_boolean))
         && rows(
             value,
             "events",
@@ -203,7 +210,7 @@ fn valid_snapshot(value: &Value) -> bool {
             value,
             "tasks",
             40,
-            &["id", "title", "dueAt", "assignee", "state"],
+            &["id", "title", "dueAt", "assignee", "state", "version"],
         )
         && rows(
             value,
@@ -308,6 +315,9 @@ pub fn initialize(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Erro
                 credential,
                 host: address.to_string(),
                 snapshot: Mutex::new(None),
+                mutations: Mutex::new(mutations::Store::load(
+                    directory.join("open-deck-mutations.json"),
+                )),
                 pending: Mutex::new(HashMap::new()),
             }),
         };
@@ -331,6 +341,8 @@ pub fn initialize(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Erro
         let router = Router::new()
             .route("/v1/snapshot", get(snapshot))
             .route("/v1/action", post(action))
+            .route("/v1/mutations", post(mutations::submit))
+            .route("/v1/mutations/{id}", get(mutations::status))
             .layer(DefaultBodyLimit::max(8192))
             .with_state(state);
         let _ = axum::serve(listener, router).await;

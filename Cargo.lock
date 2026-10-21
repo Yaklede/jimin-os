@@ -2648,6 +2648,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "tauri-plugin-voice-recognition",
+ "time",
  "tokio",
  "uuid",
 ]

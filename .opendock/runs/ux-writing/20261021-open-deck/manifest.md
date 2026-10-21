@@ -27,7 +27,7 @@ Status: reviewed
 
 ## Rewrites
 
-No existing product copy was changed. New client navigation reuses current screens and forms.
+No existing product copy was changed. Mac navigation reuses current screens and forms. Native tablet write confirmations use the existing 일정/할 일 vocabulary and explain optional Google Chat completion replies.
 
 ## Exceptions
 

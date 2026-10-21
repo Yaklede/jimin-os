@@ -1,3 +1,4 @@
+import { executeDeckMutation } from "./open-deck-mutations";
 import {
   useOpenDeckBridge,
   loadDeckSnapshot,
@@ -5078,6 +5079,14 @@ export default function App() {
       withAuthenticatedSession((access) =>
         loadDeckSnapshot(apiBaseUrl, access),
       ),
+    mutate: async (mutation) => {
+      const result = await withAuthenticatedSession((access) =>
+        executeDeckMutation(apiBaseUrl, access, mutation),
+      );
+      if (!result.error)
+        void Promise.all([loadHomeSnapshot(), loadPlanningSnapshot()]);
+      return result;
+    },
     act: async (action: DeckAction, signal: AbortSignal) => {
       const ensureActive = () => {
         if (signal.aborted) throw Error("ACTION_TIMEOUT");
