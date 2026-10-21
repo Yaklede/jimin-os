@@ -151,3 +151,45 @@ describe("bounded companion actions", () => {
     expect(finish).not.toHaveBeenCalled();
   });
 });
+
+it("pads all-day lookup boundaries but keeps the published calendar range exact", async () => {
+  const seen: string[] = [];
+  const result = await loadDeckSnapshot(
+    "https://os.example",
+    "secret",
+    new Date("2026-10-21T00:00:00Z"),
+    async (input) => {
+      seen.push(String(input));
+      return new Response(
+        JSON.stringify(
+          String(input).includes("schedule-entries")
+            ? {
+                items: [
+                  {
+                    id,
+                    title: "Month end",
+                    startsAt: "2026-10-31T00:00:00Z",
+                    endsAt: "2026-11-01T00:00:00Z",
+                    status: "confirmed",
+                  },
+                  {
+                    id: "019f68cb-9400-7000-8000-000000000002",
+                    title: "Outside",
+                    startsAt: "2026-09-29T00:00:00Z",
+                    endsAt: "2026-09-30T00:00:00Z",
+                    status: "confirmed",
+                  },
+                ],
+              }
+            : String(input).includes("scheduled-work")
+              ? { items: [] }
+              : { tasks: [], inflow: [] },
+        ),
+      );
+    },
+  );
+  const url = new URL(seen.find((x) => x.includes("schedule-entries"))!);
+  expect(url.searchParams.get("to")).toBe("2026-12-01T15:00:00.000Z");
+  expect(result.range.to).toBe("2026-11-30T15:00:00.000Z");
+  expect(result.events.map((x) => x.title)).toEqual(["Month end"]);
+});

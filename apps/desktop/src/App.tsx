@@ -759,7 +759,11 @@ export default function App() {
   ]);
 
   const loadPlanningSnapshot = useCallback(
-    async (targetStartsAt?: string, requestedRange?: PlanningViewRange) => {
+    async (
+      targetStartsAt?: string,
+      requestedRange?: PlanningViewRange,
+      includeBoundaryDates = false,
+    ) => {
       if (!tokens) return undefined;
       setPlanningLoading(true);
       setPlanningError(undefined);
@@ -776,7 +780,17 @@ export default function App() {
           samePlanningViewRange(current, nextRange) ? current : nextRange,
         );
         const snapshot = await withAuthenticatedSession((accessToken) =>
-          fetchPlanning(apiBaseUrl, accessToken, nextRange.from, nextRange.to),
+          // All-day provider dates use UTC date bounds; include boundary records without changing the displayed month.
+          fetchPlanning(
+            apiBaseUrl,
+            accessToken,
+            includeBoundaryDates
+              ? new Date(nextRange.from.getTime() - 86400000)
+              : nextRange.from,
+            includeBoundaryDates
+              ? new Date(nextRange.to.getTime() + 86400000)
+              : nextRange.to,
+          ),
         );
         setPlanningSnapshot(snapshot);
         return snapshot;
@@ -5097,7 +5111,12 @@ export default function App() {
         );
         const event = snapshot.events.find((x) => x.id === action.itemId);
         if (!event) throw Error("NOT_FOUND");
-        const planning = await loadPlanningSnapshot(event.startsAt);
+        ensureActive();
+        const planning = await loadPlanningSnapshot(
+          event.startsAt,
+          undefined,
+          true,
+        );
         const entry = planning?.schedule.find((x) => x.id === action.itemId);
         if (!entry) throw Error("NOT_FOUND");
         ensureActive();

@@ -98,6 +98,7 @@ export function normalizeDeckSnapshot(
       (x.analysisStatus === "ready" &&
         x.analysisClassification !== "new_task"));
   const today = koreanDay(now.toISOString());
+  const range = deckRange(now);
   return {
     schemaVersion: 1,
     updatedAt: now.getTime(),
@@ -122,7 +123,9 @@ export function normalizeDeckSnapshot(
           validId(x.id) &&
           x.status !== "cancelled" &&
           date(x.startsAt) &&
-          date(x.endsAt),
+          date(x.endsAt) &&
+          Date.parse(String(x.endsAt)) > Date.parse(range.from) &&
+          Date.parse(String(x.startsAt)) < Date.parse(range.to),
       )
       .slice(0, 120)
       .map((x) => ({
@@ -188,6 +191,10 @@ export async function loadDeckSnapshot(
 ): Promise<DeckSnapshot> {
   const range = deckRange(now),
     query = new URLSearchParams(range);
+  const scheduleQuery = new URLSearchParams({
+    from: new Date(Date.parse(range.from) - 86400000).toISOString(),
+    to: new Date(Date.parse(range.to) + 86400000).toISOString(),
+  });
   const get = async (path: string): Promise<Row> => {
     const res = await fetcher(base.replace(/\/$/, "") + path, {
       headers: {
@@ -206,7 +213,7 @@ export async function loadDeckSnapshot(
   };
   const [home, schedule, routines] = await Promise.all([
     get("/v1/home?" + query),
-    get("/v1/schedule-entries?" + query),
+    get("/v1/schedule-entries?" + scheduleQuery),
     get("/v1/scheduled-work"),
   ]);
   return normalizeDeckSnapshot(home, schedule.items, routines.items, now);
