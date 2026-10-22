@@ -13,6 +13,7 @@ use std::{
     collections::HashMap,
     fmt::Write as _,
     fs,
+    io::Write as _,
     os::unix::fs::OpenOptionsExt,
     sync::{Arc, Mutex},
     time::Duration,
@@ -180,6 +181,7 @@ fn valid_snapshot(value: &Value) -> bool {
         "tasks",
         "inbox",
         "routines",
+        "sync",
     ];
     object.keys().all(|k| allowed.contains(&k.as_str()))
         && value.get("schemaVersion") == Some(&json!(1))
@@ -200,6 +202,7 @@ fn valid_snapshot(value: &Value) -> bool {
         && value
             .get("capabilities")
             .is_none_or(|v| fields(v, &["scheduleCreate", "taskComplete"], Value::is_boolean))
+        && value.get("sync").is_none_or(valid_sync)
         && rows(
             value,
             "events",
@@ -231,6 +234,87 @@ fn valid_snapshot(value: &Value) -> bool {
             20,
             &["id", "title", "nextRunAt", "enabled"],
         )
+}
+fn valid_sync(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object
+        .keys()
+        .all(|key| ["state", "attemptedAt", "retryAt", "failures", "error"].contains(&key.as_str()))
+        && matches!(value["state"].as_str(), Some("fresh" | "retrying"))
+        && ["attemptedAt", "retryAt", "failures"]
+            .iter()
+            .all(|key| value[key].as_u64().is_some())
+        && value.get("error").is_none_or(|error| {
+            error.as_object().is_some_and(|o| {
+                o.keys().all(|key| {
+                    ["route", "code", "httpStatus", "durationMs"].contains(&key.as_str())
+                })
+            }) && matches!(
+                error["route"].as_str(),
+                Some("snapshot" | "/v1/home" | "/v1/schedule-entries" | "/v1/scheduled-work")
+            ) && matches!(
+                error["code"].as_str(),
+                Some("http" | "timeout" | "network" | "unavailable")
+            ) && error["httpStatus"].as_u64().is_some_and(|n| n <= 599)
+                && error["durationMs"].as_u64().is_some_and(|n| n <= 120_000)
+        })
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SyncLogEntry {
+    event: String,
+    at: u64,
+    #[serde(default)]
+    failures: u32,
+    retry_at: Option<u64>,
+    route: Option<String>,
+    code: Option<String>,
+    http_status: Option<u16>,
+    duration_ms: Option<u64>,
+}
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn log_open_deck_sync(app: tauri::AppHandle, entry: SyncLogEntry) -> Result<(), String> {
+    if !["refresh_failed", "recovered", "publish_failed"].contains(&entry.event.as_str())
+        || entry.route.as_deref().is_some_and(|v| {
+            ![
+                "snapshot",
+                "/v1/home",
+                "/v1/schedule-entries",
+                "/v1/scheduled-work",
+            ]
+            .contains(&v)
+        })
+        || entry
+            .code
+            .as_deref()
+            .is_some_and(|v| !["http", "timeout", "network", "unavailable"].contains(&v))
+        || entry.http_status.is_some_and(|v| v > 599)
+        || entry.duration_ms.is_some_and(|v| v > 120_000)
+    {
+        return Err("INVALID_DIAGNOSTIC".into());
+    }
+    let directory = app.path().app_data_dir().map_err(|_| "UNAVAILABLE")?;
+    fs::create_dir_all(&directory).map_err(|_| "UNAVAILABLE")?;
+    let file = directory.join("open-deck-sync.jsonl");
+    if fs::metadata(&file).is_ok_and(|m| m.len() > 262_144) {
+        fs::rename(&file, directory.join("open-deck-sync.previous.jsonl"))
+            .map_err(|_| "UNAVAILABLE")?;
+    }
+    let mut output = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(file)
+        .map_err(|_| "UNAVAILABLE")?;
+    writeln!(
+        output,
+        "{}",
+        serde_json::to_string(&entry).map_err(|_| "UNAVAILABLE")?
+    )
+    .map_err(|_| "UNAVAILABLE".to_string())
 }
 fn fields(value: &Value, allowed: &[&str], valid: fn(&Value) -> bool) -> bool {
     value.as_object().is_some_and(|object| {
@@ -352,6 +436,23 @@ pub fn initialize(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Erro
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sync_diagnostics_are_strict_and_contain_no_arbitrary_messages() {
+        let sync = json!({"state":"retrying","attemptedAt":10,"retryAt":20,"failures":1,"error":{"route":"/v1/home","code":"timeout","httpStatus":0,"durationMs":6000}});
+        assert!(valid_sync(&sync));
+        let mut leaked = sync.clone();
+        leaked["error"]["token"] = json!("private");
+        assert!(!valid_sync(&leaked));
+        leaked = sync;
+        leaked["error"]["route"] = json!("/v1/home?token=private");
+        assert!(!valid_sync(&leaked));
+        assert!(
+            serde_json::from_value::<SyncLogEntry>(
+                json!({"event":"refresh_failed","at":1,"accessToken":"private"})
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn actions_are_allowlisted() {
         assert!(valid_action(&Action {

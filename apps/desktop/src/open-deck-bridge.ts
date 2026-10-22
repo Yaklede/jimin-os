@@ -7,6 +7,7 @@ import {
   type DeckMutationOutcome,
 } from "./open-deck-mutations";
 import { openDeckCopy } from "./open-deck-copy";
+import { DeckSnapshotPublisher, type DeckSync } from "./open-deck-sync";
 
 export interface DeckAction {
   operation: "navigate" | "refresh" | "open-schedule" | "open-task";
@@ -17,6 +18,7 @@ export interface DeckSnapshot {
   schemaVersion: 1;
   updatedAt: number;
   connected: boolean;
+  sync?: DeckSync;
   capabilities: { scheduleCreate: boolean; taskComplete: boolean };
   timeZone: string;
   range: { from: string; to: string };
@@ -197,6 +199,7 @@ export async function loadDeckSnapshot(
   now = new Date(),
   fetcher = fetch,
 ): Promise<DeckSnapshot> {
+  const collectionStarted = Date.now();
   const range = deckRange(now),
     query = new URLSearchParams(range);
   const scheduleQuery = new URLSearchParams({
@@ -204,28 +207,69 @@ export async function loadDeckSnapshot(
     to: new Date(Date.parse(range.to) + 86400000).toISOString(),
   });
   const get = async (path: string): Promise<Row> => {
-    const res = await fetcher(base.replace(/\/$/, "") + path, {
-      headers: {
-        Authorization: "Bearer " + access,
-        Accept: "application/json",
-      },
-      signal: AbortSignal.timeout(6000),
-    });
-    if (!res.ok)
-      throw new PlanningRequestError(
-        res.status === 401 ? "unauthorized" : "unavailable",
+    const started = Date.now();
+    let httpStatus = 0;
+    try {
+      const res = await fetcher(base.replace(/\/$/, "") + path, {
+        headers: {
+          Authorization: "Bearer " + access,
+          Accept: "application/json",
+        },
+        signal: AbortSignal.timeout(6000),
+      });
+      httpStatus = res.status;
+      if (!res.ok)
+        throw new PlanningRequestError(
+          res.status === 401 ? "unauthorized" : "unavailable",
+        );
+      const body: unknown = await res.json();
+      if (!record(body)) throw new PlanningRequestError("unavailable");
+      return body;
+    } catch (cause) {
+      const error = new PlanningRequestError(
+        httpStatus === 401 ? "unauthorized" : "unavailable",
       );
-    const body: unknown = await res.json();
-    if (!record(body)) throw new PlanningRequestError("unavailable");
-    return body;
+      Object.assign(error, {
+        diagnostic: {
+          route: path.split("?")[0],
+          httpStatus,
+          code: httpStatus
+            ? "http"
+            : cause instanceof Error &&
+                ["TimeoutError", "AbortError"].includes(cause.name)
+              ? "timeout"
+              : "network",
+          durationMs: Date.now() - started,
+        },
+      });
+      throw error;
+    }
   };
-  const [home, schedule, routines] = await Promise.all([
+  // Wait for every read before retrying: a failed request must not leave sibling reads running.
+  const results = await Promise.allSettled([
     get("/v1/home?" + query),
     get("/v1/schedule-entries?" + scheduleQuery),
     get("/v1/scheduled-work"),
   ]);
-  return normalizeDeckSnapshot(home, schedule.items, routines.items, now);
+  const failures = results.filter((r) => r.status === "rejected");
+  if (failures.length) {
+    // Preserve the existing session-refresh coordinator's unauthorized contract.
+    const failure =
+      failures.find((r) => r.reason?.code === "unauthorized") ?? failures[0];
+    throw failure.reason;
+  }
+  const [home, schedule, routines] = results.map(
+    (r) => (r as PromiseFulfilledResult<Row>).value,
+  );
+  // This is the collection completion time, never the attempted refresh time.
+  return normalizeDeckSnapshot(
+    home,
+    schedule.items,
+    routines.items,
+    new Date(now.getTime() + Date.now() - collectionStarted),
+  );
 }
+
 export class DeckActionDispatcher {
   private workers = new Map<
     string,
@@ -294,40 +338,21 @@ export function useOpenDeckBridge(options: Options) {
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window) || !options.enabled) return;
     // This command exists only in the macOS build. Mobile clients keep their own reminder flow.
-    let disposed = false,
-      busy = false;
+    let disposed = false;
     let stop: undefined | (() => void);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const publisher = new DeckSnapshotPublisher(
+      () => latest.current.load(),
+      (snapshot) => invoke("publish_open_deck_snapshot", { snapshot }),
+      (entry) => invoke("log_open_deck_sync", { entry }).catch(() => {}),
+    );
     const publish = async () => {
-      if (busy || disposed) return;
-      busy = true;
-      try {
-        const snapshot = await latest.current.load();
-        if (!disposed) await invoke("publish_open_deck_snapshot", { snapshot });
-      } catch {
-        if (!disposed)
-          await invoke("publish_open_deck_snapshot", {
-            snapshot: {
-              schemaVersion: 1,
-              updatedAt: Date.now(),
-              connected: false,
-              capabilities: { scheduleCreate: false, taskComplete: false },
-              timeZone: "Asia/Seoul",
-              events: [],
-              tasks: [],
-              inbox: [],
-              routines: [],
-              range: deckRange(new Date()),
-              counts: {
-                requests: 0,
-                updates: 0,
-                uncertain: 0,
-                today: 0,
-                overdue: 0,
-              },
-            },
-          }).catch(() => {});
-      } finally {
-        busy = false;
+      if (disposed) return;
+      clearTimeout(timer);
+      const delay = await publisher.refresh();
+      if (!disposed) {
+        clearTimeout(timer);
+        timer = setTimeout(() => void publish(), delay);
       }
     };
     const dispatcher = new DeckActionDispatcher(
@@ -381,11 +406,20 @@ export function useOpenDeckBridge(options: Options) {
       })
       .catch(() => {});
     void publish();
-    const timer = window.setInterval(() => void publish(), 15000);
+    const recover = () => {
+      if (document.visibilityState !== "hidden") void publish();
+    };
+    window.addEventListener("online", recover);
+    window.addEventListener("focus", recover);
+    document.addEventListener("visibilitychange", recover);
     return () => {
       disposed = true;
       dispatcher.dispose();
-      window.clearInterval(timer);
+      publisher.dispose();
+      clearTimeout(timer);
+      window.removeEventListener("online", recover);
+      window.removeEventListener("focus", recover);
+      document.removeEventListener("visibilitychange", recover);
       stop?.();
       stopMutations?.();
     };

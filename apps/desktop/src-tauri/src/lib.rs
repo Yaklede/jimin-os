@@ -137,6 +137,7 @@ pub fn run() {
         inflow_notifications::inflow_notification_diagnostics,
         inflow_notifications::test_inflow_notification,
         open_deck_bridge::publish_open_deck_snapshot,
+        open_deck_bridge::log_open_deck_sync,
         open_deck_bridge::finish_open_deck_action,
         open_deck_bridge::mutations::finish_open_deck_mutation
     ]);
