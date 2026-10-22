@@ -2632,12 +2632,15 @@ name = "jimin-desktop"
 version = "0.1.0"
 dependencies = [
  "android-native-keyring-store",
+ "axum",
  "keyring",
  "keyring-core",
+ "rand 0.10.2",
  "reqwest",
  "secrecy",
  "serde",
  "serde_json",
+ "subtle",
  "tauri",
  "tauri-build",
  "tauri-plugin-device-signals",
@@ -2645,6 +2648,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "tauri-plugin-voice-recognition",
+ "time",
  "tokio",
  "uuid",
 ]
