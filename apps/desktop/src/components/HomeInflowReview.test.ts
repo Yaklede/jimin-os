@@ -97,6 +97,42 @@ describe("home inflow review", () => {
     expect(markup).toMatch(/id="home-inflow-panel-new"[^>]*hidden=""/);
     expect(markup).toContain(copy.projects.inflowNewEmpty);
   });
+  it("shows an unread owner-authored task in new requests without an external reply", () => {
+    const markup = renderReview([
+      inflow("owner", {
+        sentByOwner: true,
+        senderName: "나",
+        reviewed: false,
+        messages: [
+          {
+            senderName: "나",
+            sentByOwner: true,
+            contentText: "토큰 인증 범위를 추가해 주세요.",
+            receivedAt: "2026-07-31T01:00:00Z",
+          },
+        ],
+      }),
+    ]);
+    expect(markup).toMatch(/id="home-inflow-tab-new"[^>]*aria-selected="true"/);
+    expect(markup).toContain("업무 owner");
+    expect(markup).toContain(copy.projects.inflowMarkSeen);
+    expect(markup).not.toContain('<details class="project-inflow__history">');
+  });
+  it("keeps an uncertain owner-authored request available instead of hiding it as reviewed", () => {
+    const markup = renderReview([
+      inflow("owner-question", {
+        sentByOwner: true,
+        senderName: "나",
+        reviewed: false,
+        analysisClassification: "question",
+      }),
+    ]);
+    expect(markup).toMatch(
+      /id="home-inflow-tab-uncertain"[^>]*aria-selected="true"/,
+    );
+    expect(markup).toContain("업무 owner-question");
+    expect(markup).not.toContain('<details class="project-inflow__history">');
+  });
   it("keeps uncertain requests in their own review tab without allowing automatic promotion", () => {
     const markup = renderReview([
       inflow("uncertain", { analysisClassification: "noise" }),

@@ -8711,6 +8711,9 @@ struct ProjectInflowCandidate {
     analysis: Option<ProjectInflowAnalysis>,
 }
 
+#[cfg(test)]
+mod inflow_visibility_tests;
+
 #[derive(Default)]
 struct InflowAssignmentContext {
     names: BTreeSet<String>,
@@ -8831,7 +8834,6 @@ fn group_project_inflow_candidates(
                         && analysis.classification != Some(InflowClassification::NewTask)
                         && !linked_attention_is_visible
                         && (representative.promoted_task_id.is_some()
-                            || focus.sent_by_owner
                             || focus.sender_provider_name.as_deref() == Some("users/app"))
                 })
             {
@@ -8872,9 +8874,13 @@ fn project_inflow_item_response(
     } = candidate;
     let first_received_at = messages.first().ok_or(())?.received_at;
     let acknowledged = messages.iter().all(|item| item.acknowledged_at.is_some());
+    // Own replies should not reopen an external request, but an owner-only
+    // request still needs an explicit review. `all` on an empty filtered
+    // iterator would otherwise mark every owner-authored request as reviewed.
+    let has_external_messages = messages.iter().any(|item| !item.sent_by_owner);
     let reviewed = messages
         .iter()
-        .filter(|item| !item.sent_by_owner)
+        .filter(|item| !has_external_messages || !item.sent_by_owner)
         .all(|item| item.reviewed_at.is_some());
     let dismissal_reason = messages
         .iter()
