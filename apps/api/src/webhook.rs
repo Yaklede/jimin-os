@@ -256,16 +256,28 @@ fn provider_payload(
     if !mention_directory.is_valid_for(provider) {
         return Err(WebhookRuntimeError::Invalid);
     }
-    let message = payload
-        .get("message")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map_or_else(|| default_event_message(event_type), str::to_owned);
+    let message = if event_type == "task.completed" {
+        format!(
+            "{} · 완료되었어요.",
+            payload
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("할 일")
+                .trim()
+        )
+    } else {
+        payload
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map_or_else(|| default_event_message(event_type), str::to_owned)
+    };
     let message = match provider {
         WebhookProvider::GoogleChat => {
             let message = payload
                 .get("assigneeName")
+                .filter(|_| event_type != "task.completed")
                 .and_then(serde_json::Value::as_str)
                 .filter(|name| mention_directory.users.contains_key(*name))
                 .map_or_else(|| message.clone(), |name| format!("@{{{name}}} {message}"));
@@ -285,7 +297,10 @@ fn provider_payload(
     })
 }
 
-fn expand_google_chat_mentions(message: &str, directory: &GoogleChatMentionDirectory) -> String {
+pub(crate) fn expand_google_chat_mentions(
+    message: &str,
+    directory: &GoogleChatMentionDirectory,
+) -> String {
     let mut expanded = message.to_owned();
     let mut users = directory.users.iter().collect::<Vec<_>>();
     users.sort_by(|(left, _), (right, _)| {
@@ -403,6 +418,26 @@ mod tests {
                 "allowed_mentions": { "parse": [] }
             })
         );
+    }
+
+    #[test]
+    fn completed_webhooks_are_title_only_even_for_old_queued_detailed_events() {
+        let directory = GoogleChatMentionDirectory {
+            users: [("김경주".into(), "users/123".into())].into(),
+        };
+        for provider in [WebhookProvider::GoogleChat, WebhookProvider::Discord] {
+            let directory = if provider == WebhookProvider::GoogleChat {
+                directory.clone()
+            } else {
+                GoogleChatMentionDirectory::default()
+            };
+            let result=provider_payload(provider,"task.completed",&serde_json::json!({"title":"권한 오류 수정","message":"오래된 상세 내용","notes":"민감한 내부 메모","assigneeName":"김경주"}),&directory).unwrap();
+            let text = result
+                .get("text")
+                .or_else(|| result.get("content"))
+                .unwrap();
+            assert_eq!(text, "권한 오류 수정 · 완료되었어요.");
+        }
     }
 
     #[test]

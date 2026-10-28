@@ -68,6 +68,7 @@ import { type PromoteInflowInput } from "./ProjectInflowPanel";
 
 type HomeWorkspaceProps = {
   scheduledWork?: ReactNode;
+  completionReviews?: ReactNode;
   suppressDecisionSuggestions?: boolean;
   onLoadAllTasks?(): Promise<Task[]>;
   snapshot: HomeSnapshot | undefined;
@@ -145,6 +146,7 @@ type HomeWorkspaceProps = {
 
 export function HomeWorkspace({
   scheduledWork,
+  completionReviews,
   suppressDecisionSuggestions = false,
   onLoadAllTasks,
   snapshot,
@@ -369,6 +371,7 @@ export function HomeWorkspace({
           {error}
         </p>
       )}
+      {completionReviews}
       <p className="sr-only" aria-live="polite">
         {recommendationAnnouncement}
       </p>

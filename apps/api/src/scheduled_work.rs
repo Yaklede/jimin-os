@@ -24,13 +24,35 @@ pub(crate) fn routes() -> Router<ApiState> {
         .route("/v1/scheduled-work", get(list))
         .route("/v1/scheduled-work/preview", post(preview))
         .route("/v1/scheduled-work/runs", get(runs))
+        .route("/v1/scheduled-work/capabilities", get(capabilities))
         .route("/v1/scheduled-work/{id}", put(save))
         .route("/v1/scheduled-work/{id}/actions", post(action))
 }
 
 #[derive(OpenApi)]
-#[openapi(paths(list,preview,runs,save,action),components(schemas(SaveRequest,ActionRequest,ActionKind,ActionResult,WorkList,RunList,ScheduledWorkDefinition,ScheduledWork,ScheduledWorkPreview,ScheduledWorkRun)),tags((name="scheduled work",description="예약 업무와 실행 이력")))]
+#[openapi(paths(list,preview,runs,save,action,capabilities),components(schemas(SaveRequest,ActionRequest,ActionKind,ActionResult,WorkList,RunList,Capabilities,ScheduledWorkDefinition,ScheduledWork,ScheduledWorkPreview,ScheduledWorkRun)),tags((name="scheduled work",description="예약 업무와 실행 이력")))]
 pub(crate) struct ScheduledWorkApiDoc;
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct Capabilities {
+    completion_replies_available: bool,
+}
+
+#[utoipa::path(get,path="/v1/scheduled-work/capabilities",tag="scheduled work",responses((status=200,body=Capabilities),(status=401)))]
+async fn capabilities(
+    State(state): State<ApiState>,
+    Extension(id): Extension<RequestId>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = auth::authenticate(&state, &headers).await {
+        return error.into_response(id);
+    }
+    Json(Capabilities {
+        completion_replies_available: state.google_chat_oauth().is_some(),
+    })
+    .into_response()
+}
 
 #[derive(Serialize, ToSchema)]
 struct WorkList {
@@ -107,6 +129,9 @@ async fn preview(
         Ok(p) => p.identity().user_id(),
         Err(f) => return f.into_response(request_id),
     };
+    if definition.reply_completion_source_id.is_some() && state.google_chat_oauth().is_none() {
+        return reply_connection_unavailable(request_id);
+    }
     let Some(db) = state.planning() else {
         return unavailable_response(request_id);
     };
@@ -131,6 +156,12 @@ async fn save(
         Ok(p) => p.identity().user_id(),
         Err(f) => return f.into_response(request_id),
     };
+    if body.enabled
+        && body.definition.reply_completion_source_id.is_some()
+        && state.google_chat_oauth().is_none()
+    {
+        return reply_connection_unavailable(request_id);
+    }
     let Some(db) = state.planning() else {
         return unavailable_response(request_id);
     };
@@ -200,6 +231,19 @@ async fn action(
         return failure(StorageError::InvalidConfiguration, request_id);
     }
     if matches!(body.kind, ActionKind::RunNow) {
+        if state.google_chat_oauth().is_none() {
+            match db.scheduled_work_for_user(user).await {
+                Ok(items)
+                    if items.iter().any(|w| {
+                        w.id == id && w.definition.reply_completion_source_id.is_some()
+                    }) =>
+                {
+                    return reply_connection_unavailable(request_id);
+                }
+                Err(error) => return failure(error, request_id),
+                _ => {}
+            }
+        }
         let Some(key) = body.request_id else {
             return failure(StorageError::InvalidConfiguration, request_id);
         };
@@ -260,6 +304,16 @@ fn conflict(id: RequestId) -> Response {
         StatusCode::CONFLICT,
         "scheduled_work.conflict",
         "예약이 변경됐거나 삭제됐어요. 새로고침한 뒤 다시 시도해 주세요.",
+        id,
+        false,
+    )
+}
+
+fn reply_connection_unavailable(id: RequestId) -> Response {
+    error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "scheduled_reply.connection_unavailable",
+        "Chat 완료 답글을 아직 확인할 수 없어요. 기존 Google Chat 계정 연결을 확인해 주세요.",
         id,
         false,
     )

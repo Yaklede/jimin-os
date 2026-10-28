@@ -1525,6 +1525,12 @@ impl Database {
         )
         .await?;
         if update.status == TaskStatus::Completed {
+            crate::completion_reviews::ensure_no_pending(
+                &mut transaction,
+                update.user_id,
+                update.id,
+            )
+            .await?;
             ensure_no_open_child_tasks(&mut transaction, update.user_id, update.id).await?;
         }
         let row = sqlx::query_as::<_, TaskRow>(
@@ -1729,8 +1735,29 @@ impl Database {
             return Err(StorageError::InvalidConfiguration);
         }
         let mut transaction = self.pool().begin().await.map_err(classify)?;
-        ensure_no_open_child_tasks(&mut transaction, user_id, task_id).await?;
-        let row = sqlx::query_as::<_, TaskRow>(
+        let task = complete_task_in_transaction(
+            &mut transaction,
+            user_id,
+            task_id,
+            expected_version,
+            completion_note,
+        )
+        .await?;
+        transaction.commit().await.map_err(classify)?;
+        Ok(task)
+    }
+}
+
+pub(crate) async fn complete_task_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    task_id: Uuid,
+    expected_version: i64,
+    completion_note: Option<&str>,
+) -> Result<Option<Task>, StorageError> {
+    crate::completion_reviews::ensure_no_pending(transaction, user_id, task_id).await?;
+    ensure_no_open_child_tasks(transaction, user_id, task_id).await?;
+    let row = sqlx::query_as::<_, TaskRow>(
             "\
             UPDATE tasks
             SET status = 'completed', completed_at = NOW(), completion_note = $4
@@ -1742,27 +1769,18 @@ impl Database {
         .bind(user_id)
         .bind(expected_version)
         .bind(completion_note.map(str::trim))
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await
         .map_err(classify)?;
-        let Some(row) = row else {
-            transaction.commit().await.map_err(classify)?;
-            return Ok(None);
-        };
-        let task = Task::try_from(row)?;
-        append_change(&mut transaction, user_id, "task", task.id, task.version).await?;
-        queue_task_webhook_in_transaction(&mut transaction, user_id, &task, "task.completed")
-            .await?;
-        queue_google_chat_task_completion_in_transaction(
-            &mut transaction,
-            user_id,
-            task.id,
-            task.version,
-        )
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let task = Task::try_from(row)?;
+    append_change(transaction, user_id, "task", task.id, task.version).await?;
+    queue_task_webhook_in_transaction(transaction, user_id, &task, "task.completed").await?;
+    queue_google_chat_task_completion_in_transaction(transaction, user_id, task.id, task.version)
         .await?;
-        transaction.commit().await.map_err(classify)?;
-        Ok(Some(task))
-    }
+    Ok(Some(task))
 }
 
 /// Validates legacy work-kind values retained for existing clients and stored tasks.
@@ -2044,10 +2062,15 @@ pub(crate) async fn queue_task_webhook_in_transaction(
             .clone()
             .map_or(serde_json::Value::Null, serde_json::Value::String),
     );
-    let details =
+    let details = if event_type == "task.completed" {
+        TaskAssignmentDetails::default()
+    } else {
         task_assignment_details_for_task(transaction, user_id, task.id, task.notes.as_deref())
-            .await?;
-    insert_task_assignment_payload_fields(object, &details);
+            .await?
+    };
+    if event_type != "task.completed" {
+        insert_task_assignment_payload_fields(object, &details);
+    }
     object.insert(
         "message".to_owned(),
         serde_json::Value::String(task_event_message(
@@ -2158,6 +2181,9 @@ fn task_event_message(
     task: &Task,
     details: &TaskAssignmentDetails,
 ) -> String {
+    if event_type == "task.completed" {
+        return format!("{} · 완료되었어요.", task.title.trim());
+    }
     let action = match event_type {
         "task.created" if task.assignee_name.is_some() => "새 할 일이 배정됐어요.",
         "task.created" => "새 할 일이 등록됐어요.",

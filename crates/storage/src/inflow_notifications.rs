@@ -60,6 +60,14 @@ impl Database {
                     AND representative.status = 'pending' AND representative.reviewed_at IS NULL
                     AND representative.sender_provider_name IS DISTINCT FROM CONCAT('users/', account.provider_subject)
                 UNION ALL
+                SELECT review.id, 'task_completion_review'::TEXT, 1,
+                    task.project_id, TRUE, task.title,
+                    review.reporter_name || '님이 완료를 보고했어요. 홈에서 확인해 주세요.',
+                    FLOOR(EXTRACT(EPOCH FROM review.created_at) * 1000)::BIGINT
+                FROM task_completion_reviews review
+                JOIN tasks task ON task.id=review.task_id AND task.user_id=review.user_id
+                WHERE review.user_id=$1 AND review.status='pending' AND task.status='open'
+                UNION ALL
                 SELECT candidate.id, 'gmail_inflow'::TEXT, candidate.source_revision,
                     candidate.promoted_project_id, candidate.promoted_task_id IS NOT NULL,
                     COALESCE(candidate.suggested_task_title, candidate.summary, '새 메일'),

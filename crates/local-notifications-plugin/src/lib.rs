@@ -52,7 +52,7 @@ mod tests {
         assert!(SOURCE.contains("validNotificationItemType(itemType)"));
         assert!(
             SOURCE
-                .contains("\"google_chat_inflow\", \"gmail_inflow\", \"brief\", \"weekly_report\"")
+                .contains("\"google_chat_inflow\", \"gmail_inflow\", \"brief\", \"weekly_report\", \"task_completion_review\"")
         );
         assert!(SOURCE.contains("targetAtEpochMillis <= System.currentTimeMillis()"));
     }

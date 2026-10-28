@@ -257,6 +257,99 @@ impl GoogleChatOAuthRuntime {
         Ok(messages.into_iter().map(provider_message).collect())
     }
 
+    /// Replays one newly posted reminder thread, including replies older than the space cursor.
+    /// # Errors
+    /// Returns classified credential or provider failures.
+    pub async fn list_scheduled_reminder_replies(
+        &self,
+        connection: &GoogleChatSourceSyncConnection,
+        thread: &str,
+        after: OffsetDateTime,
+    ) -> Result<Vec<ProviderGoogleChatMessage>, GoogleChatOAuthError> {
+        let refresh = self.crypto.decrypt(
+            &connection.refresh_token,
+            &refresh_token_aad(connection.user_id, &connection.provider_subject),
+        )?;
+        let access = self
+            .chat
+            .refresh_access_token(&refresh)
+            .await
+            .map_err(GoogleChatOAuthError::from_google)?;
+        self.chat
+            .list_reminder_thread(&access, &connection.space_name, thread, after)
+            .await
+            .map(|items| items.into_iter().map(provider_message).collect())
+            .map_err(GoogleChatOAuthError::from_google)
+    }
+
+    /// Sends a scheduled reminder using the existing company user's OAuth grant.
+    /// # Errors
+    /// Returns classified scope, credential or provider failures.
+    pub async fn send_scheduled_reminder(
+        &self,
+        connection: &GoogleChatSourceSyncConnection,
+        id: Uuid,
+        text: &str,
+    ) -> Result<jimin_google::GoogleChatMessageReceipt, GoogleChatOAuthError> {
+        if !Self::completion_scope_granted(&connection.granted_scopes)
+            || !connection
+                .granted_scopes
+                .iter()
+                .any(|s| s == CHAT_MESSAGES_SCOPE)
+        {
+            return Err(GoogleChatOAuthError::RequiredScopeMissing);
+        }
+        let refresh = self.crypto.decrypt(
+            &connection.refresh_token,
+            &refresh_token_aad(connection.user_id, &connection.provider_subject),
+        )?;
+        let access = self
+            .chat
+            .refresh_access_token(&refresh)
+            .await
+            .map_err(GoogleChatOAuthError::from_google)?;
+        self.chat
+            .create_reminder_message(
+                &access,
+                &connection.space_name,
+                text,
+                &id.simple().to_string(),
+            )
+            .await
+            .map_err(GoogleChatOAuthError::from_google)
+    }
+
+    /// Sends one idempotent result reply; no new credentials or app membership are used.
+    /// # Errors
+    /// Returns classified scope, credential or provider failures.
+    pub async fn send_scheduled_reply_feedback(
+        &self,
+        connection: &GoogleChatSourceSyncConnection,
+        id: Uuid,
+        thread: &str,
+        text: &str,
+    ) -> Result<(), GoogleChatOAuthError> {
+        let refresh = self.crypto.decrypt(
+            &connection.refresh_token,
+            &refresh_token_aad(connection.user_id, &connection.provider_subject),
+        )?;
+        let access = self
+            .chat
+            .refresh_access_token(&refresh)
+            .await
+            .map_err(GoogleChatOAuthError::from_google)?;
+        self.chat
+            .reply_to_thread(
+                &access,
+                &connection.space_name,
+                thread,
+                text,
+                &format!("{}-reply", id.simple()),
+            )
+            .await
+            .map_err(GoogleChatOAuthError::from_chat_write)
+    }
+
     /// Adds the configured reaction to provider messages after durable ingestion.
     ///
     /// # Errors
@@ -569,6 +662,15 @@ pub enum GoogleChatOAuthError {
 }
 
 impl GoogleChatOAuthError {
+    fn from_chat_write(error: jimin_google::GoogleChatWriteError) -> Self {
+        use jimin_google::GoogleChatWriteError as E;
+        match error {
+            E::Unauthenticated => Self::ProviderRejected,
+            E::PermissionDenied => Self::RequiredScopeMissing,
+            E::RateLimited | E::ProviderUnavailable => Self::ProviderUnavailable,
+            E::InvalidRequest | E::NotFound | E::ProviderRejected => Self::SyncDataInvalid,
+        }
+    }
     #[must_use]
     pub const fn failure_code(self) -> &'static str {
         match self {

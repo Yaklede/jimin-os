@@ -496,7 +496,9 @@ pub(crate) async fn get_inflow_notifications(
             let items = rows
                 .into_iter()
                 .map(|row| {
-                    let prefix = if row.existing_task {
+                    let prefix = if row.item_type == "task_completion_review" {
+                        "완료 확인 요청"
+                    } else if row.existing_task {
                         "일감에 새 답글"
                     } else {
                         "새 업무 요청"

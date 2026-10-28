@@ -600,6 +600,11 @@ impl Database {
                            SELECT 1 FROM scheduled_work_runs r WHERE r.id=delivery.item_id AND r.user_id=delivery.user_id AND r.status IN ('completed','failed')
                        ))
                        OR
+                       (delivery.item_type = 'task_completion_review' AND delivery.target_at>NOW() AND EXISTS (
+                           SELECT 1 FROM task_completion_reviews r JOIN tasks t ON t.id=r.task_id AND t.user_id=r.user_id
+                           WHERE r.id=delivery.item_id AND r.user_id=delivery.user_id AND r.status='pending' AND t.status='open'
+                       ))
+                       OR
                        (delivery.item_type = 'task' AND EXISTS (
                            SELECT 1 FROM tasks AS task
                            WHERE task.id = delivery.item_id AND task.user_id = delivery.user_id

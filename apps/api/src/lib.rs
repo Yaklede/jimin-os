@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod calendar_oauth;
+mod completion_reviews;
 pub mod config;
 mod delivery_recovery;
 mod device_signals;
@@ -11,6 +12,7 @@ mod meetings;
 pub mod probe;
 pub mod push;
 mod report_evidence;
+pub mod scheduled_chat_reply;
 pub mod scheduled_work;
 mod voice_command;
 pub mod webhook;
@@ -2036,6 +2038,7 @@ struct ApiDoc;
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
     let mut document = ApiDoc::openapi();
     document.merge(scheduled_work::ScheduledWorkApiDoc::openapi());
+    document.merge(completion_reviews::CompletionReviewsApiDoc::openapi());
     document
 }
 
@@ -2161,6 +2164,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/devices", get(devices))
         .merge(device_signals::routes())
         .merge(scheduled_work::routes())
+        .merge(completion_reviews::routes())
         .merge(meetings::routes());
 
     let allowed_origins = allowed_client_origins(state.trusted_network());
@@ -2651,12 +2655,52 @@ pub fn spawn_calendar_mutation_worker(state: &ApiState) -> Option<tokio::task::J
 pub fn spawn_webhook_delivery_worker(state: &ApiState) -> Option<tokio::task::JoinHandle<()>> {
     let planning = state.planning()?.clone();
     let runtime = Arc::clone(state.webhook()?);
+    let reply_runtime = state.google_chat_oauth().cloned();
     let worker_id = format!("webhook-delivery-{}", uuid::Uuid::now_v7());
     Some(tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(1)).await;
         loop {
             if let Ok(deliveries) = planning.claim_webhook_deliveries(&worker_id, 10).await {
                 for delivery in deliveries {
+                    if delivery.payload.get("replyCompletion").is_some() {
+                        let result = if let Some(runtime) = &reply_runtime {
+                            scheduled_chat_reply::deliver_reminder(&planning, runtime, delivery.id)
+                                .await
+                        } else {
+                            Err(GoogleChatOAuthError::Configuration)
+                        };
+                        match result {
+                            Ok(message) => {
+                                let _ = planning
+                                    .complete_scheduled_reply_delivery(
+                                        delivery.id,
+                                        &worker_id,
+                                        delivery.attempt_count,
+                                        &message.message_name,
+                                        &message.thread_name,
+                                    )
+                                    .await;
+                            }
+                            Err(error) => {
+                                let code = error.failure_code();
+                                let _ = planning
+                                    .fail_webhook_delivery(
+                                        delivery.id,
+                                        &worker_id,
+                                        delivery.attempt_count,
+                                        None,
+                                        code,
+                                    )
+                                    .await;
+                                warn!(
+                                    event = "scheduled_chat_reply.delivery_failed",
+                                    error_code = code,
+                                    attempt = delivery.attempt_count
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     match runtime.deliver(&delivery).await {
                         Ok(result) => {
                             let _ = planning
@@ -8087,10 +8131,20 @@ async fn synchronize_google_chat_source(
         return Err(GoogleChatOAuthError::ProviderRejected);
     }
     let messages = runtime.list_source_messages(&connection).await?;
+    scheduled_chat_reply::catch_up_new_threads(planning, runtime, &connection).await?;
+    let observed_latest = messages.iter().map(|m| m.received_at).max();
+    let messages =
+        scheduled_chat_reply::filter_completion_replies(planning, &connection, messages).await?;
     let acknowledgements = planning
         .apply_google_chat_messages(&connection, &messages)
         .await
         .map_err(|_| GoogleChatOAuthError::ProviderUnavailable)?;
+    if let Some(latest) = observed_latest {
+        planning
+            .advance_scheduled_reply_source_cursor(connection.source_id, connection.user_id, latest)
+            .await
+            .map_err(|_| GoogleChatOAuthError::ProviderUnavailable)?;
+    }
     if connection.acknowledge_with_reaction && !acknowledgements.is_empty() {
         let names = acknowledgements
             .iter()
@@ -8106,7 +8160,9 @@ async fn synchronize_google_chat_source(
             }
         }
     }
+    let feedback = scheduled_chat_reply::flush_feedback(planning, runtime, &connection).await;
     deliver_google_chat_completions(planning, runtime, &connection, None).await?;
+    feedback?;
     Ok(())
 }
 
@@ -10937,6 +10993,21 @@ mod tests {
         );
         assert_eq!(definition["properties"]["skipHolidays"]["default"], false);
         assert!(
+            definition["properties"]
+                .get("replyCompletionSourceId")
+                .is_some()
+        );
+        assert!(
+            definition["properties"]
+                .get("chatCompletionSourceId")
+                .is_none()
+        );
+        assert!(
+            document["components"]["schemas"]["ScheduledWorkPreview"]["properties"]
+                .get("replyTasks")
+                .is_none()
+        );
+        assert!(
             !definition["required"]
                 .as_array()
                 .unwrap()
@@ -10954,11 +11025,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completion_review_routes_require_owner_authentication() {
+        let (state, _, _) = signed_auth_state(true);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/task-completion-reviews")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let (state, _, _) = signed_auth_state(true);
+        let response=router(state).oneshot(Request::builder().method("POST").uri(format!("/v1/task-completion-reviews/{}/decision",Uuid::now_v7()))
+            .header("content-type","application/json").body(Body::from(r#"{"kind":"approve","expectedVersion":1,"expectedTaskVersion":1,"note":null}"#)).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let doc =
+            serde_json::to_value(completion_reviews::CompletionReviewsApiDoc::openapi()).unwrap();
+        assert!(doc["paths"]["/v1/task-completion-reviews/{id}/decision"]["post"].is_object());
+        assert!(
+            doc["components"]["schemas"]["Decision"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("expectedTaskVersion"))
+        );
+    }
+
+    #[tokio::test]
     async fn scheduled_work_routes_require_an_authenticated_owner() {
         let id = Uuid::now_v7();
         for path in [
             "/v1/scheduled-work".to_owned(),
             "/v1/scheduled-work/runs".to_owned(),
+            "/v1/scheduled-work/capabilities".to_owned(),
         ] {
             let (state, _, _) = signed_auth_state(true);
             let response = router(state)
@@ -11210,12 +11310,15 @@ mod tests {
                 "/v1/schedule-entries",
                 "/v1/schedule-entries/{schedule_entry_id}",
                 "/v1/scheduled-work",
+                "/v1/scheduled-work/capabilities",
                 "/v1/scheduled-work/preview",
                 "/v1/scheduled-work/runs",
                 "/v1/scheduled-work/{id}",
                 "/v1/scheduled-work/{id}/actions",
                 "/v1/sync/changes",
                 "/v1/sync/stream",
+                "/v1/task-completion-reviews",
+                "/v1/task-completion-reviews/{id}/decision",
                 "/v1/tasks",
                 "/v1/tasks/{task_id}",
                 "/v1/tasks/{task_id}/complete",

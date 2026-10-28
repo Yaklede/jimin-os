@@ -13,6 +13,7 @@ use crate::{Database, StorageError, webhook::GoogleChatMentionDirectory};
 
 #[derive(sqlx::FromRow)]
 struct ReminderTask {
+    version: i64,
     status: String,
     workflow_state: String,
     updated_at: OffsetDateTime,
@@ -229,7 +230,7 @@ pub(super) async fn preview_in_transaction(
 ) -> Result<ScheduledWorkPreview, StorageError> {
     validate_scope(tx, user, definition).await?;
     let tasks: Vec<ReminderTask> = sqlx::query_as(
-        "SELECT t.id,t.title,p.title AS project_title,t.assignee_name,t.due_at,d.summary,
+        "SELECT t.id,t.version,t.title,p.title AS project_title,t.assignee_name,t.due_at,d.summary,
          t.status,t.workflow_state,t.updated_at,t.completed_at,
          (SELECT MAX(i.received_at) FROM project_inflow_items i
           JOIN project_google_chat_sources s ON s.id=i.source_id
@@ -243,6 +244,7 @@ pub(super) async fn preview_in_transaction(
          LEFT JOIN task_assignment_public_details d ON d.task_id=t.id AND d.user_id=t.user_id
          JOIN workspaces w ON w.id=$2 AND w.user_id=t.user_id
          WHERE t.user_id=$1 AND (t.status='open' OR ($4::BOOL AND t.status='completed'))
+           AND NOT EXISTS(SELECT 1 FROM task_completion_reviews r WHERE r.task_id=t.id AND r.user_id=t.user_id AND r.status='pending')
            AND (p.workspace_id=w.id OR (t.project_id IS NULL AND w.scope='personal'))
            AND ($3::UUID IS NULL OR t.project_id=$3)
            AND (p.id IS NULL OR p.status='active')
@@ -260,7 +262,7 @@ pub(super) async fn preview_in_transaction(
         .iter()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
-    let tasks: Vec<_> = tasks
+    let mut tasks: Vec<_> = tasks
         .into_iter()
         .filter(|task| {
             (definition.condition != WorkCondition::Always
@@ -271,6 +273,15 @@ pub(super) async fn preview_in_transaction(
                     || !task.assignee_names().is_disjoint(&assignee_filter))
         })
         .collect();
+    if definition.reply_completion_source_id.is_some() {
+        for task in &mut tasks {
+            task.title = format!(
+                "[{}] {}",
+                crate::scheduled_chat_reply::task_code(task.id),
+                task.title
+            );
+        }
+    }
     let directory = if let Some(id) = definition.webhook_id {
         sqlx::query_scalar::<_, Json<GoogleChatMentionDirectory>>(
             "SELECT mention_directory FROM project_webhooks WHERE id=$1 AND user_id=$2 AND enabled FOR SHARE",
@@ -290,7 +301,7 @@ pub(super) async fn preview_in_transaction(
         .iter()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
-    if definition.mention_assignees {
+    if definition.mention_assignees || definition.reply_completion_source_id.is_some() {
         mentions.extend(tasks.iter().flat_map(ReminderTask::assignee_names));
     }
     let missing: Vec<_> = mentions
@@ -320,6 +331,9 @@ pub(super) async fn preview_in_transaction(
         groups.entry(task.assignee_names()).or_default().push(task);
     }
     let mut blocks = Vec::new();
+    if definition.reply_completion_source_id.is_some() {
+        blocks.push("이 알림의 답글에 ‘완료 T-번호’를 적어 주세요. 완료 메모는 다음 줄에 적을 수 있어요. 현재 담당자가 보고하면 다음 동기화 때 완료 확인 대기로 등록돼요. 최종 확인 후 CS·Redmine에 반영해요.".into());
+    }
     let additional = definition
         .mention_names
         .iter()
@@ -378,6 +392,13 @@ pub(super) async fn preview_in_transaction(
         split_messages(&header, &blocks)
     };
     Ok(ScheduledWorkPreview {
+        reply_tasks: tasks
+            .iter()
+            .map(|t| crate::scheduled_chat_reply::ReplyTask {
+                id: t.id,
+                version: t.version,
+            })
+            .collect(),
         task_ids: tasks.iter().map(|t| t.id).collect(),
         messages,
         warnings,
@@ -785,10 +806,16 @@ async fn execute(
     if !chat {
         return queue_push(tx, user, id, now, &rule.definition.title).await;
     }
-    for message in &preview.messages {
+    // Opt-in reminders use the existing company OAuth identity, not a separate Chat app.
+    let payloads = if let Some(source) = rule.definition.reply_completion_source_id {
+        preview.messages.iter().map(|message|json!({"message":message,"replyCompletion":crate::scheduled_chat_reply::ReplyEnvelope{source_id:source,tasks:preview.reply_tasks.clone()}})).collect::<Vec<_>>()
+    } else {
+        preview.messages.iter().map(|message| json!({"event":"chat.message","projectId":rule.definition.project_id,"message":message,"occurredAt":now.format(&Rfc3339).unwrap_or_default()})).collect()
+    };
+    for payload in payloads {
         let delivery = Uuid::now_v7();
         let count=sqlx::query("INSERT INTO webhook_deliveries(id,user_id,project_id,webhook_id,provider,destination_ciphertext,destination_nonce,mention_directory,event_type,payload,status) SELECT $1,h.user_id,h.project_id,h.id,h.provider,h.destination_ciphertext,h.destination_nonce,h.mention_directory,'chat.message',$4,'queued' FROM project_webhooks h WHERE h.id=$2 AND h.user_id=$3 AND h.enabled AND h.provider='google_chat'")
-            .bind(delivery).bind(rule.definition.webhook_id).bind(user).bind(Json(json!({"event":"chat.message","projectId":rule.definition.project_id,"message":message,"occurredAt":now.format(&Rfc3339).map_err(|_|StorageError::InvalidConfiguration)?}))).execute(&mut **tx).await.map_err(classify)?.rows_affected();
+            .bind(delivery).bind(rule.definition.webhook_id).bind(user).bind(Json(payload)).execute(&mut **tx).await.map_err(classify)?.rows_affected();
         if count != 1 {
             return Err(StorageError::PersistenceUnavailable);
         }
@@ -831,6 +858,7 @@ mod tests {
         let at = OffsetDateTime::now_utc();
         let mut definition:ScheduledWorkDefinition=serde_json::from_value(json!({"title":"조건 안내","workspaceId":Uuid::now_v7(),"projectId":null,"webhookId":null,"weekdays":[1,2,3,4,5],"time":"09:00","followUpTime":null,"timeZone":"Asia/Seoul","taskScope":"all_open","includeOverdue":true,"assigneeNames":[],"destination":"in_app","mentionAssignees":false,"mentionNames":[],"includeSchedules":false,"condition":"deadline_near","conditionHours":24})).unwrap();
         let mut task = ReminderTask {
+            version: 1,
             status: "open".into(),
             workflow_state: "waiting".into(),
             updated_at: at - Duration::hours(25),
@@ -886,6 +914,7 @@ mod tests {
     fn reminder_modes_keep_dates_but_only_details_mode_includes_description_and_links() {
         let at = OffsetDateTime::parse("2026-09-16T09:00:00+09:00", &Rfc3339).unwrap();
         let mut task = ReminderTask {
+            version: 1,
             status: "open".into(),
             workflow_state: "not_started".into(),
             updated_at: at,
@@ -929,6 +958,7 @@ mod tests {
     #[test]
     fn assignee_names_are_trimmed_deduplicated_and_rendered_individually() {
         let mut task = ReminderTask {
+            version: 1,
             status: "open".into(),
             workflow_state: "not_started".into(),
             updated_at: OffsetDateTime::now_utc(),

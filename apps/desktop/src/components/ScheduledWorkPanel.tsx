@@ -23,6 +23,10 @@ import {
 } from "../api/projects";
 import { fetchProjectWebhooks, type ProjectWebhook } from "../api/webhooks";
 import {
+  fetchProjectGoogleChatSources,
+  type ProjectGoogleChatSource,
+} from "../api/googleChat";
+import {
   normalizeScheduledWorkDefinition,
   scheduledRequest,
   type ScheduledWork,
@@ -31,6 +35,7 @@ import {
   type ScheduledWorkRunPage,
 } from "../api/scheduledWork";
 import { scheduledWorkCopy as c } from "../copy/scheduledWork";
+import { scheduledChatCopy as chatCopy } from "../copy/scheduledChat";
 import {
   latestScheduledFailure,
   mergeScheduledRuns,
@@ -72,6 +77,7 @@ export function scheduledWorkTemplate(
     workspaceId,
     projectId: null,
     webhookId: null,
+    replyCompletionSourceId: null,
     weekdays: [1, 2, 3, 4, 5],
     time: template === "brief" ? "18:00" : "09:00",
     followUpTime: template === "followup" ? "16:00" : null,
@@ -113,6 +119,12 @@ export function ScheduledWorkPanel({
   const [tab, setTab] = useState<"list" | "history">("list");
   const [editing, setEditing] = useState<ScheduledWork>();
   const [definition, setDefinition] = useState<ScheduledWorkDefinition>();
+  const [completionRepliesAvailable, setCompletionRepliesAvailable] =
+    useState(false);
+  const [chatSources, setChatSources] = useState<ProjectGoogleChatSource[]>([]);
+  const [chatSourcesState, setChatSourcesState] = useState<
+    "loading" | "ready" | "failed"
+  >("ready");
   const [assigneeFilter, setAssigneeFilter] = useState("");
   const [preview, setPreview] = useState<ScheduledWorkPreview>();
   const [previewKey, setPreviewKey] = useState("");
@@ -159,6 +171,44 @@ export function ScheduledWorkPanel({
       if (version === generation.current) setError(errorCopy(failure));
     }
   }, [request, authenticate, baseUrl]);
+  useEffect(() => {
+    let cancelled = false;
+    request<{ completionRepliesAvailable: boolean }>("/capabilities")
+      .then((value) => {
+        if (!cancelled)
+          setCompletionRepliesAvailable(value.completionRepliesAvailable);
+      })
+      .catch(() => {
+        if (!cancelled) setCompletionRepliesAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [request]);
+  useEffect(() => {
+    let cancelled = false;
+    setChatSources([]);
+    setChatSourcesState(definition?.projectId ? "loading" : "ready");
+    if (definition?.projectId)
+      authenticate((token) =>
+        fetchProjectGoogleChatSources(baseUrl, token, definition.projectId!),
+      )
+        .then((items) => {
+          if (!cancelled) {
+            setChatSources(items.filter((s) => s.enabled));
+            setChatSourcesState("ready");
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setChatSources([]);
+            setChatSourcesState("failed");
+          }
+        });
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticate, baseUrl, definition?.projectId]);
   useEffect(() => {
     void reload();
     const interval = window.setInterval(() => {
@@ -669,6 +719,7 @@ export function ScheduledWorkPanel({
                         workspaceId: event.target.value,
                         projectId: null,
                         webhookId: null,
+                        replyCompletionSourceId: null,
                         includeSchedules: false,
                       })
                     }
@@ -690,6 +741,7 @@ export function ScheduledWorkPanel({
                       update({
                         projectId: event.target.value || null,
                         webhookId: null,
+                        replyCompletionSourceId: null,
                       })
                     }
                   >
@@ -777,6 +829,9 @@ export function ScheduledWorkPanel({
                     update({
                       condition: event.target
                         .value as ScheduledWorkDefinition["condition"],
+                      ...(event.target.value === "completion_confirmation"
+                        ? { replyCompletionSourceId: null }
+                        : {}),
                       ...(event.target.value !== "always"
                         ? { includeSchedules: false }
                         : {}),
@@ -868,6 +923,7 @@ export function ScheduledWorkPanel({
                       destination: event.target.value as
                         "google_chat" | "in_app",
                       webhookId: null,
+                      replyCompletionSourceId: null,
                       mentionNames: [],
                       mentionAssignees: event.target.value === "google_chat",
                       includeSchedules: false,
@@ -925,6 +981,76 @@ export function ScheduledWorkPanel({
                   </label>
                   {!webhooks.length && (
                     <p>프로젝트에 Google Chat 웹훅을 먼저 연결해 주세요.</p>
+                  )}
+                  <label className="scheduled-check">
+                    <input
+                      type="checkbox"
+                      aria-label={chatCopy.complete}
+                      disabled={
+                        !definition.replyCompletionSourceId &&
+                        (!completionRepliesAvailable ||
+                          !chatSources.length ||
+                          definition.condition === "completion_confirmation")
+                      }
+                      checked={!!definition.replyCompletionSourceId}
+                      onChange={(event) =>
+                        update({
+                          replyCompletionSourceId: event.target.checked
+                            ? (chatSources[0]?.id ?? null)
+                            : null,
+                        })
+                      }
+                    />
+                    {chatCopy.complete}
+                  </label>
+                  <p className="scheduled-hint">
+                    {!completionRepliesAvailable
+                      ? chatCopy.setupHelp
+                      : chatSourcesState === "failed"
+                        ? chatCopy.spaceRetry
+                        : chatSourcesState === "loading"
+                          ? chatCopy.checkingSpace
+                          : !chatSources.length
+                            ? chatCopy.noSpace
+                            : chatCopy.help}
+                  </p>
+                  {!!definition.replyCompletionSourceId && (
+                    <>
+                      <label>
+                        {chatCopy.space}
+                        <select
+                          aria-label={chatCopy.space}
+                          required
+                          value={definition.replyCompletionSourceId}
+                          onChange={(event) =>
+                            update({
+                              replyCompletionSourceId:
+                                event.target.value || null,
+                            })
+                          }
+                        >
+                          <option value="">대화방 선택</option>
+                          {chatSources.map((source) => (
+                            <option key={source.id} value={source.id}>
+                              {source.displayName} ({source.accountEmail})
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <p
+                        className="scheduled-hint"
+                        style={{ overflowWrap: "anywhere" }}
+                      >
+                        {chatCopy.sender}:{" "}
+                        {
+                          chatSources.find(
+                            (source) =>
+                              source.id === definition.replyCompletionSourceId,
+                          )?.accountEmail
+                        }
+                      </p>
+                      <p className="scheduled-hint">{chatCopy.preview}</p>
+                    </>
                   )}
                   <label className="scheduled-check">
                     <input

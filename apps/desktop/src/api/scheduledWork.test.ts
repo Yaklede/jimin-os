@@ -9,6 +9,19 @@ import {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("scheduled reminder display settings", () => {
+  it("keeps app completion opt-in and preserves the selected source on readback", () => {
+    const legacy = scheduledWorkTemplate("workspace");
+    delete legacy.replyCompletionSourceId;
+    expect(
+      normalizeScheduledWorkDefinition(legacy).replyCompletionSourceId,
+    ).toBeNull();
+    expect(
+      normalizeScheduledWorkDefinition({
+        ...legacy,
+        replyCompletionSourceId: "selected-project-space",
+      }).replyCompletionSourceId,
+    ).toBe("selected-project-space");
+  });
   it.each(["deadline", "followup", "brief"] as const)(
     "defaults the %s template and legacy definitions to titles only",
     (template) => {

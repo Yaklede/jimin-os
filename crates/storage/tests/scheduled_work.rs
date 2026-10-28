@@ -19,6 +19,7 @@ fn rule(workspace: Uuid, project: Uuid, webhook: Uuid) -> ScheduledWorkDefinitio
         workspace_id: workspace,
         project_id: Some(project),
         webhook_id: Some(webhook),
+        reply_completion_source_id: None,
         weekdays: vec![1, 2, 3, 4, 5],
         time: "09:00".into(),
         follow_up_time: Some("16:00".into()),
