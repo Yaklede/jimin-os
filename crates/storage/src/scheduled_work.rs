@@ -63,6 +63,9 @@ pub struct ScheduledWorkDefinition {
     pub workspace_id: Uuid,
     pub project_id: Option<Uuid>,
     pub webhook_id: Option<Uuid>,
+    /// Explicit opt-in to completion replies through the existing company OAuth source.
+    #[serde(default)]
+    pub reply_completion_source_id: Option<Uuid>,
     /// ISO weekday numbers: Monday = 1, Sunday = 7.
     pub weekdays: Vec<u8>,
     /// Local HH:MM. v1 supports Korea time explicitly.
@@ -121,6 +124,9 @@ pub struct ScheduledWorkRun {
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScheduledWorkPreview {
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub(crate) reply_tasks: Vec<crate::scheduled_chat_reply::ReplyTask>,
     pub task_ids: Vec<Uuid>,
     pub messages: Vec<String>,
     pub warnings: Vec<String>,
@@ -163,6 +169,15 @@ impl ScheduledWorkDefinition {
     /// # Errors
     /// Returns invalid configuration for malformed or ambiguous rules.
     pub fn validate(&self) -> Result<(), StorageError> {
+        if self
+            .reply_completion_source_id
+            .is_some_and(|id| id.get_version_num() != 7)
+            || (self.reply_completion_source_id.is_some()
+                && (self.destination != WorkDestination::GoogleChat
+                    || self.condition == WorkCondition::CompletionConfirmation))
+        {
+            return Err(StorageError::InvalidConfiguration);
+        }
         if !(1..=168).contains(&self.condition_hours)
             || (self.condition != WorkCondition::Always && self.include_schedules)
         {
@@ -420,7 +435,13 @@ async fn validate_scope(
     definition.validate()?;
     let scoped = sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM workspaces w JOIN users u ON u.id=w.user_id AND u.status='active' WHERE w.id=$1 AND w.user_id=$2 AND ($3::UUID IS NULL OR EXISTS (SELECT 1 FROM projects p WHERE p.id=$3 AND p.user_id=$2 AND p.workspace_id=w.id AND p.status='active')) AND ($4::UUID IS NULL OR EXISTS (SELECT 1 FROM project_webhooks h WHERE h.id=$4 AND h.user_id=$2 AND h.project_id=$3 AND h.provider='google_chat' AND h.enabled)) AND (NOT $5 OR w.scope='personal'))")
         .bind(definition.workspace_id).bind(user).bind(definition.project_id).bind(definition.webhook_id).bind(definition.include_schedules).fetch_one(&mut **tx).await.map_err(classify)?;
-    if scoped {
+    let source_scoped = if let Some(source) = definition.reply_completion_source_id {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM project_google_chat_sources s JOIN google_chat_accounts a ON a.id=s.account_id AND a.user_id=s.user_id WHERE s.id=$1 AND s.user_id=$2 AND s.project_id=$3 AND s.enabled AND a.status IN ('active','error') AND a.refresh_token_ciphertext IS NOT NULL AND a.granted_scopes @> ARRAY['https://www.googleapis.com/auth/chat.messages.readonly','https://www.googleapis.com/auth/chat.messages.create']::TEXT[])")
+            .bind(source).bind(user).bind(definition.project_id).fetch_one(&mut **tx).await.map_err(classify)?
+    } else {
+        true
+    };
+    if scoped && source_scoped {
         Ok(())
     } else {
         Err(StorageError::InvalidConfiguration)
@@ -449,6 +470,7 @@ mod tests {
             workspace_id: Uuid::now_v7(),
             project_id: None,
             webhook_id: None,
+            reply_completion_source_id: None,
             weekdays: vec![1, 2, 3, 4, 5],
             time: "09:00".into(),
             follow_up_time: Some("16:00".into()),
@@ -469,9 +491,14 @@ mod tests {
         let mut value = serde_json::to_value(rule()).unwrap();
         value.as_object_mut().unwrap().remove("messageDetail");
         value.as_object_mut().unwrap().remove("skipHolidays");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("replyCompletionSourceId");
         let legacy: ScheduledWorkDefinition = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(legacy.message_detail, WorkMessageDetail::TitleOnly);
         assert!(!legacy.skip_holidays);
+        assert!(legacy.reply_completion_source_id.is_none());
         for mode in [
             WorkMessageDetail::TitleOnly,
             WorkMessageDetail::TitleAndDetails,

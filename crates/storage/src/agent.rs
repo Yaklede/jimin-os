@@ -3233,6 +3233,19 @@ async fn persist_agent_action(
     user_id: Uuid,
     action: &AgentActionCommand,
 ) -> Result<(), StorageError> {
+    if let AgentActionCommand::SetTaskStatus {
+        id,
+        status: TaskStatus::Completed,
+        ..
+    }
+    | AgentActionCommand::UpdateTask {
+        id,
+        status: TaskStatus::Completed,
+        ..
+    } = action
+    {
+        crate::completion_reviews::ensure_no_pending(transaction, user_id, *id).await?;
+    }
     let (entity_type, entity_id, version) = match action {
         AgentActionCommand::CreateTask {
             id,

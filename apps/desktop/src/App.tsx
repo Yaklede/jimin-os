@@ -184,6 +184,7 @@ import {
 } from "./api/agent";
 import { assistantResponseAfterLatestRequest } from "./components/conversationResponse";
 import { HomeWorkspace } from "./components/HomeWorkspace";
+import { CompletionReviewPanel } from "./components/CompletionReviewPanel";
 import { type PromoteGmailInflowInput } from "./components/GmailInflowReview";
 import { OsShell, type OsDestination } from "./components/OsShell";
 import {
@@ -380,6 +381,8 @@ export default function App() {
     useState<string>();
   const [highlightedScheduleId, setHighlightedScheduleId] = useState<string>();
   const [highlightedPlanningTaskId, setHighlightedPlanningTaskId] =
+    useState<string>();
+  const [highlightedCompletionReviewId, setHighlightedCompletionReviewId] =
     useState<string>();
   const [planningEditTarget, setPlanningEditTarget] = useState<
     PlanningEditTarget | undefined
@@ -1935,6 +1938,8 @@ export default function App() {
   const refreshSynchronizedProjections = useCallback(
     async (changes: SyncChange[], forceFull = false): Promise<void> => {
       const entityTypes = new Set(changes.map((change) => change.entityType));
+      if (forceFull || entityTypes.has("task_completion_review"))
+        window.dispatchEvent(new Event("completion-reviews-changed"));
       const affectsWork =
         forceFull ||
         [
@@ -2441,6 +2446,13 @@ export default function App() {
       void peekPendingReminderNavigation()
         .then(async (navigation) => {
           if (!active || !navigation) return;
+          if (navigation.itemType === "task_completion_review") {
+            setHighlightedCompletionReviewId(navigation.itemId);
+            navigate("home");
+            window.dispatchEvent(new Event("completion-reviews-changed"));
+            await acknowledgePendingReminderNavigation(navigation);
+            return;
+          }
           if (
             navigation.itemType === "google_chat_inflow" &&
             navigation.projectId
@@ -5127,6 +5139,16 @@ export default function App() {
           >
             {destination === "home" && (
               <HomeWorkspace
+                completionReviews={
+                  <CompletionReviewPanel
+                    baseUrl={apiBaseUrl}
+                    authenticate={withAuthenticatedSession}
+                    highlightedId={highlightedCompletionReviewId}
+                    onChanged={async () => {
+                      await loadHomeSnapshot();
+                    }}
+                  />
+                }
                 scheduledWork={
                   <ScheduledWorkPanel
                     baseUrl={apiBaseUrl}

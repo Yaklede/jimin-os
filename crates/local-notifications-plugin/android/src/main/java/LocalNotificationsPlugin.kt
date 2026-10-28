@@ -697,7 +697,7 @@ private fun validateScheduleArgs(
 private fun validItemType(value: String): Boolean = value == "task" || value == "schedule"
 
 private fun validNotificationItemType(value: String): Boolean =
-  validItemType(value) || value in setOf("google_chat_inflow", "gmail_inflow", "brief", "weekly_report")
+  validItemType(value) || value in setOf("google_chat_inflow", "gmail_inflow", "brief", "weekly_report", "task_completion_review")
 
 private fun validIdentifier(value: String): Boolean =
   value.length in 1..128 && value.all { it.isLetterOrDigit() || it == '-' || it == '_' }

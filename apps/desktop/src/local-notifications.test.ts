@@ -60,6 +60,7 @@ describe("local notification runtime", () => {
     "gmail_inflow",
     "brief",
     "weekly_report",
+    "task_completion_review",
   ] as const)(
     "accepts %s push navigation without changing timed reminder types",
     async (itemType) => {

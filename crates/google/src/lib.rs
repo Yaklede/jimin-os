@@ -367,6 +367,34 @@ pub struct GoogleChatMessageEntry {
     pub create_time: OffsetDateTime,
 }
 
+pub struct GoogleChatMessageReceipt {
+    pub message_name: String,
+    pub thread_name: String,
+}
+
+fn reminder_receipt(
+    space: &str,
+    value: &serde_json::Value,
+) -> Result<GoogleChatMessageReceipt, GoogleAuthError> {
+    let space_id = validated_chat_space_id(space)?;
+    let message = value["name"]
+        .as_str()
+        .ok_or(GoogleAuthError::ProviderDataInvalid)?;
+    let thread = value["thread"]["name"]
+        .as_str()
+        .ok_or(GoogleAuthError::ProviderDataInvalid)?;
+    validated_chat_message_segments(message).map_err(|_| GoogleAuthError::ProviderDataInvalid)?;
+    validated_chat_thread_segments(thread, space_id)
+        .map_err(|_| GoogleAuthError::ProviderDataInvalid)?;
+    if !message.starts_with(&format!("{space}/messages/")) {
+        return Err(GoogleAuthError::ProviderDataInvalid);
+    }
+    Ok(GoogleChatMessageReceipt {
+        message_name: message.into(),
+        thread_name: thread.into(),
+    })
+}
+
 /// One validated Calendar list entry. Provider IDs remain server-only and are
 /// intentionally not serializable or printable.
 pub struct GoogleCalendarListEntry {
@@ -1513,6 +1541,34 @@ impl GoogleChatAdapter {
         space_name: &str,
         created_after: Option<OffsetDateTime>,
     ) -> Result<Vec<GoogleChatMessageEntry>, GoogleAuthError> {
+        self.list_messages_filtered(access_token, space_name, created_after, None)
+            .await
+    }
+
+    /// Lists one server-tracked reminder thread without relying on the general space cursor.
+    /// # Errors
+    /// Returns invalid thread, credential or provider failures.
+    pub async fn list_reminder_thread(
+        &self,
+        access_token: &SecretString,
+        space_name: &str,
+        thread: &str,
+        after: OffsetDateTime,
+    ) -> Result<Vec<GoogleChatMessageEntry>, GoogleAuthError> {
+        let space = validated_chat_space_id(space_name)?;
+        validated_chat_thread_segments(thread, space)
+            .map_err(|_| GoogleAuthError::InvalidRequest)?;
+        self.list_messages_filtered(access_token, space_name, Some(after), Some(thread))
+            .await
+    }
+
+    async fn list_messages_filtered(
+        &self,
+        access_token: &SecretString,
+        space_name: &str,
+        created_after: Option<OffsetDateTime>,
+        thread: Option<&str>,
+    ) -> Result<Vec<GoogleChatMessageEntry>, GoogleAuthError> {
         let token = validate_access_token(access_token)?;
         let space_id = validated_chat_space_id(space_name)?;
         let mut messages = Vec::new();
@@ -1533,7 +1589,12 @@ impl GoogleChatAdapter {
                     let timestamp = created_after
                         .format(&time::format_description::well_known::Rfc3339)
                         .map_err(|_| GoogleAuthError::InvalidRequest)?;
-                    query.append_pair("filter", &format!("createTime > \"{timestamp}\""));
+                    let filter = format!(
+                        "createTime > \"{timestamp}\"{}",
+                        thread
+                            .map_or_else(String::new, |name| format!(" AND thread.name = {name}"))
+                    );
+                    query.append_pair("filter", &filter);
                 }
                 if let Some(page_token) = page_token.as_deref() {
                     query.append_pair("pageToken", page_token);
@@ -1562,6 +1623,67 @@ impl GoogleChatAdapter {
             }
         }
         Err(GoogleAuthError::ProviderDataInvalid)
+    }
+
+    /// Sends an idempotent text reminder as the already connected company user.
+    /// # Errors
+    /// Returns a classified request, authorization or provider failure.
+    pub async fn create_reminder_message(
+        &self,
+        access: &SecretString,
+        space: &str,
+        text: &str,
+        id: &str,
+    ) -> Result<GoogleChatMessageReceipt, GoogleAuthError> {
+        let token = validate_access_token(access)?;
+        let space_id = validated_chat_space_id(space)?;
+        if id.len() != 32
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return Err(GoogleAuthError::InvalidRequest);
+        }
+        let text = validate_provider_free_text(text.to_owned(), 32_000)
+            .map_err(|_| GoogleAuthError::InvalidRequest)?;
+        let mut url = reqwest::Url::parse("https://chat.googleapis.com/v1")
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        url.path_segments_mut()
+            .map_err(|()| GoogleAuthError::ProviderUnavailable)?
+            .push("spaces")
+            .push(space_id)
+            .push("messages");
+        let message_id = format!("client-jimin-{id}");
+        url.query_pairs_mut()
+            .append_pair("requestId", id)
+            .append_pair("messageId", &message_id);
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({"text":text}))
+            .send()
+            .await
+            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
+        let response = if response.status().as_u16() == 409 {
+            self.client
+                .get(format!(
+                    "https://chat.googleapis.com/v1/{space}/messages/{message_id}"
+                ))
+                .bearer_auth(token)
+                .send()
+                .await
+                .map_err(|_| GoogleAuthError::ProviderUnavailable)?
+        } else {
+            response
+        };
+        if !response.status().is_success() {
+            return Err(classify_chat_read_status(response.status().as_u16()));
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&bounded_body(response, 64 * 1024).await?)
+                .map_err(|_| GoogleAuthError::ProviderDataInvalid)?;
+        reminder_receipt(space, &value)
     }
 
     /// Adds the ingestion acknowledgement reaction after a message has been
@@ -4060,6 +4182,23 @@ mod tests {
         assert!(
             validated_chat_thread_segments("spaces/AAAAAAAAAAA/threads/..", "AAAAAAAAAAA").is_err()
         );
+    }
+
+    #[test]
+    fn reminder_receipts_require_both_canonical_names_in_the_selected_space() {
+        let good = serde_json::json!({"name":"spaces/test/messages/abc.123","thread":{"name":"spaces/test/threads/abc.123"}});
+        assert_eq!(
+            reminder_receipt("spaces/test", &good).unwrap().message_name,
+            "spaces/test/messages/abc.123"
+        );
+        for bad in [
+            serde_json::json!({"name":"spaces/other/messages/abc","thread":{"name":"spaces/test/threads/abc"}}),
+            serde_json::json!({"name":"spaces/test/messages/abc","thread":{"name":"spaces/other/threads/abc"}}),
+            serde_json::json!({"name":"spaces/test/messages/abc"}),
+            serde_json::json!({"name":"https://evil.example.test","thread":{"name":"spaces/test/threads/abc"}}),
+        ] {
+            assert!(reminder_receipt("spaces/test", &bad).is_err());
+        }
     }
 
     #[test]

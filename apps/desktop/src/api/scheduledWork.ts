@@ -11,6 +11,7 @@ export interface ScheduledWorkDefinition {
   workspaceId: string;
   projectId: string | null;
   webhookId: string | null;
+  replyCompletionSourceId?: string | null;
   weekdays: number[];
   time: string;
   followUpTime: string | null;
@@ -36,6 +37,7 @@ export function normalizeScheduledWorkDefinition(
     skipHolidays: definition.skipHolidays ?? false,
     condition: definition.condition ?? "always",
     conditionHours: definition.conditionHours ?? 24,
+    replyCompletionSourceId: definition.replyCompletionSourceId ?? null,
   };
 }
 export interface ScheduledWork {

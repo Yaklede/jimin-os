@@ -37,7 +37,8 @@ export type ReminderNavigation = Pick<
     | "google_chat_inflow"
     | "gmail_inflow"
     | "brief"
-    | "weekly_report";
+    | "weekly_report"
+    | "task_completion_review";
   targetAtEpochMillis?: number;
 };
 
@@ -307,6 +308,7 @@ function parseReminderNavigation(
       "gmail_inflow",
       "brief",
       "weekly_report",
+      "task_completion_review",
     ].includes(String(result.itemType)) ||
     typeof result.itemId !== "string" ||
     (result.destination !== "home" &&
