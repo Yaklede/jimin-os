@@ -1,5 +1,8 @@
 //! Owner confirmation separates an assignee report from irreversible external completion.
-use crate::{Database, StorageError, auth::append_change, planning::complete_task_in_transaction};
+use crate::{
+    Database, StorageError, auth::append_change,
+    planning::complete_task_with_feedback_in_transaction,
+};
 use serde::Serialize;
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
@@ -39,6 +42,7 @@ struct DecisionRow {
     version: i64,
     completion_note: Option<String>,
     command_id: Option<Uuid>,
+    feedback_source_id: Option<Uuid>,
     owner_note: Option<String>,
 }
 
@@ -182,7 +186,7 @@ impl Database {
         .fetch_optional(&mut *tx)
         .await
         .map_err(classify)?;
-        let row:DecisionRow=sqlx::query_as("SELECT status,version,completion_note,command_id,owner_note FROM task_completion_reviews WHERE id=$1 AND user_id=$2 FOR UPDATE")
+        let row:DecisionRow=sqlx::query_as("SELECT status,version,completion_note,command_id,owner_note,(SELECT source_id FROM scheduled_chat_reply_commands c WHERE c.id=r.command_id AND c.user_id=$2) AS feedback_source_id FROM task_completion_reviews r WHERE id=$1 AND user_id=$2 FOR UPDATE")
             .bind(id).bind(user).fetch_one(&mut *tx).await.map_err(classify)?;
         let decision = if approve { "approved" } else { "rejected" };
         if row.status == decision && row.version == review_version + 1 {
@@ -197,12 +201,13 @@ impl Database {
         sqlx::query("UPDATE task_completion_reviews SET status=$2,owner_note=$3,version=version+1,resolved_at=NOW() WHERE id=$1")
             .bind(id).bind(decision).bind(note.map(str::trim)).execute(&mut *tx).await.map_err(classify)?;
         if approve
-            && complete_task_in_transaction(
+            && complete_task_with_feedback_in_transaction(
                 &mut tx,
                 user,
                 task,
                 task_version,
                 row.completion_note.as_deref(),
+                row.feedback_source_id,
             )
             .await?
             .is_none()
@@ -220,10 +225,14 @@ impl Database {
         sqlx::query("UPDATE push_deliveries SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL,next_attempt_at=NULL WHERE user_id=$1 AND item_type='task_completion_review' AND item_id=$2 AND status IN ('queued','retry_wait')")
             .bind(user).bind(id).execute(&mut *tx).await.map_err(classify)?;
         let text = if approve {
-            format!(
-                "{} · 완료를 확인했어요. 최종 완료와 연결된 CS·Redmine 반영을 진행해요.",
-                crate::scheduled_chat_reply::task_code(task)
-            )
+            let title: String =
+                sqlx::query_scalar("SELECT title FROM tasks WHERE id=$1 AND user_id=$2")
+                    .bind(task)
+                    .bind(user)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(classify)?;
+            format!("{} · 완료되었어요.", title.trim())
         } else {
             format!(
                 "{} · 재작업을 요청했어요. 할 일은 열린 상태로 유지해요.\n{}",

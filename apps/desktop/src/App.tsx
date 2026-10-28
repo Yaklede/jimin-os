@@ -116,8 +116,11 @@ import {
   type GoogleChatAccount,
   type GoogleChatSpace,
   type ProjectGoogleChatSource,
+  type ChatSourcePurpose,
   type ProjectInflowItem,
 } from "./api/googleChat";
+import { updateChatSourcePurpose } from "./api/chatRouting";
+import { chatRoutingCopy } from "./copy/chatRouting";
 import {
   createProjectWebhook,
   deleteProjectWebhook,
@@ -387,6 +390,8 @@ export default function App() {
   );
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>();
   const [selectedProjectId, setSelectedProjectId] = useState<string>();
+  const selectedProjectIdRef = useRef(selectedProjectId);
+  selectedProjectIdRef.current = selectedProjectId;
   const [highlightedProjectTaskId, setHighlightedProjectTaskId] =
     useState<string>();
   const [highlightedProjectInflowId, setHighlightedProjectInflowId] =
@@ -4428,6 +4433,7 @@ export default function App() {
     displayName: string;
     acknowledgeWithReaction: boolean;
     importHistory: boolean;
+    purpose?: ChatSourcePurpose;
   }): Promise<void> {
     if (!selectedProjectId) throw new Error("project unavailable");
     setInflowSaving(true);
@@ -4468,6 +4474,34 @@ export default function App() {
       );
     } catch (error) {
       setInflowError(copy.projects.inflowSourceProblem);
+      throw error;
+    } finally {
+      setInflowSaving(false);
+    }
+  }
+
+  async function updateWorkspaceChatPurpose(
+    source: ProjectGoogleChatSource,
+    purpose: ChatSourcePurpose,
+  ): Promise<void> {
+    setInflowSaving(true);
+    setInflowError(undefined);
+    try {
+      const updated = await withAuthenticatedSession((access) =>
+        updateChatSourcePurpose(apiBaseUrl, access, source, purpose),
+      );
+      if (source.projectId === selectedProjectIdRef.current)
+        setProjectGoogleChatSources((current) =>
+          current.map((item) => (item.id === source.id ? updated : item)),
+        );
+    } catch (error) {
+      if (source.projectId === selectedProjectIdRef.current)
+        setInflowError(chatRoutingCopy.purposeError);
+      const latest = await withAuthenticatedSession((access) =>
+        fetchProjectGoogleChatSources(apiBaseUrl, access, source.projectId),
+      ).catch(() => undefined);
+      if (latest && source.projectId === selectedProjectIdRef.current)
+        setProjectGoogleChatSources(latest);
       throw error;
     } finally {
       setInflowSaving(false);
@@ -5413,6 +5447,10 @@ export default function App() {
             )}
             {destination === "projects" && (
               <ProjectsWorkspace
+                chatRouting={{
+                  baseUrl: apiBaseUrl,
+                  authenticate: withAuthenticatedSession,
+                }}
                 scheduledWork={
                   <ScheduledWorkPanel
                     onOpenRequestHandled={consumeDeckIntent}
@@ -5517,6 +5555,7 @@ export default function App() {
                 onConnectGoogleChatAccount={beginGoogleChatConnection}
                 onLoadGoogleChatSpaces={loadGoogleChatSpaces}
                 onCreateGoogleChatSource={createWorkspaceGoogleChatSource}
+                onUpdateGoogleChatSourcePurpose={updateWorkspaceChatPurpose}
                 onDeleteGoogleChatSource={deleteWorkspaceGoogleChatSource}
                 onSyncGoogleChatSource={syncWorkspaceGoogleChatSource}
                 onPromoteInflow={promoteWorkspaceInflow}

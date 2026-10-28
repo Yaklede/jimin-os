@@ -1,0 +1,90 @@
+.project-chat-routing {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  padding: 16px;
+  background: var(--surface-subtle);
+  border-radius: 16px;
+}
+.project-chat-routing header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.project-chat-routing header > button {
+  display: grid;
+  place-items: center;
+  min-width: 44px;
+  min-height: 44px;
+  flex-shrink: 0;
+}
+.project-chat-routing h4,
+.project-chat-routing p {
+  margin: 0;
+}
+.project-chat-routing header p {
+  margin-top: 8px;
+}
+.project-chat-routing form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.project-chat-routing label {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.project-chat-routing select {
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+}
+.project-chat-routing__help,
+.project-chat-routing__actions {
+  grid-column: 1 / -1;
+}
+.project-chat-routing__help {
+  color: var(--text-muted);
+}
+.project-chat-routing__load-status {
+  min-height: 20px;
+}
+.project-chat-routing__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.project-chat-routing__actions button {
+  min-height: 44px;
+}
+.project-chat-role {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.project-chat-role select {
+  min-width: 0;
+  min-height: 44px;
+  max-width: 100%;
+}
+.project-chat-role button {
+  min-height: 44px;
+}
+@media (max-width: 720px) {
+  .project-chat-routing form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .project-chat-routing select,
+  .project-chat-role select {
+    font-size: 16px;
+  }
+  .project-chat-role {
+    width: 100%;
+  }
+  .project-chat-role select {
+    flex: 1 1 180px;
+  }
+}

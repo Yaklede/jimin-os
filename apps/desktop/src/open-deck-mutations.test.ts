@@ -19,6 +19,25 @@ const task: DeckMutation = {
 const response = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status });
 describe("tablet writes", () => {
+  it("does not bypass pending owner confirmation or retry a rejected completion", async () => {
+    let calls = 0;
+    const result = await executeDeckMutation(
+      "https://example.test",
+      "fixture",
+      task,
+      async () => {
+        calls++;
+        return calls === 1
+          ? response({ id, status: "open", version: 7 })
+          : response(
+              { error: { code: "task.completion_review_pending" } },
+              409,
+            );
+      },
+    );
+    expect(result).toEqual({ error: "CONFLICT" });
+    expect(calls).toBe(2);
+  });
   it("creates schedules with a stable server mutation id and Seoul timezone", async () => {
     const calls: RequestInit[] = [];
     const result = await executeDeckMutation(

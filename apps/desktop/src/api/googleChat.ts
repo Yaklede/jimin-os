@@ -26,6 +26,8 @@ export interface GoogleChatSpace {
   displayName: string;
 }
 
+export type ChatSourcePurpose = "inflow" | "delivery" | "both";
+
 export interface ProjectGoogleChatSource {
   id: string;
   projectId: string;
@@ -35,6 +37,7 @@ export interface ProjectGoogleChatSource {
   displayName: string;
   enabled: boolean;
   acknowledgeWithReaction: boolean;
+  purpose?: ChatSourcePurpose;
   lastSuccessfulSyncAt: string | null;
   lastErrorCode: string | null;
   version: number;
@@ -232,6 +235,7 @@ export async function createProjectGoogleChatSource(
     displayName: string;
     acknowledgeWithReaction: boolean;
     importHistory: boolean;
+    purpose?: ChatSourcePurpose;
   },
 ): Promise<ProjectGoogleChatSource> {
   return request<ProjectGoogleChatSource>(

@@ -124,6 +124,24 @@ pub fn parse_command(text: &str) -> ParsedCommand<'_> {
     }
     ParsedCommand::Complete { code, note }
 }
+
+/// Only a server-tracked, single-task assignment may omit the explicit task code.
+#[must_use]
+pub fn normalize_assignment_command(text: &str, task: Uuid) -> Option<String> {
+    let mut lines = text.trim().splitn(2, '\n');
+    if lines.next()?.trim() != "완료" {
+        return None;
+    }
+    let note = lines
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    Some(format!(
+        "완료 {}{}",
+        task_code(task),
+        note.map_or_else(String::new, |value| format!("\n{value}"))
+    ))
+}
 fn classify(_: sqlx::Error) -> StorageError {
     StorageError::PersistenceUnavailable
 }
@@ -161,19 +179,22 @@ async fn contexts(
     delivery: Option<Uuid>,
     thread: Option<&str>,
 ) -> Result<Vec<ReplyContext>, StorageError> {
-    sqlx::query_as("SELECT a.id AS account_id,d.id AS delivery_id,d.user_id,d.project_id,s.id AS source_id,s.space_name,d.google_chat_message_name AS message_name,d.google_chat_thread_name AS thread_name,d.delivered_at,h.mention_directory AS directory,d.payload,r.task_ids AS run_task_ids
+    let mut result = sqlx::query_as("SELECT a.id AS account_id,d.id AS delivery_id,d.user_id,d.project_id,s.id AS source_id,s.space_name,d.google_chat_message_name AS message_name,d.google_chat_thread_name AS thread_name,d.delivered_at,h.mention_directory AS directory,d.payload,r.task_ids AS run_task_ids
         FROM webhook_deliveries d JOIN scheduled_work_run_deliveries l ON l.delivery_id=d.id
         JOIN scheduled_work_runs r ON r.id=l.run_id AND r.user_id=d.user_id
         JOIN scheduled_work w ON w.id=r.scheduled_work_id AND w.user_id=d.user_id AND w.project_id=d.project_id
         JOIN project_webhooks h ON h.id=d.webhook_id AND h.user_id=d.user_id AND h.project_id=d.project_id AND h.enabled AND h.provider='google_chat'
-        JOIN project_google_chat_sources s ON s.id::text=d.payload->'replyCompletion'->>'sourceId' AND s.user_id=d.user_id AND s.project_id=d.project_id AND s.enabled
+        JOIN project_google_chat_sources s ON s.id::text=d.payload->'replyCompletion'->>'sourceId' AND s.user_id=d.user_id AND s.project_id=d.project_id AND s.enabled AND s.purpose IN ('delivery','both')
         JOIN google_chat_accounts a ON a.id=s.account_id AND a.user_id=s.user_id AND a.status IN ('active','error','reauth_required')
         JOIN projects p ON p.id=d.project_id AND p.user_id=d.user_id AND p.status='active'
         JOIN users u ON u.id=d.user_id AND u.status='active'
         WHERE d.user_id=$1 AND s.id=$2 AND ($3::UUID IS NULL OR d.id=$3) AND ($4::TEXT IS NULL OR d.google_chat_thread_name=$4)
           AND w.definition->>'replyCompletionSourceId'=s.id::text AND w.definition->>'webhookId'=h.id::text
         ORDER BY d.id DESC LIMIT 50 FOR SHARE OF w,h,s,a,p,u")
-        .bind(owner).bind(source).bind(delivery).bind(thread).fetch_all(&mut **tx).await.map_err(classify)
+        .bind(owner).bind(source).bind(delivery).bind(thread).fetch_all(&mut **tx).await.map_err(classify)?;
+    result
+        .extend(crate::task_chat::reply_contexts(tx, owner, source, delivery, thread, true).await?);
+    Ok(result)
 }
 
 impl Database {
@@ -219,6 +240,9 @@ impl Database {
         &self,
         id: Uuid,
     ) -> Result<Option<ReplyContext>, StorageError> {
+        if let Some(context) = crate::task_chat::delivery_context(self, id).await? {
+            return Ok(Some(context));
+        }
         let raw: Option<(Uuid, serde_json::Value)> =
             sqlx::query_as("SELECT user_id,payload FROM webhook_deliveries WHERE id=$1")
                 .bind(id)
@@ -293,11 +317,19 @@ impl Database {
         {
             return Ok(false);
         }
+        let known:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM webhook_deliveries d WHERE d.user_id=$1 AND d.project_id=$2 AND (d.payload->'replyCompletion'->>'sourceId'=$3 OR d.payload->>'taskChatSourceId'=$3) AND (d.google_chat_message_name=$4 OR $4=CONCAT($5,'/messages/client-jimin-',replace(d.id::TEXT,'-',''))))")
+            .bind(connection.user_id).bind(connection.project_id).bind(connection.source_id.to_string()).bind(&message.provider_message_name).bind(&connection.space_name).fetch_one(self.pool()).await.map_err(classify)?;
+        if known {
+            return Ok(true);
+        }
         let Some(tag) = message
             .content_text
             .lines()
             .next()
-            .and_then(|s| s.strip_prefix("[예약 알림 R-"))
+            .and_then(|s| {
+                s.strip_prefix("[예약 알림 R-")
+                    .or_else(|| s.strip_prefix("[일감 배정 A-"))
+            })
             .and_then(|s| s.strip_suffix(']'))
         else {
             return Ok(false);
@@ -370,7 +402,18 @@ impl Database {
             )
             .await?;
         }
-        let command = parse_command(&message.content_text);
+        let single_assignment =
+            contexts.len() == 1 && contexts[0].payload["taskChatKind"] == "assignment";
+        let normalized = if single_assignment {
+            contexts[0]
+                .envelope()?
+                .tasks
+                .first()
+                .and_then(|task| normalize_assignment_command(&message.content_text, task.id))
+        } else {
+            None
+        };
+        let command = parse_command(normalized.as_deref().unwrap_or(&message.content_text));
         if command == ParsedCommand::Ignore
             || contexts
                 .iter()
@@ -539,6 +582,26 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plain_completion_is_only_normalized_for_a_tracked_single_assignment() {
+        let task = uuid::Uuid::now_v7();
+        assert_eq!(super::parse_command("완료"), super::ParsedCommand::Ignore);
+        let text = super::normalize_assignment_command(" 완료\n검증 메모 ", task).unwrap();
+        assert_eq!(text, format!("완료 {}\n검증 메모", super::task_code(task)));
+        assert!(matches!(
+            super::parse_command(&text),
+            super::ParsedCommand::Complete { .. }
+        ));
+        for ignored in [
+            "아직 완료 아님",
+            "완료했습니다",
+            "확인 완료 예정",
+            "미완료",
+            "완료 T-ABCDEF123456",
+        ] {
+            assert!(super::normalize_assignment_command(ignored, task).is_none());
+        }
+    }
     use super::*;
     #[test]
     fn exact_commands_are_bounded_and_do_not_infer_completion_from_chatter() {

@@ -199,7 +199,15 @@ export function ScheduledWorkPanel({
       )
         .then((items) => {
           if (!cancelled) {
-            setChatSources(items.filter((s) => s.enabled));
+            setChatSources(
+              items.filter(
+                (s) =>
+                  s.enabled &&
+                  (s.purpose === undefined ||
+                    s.purpose === "delivery" ||
+                    s.purpose === "both"),
+              ),
+            );
             setChatSourcesState("ready");
           }
         })

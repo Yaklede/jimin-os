@@ -162,6 +162,7 @@ pub struct ProjectGoogleChatSource {
     pub display_name: String,
     pub enabled: bool,
     pub acknowledge_with_reaction: bool,
+    pub purpose: String,
     pub last_successful_sync_at: Option<OffsetDateTime>,
     pub last_error_code: Option<String>,
     pub version: i64,
@@ -177,6 +178,7 @@ struct ProjectGoogleChatSourceRow {
     display_name: String,
     enabled: bool,
     acknowledge_with_reaction: bool,
+    purpose: String,
     last_successful_sync_at: Option<OffsetDateTime>,
     last_error_code: Option<String>,
     version: i64,
@@ -193,6 +195,7 @@ impl From<ProjectGoogleChatSourceRow> for ProjectGoogleChatSource {
             display_name: row.display_name,
             enabled: row.enabled,
             acknowledge_with_reaction: row.acknowledge_with_reaction,
+            purpose: row.purpose,
             last_successful_sync_at: row.last_successful_sync_at,
             last_error_code: row.last_error_code,
             version: row.version,
@@ -209,6 +212,7 @@ pub struct NewProjectGoogleChatSource {
     pub display_name: String,
     pub acknowledge_with_reaction: bool,
     pub import_history: bool,
+    pub purpose: crate::task_chat::ChatSourcePurpose,
 }
 
 pub struct PromoteProjectInflowItem {
@@ -812,7 +816,7 @@ impl Database {
         let rows = sqlx::query_as::<_, ProjectGoogleChatSourceRow>(
             "SELECT source.id, source.project_id, source.account_id,
                 account.email AS account_email, source.space_name, source.display_name,
-                source.enabled, source.acknowledge_with_reaction,
+                source.enabled, source.acknowledge_with_reaction, source.purpose,
                 source.last_successful_sync_at, source.last_error_code, source.version
              FROM project_google_chat_sources AS source
              JOIN google_chat_accounts AS account ON account.id = source.account_id
@@ -844,17 +848,17 @@ impl Database {
         let row = sqlx::query_as::<_, ProjectGoogleChatSourceRow>(
             "INSERT INTO project_google_chat_sources (
                 id, user_id, project_id, account_id, space_name, display_name,
-                acknowledge_with_reaction, last_provider_message_at
+                acknowledge_with_reaction, last_provider_message_at, purpose
              )
              SELECT $1, $2, project.id, account.id, $5, $6, $7,
-                CASE WHEN $8 THEN NULL ELSE NOW() END
+                CASE WHEN $8 THEN NULL ELSE NOW() END, $9
              FROM projects AS project
              JOIN google_chat_accounts AS account
                ON account.id = $4 AND account.user_id = $2 AND account.status = 'active'
              WHERE project.id = $3 AND project.user_id = $2
              RETURNING id, project_id, account_id,
                 (SELECT email FROM google_chat_accounts WHERE id = account_id) AS account_email,
-                space_name, display_name, enabled, acknowledge_with_reaction,
+                space_name, display_name, enabled, acknowledge_with_reaction, purpose,
                 last_successful_sync_at, last_error_code, version",
         )
         .bind(command.id)
@@ -865,6 +869,7 @@ impl Database {
         .bind(command.display_name.trim())
         .bind(command.acknowledge_with_reaction)
         .bind(command.import_history)
+        .bind(command.purpose.as_str())
         .fetch_optional(&mut *transaction)
         .await
         .map_err(classify)?
@@ -898,6 +903,21 @@ impl Database {
             return Err(StorageError::InvalidConfiguration);
         }
         let mut transaction = self.pool().begin().await.map_err(classify)?;
+        let owned: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM projects WHERE id=$1 AND user_id=$2 FOR UPDATE")
+                .bind(project_id)
+                .bind(user_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(classify)?;
+        if owned.is_none() {
+            return Ok(false);
+        }
+        let routed:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM project_task_chat_routes WHERE user_id=$1 AND project_id=$2 AND source_id=$3)")
+            .bind(user_id).bind(project_id).bind(source_id).fetch_one(&mut *transaction).await.map_err(classify)?;
+        if routed {
+            return Err(StorageError::InvalidConfiguration);
+        }
         let deleted = sqlx::query_scalar::<_, i64>(
             "DELETE FROM project_google_chat_sources
              WHERE id = $1 AND user_id = $2 AND project_id = $3 AND version = $4
@@ -997,10 +1017,10 @@ impl Database {
             return Err(StorageError::InvalidConfiguration);
         }
         let mut transaction = self.pool().begin().await.map_err(classify)?;
-        let source_locked = sqlx::query_scalar::<_, Uuid>(
-            "SELECT id
+        let source_locked = sqlx::query_as::<_, (Uuid, String)>(
+            "SELECT id,purpose
              FROM project_google_chat_sources
-             WHERE id = $1 AND user_id = $2 AND project_id = $3
+             WHERE id = $1 AND user_id = $2 AND project_id = $3 AND enabled
              FOR UPDATE",
         )
         .bind(connection.source_id)
@@ -1013,8 +1033,9 @@ impl Database {
             transaction.rollback().await.map_err(classify)?;
             return Err(StorageError::IdentityConflict);
         }
+        let collect_inflow = source_locked.is_some_and(|(_, purpose)| purpose != "delivery");
         let mut acknowledgements = Vec::new();
-        for message in messages {
+        for message in messages.iter().filter(|_| collect_inflow) {
             let inflow_id = Uuid::now_v7();
             let linked_task_id = if let Some(thread_name) = &message.provider_thread_name {
                 sqlx::query_scalar::<_, Uuid>(
@@ -2868,6 +2889,8 @@ fn validate_source(command: &NewProjectGoogleChatSource) -> Result<(), StorageEr
     .all(is_v7)
         || !valid_space_name(&command.space_name)
         || !valid_text(&command.display_name, MAX_DISPLAY_NAME_CHARS, false)
+        || (command.purpose == crate::task_chat::ChatSourcePurpose::Delivery
+            && (command.import_history || command.acknowledge_with_reaction))
     {
         return Err(StorageError::InvalidConfiguration);
     }

@@ -30,11 +30,12 @@ pub mod reports;
 pub mod scheduled_chat_reply;
 pub mod scheduled_work;
 pub mod sync;
+pub mod task_chat;
 pub mod webhook;
 pub mod weekly_report;
 pub mod work;
 
-pub const EXPECTED_SCHEMA_VERSION: i64 = 65;
+pub const EXPECTED_SCHEMA_VERSION: i64 = 66;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 

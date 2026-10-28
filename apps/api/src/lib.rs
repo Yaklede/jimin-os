@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod calendar_oauth;
+mod chat_routing;
 mod completion_reviews;
 pub mod config;
 mod delivery_recovery;
@@ -936,6 +937,7 @@ pub struct ProjectGoogleChatSourceResponse {
     display_name: String,
     enabled: bool,
     acknowledge_with_reaction: bool,
+    purpose: String,
     last_successful_sync_at: Option<String>,
     last_error_code: Option<String>,
     version: i64,
@@ -1075,6 +1077,8 @@ pub struct CreateProjectGoogleChatSourceRequest {
     acknowledge_with_reaction: bool,
     #[serde(default)]
     import_history: bool,
+    #[serde(default)]
+    purpose: jimin_storage::task_chat::ChatSourcePurpose,
 }
 
 #[derive(Debug, Deserialize, ToSchema, PartialEq, Eq)]
@@ -2039,6 +2043,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
     let mut document = ApiDoc::openapi();
     document.merge(scheduled_work::ScheduledWorkApiDoc::openapi());
     document.merge(completion_reviews::CompletionReviewsApiDoc::openapi());
+    document.merge(chat_routing::ChatRoutingApiDoc::openapi());
     document
 }
 
@@ -2165,6 +2170,7 @@ pub fn router(state: ApiState) -> Router {
         .merge(device_signals::routes())
         .merge(scheduled_work::routes())
         .merge(completion_reviews::routes())
+        .merge(chat_routing::routes())
         .merge(meetings::routes());
 
     let allowed_origins = allowed_client_origins(state.trusted_network());
@@ -2662,7 +2668,9 @@ pub fn spawn_webhook_delivery_worker(state: &ApiState) -> Option<tokio::task::Jo
         loop {
             if let Ok(deliveries) = planning.claim_webhook_deliveries(&worker_id, 10).await {
                 for delivery in deliveries {
-                    if delivery.payload.get("replyCompletion").is_some() {
+                    if delivery.payload.get("replyCompletion").is_some()
+                        || delivery.payload.get("taskChatKind").is_some()
+                    {
                         let result = if let Some(runtime) = &reply_runtime {
                             scheduled_chat_reply::deliver_reminder(&planning, runtime, delivery.id)
                                 .await
@@ -3166,7 +3174,11 @@ async fn get_home_snapshot(
     else {
         return unavailable_response(request_id);
     };
-    let contexts = inflow_assignment_contexts(webhooks);
+    let Ok(contexts) =
+        routed_inflow_assignment_contexts(planning, principal.identity().user_id(), webhooks).await
+    else {
+        return unavailable_response(request_id);
+    };
     let Ok(recent_inflow) =
         project_inflow_responses(unsettled_inflow_items, inflow_analyses.clone(), &contexts)
     else {
@@ -7695,6 +7707,7 @@ async fn create_project_google_chat_source(
         display_name: request.display_name,
         acknowledge_with_reaction: request.acknowledge_with_reaction,
         import_history: request.import_history,
+        purpose: request.purpose,
     };
     match planning.create_project_google_chat_source(&command).await {
         Ok(source) => match project_google_chat_source_response(source) {
@@ -7843,7 +7856,11 @@ async fn list_project_inflow_items(
         planning.project_webhooks(user_id, project_id),
     ) {
         Ok((items, analyses, webhooks)) => {
-            let contexts = inflow_assignment_contexts(webhooks);
+            let contexts =
+                match routed_inflow_assignment_contexts(planning, user_id, webhooks).await {
+                    Ok(contexts) => contexts,
+                    Err(error) => return storage_error_response(&error, request_id),
+                };
             let items = group_project_inflow_candidates(items, analyses)
                 .into_iter()
                 .map(project_inflow_item_response)
@@ -8750,6 +8767,7 @@ fn project_google_chat_source_response(
         display_name: source.display_name,
         enabled: source.enabled,
         acknowledge_with_reaction: source.acknowledge_with_reaction,
+        purpose: source.purpose,
         last_successful_sync_at: source
             .last_successful_sync_at
             .map(|value| value.format(&Rfc3339))
@@ -8796,6 +8814,27 @@ fn inflow_assignment_contexts(
         }
     }
     contexts
+}
+
+async fn routed_inflow_assignment_contexts(
+    db: &Database,
+    user: uuid::Uuid,
+    webhooks: Vec<ProjectWebhook>,
+) -> Result<BTreeMap<uuid::Uuid, InflowAssignmentContext>, StorageError> {
+    let mut contexts = inflow_assignment_contexts(webhooks);
+    for (project, directory) in db.user_task_chat_directories(user).await? {
+        apply_task_chat_directory(&mut contexts, project, directory.0);
+    }
+    Ok(contexts)
+}
+fn apply_task_chat_directory(
+    contexts: &mut BTreeMap<uuid::Uuid, InflowAssignmentContext>,
+    project: uuid::Uuid,
+    directory: GoogleChatMentionDirectory,
+) {
+    let context = contexts.entry(project).or_default();
+    context.names.extend(directory.users.keys().cloned());
+    context.notifiable_names = directory.users.into_keys().collect();
 }
 
 fn apply_inflow_assignment_context(
@@ -11052,6 +11091,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn explicit_delivery_directory_replaces_only_notifiable_legacy_names() {
+        let project = Uuid::now_v7();
+        let mut contexts = BTreeMap::new();
+        let mut legacy = InflowAssignmentContext::default();
+        legacy.names.insert("이전 담당자".to_owned());
+        legacy.notifiable_names.insert("이전 담당자".to_owned());
+        contexts.insert(project, legacy);
+        apply_task_chat_directory(
+            &mut contexts,
+            project,
+            GoogleChatMentionDirectory {
+                users: [("현재 담당자".to_owned(), "users/123456789".to_owned())].into(),
+            },
+        );
+        assert!(contexts[&project].names.contains("이전 담당자"));
+        assert_eq!(
+            contexts[&project].notifiable_names,
+            ["현재 담당자".to_owned()].into()
+        );
+        apply_task_chat_directory(
+            &mut contexts,
+            project,
+            GoogleChatMentionDirectory::default(),
+        );
+        assert!(contexts[&project].notifiable_names.is_empty());
+    }
+
+    #[tokio::test]
+    async fn chat_routing_requires_owner_authentication_and_exposes_versioned_contracts() {
+        let project = Uuid::now_v7();
+        let source = Uuid::now_v7();
+        let directory = Uuid::now_v7();
+        for (method, path, body) in [
+            (
+                "GET",
+                format!("/v1/projects/{project}/chat-task-routing"),
+                None,
+            ),
+            (
+                "PUT",
+                format!("/v1/projects/{project}/chat-task-routing"),
+                Some(
+                    serde_json::json!({"sourceId":source,"directoryWebhookId":directory,"expectedVersion":0}),
+                ),
+            ),
+            (
+                "DELETE",
+                format!("/v1/projects/{project}/chat-task-routing?expected_version=1"),
+                None,
+            ),
+            (
+                "PUT",
+                format!("/v1/projects/{project}/google-chat-sources/{source}/purpose"),
+                Some(serde_json::json!({"purpose":"delivery","expectedVersion":1})),
+            ),
+        ] {
+            let (state, _, _) = signed_auth_state(true);
+            let response = router(state)
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.map_or_else(String::new, |b| b.to_string())))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let doc = serde_json::to_value(chat_routing::ChatRoutingApiDoc::openapi()).unwrap();
+        assert!(doc["paths"]["/v1/projects/{project_id}/chat-task-routing"]["put"].is_object());
+        assert!(
+            doc["components"]["schemas"]["RouteInput"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("expectedVersion"))
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["ChatSourcePurpose"]["enum"],
+            serde_json::json!(["inflow", "delivery", "both"])
+        );
+        assert!(
+            serde_json::from_value::<jimin_storage::task_chat::ChatSourcePurpose>(
+                serde_json::json!("anything")
+            )
+            .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn scheduled_work_routes_require_an_authenticated_owner() {
         let id = Uuid::now_v7();
@@ -11283,8 +11413,10 @@ mod tests {
                 "/v1/meetings/{meeting_id}/transcript",
                 "/v1/projects",
                 "/v1/projects/{project_id}",
+                "/v1/projects/{project_id}/chat-task-routing",
                 "/v1/projects/{project_id}/google-chat-sources",
                 "/v1/projects/{project_id}/google-chat-sources/{source_id}",
+                "/v1/projects/{project_id}/google-chat-sources/{source_id}/purpose",
                 "/v1/projects/{project_id}/google-chat-sources/{source_id}/sync",
                 "/v1/projects/{project_id}/inflow",
                 "/v1/projects/{project_id}/inflow/{item_id}/decision",
