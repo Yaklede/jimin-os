@@ -13,6 +13,19 @@ import {
 import { copy } from "../copy";
 import { RepresentativeImageControl } from "./RepresentativeImageControl";
 
+// Older Android WebViews do not support either this API or its pseudo-class.
+// An inactive appearance panel must never prevent the route back handler.
+export function dismissAppearancePopover(panel: HTMLElement | null): boolean {
+  if (!panel || typeof panel.hidePopover !== "function") return false;
+  try {
+    if (!panel.matches(":popover-open")) return false;
+  } catch {
+    return false;
+  }
+  panel.hidePopover();
+  return true;
+}
+
 export function AppearanceControl() {
   const popoverId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
@@ -23,10 +36,7 @@ export function AppearanceControl() {
   useEffect(
     () =>
       registerMobileBackHandler(() => {
-        const panel = panelRef.current;
-        if (!panel?.matches(":popover-open")) return false;
-        panel.hidePopover();
-        return true;
+        return dismissAppearancePopover(panelRef.current);
       }, 100),
     [],
   );
