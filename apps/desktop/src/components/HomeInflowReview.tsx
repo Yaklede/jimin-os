@@ -20,6 +20,8 @@ import {
 } from "./ProjectInflowPanel";
 
 type HomeInflowReviewProps = {
+  onFocusHandled?(id: number): void;
+  focusRequest?: number;
   initialView?: "list" | "calendar";
   items: ProjectInflowItem[];
   saving: boolean;
@@ -53,9 +55,30 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
         ? "existing"
         : "uncertain",
   );
+  const focusTarget = useRef<HTMLDivElement>(null);
+  const handledFocus = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (props.focusRequest && handledFocus.current !== props.focusRequest) {
+      handledFocus.current = props.focusRequest;
+      props.onFocusHandled?.(props.focusRequest);
+      setActiveTab(
+        groups.new.length
+          ? "new"
+          : groups.existing.length
+            ? "existing"
+            : "uncertain",
+      );
+      focusTarget.current?.scrollIntoView({ block: "start" });
+    }
+  }, [
+    props.focusRequest,
+    groups.new.length,
+    groups.existing.length,
+    props.onFocusHandled,
+  ]);
   if (pending.length === 0) return null;
   return (
-    <div className="inflow-review-queues">
+    <div className="inflow-review-queues" ref={focusTarget}>
       <div
         className="home-inflow-tabs"
         role="tablist"

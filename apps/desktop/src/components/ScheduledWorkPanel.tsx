@@ -46,6 +46,8 @@ import { ScheduledWorkCloseConfirmation } from "./ScheduledWorkCloseConfirmation
 import "./scheduledWork.css";
 
 interface Props {
+  onOpenRequestHandled?(id: number): void;
+  openRequest?: number;
   baseUrl: string;
   authenticate<T>(request: (token: string) => Promise<T>): Promise<T>;
   workspaceId?: string;
@@ -102,6 +104,8 @@ function errorCopy(error: unknown) {
 }
 
 export function ScheduledWorkPanel({
+  openRequest,
+  onOpenRequestHandled,
   baseUrl,
   authenticate,
   workspaceId,
@@ -382,6 +386,15 @@ export function ScheduledWorkPanel({
       (!workspaceId || item.definition.workspaceId === workspaceId),
   );
   const active = scoped.filter((item) => item.enabled);
+  const handledOpenRequest = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (openRequest && handledOpenRequest.current !== openRequest) {
+      handledOpenRequest.current = openRequest;
+      setOpen(true);
+      onOpenRequestHandled?.(openRequest);
+      void reload();
+    }
+  }, [openRequest, reload, onOpenRequestHandled]);
   const latestFailure = latestScheduledFailure(
     runs,
     scoped.map((item) => item.id),
@@ -855,6 +868,11 @@ export function ScheduledWorkPanel({
                     ? "마감까지 남은 시간 이내"
                     : "응답 없이 지난 시간 이상"}
                   <input
+                    aria-label={
+                      definition.condition === "deadline_near"
+                        ? "마감까지 남은 시간 이내"
+                        : "응답 없이 지난 시간 이상"
+                    }
                     type="number"
                     min={1}
                     max={168}

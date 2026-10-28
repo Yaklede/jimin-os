@@ -1,3 +1,9 @@
+import { executeDeckMutation } from "./open-deck-mutations";
+import {
+  useOpenDeckBridge,
+  loadDeckSnapshot,
+  type DeckAction,
+} from "./open-deck-bridge";
 import { useTaskCompletion } from "./components/TaskCompletionDialog";
 import { retryDeliveryRecovery } from "./api/deliveryRecovery";
 import { approveInflowChange } from "./api/inflowChanges";
@@ -309,6 +315,12 @@ const SettingsWorkspace = lazy(() =>
 export default function App() {
   const mobileLayout = useMobileLayout();
   const apiBaseUrl = personalServerBaseUrl ?? "";
+  const [deckIntent, setDeckIntent] = useState<{ id: number; view: string }>();
+  const consumeDeckIntent = useCallback(
+    (id: number) =>
+      setDeckIntent((current) => (current?.id === id ? undefined : current)),
+    [],
+  );
   const [tokens, setTokens] = useState<SessionTokens | undefined>(undefined);
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [mode, setMode] = useState<AppMode>("loading");
@@ -751,7 +763,11 @@ export default function App() {
   ]);
 
   const loadPlanningSnapshot = useCallback(
-    async (targetStartsAt?: string, requestedRange?: PlanningViewRange) => {
+    async (
+      targetStartsAt?: string,
+      requestedRange?: PlanningViewRange,
+      includeBoundaryDates = false,
+    ) => {
       if (!tokens) return undefined;
       setPlanningLoading(true);
       setPlanningError(undefined);
@@ -768,7 +784,17 @@ export default function App() {
           samePlanningViewRange(current, nextRange) ? current : nextRange,
         );
         const snapshot = await withAuthenticatedSession((accessToken) =>
-          fetchPlanning(apiBaseUrl, accessToken, nextRange.from, nextRange.to),
+          // All-day provider dates use UTC date bounds; include boundary records without changing the displayed month.
+          fetchPlanning(
+            apiBaseUrl,
+            accessToken,
+            includeBoundaryDates
+              ? new Date(nextRange.from.getTime() - 86400000)
+              : nextRange.from,
+            includeBoundaryDates
+              ? new Date(nextRange.to.getTime() + 86400000)
+              : nextRange.to,
+          ),
         );
         setPlanningSnapshot(snapshot);
         return snapshot;
@@ -5059,6 +5085,86 @@ export default function App() {
     }
   }
 
+  useOpenDeckBridge({
+    enabled: !!tokens && desktopInflowNotificationsSupported(),
+    load: () =>
+      withAuthenticatedSession((access) =>
+        loadDeckSnapshot(apiBaseUrl, access),
+      ),
+    mutate: async (mutation) => {
+      const result = await withAuthenticatedSession((access) =>
+        executeDeckMutation(apiBaseUrl, access, mutation),
+      );
+      if (!result.error)
+        void Promise.all([loadHomeSnapshot(), loadPlanningSnapshot()]);
+      return result;
+    },
+    act: async (action: DeckAction, signal: AbortSignal) => {
+      const ensureActive = () => {
+        if (signal.aborted) throw Error("ACTION_TIMEOUT");
+      };
+      ensureActive();
+      if (
+        document.querySelector(
+          '.meeting-transcript-editor[data-dirty="true"]',
+        ) ||
+        [
+          ...document.querySelectorAll('dialog[open], [aria-modal="true"]'),
+        ].some((element) => element.getClientRects().length > 0)
+      )
+        throw Error("BUSY_EDITING");
+      if (action.operation === "open-task" && action.itemId) {
+        const task = await withAuthenticatedSession((access) =>
+          fetchTask(apiBaseUrl, access, action.itemId!),
+        );
+        const planning = await loadPlanningSnapshot(task.dueAt ?? undefined);
+        if (!planning?.tasks.some((item) => item.id === task.id))
+          throw Error("NOT_FOUND");
+        ensureActive();
+        setHighlightedScheduleId(undefined);
+        setHighlightedPlanningTaskId(task.id);
+        navigate("calendar", { calendarDataReady: true });
+        return;
+      }
+      if (action.operation === "open-schedule" && action.itemId) {
+        const snapshot = await withAuthenticatedSession((access) =>
+          loadDeckSnapshot(apiBaseUrl, access),
+        );
+        const event = snapshot.events.find((x) => x.id === action.itemId);
+        if (!event) throw Error("NOT_FOUND");
+        ensureActive();
+        const planning = await loadPlanningSnapshot(
+          event.startsAt,
+          undefined,
+          true,
+        );
+        const entry = planning?.schedule.find((x) => x.id === action.itemId);
+        if (!entry) throw Error("NOT_FOUND");
+        ensureActive();
+        navigate("calendar", { calendarDataReady: true });
+        setHighlightedPlanningTaskId(undefined);
+        setHighlightedScheduleId(entry.id);
+        return;
+      }
+      const view = action.view || "home";
+      setDeckIntent(
+        ["scheduled", "new-schedule", "new-task", "requests"].includes(view)
+          ? { id: Date.now(), view }
+          : undefined,
+      );
+      navigate(
+        view === "assistant"
+          ? "chat"
+          : view === "new-schedule" || view === "new-task" || view === "tasks"
+            ? "calendar"
+            : view === "requests" ||
+                view === "scheduled" ||
+                view === "notifications"
+              ? "home"
+              : (view as OsDestination),
+      );
+    },
+  });
   useEffect(() => installAndroidBackBridge(), []);
   useEffect(() => {
     if (destination === "decisions") setDestination("home");
@@ -5149,8 +5255,18 @@ export default function App() {
                     }}
                   />
                 }
+                onRequestOpenHandled={consumeDeckIntent}
+                requestOpenRequest={
+                  deckIntent?.view === "requests" ? deckIntent.id : undefined
+                }
                 scheduledWork={
                   <ScheduledWorkPanel
+                    onOpenRequestHandled={consumeDeckIntent}
+                    openRequest={
+                      deckIntent?.view === "scheduled"
+                        ? deckIntent.id
+                        : undefined
+                    }
                     baseUrl={apiBaseUrl}
                     authenticate={withAuthenticatedSession}
                   />
@@ -5258,6 +5374,19 @@ export default function App() {
             )}
             {destination === "calendar" && (
               <PlanningWorkspace
+                onExternalCreateHandled={consumeDeckIntent}
+                externalCreateRequest={
+                  deckIntent?.view === "new-schedule" ||
+                  deckIntent?.view === "new-task"
+                    ? {
+                        id: deckIntent.id,
+                        kind:
+                          deckIntent.view === "new-schedule"
+                            ? "schedule"
+                            : "task",
+                      }
+                    : undefined
+                }
                 snapshot={planningSnapshot}
                 projects={planningProjectReferences}
                 range={planningRange}
@@ -5286,6 +5415,12 @@ export default function App() {
               <ProjectsWorkspace
                 scheduledWork={
                   <ScheduledWorkPanel
+                    onOpenRequestHandled={consumeDeckIntent}
+                    openRequest={
+                      deckIntent?.view === "scheduled"
+                        ? deckIntent.id
+                        : undefined
+                    }
                     baseUrl={apiBaseUrl}
                     authenticate={withAuthenticatedSession}
                     workspaceId={selectedWorkspaceId}
