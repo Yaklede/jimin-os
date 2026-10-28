@@ -43,10 +43,11 @@ Status: verified locally; production rollout pending
 - 전체 OpenAPI 경로 스냅샷에 이번 두 경로를 추가했다. 인증·버전·purpose enum 계약은 별도 API 테스트로 검증했다.
 - 새 패널의 다시 불러오기 버튼이 기본 스타일에서 44px보다 작아 명시적인 44px 터치 영역을 적용했다.
 - Android 일반 dev identifier config는 생성된 Java 경로와 달라 빌드가 거부됐다. 기존 Android 전용 dev config와 `jiminDevPackage=true`를 사용하고 APK ID가 `io.jimin.os.dev`임을 확인했다. 생성 폴더 삭제/재생성 및 실기기 개발 앱 설치는 하지 않았다.
+- Android API34 WebView의 기존 appearance-control 뒤로가기 handler가 닫힌 패널에도 `matches(':popover-open')`를 호출했다. 이 WebView는 해당 selector를 지원하지 않아 DOMException이 발생하고 이후 route handler가 호출되지 않았다. native 평가 결과의 정확한 예외를 확인했으며, popover API 지원 확인 및 selector guard만 추가했다(전역 예외 무시로 녹음/모달 보호를 우회하지 않음). 비지원/부분지원/정상 지원 회귀 2 tests를 추가했다. 서버 변경 없는 클라이언트 전용 보완이다.
 
 ## 검증 결과
 
-- frontend: TypeScript, Prettier(변경 파일), 86개 파일 529 tests 통과.
+- frontend: TypeScript, Prettier(변경 파일), 최종 86개 파일 531 tests 통과.
 - storage: `scripts/test-postgres-integration.sh` 57개 격리 DB 시나리오 통과. `scripts/test-scheduled-chat.sh` 3개 DB 계약 통과(65→66 재실행, 기존 예약 보존, 역할·권한·버전·승인/반려·중복·CS/Redmine 원자성 포함).
 - Rust: API 128 / storage 93 / desktop 15 lib tests, fmt, API/storage/desktop all-targets clippy, API/native build. Open Deck native 전용 5 tests와 frontend pending-review 409 회귀도 포함.
 - `cargo test --workspace --quiet` 전체 통과. 환경 변수 없이 early-return하는 DB 테스트를 성공 근거로 세지 않고, 위 격리 DB 57+3 실행 결과를 별도로 사용했다. 네트워크 live smoke 등 5 ignored tests는 자동 실행하지 않았다.

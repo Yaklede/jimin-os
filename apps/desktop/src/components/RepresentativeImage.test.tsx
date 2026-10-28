@@ -1,7 +1,11 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
-import { expect, it } from "vitest";
-import { AppearanceControl } from "./appearance-control";
+import { expect, it, vi } from "vitest";
+import {
+  AppearanceControl,
+  dismissAppearancePopover,
+} from "./appearance-control";
+import { handleMobileBack, registerMobileBackHandler } from "../mobileBack";
 import { RepresentativeImage } from "./RepresentativeImage";
 
 it("retains the original image when no saved preference is available", () => {
@@ -49,4 +53,36 @@ it("sizes the appearance popover to its content and prevents stretched grid rows
   );
   expect(css).toMatch(/\.appearance-panel__mode\s*\{[^}]*height: 44px;/);
   expect(css).toMatch(/\.appearance-panel__color\s*\{[^}]*height: 68px;/);
+});
+
+it("lets Android route back handling continue when its WebView lacks native popovers", () => {
+  const matches = vi.fn(() => {
+    throw new DOMException("unsupported selector", "SyntaxError");
+  });
+  const oldPanel = { matches } as unknown as HTMLElement;
+  expect(dismissAppearancePopover(oldPanel)).toBe(false);
+  expect(matches).not.toHaveBeenCalled();
+  const partial = { matches, hidePopover: vi.fn() } as unknown as HTMLElement;
+  const route = vi.fn(() => true);
+  const removeRoute = registerMobileBackHandler(route, 10);
+  const removeAppearance = registerMobileBackHandler(
+    () => dismissAppearancePopover(partial),
+    100,
+  );
+  try {
+    expect(handleMobileBack()).toBe(true);
+    expect(route).toHaveBeenCalledOnce();
+  } finally {
+    removeAppearance();
+    removeRoute();
+  }
+});
+
+it("dismisses a supported open appearance popover before route navigation", () => {
+  const panel = { matches: vi.fn(() => true), hidePopover: vi.fn() };
+  expect(dismissAppearancePopover(panel as unknown as HTMLElement)).toBe(true);
+  expect(panel.hidePopover).toHaveBeenCalledOnce();
+  panel.matches.mockReturnValue(false);
+  expect(dismissAppearancePopover(panel as unknown as HTMLElement)).toBe(false);
+  expect(panel.hidePopover).toHaveBeenCalledOnce();
 });
