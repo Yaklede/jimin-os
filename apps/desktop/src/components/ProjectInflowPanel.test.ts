@@ -22,6 +22,16 @@ import {
 } from "./ProjectInflowPanel";
 
 describe("project inflow deadline", () => {
+  it("offers independent collection and delivery purposes without treating a reporting room as acknowledged inflow", () => {
+    const markup = renderPanel({
+      sources: [{ ...googleChatSource(), purpose: "delivery" }],
+      onUpdateSourcePurpose: async () => undefined,
+    });
+    expect(markup).toContain("업무 수집용");
+    expect(markup).toContain("배정·완료 보고용");
+    expect(markup).toContain("역할 저장");
+    expect(markup).not.toContain('class="project-inflow__ack-state"');
+  });
   it("restores a saved draft without automatically opening the registration modal", () => {
     vi.stubGlobal("window", {
       sessionStorage: {

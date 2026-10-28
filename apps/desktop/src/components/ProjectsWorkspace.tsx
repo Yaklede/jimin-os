@@ -38,6 +38,7 @@ import {
   type GoogleChatAccount,
   type GoogleChatSpace,
   type ProjectGoogleChatSource,
+  type ChatSourcePurpose,
   type ProjectInflowItem,
 } from "../api/googleChat";
 import { type Goal } from "../api/goals";
@@ -74,6 +75,8 @@ import {
 } from "./ProjectInflowPanel";
 import { registerMobileBackHandler } from "../mobileBack";
 import { ReportEvidencePanel } from "./ReportEvidencePanel";
+import { ProjectChatRoutingPanel } from "./ProjectChatRoutingPanel";
+import type { ChatAuthenticate } from "../api/chatRouting";
 import type { ReportEvidenceMetric, ReportEvidencePage } from "../api/projects";
 
 type ProjectDetailTab =
@@ -95,6 +98,7 @@ type ProjectsWorkspaceProps = {
     after?: string,
   ): Promise<ReportEvidencePage>;
   scheduledWork?: ReactNode;
+  chatRouting?: { baseUrl: string; authenticate: ChatAuthenticate };
   workspaces: Workspace[];
   goals: Goal[];
   projects: Project[];
@@ -232,7 +236,12 @@ type ProjectsWorkspaceProps = {
     displayName: string;
     acknowledgeWithReaction: boolean;
     importHistory: boolean;
+    purpose?: ChatSourcePurpose;
   }): Promise<void>;
+  onUpdateGoogleChatSourcePurpose?(
+    source: ProjectGoogleChatSource,
+    purpose: ChatSourcePurpose,
+  ): Promise<void>;
   onDeleteGoogleChatSource(source: ProjectGoogleChatSource): Promise<void>;
   onSyncGoogleChatSource(source: ProjectGoogleChatSource): Promise<void>;
   onPromoteInflow(
@@ -250,6 +259,7 @@ type ProjectsWorkspaceProps = {
 
 export function ProjectsWorkspace({
   scheduledWork,
+  chatRouting,
   workspaces,
   goals,
   projects,
@@ -311,6 +321,7 @@ export function ProjectsWorkspace({
   onConnectGoogleChatAccount,
   onLoadGoogleChatSpaces,
   onCreateGoogleChatSource,
+  onUpdateGoogleChatSourcePurpose,
   onDeleteGoogleChatSource,
   onSyncGoogleChatSource,
   onPromoteInflow,
@@ -1431,6 +1442,8 @@ export function ProjectsWorkspace({
                   onConnectAccount={onConnectGoogleChatAccount}
                   onLoadSpaces={onLoadGoogleChatSpaces}
                   onCreateSource={onCreateGoogleChatSource}
+                  onUpdateSourcePurpose={onUpdateGoogleChatSourcePurpose}
+                  onOpenRouting={() => setActiveProjectTab("integrations")}
                   onDeleteSource={onDeleteGoogleChatSource}
                   onSyncSource={onSyncGoogleChatSource}
                   onPromote={onPromoteInflow}
@@ -1447,6 +1460,16 @@ export function ProjectsWorkspace({
               )}
               {activeProjectTab === "integrations" && (
                 <div className="project-connections">
+                  {chatRouting && (
+                    <ProjectChatRoutingPanel
+                      key={selectedProject.id}
+                      baseUrl={chatRouting.baseUrl}
+                      authenticate={chatRouting.authenticate}
+                      projectId={selectedProject.id}
+                      sources={googleChatSources}
+                      webhooks={webhooks}
+                    />
+                  )}
                   <section
                     className="project-connections__group"
                     aria-labelledby="project-connections-input-title"

@@ -10,11 +10,35 @@ import type {
   ScheduledWorkDefinition,
 } from "./api/scheduledWork";
 import { scheduledWorkTemplate } from "./components/ScheduledWorkPanel";
+import type { ProjectGoogleChatSource } from "./api/googleChat";
+import type { TaskChatRoute } from "./api/chatRouting";
 
 // Fixtures for local preview or an explicit design-preview build only.
 export function installDesignPreview(): void {
   const originalFetch = window.fetch.bind(window);
   const now = new Date().toISOString();
+  const chatSources: ProjectGoogleChatSource[] = [
+    "operations",
+    "developers",
+  ].map((room, index) => ({
+    id: `preview-chat-${room}`,
+    projectId: "preview-project",
+    accountId: "preview-company-account",
+    accountEmail: "company@example.test",
+    spaceName: `spaces/preview-${room}`,
+    displayName: index === 0 ? "예시 운영방" : "예시 개발자방",
+    enabled: true,
+    acknowledgeWithReaction: index === 0,
+    purpose: index === 0 ? "inflow" : "delivery",
+    lastSuccessfulSyncAt: now,
+    lastErrorCode: null,
+    version: 1,
+  }));
+  let chatRoute: TaskChatRoute | null = null;
+  let chatRouteVersion = 0;
+  const previewPeople = {
+    users: { 김경주: "users/111111111", 송천안: "users/222222222" },
+  };
   const titles = [
     "월별 공제금 미적재 현상 확인",
     "계산 문구 수정",
@@ -319,6 +343,103 @@ export function installDesignPreview(): void {
         { headers: { "Content-Type": "text/event-stream" } },
       );
     }
+    if (path === "/v1/google-chat/connections")
+      return json({
+        available: true,
+        items: [
+          {
+            id: "preview-company-account",
+            email: "company@example.test",
+            status: "active",
+            lastSuccessfulSyncAt: now,
+            lastErrorCode: null,
+            reauthRequired: false,
+            version: 1,
+          },
+        ],
+      });
+    if (/^\/v1\/google-chat\/connections\/[^/]+\/spaces$/.test(path))
+      return json(
+        list(
+          chatSources.map((s) => ({
+            name: s.spaceName,
+            displayName: s.displayName,
+          })),
+        ),
+      );
+    if (/^\/v1\/projects\/[^/]+\/google-chat-sources$/.test(path)) {
+      if (method === "POST") {
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        const item: ProjectGoogleChatSource = {
+          ...chatSources[0],
+          ...body,
+          id: `preview-added-${chatSources.length}`,
+          purpose: body.purpose ?? "inflow",
+          version: 1,
+        };
+        chatSources.push(item);
+        return json(item, 201);
+      }
+      return json(list(chatSources));
+    }
+    if (
+      /^\/v1\/projects\/[^/]+\/google-chat-sources\/[^/]+\/purpose$/.test(
+        path,
+      ) &&
+      method === "PUT"
+    ) {
+      const item = chatSources.find((s) => s.id === path.split("/")[5]);
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (!item || item.version !== body.expectedVersion)
+        return json({ error: "preview_source_changed" }, 409);
+      if (body.purpose === "inflow" && chatRoute?.sourceId === item.id)
+        return json({ error: "preview_source_in_use" }, 400);
+      item.purpose = body.purpose;
+      item.version++;
+      return json(item);
+    }
+    if (/^\/v1\/projects\/[^/]+\/google-chat-sources\/[^/]+\/sync$/.test(path))
+      return json(list(chatSources));
+    if (/^\/v1\/projects\/[^/]+\/chat-task-routing$/.test(path)) {
+      if (method === "PUT") {
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        if (body.expectedVersion !== (chatRoute?.version ?? 0))
+          return json({ error: "preview_route_changed" }, 409);
+        chatRoute = {
+          projectId: "preview-project",
+          sourceId: body.sourceId,
+          directoryWebhookId: body.directoryWebhookId,
+          version: ++chatRouteVersion,
+        };
+      }
+      if (method === "DELETE") {
+        if (
+          Number(url.searchParams.get("expected_version")) !==
+          chatRoute?.version
+        )
+          return json({ error: "preview_route_changed" }, 409);
+        chatRoute = null;
+        return new Response(null, { status: 204 });
+      }
+      return json({ item: chatRoute });
+    }
+    if (/^\/v1\/projects\/[^/]+\/webhooks$/.test(path))
+      return json(
+        list([
+          {
+            id: "preview-people",
+            projectId: "preview-project",
+            provider: "google_chat",
+            destinationLabel: "예시 담당자 명단",
+            mentionDirectory: previewPeople,
+            events: ["task.created", "task.updated", "task.completed"],
+            enabled: true,
+            version: 1,
+          },
+        ]),
+      );
+    if (path === "/v1/scheduled-work/capabilities")
+      return json({ completionRepliesAvailable: true });
     if (path === "/v1/access/session" || path === "/v1/auth/refresh")
       return json({
         accessToken: "design-preview",

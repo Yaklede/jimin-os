@@ -1,3 +1,9 @@
+import { executeDeckMutation } from "./open-deck-mutations";
+import {
+  useOpenDeckBridge,
+  loadDeckSnapshot,
+  type DeckAction,
+} from "./open-deck-bridge";
 import { useTaskCompletion } from "./components/TaskCompletionDialog";
 import { retryDeliveryRecovery } from "./api/deliveryRecovery";
 import { approveInflowChange } from "./api/inflowChanges";
@@ -110,8 +116,11 @@ import {
   type GoogleChatAccount,
   type GoogleChatSpace,
   type ProjectGoogleChatSource,
+  type ChatSourcePurpose,
   type ProjectInflowItem,
 } from "./api/googleChat";
+import { updateChatSourcePurpose } from "./api/chatRouting";
+import { chatRoutingCopy } from "./copy/chatRouting";
 import {
   createProjectWebhook,
   deleteProjectWebhook,
@@ -309,6 +318,12 @@ const SettingsWorkspace = lazy(() =>
 export default function App() {
   const mobileLayout = useMobileLayout();
   const apiBaseUrl = personalServerBaseUrl ?? "";
+  const [deckIntent, setDeckIntent] = useState<{ id: number; view: string }>();
+  const consumeDeckIntent = useCallback(
+    (id: number) =>
+      setDeckIntent((current) => (current?.id === id ? undefined : current)),
+    [],
+  );
   const [tokens, setTokens] = useState<SessionTokens | undefined>(undefined);
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [mode, setMode] = useState<AppMode>("loading");
@@ -375,6 +390,8 @@ export default function App() {
   );
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>();
   const [selectedProjectId, setSelectedProjectId] = useState<string>();
+  const selectedProjectIdRef = useRef(selectedProjectId);
+  selectedProjectIdRef.current = selectedProjectId;
   const [highlightedProjectTaskId, setHighlightedProjectTaskId] =
     useState<string>();
   const [highlightedProjectInflowId, setHighlightedProjectInflowId] =
@@ -751,7 +768,11 @@ export default function App() {
   ]);
 
   const loadPlanningSnapshot = useCallback(
-    async (targetStartsAt?: string, requestedRange?: PlanningViewRange) => {
+    async (
+      targetStartsAt?: string,
+      requestedRange?: PlanningViewRange,
+      includeBoundaryDates = false,
+    ) => {
       if (!tokens) return undefined;
       setPlanningLoading(true);
       setPlanningError(undefined);
@@ -768,7 +789,17 @@ export default function App() {
           samePlanningViewRange(current, nextRange) ? current : nextRange,
         );
         const snapshot = await withAuthenticatedSession((accessToken) =>
-          fetchPlanning(apiBaseUrl, accessToken, nextRange.from, nextRange.to),
+          // All-day provider dates use UTC date bounds; include boundary records without changing the displayed month.
+          fetchPlanning(
+            apiBaseUrl,
+            accessToken,
+            includeBoundaryDates
+              ? new Date(nextRange.from.getTime() - 86400000)
+              : nextRange.from,
+            includeBoundaryDates
+              ? new Date(nextRange.to.getTime() + 86400000)
+              : nextRange.to,
+          ),
         );
         setPlanningSnapshot(snapshot);
         return snapshot;
@@ -4402,6 +4433,7 @@ export default function App() {
     displayName: string;
     acknowledgeWithReaction: boolean;
     importHistory: boolean;
+    purpose?: ChatSourcePurpose;
   }): Promise<void> {
     if (!selectedProjectId) throw new Error("project unavailable");
     setInflowSaving(true);
@@ -4442,6 +4474,34 @@ export default function App() {
       );
     } catch (error) {
       setInflowError(copy.projects.inflowSourceProblem);
+      throw error;
+    } finally {
+      setInflowSaving(false);
+    }
+  }
+
+  async function updateWorkspaceChatPurpose(
+    source: ProjectGoogleChatSource,
+    purpose: ChatSourcePurpose,
+  ): Promise<void> {
+    setInflowSaving(true);
+    setInflowError(undefined);
+    try {
+      const updated = await withAuthenticatedSession((access) =>
+        updateChatSourcePurpose(apiBaseUrl, access, source, purpose),
+      );
+      if (source.projectId === selectedProjectIdRef.current)
+        setProjectGoogleChatSources((current) =>
+          current.map((item) => (item.id === source.id ? updated : item)),
+        );
+    } catch (error) {
+      if (source.projectId === selectedProjectIdRef.current)
+        setInflowError(chatRoutingCopy.purposeError);
+      const latest = await withAuthenticatedSession((access) =>
+        fetchProjectGoogleChatSources(apiBaseUrl, access, source.projectId),
+      ).catch(() => undefined);
+      if (latest && source.projectId === selectedProjectIdRef.current)
+        setProjectGoogleChatSources(latest);
       throw error;
     } finally {
       setInflowSaving(false);
@@ -5059,6 +5119,86 @@ export default function App() {
     }
   }
 
+  useOpenDeckBridge({
+    enabled: !!tokens && desktopInflowNotificationsSupported(),
+    load: () =>
+      withAuthenticatedSession((access) =>
+        loadDeckSnapshot(apiBaseUrl, access),
+      ),
+    mutate: async (mutation) => {
+      const result = await withAuthenticatedSession((access) =>
+        executeDeckMutation(apiBaseUrl, access, mutation),
+      );
+      if (!result.error)
+        void Promise.all([loadHomeSnapshot(), loadPlanningSnapshot()]);
+      return result;
+    },
+    act: async (action: DeckAction, signal: AbortSignal) => {
+      const ensureActive = () => {
+        if (signal.aborted) throw Error("ACTION_TIMEOUT");
+      };
+      ensureActive();
+      if (
+        document.querySelector(
+          '.meeting-transcript-editor[data-dirty="true"]',
+        ) ||
+        [
+          ...document.querySelectorAll('dialog[open], [aria-modal="true"]'),
+        ].some((element) => element.getClientRects().length > 0)
+      )
+        throw Error("BUSY_EDITING");
+      if (action.operation === "open-task" && action.itemId) {
+        const task = await withAuthenticatedSession((access) =>
+          fetchTask(apiBaseUrl, access, action.itemId!),
+        );
+        const planning = await loadPlanningSnapshot(task.dueAt ?? undefined);
+        if (!planning?.tasks.some((item) => item.id === task.id))
+          throw Error("NOT_FOUND");
+        ensureActive();
+        setHighlightedScheduleId(undefined);
+        setHighlightedPlanningTaskId(task.id);
+        navigate("calendar", { calendarDataReady: true });
+        return;
+      }
+      if (action.operation === "open-schedule" && action.itemId) {
+        const snapshot = await withAuthenticatedSession((access) =>
+          loadDeckSnapshot(apiBaseUrl, access),
+        );
+        const event = snapshot.events.find((x) => x.id === action.itemId);
+        if (!event) throw Error("NOT_FOUND");
+        ensureActive();
+        const planning = await loadPlanningSnapshot(
+          event.startsAt,
+          undefined,
+          true,
+        );
+        const entry = planning?.schedule.find((x) => x.id === action.itemId);
+        if (!entry) throw Error("NOT_FOUND");
+        ensureActive();
+        navigate("calendar", { calendarDataReady: true });
+        setHighlightedPlanningTaskId(undefined);
+        setHighlightedScheduleId(entry.id);
+        return;
+      }
+      const view = action.view || "home";
+      setDeckIntent(
+        ["scheduled", "new-schedule", "new-task", "requests"].includes(view)
+          ? { id: Date.now(), view }
+          : undefined,
+      );
+      navigate(
+        view === "assistant"
+          ? "chat"
+          : view === "new-schedule" || view === "new-task" || view === "tasks"
+            ? "calendar"
+            : view === "requests" ||
+                view === "scheduled" ||
+                view === "notifications"
+              ? "home"
+              : (view as OsDestination),
+      );
+    },
+  });
   useEffect(() => installAndroidBackBridge(), []);
   useEffect(() => {
     if (destination === "decisions") setDestination("home");
@@ -5149,8 +5289,18 @@ export default function App() {
                     }}
                   />
                 }
+                onRequestOpenHandled={consumeDeckIntent}
+                requestOpenRequest={
+                  deckIntent?.view === "requests" ? deckIntent.id : undefined
+                }
                 scheduledWork={
                   <ScheduledWorkPanel
+                    onOpenRequestHandled={consumeDeckIntent}
+                    openRequest={
+                      deckIntent?.view === "scheduled"
+                        ? deckIntent.id
+                        : undefined
+                    }
                     baseUrl={apiBaseUrl}
                     authenticate={withAuthenticatedSession}
                   />
@@ -5258,6 +5408,19 @@ export default function App() {
             )}
             {destination === "calendar" && (
               <PlanningWorkspace
+                onExternalCreateHandled={consumeDeckIntent}
+                externalCreateRequest={
+                  deckIntent?.view === "new-schedule" ||
+                  deckIntent?.view === "new-task"
+                    ? {
+                        id: deckIntent.id,
+                        kind:
+                          deckIntent.view === "new-schedule"
+                            ? "schedule"
+                            : "task",
+                      }
+                    : undefined
+                }
                 snapshot={planningSnapshot}
                 projects={planningProjectReferences}
                 range={planningRange}
@@ -5284,8 +5447,18 @@ export default function App() {
             )}
             {destination === "projects" && (
               <ProjectsWorkspace
+                chatRouting={{
+                  baseUrl: apiBaseUrl,
+                  authenticate: withAuthenticatedSession,
+                }}
                 scheduledWork={
                   <ScheduledWorkPanel
+                    onOpenRequestHandled={consumeDeckIntent}
+                    openRequest={
+                      deckIntent?.view === "scheduled"
+                        ? deckIntent.id
+                        : undefined
+                    }
                     baseUrl={apiBaseUrl}
                     authenticate={withAuthenticatedSession}
                     workspaceId={selectedWorkspaceId}
@@ -5382,6 +5555,7 @@ export default function App() {
                 onConnectGoogleChatAccount={beginGoogleChatConnection}
                 onLoadGoogleChatSpaces={loadGoogleChatSpaces}
                 onCreateGoogleChatSource={createWorkspaceGoogleChatSource}
+                onUpdateGoogleChatSourcePurpose={updateWorkspaceChatPurpose}
                 onDeleteGoogleChatSource={deleteWorkspaceGoogleChatSource}
                 onSyncGoogleChatSource={syncWorkspaceGoogleChatSource}
                 onPromoteInflow={promoteWorkspaceInflow}

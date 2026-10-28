@@ -128,7 +128,7 @@ async fn company_oauth_reply_completion_contract() {
         .bind(webhook).bind(owner).bind(project).bind(vec![7u8;48]).bind(vec![8u8;24]).bind(serde_json::json!({"users":{"김경주":"users/123","송인준":"users/456"}})).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO google_chat_accounts(id,user_id,provider_subject,email,status,granted_scopes,refresh_token_ciphertext,refresh_token_nonce,encryption_key_version) VALUES($1,$2,'789','company@example.test','active',ARRAY['https://www.googleapis.com/auth/chat.messages.readonly','https://www.googleapis.com/auth/chat.messages.create'],$3,$4,1)")
         .bind(account).bind(owner).bind(vec![9u8;48]).bind(vec![10u8;24]).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO project_google_chat_sources(id,user_id,project_id,account_id,space_name,display_name) VALUES($1,$2,$3,$4,'spaces/test','회사 CS')").bind(source).bind(owner).bind(project).bind(account).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO project_google_chat_sources(id,user_id,project_id,account_id,space_name,display_name,purpose) VALUES($1,$2,$3,$4,'spaces/test','회사 CS','both')").bind(source).bind(owner).bind(project).bind(account).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO tasks(id,user_id,project_id,title,assignee_name) VALUES($1,$2,$3,'티켓 없는 업무 확인','김경주, 송인준')").bind(task).bind(owner).bind(project).execute(&pool).await.unwrap();
     let device = Uuid::now_v7();
     sqlx::query("INSERT INTO devices(id,user_id,installation_id,platform,name,app_version,status,last_seen_at) VALUES($1,$2,$1,'android','격리 검증 기기','test','active',NOW())")

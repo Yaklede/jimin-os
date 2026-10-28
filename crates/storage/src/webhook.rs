@@ -368,7 +368,8 @@ impl Database {
             USING projects AS project
             WHERE webhook.id = $1 AND webhook.project_id = $2
               AND webhook.version = $3
-              AND project.id = webhook.project_id AND project.user_id = $4",
+              AND project.id = webhook.project_id AND project.user_id = $4
+              AND NOT EXISTS (SELECT 1 FROM project_task_chat_routes r WHERE r.project_id=webhook.project_id AND r.user_id=$4 AND r.directory_webhook_id=webhook.id)",
         )
         .bind(webhook_id)
         .bind(project_id)
@@ -772,6 +773,25 @@ pub(crate) async fn queue_project_event_in_transaction(
     event_type: &str,
     payload: &Value,
 ) -> Result<usize, StorageError> {
+    queue_project_event_with_google_chat(
+        transaction,
+        user_id,
+        project_id,
+        event_type,
+        payload,
+        true,
+    )
+    .await
+}
+
+pub(crate) async fn queue_project_event_with_google_chat(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    project_id: Uuid,
+    event_type: &str,
+    payload: &Value,
+    include_google_chat: bool,
+) -> Result<usize, StorageError> {
     if !is_v7(user_id)
         || !is_v7(project_id)
         || !valid_event_type(event_type)
@@ -795,11 +815,13 @@ pub(crate) async fn queue_project_event_in_transaction(
         FROM project_webhooks AS webhook
         INNER JOIN projects AS project ON project.id = webhook.project_id
         WHERE webhook.project_id = $2 AND project.user_id = $1
-          AND webhook.enabled = TRUE AND $3 = ANY(webhook.events)",
+          AND webhook.enabled = TRUE AND $3 = ANY(webhook.events)
+          AND ($4 OR webhook.provider <> 'google_chat')",
     )
     .bind(user_id)
     .bind(project_id)
     .bind(event_type)
+    .bind(include_google_chat)
     .fetch_all(&mut **transaction)
     .await
     .map_err(classify)?;

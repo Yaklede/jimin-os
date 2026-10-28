@@ -15,6 +15,7 @@ import {
   type GoogleChatAccount,
   type GoogleChatSpace,
   type ProjectGoogleChatSource,
+  type ChatSourcePurpose,
   type ProjectInflowItem,
   type ProjectInflowPromotionBlockReason,
   type ProjectInflowReferenceDocument,
@@ -22,6 +23,8 @@ import {
 } from "../api/googleChat";
 import type { TaskWorkKind } from "../api/planning";
 import { copy } from "../copy";
+import { chatRoutingCopy as routingCopy } from "../copy/chatRouting";
+import "./chatRouting.css";
 import { inflowRecoveryCopy } from "../copy/inflowRecovery";
 import {
   canRetryInflowDelivery,
@@ -59,7 +62,13 @@ type ProjectInflowPanelProps = {
     displayName: string;
     acknowledgeWithReaction: boolean;
     importHistory: boolean;
+    purpose?: ChatSourcePurpose;
   }): Promise<void>;
+  onUpdateSourcePurpose?(
+    source: ProjectGoogleChatSource,
+    purpose: ChatSourcePurpose,
+  ): Promise<void>;
+  onOpenRouting?(): void;
   onDeleteSource(source: ProjectGoogleChatSource): Promise<void>;
   onSyncSource(source: ProjectGoogleChatSource): Promise<void>;
   onPromote(item: ProjectInflowItem, input: PromoteInflowInput): Promise<void>;
@@ -127,6 +136,8 @@ export function ProjectInflowPanel({
   onConnectAccount,
   onLoadSpaces,
   onCreateSource,
+  onUpdateSourcePurpose,
+  onOpenRouting,
   onDeleteSource,
   onSyncSource,
   onPromote,
@@ -144,6 +155,7 @@ export function ProjectInflowPanel({
   const [spaceName, setSpaceName] = useState("");
   const [acknowledge, setAcknowledge] = useState(true);
   const [importHistory, setImportHistory] = useState(false);
+  const [purpose, setPurpose] = useState<ChatSourcePurpose>("inflow");
   const pendingItems = items.filter((item) => item.status === "pending");
   const newItems = pendingItems.filter(
     (item) => !item.promotedTaskId && !item.reviewed,
@@ -180,8 +192,9 @@ export function ProjectInflowPanel({
       accountId,
       spaceName: space.name,
       displayName: space.displayName,
-      acknowledgeWithReaction: acknowledge,
-      importHistory,
+      acknowledgeWithReaction: purpose !== "delivery" && acknowledge,
+      importHistory: purpose !== "delivery" && importHistory,
+      purpose,
     });
     setSpaceName("");
   }
@@ -258,9 +271,17 @@ export function ProjectInflowPanel({
             </select>
           </label>
           <label>
-            <span>{copy.projects.inflowSpaceLabel}</span>
+            <span>
+              {purpose === "delivery"
+                ? routingCopy.room
+                : copy.projects.inflowSpaceLabel}
+            </span>
             <select
-              aria-label={copy.projects.inflowSpaceLabel}
+              aria-label={
+                purpose === "delivery"
+                  ? routingCopy.room
+                  : copy.projects.inflowSpaceLabel
+              }
               value={spaceName}
               disabled={loading || saving}
               onChange={(event) => setSpaceName(event.target.value)}
@@ -273,13 +294,33 @@ export function ProjectInflowPanel({
               ))}
             </select>
           </label>
+          <label>
+            <span>{routingCopy.purpose}</span>
+            <select
+              aria-label={routingCopy.purpose}
+              value={purpose}
+              disabled={saving}
+              onChange={(event) =>
+                setPurpose(event.target.value as ChatSourcePurpose)
+              }
+            >
+              <option value="inflow">{routingCopy.inflow}</option>
+              <option value="delivery">{routingCopy.delivery}</option>
+              <option value="both">{routingCopy.both}</option>
+            </select>
+          </label>
+          <p>
+            {purpose === "delivery"
+              ? routingCopy.deliveryHelp
+              : routingCopy.purposeHelp}
+          </p>
           <div className="project-inflow__source-form-actions">
             <label className="project-inflow__acknowledge">
               <input
                 type="checkbox"
                 aria-label={copy.projects.inflowAckLabel}
-                checked={acknowledge}
-                disabled={saving}
+                checked={purpose !== "delivery" && acknowledge}
+                disabled={saving || purpose === "delivery"}
                 onChange={(event) => setAcknowledge(event.target.checked)}
               />
               <span>{copy.projects.inflowAckLabel}</span>
@@ -288,8 +329,8 @@ export function ProjectInflowPanel({
               <input
                 type="checkbox"
                 aria-label={copy.projects.inflowImportHistoryLabel}
-                checked={importHistory}
-                disabled={saving}
+                checked={purpose !== "delivery" && importHistory}
+                disabled={saving || purpose === "delivery"}
                 onChange={(event) => setImportHistory(event.target.checked)}
               />
               <span>{copy.projects.inflowImportHistoryLabel}</span>
@@ -326,13 +367,22 @@ export function ProjectInflowPanel({
               <div>
                 <strong>{source.displayName}</strong>
                 <span>{source.accountEmail}</span>
+                <span>{routingCopy[source.purpose ?? "inflow"]}</span>
+                {onUpdateSourcePurpose && (
+                  <SourcePurposeControl
+                    source={source}
+                    saving={saving}
+                    onSave={onUpdateSourcePurpose}
+                  />
+                )}
               </div>
               <div className="project-inflow__source-actions">
-                {source.acknowledgeWithReaction && (
-                  <span className="project-inflow__ack-state">
-                    <Eye aria-hidden="true" /> 확인 표시
-                  </span>
-                )}
+                {source.acknowledgeWithReaction &&
+                  source.purpose !== "delivery" && (
+                    <span className="project-inflow__ack-state">
+                      <Eye aria-hidden="true" /> 확인 표시
+                    </span>
+                  )}
                 <button
                   className="icon-button focus-visible-control"
                   type="button"
@@ -355,6 +405,17 @@ export function ProjectInflowPanel({
             </li>
           ))}
         </ul>
+      )}
+
+      {onOpenRouting && (
+        <button
+          type="button"
+          className="secondary-button focus-visible-control"
+          disabled={saving}
+          onClick={onOpenRouting}
+        >
+          {routingCopy.openRouting}
+        </button>
       )}
       {sources.length === 0 && activeAccounts.length > 0 && (
         <p className="project-inflow__empty">{copy.projects.inflowNoSource}</p>
@@ -450,6 +511,51 @@ export function ProjectInflowPanel({
         </div>
       )}
     </section>
+  );
+}
+
+function SourcePurposeControl({
+  source,
+  saving,
+  onSave,
+}: {
+  source: ProjectGoogleChatSource;
+  saving: boolean;
+  onSave(
+    source: ProjectGoogleChatSource,
+    purpose: ChatSourcePurpose,
+  ): Promise<void>;
+}) {
+  const current = source.purpose ?? "inflow";
+  const [purpose, setPurpose] = useState<ChatSourcePurpose>(current);
+  const previous = useRef(current);
+  useEffect(() => {
+    if (purpose === previous.current) setPurpose(current);
+    previous.current = current;
+  }, [current, purpose]);
+  return (
+    <div className="project-chat-role">
+      <select
+        aria-label={`${source.displayName} ${routingCopy.purpose}`}
+        value={purpose}
+        disabled={saving}
+        onChange={(event) =>
+          setPurpose(event.target.value as ChatSourcePurpose)
+        }
+      >
+        <option value="inflow">{routingCopy.inflow}</option>
+        <option value="delivery">{routingCopy.delivery}</option>
+        <option value="both">{routingCopy.both}</option>
+      </select>
+      <button
+        type="button"
+        className="secondary-button focus-visible-control"
+        disabled={saving || purpose === current}
+        onClick={() => void onSave(source, purpose).catch(() => undefined)}
+      >
+        {routingCopy.savePurpose}
+      </button>
+    </div>
   );
 }
 

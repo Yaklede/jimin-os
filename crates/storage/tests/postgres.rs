@@ -1260,6 +1260,7 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             account_id: account_ids[1],
             space_name: "spaces/company-room".to_owned(),
             display_name: "운영 요청".to_owned(),
+            purpose: jimin_storage::task_chat::ChatSourcePurpose::Inflow,
             acknowledge_with_reaction: true,
             import_history: true,
         })
@@ -1279,6 +1280,7 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
             account_id: account_ids[1],
             space_name: "spaces/company-room".to_owned(),
             display_name: "신규 요청만".to_owned(),
+            purpose: jimin_storage::task_chat::ChatSourcePurpose::Inflow,
             acknowledge_with_reaction: true,
             import_history: false,
         })
@@ -2825,9 +2827,25 @@ fn assert_automatic_webhook_delivery(
         ])
         .collect::<HashSet<_>>();
     let actual_keys = payload.keys().map(String::as_str).collect::<HashSet<_>>();
+    let completion_keys = task_keys
+        .iter()
+        .copied()
+        .filter(|key| {
+            !matches!(
+                *key,
+                "notes" | "actionItems" | "completionCriteria" | "referenceLinks"
+            )
+        })
+        .collect::<HashSet<_>>();
+    let expected_task_keys = if event_type == "task.completed" {
+        &completion_keys
+    } else {
+        &task_keys
+    };
     assert!(
-        actual_keys == base_keys || (event_type.starts_with("task.") && actual_keys == task_keys),
-        "automatic webhooks should expose only their documented projection"
+        actual_keys == base_keys
+            || (event_type.starts_with("task.") && actual_keys == *expected_task_keys),
+        "automatic webhooks should expose only their documented projection: {event_type}, {actual_keys:?}"
     );
     assert_eq!(
         payload.get("event").and_then(serde_json::Value::as_str),

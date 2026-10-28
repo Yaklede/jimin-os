@@ -15,7 +15,7 @@ for attempt in {1..30}; do
     sleep 1
 done
 port="$(docker port "$name" 5432/tcp | awk -F: 'NR==1 {print $NF}')"
-for target in scheduled_chat_reply scheduled_work; do
+for target in scheduled_chat_reply scheduled_work task_chat_routing; do
     docker exec "$name" createdb -U jimin_test "$target"
     JIMIN_TEST_DATABASE_URL="postgres://jimin_test:jimin_test_fixture@127.0.0.1:$port/$target" cargo test -p jimin-storage --test "$target" -- --ignored --test-threads=1
 done

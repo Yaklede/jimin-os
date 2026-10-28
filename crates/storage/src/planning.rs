@@ -17,7 +17,10 @@ use crate::{
         cancel_google_chat_task_completion_in_transaction,
         queue_google_chat_task_completion_in_transaction,
     },
-    webhook::{project_event_payload, queue_project_event_in_transaction},
+    webhook::{
+        project_event_payload, queue_project_event_in_transaction,
+        queue_project_event_with_google_chat,
+    },
 };
 
 const MAX_TITLE_CHARS: usize = 200;
@@ -1755,6 +1758,25 @@ pub(crate) async fn complete_task_in_transaction(
     expected_version: i64,
     completion_note: Option<&str>,
 ) -> Result<Option<Task>, StorageError> {
+    complete_task_with_feedback_in_transaction(
+        transaction,
+        user_id,
+        task_id,
+        expected_version,
+        completion_note,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn complete_task_with_feedback_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    task_id: Uuid,
+    expected_version: i64,
+    completion_note: Option<&str>,
+    feedback_source: Option<Uuid>,
+) -> Result<Option<Task>, StorageError> {
     crate::completion_reviews::ensure_no_pending(transaction, user_id, task_id).await?;
     ensure_no_open_child_tasks(transaction, user_id, task_id).await?;
     let row = sqlx::query_as::<_, TaskRow>(
@@ -1777,7 +1799,14 @@ pub(crate) async fn complete_task_in_transaction(
     };
     let task = Task::try_from(row)?;
     append_change(transaction, user_id, "task", task.id, task.version).await?;
-    queue_task_webhook_in_transaction(transaction, user_id, &task, "task.completed").await?;
+    queue_task_webhook_with_feedback(
+        transaction,
+        user_id,
+        &task,
+        "task.completed",
+        feedback_source,
+    )
+    .await?;
     queue_google_chat_task_completion_in_transaction(transaction, user_id, task.id, task.version)
         .await?;
     Ok(Some(task))
@@ -2025,6 +2054,16 @@ pub(crate) async fn queue_task_webhook_in_transaction(
     task: &Task,
     event_type: &str,
 ) -> Result<(), StorageError> {
+    queue_task_webhook_with_feedback(transaction, user_id, task, event_type, None).await
+}
+
+async fn queue_task_webhook_with_feedback(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    task: &Task,
+    event_type: &str,
+    feedback_source: Option<Uuid>,
+) -> Result<(), StorageError> {
     crate::itsm_sync::queue_task_itsm_sync(transaction, user_id, task.id).await?;
     let Some(project_id) = task.project_id else {
         return Ok(());
@@ -2080,8 +2119,24 @@ pub(crate) async fn queue_task_webhook_in_transaction(
             &details,
         )),
     );
-    queue_project_event_in_transaction(transaction, user_id, project_id, event_type, &payload)
-        .await?;
+    let routed = crate::task_chat::queue_task_delivery(
+        transaction,
+        user_id,
+        task,
+        event_type,
+        &payload,
+        feedback_source,
+    )
+    .await?;
+    queue_project_event_with_google_chat(
+        transaction,
+        user_id,
+        project_id,
+        event_type,
+        &payload,
+        !routed,
+    )
+    .await?;
     Ok(())
 }
 
