@@ -242,9 +242,9 @@ impl Database {
         };
         // A distinct durable feedback ID avoids deduplicating this against the initial waiting reply.
         sqlx::query("INSERT INTO scheduled_chat_reply_commands(id,user_id,source_id,delivery_id,provider_message_name,thread_name,task_id,outcome,feedback_text)
-            SELECT $1,user_id,source_id,delivery_id,$2,thread_name,task_id,$3,$4 FROM scheduled_chat_reply_commands WHERE id=$5 AND user_id=$6")
+            SELECT $1,user_id,source_id,delivery_id,$2,thread_name,$7,$3,$4 FROM scheduled_chat_reply_commands WHERE id=$5 AND user_id=$6")
             .bind(Uuid::now_v7()).bind(format!("review:{id}:{decision}"))
-            .bind(if approve{"review_approved"}else{"review_rejected"}).bind(text).bind(row.command_id).bind(user)
+            .bind(if approve{"review_approved"}else{"review_rejected"}).bind(text).bind(row.command_id).bind(user).bind(task)
             .execute(&mut *tx).await.map_err(classify)?;
         tx.commit().await.map_err(classify)?;
         Ok(true)

@@ -776,6 +776,7 @@ async fn company_oauth_reply_completion_contract() {
         .unwrap()
     );
     let review = db.completion_reviews(owner, None).await.unwrap().remove(0);
+    mixed_and_batch_reports(&db, &pool, owner, project, source, rule, &connection).await;
     sqlx::query("DELETE FROM project_google_chat_sources WHERE id=$1")
         .bind(source)
         .execute(&pool)
@@ -801,4 +802,232 @@ async fn company_oauth_reply_completion_contract() {
         .unwrap();
     assert!(db.scheduled_reply_context(id).await.unwrap().is_none());
     db.migrate().await.unwrap();
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "Exercise mixed status, concurrent batch authorization and independent review effects in the same isolated fixture."
+)]
+async fn mixed_and_batch_reports(
+    db: &Database,
+    pool: &PgPool,
+    owner: Uuid,
+    project: Uuid,
+    source: Uuid,
+    rule: Uuid,
+    connection: &GoogleChatSourceSyncConnection,
+) {
+    let (waiting, done_a, done_b, other_assignee, stale) = (
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    );
+    for (task, name, assignee) in [
+        (waiting, "업체 확인 대기", "김경주"),
+        (done_a, "완료 첫 번째", "김경주"),
+        (done_b, "완료 두 번째", "김경주"),
+        (other_assignee, "다른 담당자 업무", "송인준"),
+        (stale, "수정 전 업무", "김경주"),
+    ] {
+        sqlx::query(
+            "INSERT INTO tasks(id,user_id,project_id,title,assignee_name) VALUES($1,$2,$3,$4,$5)",
+        )
+        .bind(task)
+        .bind(owner)
+        .bind(project)
+        .bind(name)
+        .bind(assignee)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    for (task, issue) in [(done_a, 9901_i64), (done_b, 9902)] {
+        sqlx::query("INSERT INTO task_itsm_links(task_id,user_id,enabled,issue_url,issue_id) VALUES($1,$2,TRUE,$3,$4)")
+            .bind(task).bind(owner).bind(format!("https://itsm.example.test/issues/{issue}")).bind(issue).execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO project_inflow_items(id,user_id,project_id,source_id,provider_message_name,provider_thread_name,content_text,received_at,status,promoted_task_id) VALUES($1,$2,$3,$4,$5,$6,'배치 보고 원문',NOW(),'promoted',$7)")
+            .bind(Uuid::now_v7()).bind(owner).bind(project).bind(source).bind(format!("spaces/test/messages/request-{issue}")).bind(format!("spaces/test/threads/request-{issue}")).bind(task).execute(pool).await.unwrap();
+    }
+    let (wait_code, a, b, other, old) = (
+        task_code(waiting),
+        task_code(done_a),
+        task_code(done_b),
+        task_code(other_assignee),
+        task_code(stale),
+    );
+    let thread = "spaces/test/threads/mixed-report";
+    delivered(db, rule, owner, 1, thread).await;
+    let mixed = reply(
+        "mixed-report",
+        thread,
+        Some("users/123"),
+        &format!(
+            "**업체 확인 대기중**\n- [{wait_code}] 업체 확인이 필요합니다\n**금일 배포**\n- 완료 : [{a}] 첫 번째 일감 검증"
+        ),
+    );
+    assert!(
+        db.process_scheduled_reply(connection, &mixed)
+            .await
+            .unwrap()
+    );
+    let reviews = db.completion_reviews(owner, None).await.unwrap();
+    assert!(!reviews.iter().any(|r| r.task_id == waiting));
+    let review = reviews.iter().find(|r| r.task_id == done_a).unwrap();
+    assert_eq!(review.completion_note.as_deref(), Some("첫 번째 일감 검증"));
+    assert!(!reviews.iter().any(|r| r.task_id == done_b));
+    assert!(
+        db.decide_completion_review(
+            owner,
+            review.id,
+            review.version,
+            review.task_version,
+            false,
+            Some("추가 검증 후 다시 보고해 주세요")
+        )
+        .await
+        .unwrap()
+    );
+
+    let thread = "spaces/test/threads/batch-report";
+    delivered(db, rule, owner, 1, thread).await;
+    sqlx::query("UPDATE tasks SET title='배정 후 바뀐 업무' WHERE id=$1")
+        .bind(stale)
+        .execute(pool)
+        .await
+        .unwrap();
+    let first = reply(
+        "batch-report1",
+        thread,
+        Some("users/123"),
+        &format!(
+            "**업체 확인 대기중**\n- [{wait_code}] 업체 확인\n**금일 배포**\n- 완료 : [{b}] 두 번째 검증\n- 완료 : [{a}] 첫 번째 검증\n- 완료 : [{other}] 다른 담당자\n- 완료 : [{old}] 변경 전 배정"
+        ),
+    );
+    let second = reply(
+        "batch-report2",
+        thread,
+        Some("users/123"),
+        &format!("**금일 배포**\n- [{a}] 완료: 첫 번째 검증\n- [{b}] 완료: 두 번째 검증"),
+    );
+    let (first_result, second_result) = tokio::join!(
+        db.process_scheduled_reply(connection, &first),
+        db.process_scheduled_reply(connection, &second)
+    );
+    assert!(first_result.unwrap() && second_result.unwrap());
+    assert!(
+        db.process_scheduled_reply(connection, &first)
+            .await
+            .unwrap()
+    );
+    assert!(
+        db.process_scheduled_reply(connection, &second)
+            .await
+            .unwrap()
+    );
+    let reports = db.completion_reviews(owner, None).await.unwrap();
+    let reports: Vec<_> = reports
+        .iter()
+        .filter(|r| [waiting, done_a, done_b, other_assignee, stale].contains(&r.task_id))
+        .collect();
+    assert_eq!(reports.len(), 2);
+    assert!(
+        reports
+            .iter()
+            .all(|r| [done_a, done_b].contains(&r.task_id))
+    );
+    let (parent_task,feedback): (Option<Uuid>,String) = sqlx::query_as("SELECT task_id,feedback_text FROM scheduled_chat_reply_commands WHERE source_id=$1 AND provider_message_name=$2")
+        .bind(source).bind(&first.provider_message_name).fetch_one(pool).await.unwrap();
+    assert!(parent_task.is_none());
+    assert!(feedback.contains(&format!("{other}는 현재 담당자만")));
+    assert!(feedback.contains(&format!("{old}의 내용이나 상태가 바뀌어")));
+    assert!(!feedback.contains(&wait_code));
+    let pending_push: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM push_deliveries p JOIN task_completion_reviews r ON r.id=p.item_id WHERE p.item_type='task_completion_review' AND r.task_id=ANY($1) AND r.status='pending' AND p.status='queued'")
+        .bind(vec![done_a,done_b]).fetch_one(pool).await.unwrap();
+    assert_eq!(pending_push, 2);
+    let completed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE id=ANY($1) AND status='completed'")
+            .bind(vec![waiting, done_a, done_b, other_assignee, stale])
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(completed, 0);
+    let jobs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM itsm_issue_sync_jobs WHERE issue_id IN (9901,9902)",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(jobs, 0);
+    let cs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM google_chat_task_completion_deliveries WHERE task_id=ANY($1)",
+    )
+    .bind(vec![done_a, done_b])
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(cs, 0);
+    for r in reports {
+        let approve = r.task_id == done_a;
+        assert!(
+            db.decide_completion_review(
+                owner,
+                r.id,
+                r.version,
+                r.task_version,
+                approve,
+                if approve {
+                    None
+                } else {
+                    Some("추가 검증 후 다시 보고해 주세요")
+                }
+            )
+            .await
+            .unwrap()
+        );
+        let feedback_task: Uuid = sqlx::query_scalar(
+            "SELECT task_id FROM scheduled_chat_reply_commands WHERE provider_message_name=$1",
+        )
+        .bind(format!(
+            "review:{}:{}",
+            r.id,
+            if approve { "approved" } else { "rejected" }
+        ))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            feedback_task, r.task_id,
+            "each approval/rejection must reference its review task, not the shared message receipt"
+        );
+    }
+    let final_a = db.task_for_user(owner, done_a).await.unwrap().unwrap();
+    assert_eq!(
+        final_a.status,
+        jimin_storage::planning::TaskStatus::Completed
+    );
+    assert_eq!(final_a.completion_note.as_deref(), Some("첫 번째 검증"));
+    assert_eq!(
+        db.task_for_user(owner, done_b)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        jimin_storage::planning::TaskStatus::Open
+    );
+    let jobs: Vec<i64> = sqlx::query_scalar(
+        "SELECT issue_id FROM itsm_issue_sync_jobs WHERE issue_id IN (9901,9902)",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    assert_eq!(jobs, vec![9901]);
+    let cs: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT task_id FROM google_chat_task_completion_deliveries WHERE task_id=ANY($1)",
+    )
+    .bind(vec![done_a, done_b])
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    assert_eq!(cs, vec![done_a]);
 }
