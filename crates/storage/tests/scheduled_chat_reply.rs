@@ -214,8 +214,15 @@ async fn company_oauth_reply_completion_contract() {
     );
     for (name, actor, text) in [
         ("wrong-person", Some("users/999"), format!("완료 {code}")),
+        (
+            "wrong-person-reversed",
+            Some("users/999"),
+            format!("{code} 완료"),
+        ),
         ("no-sender", None, format!("완료 {code}")),
+        ("no-sender-reversed", None, format!("{code} 완료")),
         ("invalid", Some("users/123"), "완료 T-XYZ".into()),
+        ("invalid-reversed", Some("users/123"), "T-XYZ 완료".into()),
         ("unknown", Some("users/123"), "완료 T-000000000000".into()),
     ] {
         assert!(
@@ -289,7 +296,7 @@ async fn company_oauth_reply_completion_contract() {
         "complete2",
         thread2,
         Some("users/456"),
-        &format!("완료 {code}\n검증 후 완료했습니다."),
+        &format!("{code} 완료\n검증 후 완료했습니다."),
     );
     sqlx::query("INSERT INTO project_inflow_items(id,user_id,project_id,source_id,provider_message_name,provider_thread_name,content_text,received_at,status) VALUES($1,$2,$3,$4,$5,$6,$7,NOW(),'pending')")
         .bind(Uuid::now_v7()).bind(owner).bind(project).bind(source).bind(&one.provider_message_name).bind(thread2).bind(&one.content_text).execute(&pool).await.unwrap();
@@ -324,6 +331,23 @@ async fn company_oauth_reply_completion_contract() {
         1
     );
     assert!(db.process_scheduled_reply(&connection, &one).await.unwrap());
+    assert!(db.process_scheduled_reply(&connection, &two).await.unwrap());
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM scheduled_chat_reply_commands WHERE outcome='not_assigned'"
+        )
+        .await,
+        4
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT COUNT(*) FROM scheduled_chat_reply_commands WHERE outcome='invalid'"
+        )
+        .await,
+        2
+    );
     assert_eq!(
         count(
             &pool,
@@ -586,10 +610,19 @@ async fn company_oauth_reply_completion_contract() {
             .len(),
         1
     );
-    let feedback = db
-        .claim_scheduled_reply_feedback(source, "feedback1")
-        .await
-        .unwrap();
+    // Drain every fixture batch before testing retries; the worker leases at most ten at once.
+    let mut feedback = Vec::new();
+    loop {
+        let batch = db
+            .claim_scheduled_reply_feedback(source, "feedback1")
+            .await
+            .unwrap();
+        let more = batch.len() == 10;
+        feedback.extend(batch);
+        if !more {
+            break;
+        }
+    }
     assert!(!feedback.is_empty());
     let first = &feedback[0];
     assert!(

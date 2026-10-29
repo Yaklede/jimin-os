@@ -462,10 +462,38 @@ async fn separate_collection_and_general_assignment_completion_contract() {
         "done",
         "assignment",
         "users/123",
-        "완료\n회귀 테스트와 문서를 확인했습니다.",
+        &format!(
+            "{} 완료\n회귀 테스트와 문서를 확인했습니다.",
+            jimin_storage::scheduled_chat_reply::task_code(task.id)
+        ),
     );
     assert!(db.process_scheduled_reply(&dev, &report).await.unwrap());
     assert!(db.process_scheduled_reply(&dev, &report).await.unwrap());
+    // Explicit codes in either order use the same authorization/review path as plain completion.
+    for (name, text) in [
+        ("done-plain", "완료\n추가 검증 메모".into()),
+        (
+            "done-code-first",
+            format!(
+                "{} 완료\n추가 검증 메모",
+                jimin_storage::scheduled_chat_reply::task_code(task.id)
+            ),
+        ),
+        (
+            "done-complete-first",
+            format!(
+                "완료 {}\n추가 검증 메모",
+                jimin_storage::scheduled_chat_reply::task_code(task.id)
+            ),
+        ),
+    ] {
+        let explicit = message("developers", name, "assignment", "users/123", &text);
+        assert!(db.process_scheduled_reply(&dev, &explicit).await.unwrap());
+        assert!(db.process_scheduled_reply(&dev, &explicit).await.unwrap());
+        let outcome: String = sqlx::query_scalar("SELECT outcome FROM scheduled_chat_reply_commands WHERE source_id=$1 AND provider_message_name=$2")
+            .bind(developers.id).bind(&explicit.provider_message_name).fetch_one(&pool).await.unwrap();
+        assert_eq!(outcome, "already_pending");
+    }
     assert_eq!(
         number(
             &pool,

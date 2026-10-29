@@ -104,7 +104,10 @@ pub fn actor_assigned(
 pub fn parse_command(text: &str) -> ParsedCommand<'_> {
     let mut lines = text.trim().splitn(2, '\n');
     let first = lines.next().unwrap_or("").trim();
-    let Some(code) = first.strip_prefix("완료 ") else {
+    let Some(code) = first
+        .strip_prefix("완료 ")
+        .or_else(|| first.strip_suffix(" 완료"))
+    else {
         return ParsedCommand::Ignore;
     };
     let code = code.trim().to_ascii_uppercase();
@@ -603,6 +606,82 @@ mod tests {
         }
     }
     use super::*;
+    #[test]
+    fn completion_accepts_both_orders_with_the_same_code_and_note() {
+        let code = "T-9E50ABD103B5";
+        for text in [
+            format!("완료 {code}"),
+            format!("{code} 완료"),
+            format!("  완료   {}  ", code.to_ascii_lowercase()),
+            format!("  {}   완료  ", code.to_ascii_lowercase()),
+        ] {
+            assert_eq!(
+                parse_command(&text),
+                ParsedCommand::Complete {
+                    code: code.into(),
+                    note: None,
+                },
+                "{text:?}"
+            );
+        }
+        for first in [format!("완료 {code}"), format!("{code} 완료")] {
+            for newline in ["\n", "\r\n"] {
+                let text = format!("{first}{newline} 검증 후 완료했습니다. {newline}모바일 확인 ");
+                assert_eq!(
+                    parse_command(&text),
+                    ParsedCommand::Complete {
+                        code: code.into(),
+                        note: Some(if newline == "\n" {
+                            "검증 후 완료했습니다. \n모바일 확인"
+                        } else {
+                            "검증 후 완료했습니다. \r\n모바일 확인"
+                        }),
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn either_order_rejects_ambiguous_codes_chatter_and_unsafe_notes() {
+        let code = "T-9E50ABD103B5";
+        for text in [
+            format!("{code} 미완료"),
+            format!("{code} 완료 예정"),
+            format!("{code} 완료했습니다"),
+            format!("아직 {code} 완료"),
+            format!("완료 {code} {code}"),
+            format!("{code} {code} 완료"),
+            format!("{code}\n완료"),
+            format!("\n확인 요청\n{code} 완료"),
+            "T-XYZ 완료".into(),
+            "T-9E50ABD103B 완료".into(),
+            "T-9E50ABD103B55 완료".into(),
+            "T-9E50ABD103BG 완료".into(),
+        ] {
+            assert!(
+                !matches!(parse_command(&text), ParsedCommand::Complete { .. }),
+                "{text:?}"
+            );
+        }
+        for first in [format!("완료 {code}"), format!("{code} 완료")] {
+            assert!(matches!(
+                parse_command(&format!("{first}\n{}", "가".repeat(2000))),
+                ParsedCommand::Complete { .. }
+            ));
+            for note in [
+                "가".repeat(2001),
+                "확인\0완료".into(),
+                "확인\u{7f}완료".into(),
+            ] {
+                assert_eq!(
+                    parse_command(&format!("{first}\n{note}")),
+                    ParsedCommand::Invalid
+                );
+            }
+        }
+    }
+
     #[test]
     fn exact_commands_are_bounded_and_do_not_infer_completion_from_chatter() {
         let code = task_code(Uuid::now_v7());
