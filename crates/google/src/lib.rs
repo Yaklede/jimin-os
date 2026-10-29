@@ -4,6 +4,7 @@
 //! exchanges it with Google's fixed endpoint, and returns a validated identity.
 //! It never persists or logs the code, provider access token, refresh token, or
 //! ID token.
+mod chat_message_delivery;
 
 use std::{collections::BTreeMap, time::Duration};
 
@@ -1623,67 +1624,6 @@ impl GoogleChatAdapter {
             }
         }
         Err(GoogleAuthError::ProviderDataInvalid)
-    }
-
-    /// Sends an idempotent text reminder as the already connected company user.
-    /// # Errors
-    /// Returns a classified request, authorization or provider failure.
-    pub async fn create_reminder_message(
-        &self,
-        access: &SecretString,
-        space: &str,
-        text: &str,
-        id: &str,
-    ) -> Result<GoogleChatMessageReceipt, GoogleAuthError> {
-        let token = validate_access_token(access)?;
-        let space_id = validated_chat_space_id(space)?;
-        if id.len() != 32
-            || !id
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-        {
-            return Err(GoogleAuthError::InvalidRequest);
-        }
-        let text = validate_provider_free_text(text.to_owned(), 32_000)
-            .map_err(|_| GoogleAuthError::InvalidRequest)?;
-        let mut url = reqwest::Url::parse("https://chat.googleapis.com/v1")
-            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
-        url.path_segments_mut()
-            .map_err(|()| GoogleAuthError::ProviderUnavailable)?
-            .push("spaces")
-            .push(space_id)
-            .push("messages");
-        let message_id = format!("client-jimin-{id}");
-        url.query_pairs_mut()
-            .append_pair("requestId", id)
-            .append_pair("messageId", &message_id);
-        let response = self
-            .client
-            .post(url)
-            .bearer_auth(token)
-            .json(&serde_json::json!({"text":text}))
-            .send()
-            .await
-            .map_err(|_| GoogleAuthError::ProviderUnavailable)?;
-        let response = if response.status().as_u16() == 409 {
-            self.client
-                .get(format!(
-                    "https://chat.googleapis.com/v1/{space}/messages/{message_id}"
-                ))
-                .bearer_auth(token)
-                .send()
-                .await
-                .map_err(|_| GoogleAuthError::ProviderUnavailable)?
-        } else {
-            response
-        };
-        if !response.status().is_success() {
-            return Err(classify_chat_read_status(response.status().as_u16()));
-        }
-        let value: serde_json::Value =
-            serde_json::from_slice(&bounded_body(response, 64 * 1024).await?)
-                .map_err(|_| GoogleAuthError::ProviderDataInvalid)?;
-        reminder_receipt(space, &value)
     }
 
     /// Adds the ingestion acknowledgement reaction after a message has been

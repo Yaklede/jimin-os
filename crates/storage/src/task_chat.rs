@@ -1,4 +1,5 @@
 //! Explicit project assignment destination, independent from incoming-work collection.
+mod completion;
 use crate::{
     Database, StorageError,
     auth::append_change,
@@ -6,10 +7,17 @@ use crate::{
     scheduled_chat_reply::{ReplyContext, ReplyEnvelope, ReplyTask, task_code},
     webhook::GoogleChatMentionDirectory,
 };
+pub use completion::TaskCompletionTarget;
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction, types::Json};
 use utoipa::ToSchema;
 use uuid::Uuid;
+
+#[derive(Clone, Copy)]
+pub(crate) struct CompletionFeedback {
+    pub source_id: Uuid,
+    pub review_id: Uuid,
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -215,7 +223,7 @@ pub(crate) async fn queue_task_delivery(
     task: &Task,
     event: &str,
     payload: &serde_json::Value,
-    feedback_source: Option<Uuid>,
+    feedback: Option<CompletionFeedback>,
 ) -> Result<bool, StorageError> {
     let Some(project) = task.project_id else {
         return Ok(false);
@@ -228,14 +236,19 @@ pub(crate) async fn queue_task_delivery(
     }
     let route:Option<(Uuid,Uuid)>=sqlx::query_as("SELECT source_id,directory_webhook_id FROM project_task_chat_routes WHERE user_id=$1 AND project_id=$2 FOR SHARE")
         .bind(user).bind(project).fetch_optional(&mut **tx).await.map_err(classify)?;
+    let (route, review_route) = if route.is_some() || event != "task.completed" {
+        (route, None)
+    } else if let Some(feedback) = feedback {
+        (
+            completion::approved_review_destination(tx, user, project, task.id, feedback).await?,
+            Some(feedback.review_id),
+        )
+    } else {
+        (None, None)
+    };
     let Some((source, directory)) = route else {
         return Ok(false);
     };
-    // The approval transaction already queues one title-only reply to this room.
-    // Do not add a second completion message or legacy Google Chat webhook.
-    if event == "task.completed" && feedback_source == Some(source) {
-        return Ok(true);
-    }
     let kind = if event == "task.completed" {
         "completion"
     } else {
@@ -249,6 +262,12 @@ pub(crate) async fn queue_task_delivery(
     let mut body = payload.clone();
     body["taskChatKind"] = kind.into();
     body["taskChatSourceId"] = source.to_string().into();
+    if kind == "completion" {
+        body["taskChatCompletionRoutingVersion"] = 1.into();
+    }
+    if let Some(review) = review_route {
+        body["taskChatCompletionReviewRouteId"] = review.to_string().into();
+    }
     if kind == "assignment" {
         body["replyCompletion"] = serde_json::to_value(ReplyEnvelope {
             source_id: source,
@@ -301,16 +320,22 @@ pub(crate) async fn delivery_context(
     db: &Database,
     id: Uuid,
 ) -> Result<Option<ReplyContext>, StorageError> {
-    let row: Option<(Uuid, Uuid)> =
-        sqlx::query_as("SELECT user_id,source_id FROM task_chat_deliveries WHERE delivery_id=$1")
-            .bind(id)
-            .fetch_optional(db.pool())
-            .await
-            .map_err(classify)?;
-    let Some((owner, source)) = row else {
+    let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
+        "SELECT user_id,source_id,kind FROM task_chat_deliveries WHERE delivery_id=$1",
+    )
+    .bind(id)
+    .fetch_optional(db.pool())
+    .await
+    .map_err(classify)?;
+    let Some((owner, source, kind)) = row else {
         return Ok(None);
     };
     let mut tx = db.pool().begin().await.map_err(classify)?;
+    if kind == "completion" {
+        let context = completion::context(&mut tx, id).await?;
+        tx.commit().await.map_err(classify)?;
+        return Ok(context);
+    }
     let context = reply_contexts(&mut tx, owner, source, Some(id), None, false)
         .await?
         .into_iter()

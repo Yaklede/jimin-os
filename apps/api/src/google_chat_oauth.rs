@@ -291,6 +291,17 @@ impl GoogleChatOAuthRuntime {
         id: Uuid,
         text: &str,
     ) -> Result<jimin_google::GoogleChatMessageReceipt, GoogleChatOAuthError> {
+        self.send_task_chat_message(connection, id, text, None)
+            .await
+    }
+
+    pub(crate) async fn send_task_chat_message(
+        &self,
+        connection: &GoogleChatSourceSyncConnection,
+        id: Uuid,
+        text: &str,
+        thread: Option<&str>,
+    ) -> Result<jimin_google::GoogleChatMessageReceipt, GoogleChatOAuthError> {
         if !Self::completion_scope_granted(&connection.granted_scopes)
             || !connection
                 .granted_scopes
@@ -308,15 +319,27 @@ impl GoogleChatOAuthRuntime {
             .refresh_access_token(&refresh)
             .await
             .map_err(GoogleChatOAuthError::from_google)?;
-        self.chat
-            .create_reminder_message(
-                &access,
-                &connection.space_name,
-                text,
-                &id.simple().to_string(),
-            )
-            .await
-            .map_err(GoogleChatOAuthError::from_google)
+        if let Some(thread) = thread {
+            self.chat
+                .create_completion_reply(
+                    &access,
+                    &connection.space_name,
+                    thread,
+                    text,
+                    &id.simple().to_string(),
+                )
+                .await
+        } else {
+            self.chat
+                .create_reminder_message(
+                    &access,
+                    &connection.space_name,
+                    text,
+                    &id.simple().to_string(),
+                )
+                .await
+        }
+        .map_err(GoogleChatOAuthError::from_google)
     }
 
     /// Sends one idempotent result reply; no new credentials or app membership are used.

@@ -1775,7 +1775,7 @@ pub(crate) async fn complete_task_with_feedback_in_transaction(
     task_id: Uuid,
     expected_version: i64,
     completion_note: Option<&str>,
-    feedback_source: Option<Uuid>,
+    feedback_source: Option<crate::task_chat::CompletionFeedback>,
 ) -> Result<Option<Task>, StorageError> {
     crate::completion_reviews::ensure_no_pending(transaction, user_id, task_id).await?;
     ensure_no_open_child_tasks(transaction, user_id, task_id).await?;
@@ -2062,7 +2062,7 @@ async fn queue_task_webhook_with_feedback(
     user_id: Uuid,
     task: &Task,
     event_type: &str,
-    feedback_source: Option<Uuid>,
+    feedback_source: Option<crate::task_chat::CompletionFeedback>,
 ) -> Result<(), StorageError> {
     crate::itsm_sync::queue_task_itsm_sync(transaction, user_id, task.id).await?;
     let Some(project_id) = task.project_id else {
