@@ -207,7 +207,11 @@ impl Database {
                 task,
                 task_version,
                 row.completion_note.as_deref(),
-                row.feedback_source_id,
+                row.feedback_source_id
+                    .map(|source_id| crate::task_chat::CompletionFeedback {
+                        source_id,
+                        review_id: id,
+                    }),
             )
             .await?
             .is_none()
@@ -224,28 +228,20 @@ impl Database {
         .await?;
         sqlx::query("UPDATE push_deliveries SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL,next_attempt_at=NULL WHERE user_id=$1 AND item_type='task_completion_review' AND item_id=$2 AND status IN ('queued','retry_wait')")
             .bind(user).bind(id).execute(&mut *tx).await.map_err(classify)?;
-        let text = if approve {
-            let title: String =
-                sqlx::query_scalar("SELECT title FROM tasks WHERE id=$1 AND user_id=$2")
-                    .bind(task)
-                    .bind(user)
-                    .fetch_one(&mut *tx)
-                    .await
-                    .map_err(classify)?;
-            format!("{} · 완료되었어요.", title.trim())
-        } else {
-            format!(
+        // Final approvals use the same canonical completion outbox as direct completion.
+        // Only a rework request remains a reply to the original report thread.
+        if !approve {
+            let text = format!(
                 "{} · 재작업을 요청했어요. 할 일은 열린 상태로 유지해요.\n{}",
                 crate::scheduled_chat_reply::task_code(task),
                 note.unwrap_or_default().trim()
-            )
-        };
-        // A distinct durable feedback ID avoids deduplicating this against the initial waiting reply.
-        sqlx::query("INSERT INTO scheduled_chat_reply_commands(id,user_id,source_id,delivery_id,provider_message_name,thread_name,task_id,outcome,feedback_text)
+            );
+            sqlx::query("INSERT INTO scheduled_chat_reply_commands(id,user_id,source_id,delivery_id,provider_message_name,thread_name,task_id,outcome,feedback_text)
             SELECT $1,user_id,source_id,delivery_id,$2,thread_name,$7,$3,$4 FROM scheduled_chat_reply_commands WHERE id=$5 AND user_id=$6")
             .bind(Uuid::now_v7()).bind(format!("review:{id}:{decision}"))
-            .bind(if approve{"review_approved"}else{"review_rejected"}).bind(text).bind(row.command_id).bind(user).bind(task)
+            .bind("review_rejected").bind(text).bind(row.command_id).bind(user).bind(task)
             .execute(&mut *tx).await.map_err(classify)?;
+        }
         tx.commit().await.map_err(classify)?;
         Ok(true)
     }

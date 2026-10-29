@@ -304,6 +304,22 @@ impl Database {
         {
             return Err(StorageError::IdentityConflict);
         }
+        if context.payload["taskChatKind"] == "completion" {
+            let target = serde_json::from_value::<crate::task_chat::TaskCompletionTarget>(
+                context
+                    .payload
+                    .get("taskChatCompletionTarget")
+                    .cloned()
+                    .ok_or(StorageError::IdentityConflict)?,
+            )
+            .map_err(|_| StorageError::IdentityConflict)?;
+            if let crate::task_chat::TaskCompletionTarget::AssignmentThread { thread_name, .. } =
+                target
+                && thread_name != thread
+            {
+                return Err(StorageError::IdentityConflict);
+            }
+        }
         let count=sqlx::query("UPDATE webhook_deliveries SET status='delivered',response_code=200,delivered_at=NOW(),last_error_code=NULL,lease_owner=NULL,lease_expires_at=NULL,next_attempt_at=NULL,google_chat_message_name=$4,google_chat_thread_name=$5 WHERE id=$1 AND status='sending' AND lease_owner=$2 AND attempt_count=$3")
             .bind(id).bind(worker).bind(attempt).bind(message).bind(thread).execute(self.pool()).await.map_err(classify)?.rows_affected();
         Ok(count == 1)

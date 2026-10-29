@@ -2672,8 +2672,14 @@ pub fn spawn_webhook_delivery_worker(state: &ApiState) -> Option<tokio::task::Jo
                         || delivery.payload.get("taskChatKind").is_some()
                     {
                         let result = if let Some(runtime) = &reply_runtime {
-                            scheduled_chat_reply::deliver_reminder(&planning, runtime, delivery.id)
-                                .await
+                            scheduled_chat_reply::deliver_reminder(
+                                &planning,
+                                runtime,
+                                delivery.id,
+                                &worker_id,
+                                delivery.attempt_count,
+                            )
+                            .await
                         } else {
                             Err(GoogleChatOAuthError::Configuration)
                         };

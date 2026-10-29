@@ -17,6 +17,8 @@ pub(crate) async fn deliver_reminder(
     db: &Database,
     runtime: &GoogleChatOAuthRuntime,
     id: Uuid,
+    worker: &str,
+    attempt: i32,
 ) -> Result<jimin_google::GoogleChatMessageReceipt, GoogleChatOAuthError> {
     let context = db
         .scheduled_reply_context(id)
@@ -35,9 +37,26 @@ pub(crate) async fn deliver_reminder(
         })
         .ok_or(GoogleChatOAuthError::ProviderRejected)?;
     let text = delivery_text(id, &context.payload, &context.directory)?;
-    runtime
-        .send_scheduled_reminder(&connection, id, &text)
-        .await
+    if context.payload["taskChatKind"] == "completion" {
+        let target = db
+            .prepare_task_completion_target(id, worker, attempt)
+            .await
+            .map_err(|_| GoogleChatOAuthError::ProviderUnavailable)?;
+        let thread = match &target {
+            jimin_storage::task_chat::TaskCompletionTarget::Space => None,
+            jimin_storage::task_chat::TaskCompletionTarget::AssignmentThread {
+                thread_name,
+                ..
+            } => Some(thread_name.as_str()),
+        };
+        runtime
+            .send_task_chat_message(&connection, id, &text, thread)
+            .await
+    } else {
+        runtime
+            .send_scheduled_reminder(&connection, id, &text)
+            .await
+    }
 }
 
 fn delivery_text(

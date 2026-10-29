@@ -586,11 +586,11 @@ async fn separate_collection_and_general_assignment_completion_contract() {
             "SELECT COUNT(*) FROM task_chat_deliveries WHERE kind='completion'"
         )
         .await,
-        0,
-        "approval feedback is the one final developer-room notice"
+        1,
+        "approval uses the same single completion outbox as direct completion"
     );
     let final_text: String = sqlx::query_scalar(
-        "SELECT feedback_text FROM scheduled_chat_reply_commands WHERE outcome='review_approved'",
+        "SELECT payload->>'message' FROM webhook_deliveries WHERE payload->>'taskChatKind'='completion'",
     )
     .fetch_one(&pool)
     .await
@@ -602,7 +602,7 @@ async fn separate_collection_and_general_assignment_completion_contract() {
             .await
             .unwrap();
     assert_eq!(cs_source, operations.id);
-    let duplicates:i64=sqlx::query_scalar("SELECT COUNT(*) FROM webhook_deliveries WHERE provider='google_chat' AND event_type='task.completed'").fetch_one(&pool).await.unwrap();
+    let duplicates:i64=sqlx::query_scalar("SELECT COUNT(*) FROM webhook_deliveries WHERE provider='google_chat' AND event_type='task.completed' AND payload->>'taskChatKind' IS NULL").fetch_one(&pool).await.unwrap();
     assert_eq!(duplicates, 0);
 
     let rework = new_task(&db, owner, project, "재작업 확인").await;
@@ -747,13 +747,20 @@ async fn separate_collection_and_general_assignment_completion_contract() {
             .space_name,
         "spaces/developers"
     );
+    let target = db
+        .prepare_task_completion_target(notice.id, "completion-contract", notice.attempt_count)
+        .await
+        .unwrap();
+    assert!(
+        matches!(target,jimin_storage::task_chat::TaskCompletionTarget::AssignmentThread{ref thread_name,..} if thread_name=="spaces/developers/threads/manual")
+    );
     assert!(
         db.complete_scheduled_reply_delivery(
             notice.id,
             "completion-contract",
             notice.attempt_count,
             "spaces/developers/messages/completed",
-            "spaces/developers/threads/completed"
+            "spaces/developers/threads/manual"
         )
         .await
         .unwrap()

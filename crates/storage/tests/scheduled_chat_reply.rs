@@ -545,7 +545,7 @@ async fn company_oauth_reply_completion_contract() {
             "SELECT COUNT(*) FROM scheduled_chat_reply_commands WHERE outcome='review_approved'"
         )
         .await,
-        1
+        0
     );
     assert_eq!(
         count(
@@ -564,6 +564,38 @@ async fn company_oauth_reply_completion_contract() {
     assert_eq!(webhook_payload["message"], "검토한 업무 · 완료되었어요.");
     assert!(webhook_payload.get("notes").is_none());
     assert!(webhook_payload.get("actionItems").is_none());
+    let fallback = db
+        .claim_webhook_deliveries("approval-fallback", 50)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|d| d.payload["taskChatKind"] == "completion")
+        .unwrap();
+    assert_eq!(
+        db.scheduled_reply_context(fallback.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .source_id,
+        source
+    );
+    assert_eq!(
+        db.prepare_task_completion_target(fallback.id, "approval-fallback", fallback.attempt_count)
+            .await
+            .unwrap(),
+        jimin_storage::task_chat::TaskCompletionTarget::Space
+    );
+    assert!(
+        db.complete_scheduled_reply_delivery(
+            fallback.id,
+            "approval-fallback",
+            fallback.attempt_count,
+            "spaces/test/messages/approval-fallback",
+            "spaces/test/threads/approval-fallback"
+        )
+        .await
+        .unwrap()
+    );
     assert_eq!(count(&pool,"SELECT COUNT(*) FROM google_chat_task_completion_deliveries WHERE completion_note='검증 후 완료했습니다.'").await,1);
     assert_eq!(
         count(
@@ -985,17 +1017,18 @@ async fn mixed_and_batch_reports(
             .await
             .unwrap()
         );
-        let feedback_task: Uuid = sqlx::query_scalar(
-            "SELECT task_id FROM scheduled_chat_reply_commands WHERE provider_message_name=$1",
-        )
-        .bind(format!(
-            "review:{}:{}",
-            r.id,
-            if approve { "approved" } else { "rejected" }
-        ))
-        .fetch_one(pool)
-        .await
-        .unwrap();
+        let feedback_task: Uuid = if approve {
+            sqlx::query_scalar("SELECT t.task_id FROM task_chat_deliveries t JOIN webhook_deliveries d ON d.id=t.delivery_id WHERE t.kind='completion' AND d.payload->>'taskChatCompletionReviewRouteId'=$1")
+                .bind(r.id.to_string()).fetch_one(pool).await.unwrap()
+        } else {
+            sqlx::query_scalar(
+                "SELECT task_id FROM scheduled_chat_reply_commands WHERE provider_message_name=$1",
+            )
+            .bind(format!("review:{}:rejected", r.id))
+            .fetch_one(pool)
+            .await
+            .unwrap()
+        };
         assert_eq!(
             feedback_task, r.task_id,
             "each approval/rejection must reference its review task, not the shared message receipt"
