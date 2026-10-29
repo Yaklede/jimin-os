@@ -1,4 +1,6 @@
 //! Completion commands received through an existing, owner-scoped company OAuth source.
+mod report_parser;
+mod report_processing;
 use crate::{
     Database, StorageError,
     google_chat::{GoogleChatSourceSyncConnection, ProviderGoogleChatMessage},
@@ -416,8 +418,9 @@ impl Database {
         } else {
             None
         };
-        let command = parse_command(normalized.as_deref().unwrap_or(&message.content_text));
-        if command == ParsedCommand::Ignore
+        let commands =
+            report_parser::parse_reply(normalized.as_deref().unwrap_or(&message.content_text));
+        if commands.as_ref().is_ok_and(Vec::is_empty)
             || contexts
                 .iter()
                 .any(|c| c.message_name.as_deref() == Some(&message.provider_message_name))
@@ -432,111 +435,44 @@ impl Database {
             tx.commit().await.map_err(classify)?;
             return Ok(true);
         }
-        let (outcome, feedback, task_id, delivery) = if let ParsedCommand::Complete { code, note } =
-            command
-        {
-            let mut targets = Vec::new();
-            for context in &contexts {
-                for task in context.envelope()?.tasks {
-                    if task_code(task.id) == code
-                        && !targets
-                            .iter()
-                            .any(|(_, t): &(&ReplyContext, ReplyTask)| t.id == task.id)
-                    {
-                        targets.push((context, task));
-                    }
-                }
-            }
-            if let [(context, target)] = targets.as_slice() {
-                let task:Option<(String,Option<String>,i64)>=sqlx::query_as("SELECT status,assignee_name,version FROM tasks WHERE id=$1 AND user_id=$2 AND project_id=$3 FOR UPDATE")
-                    .bind(target.id).bind(context.user_id).bind(context.project_id).fetch_optional(&mut *tx).await.map_err(classify)?;
-                let (outcome, text) = if let Some((status, names, version)) = task {
-                    if !message
-                        .sender_provider_name
-                        .as_deref()
-                        .is_some_and(|actor| {
-                            actor_assigned(names.as_deref(), actor, &context.directory)
-                        })
-                    {
-                        (
-                            "not_assigned",
-                            format!(
-                                "{code}는 현재 담당자만 완료할 수 있어요. 앱에서 담당자를 확인해 주세요."
-                            ),
-                        )
-                    } else if status == "completed" {
-                        (
-                            "already_completed",
-                            format!("{code}는 이미 완료한 할 일이에요."),
-                        )
-                    } else if status != "open" || version != target.version {
-                        (
-                            "stale",
-                            format!(
-                                "{code}의 내용이나 상태가 바뀌어 완료하지 않았어요. 최신 알림이나 앱에서 확인해 주세요."
-                            ),
-                        )
-                    } else {
-                        let children:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE parent_task_id=$1 AND user_id=$2 AND status='open')")
-                            .bind(target.id).bind(context.user_id).fetch_one(&mut *tx).await.map_err(classify)?;
-                        if children {
-                            (
-                                "blocked",
-                                format!("{code}의 진행 중인 하위 할 일을 먼저 확인해 주세요."),
-                            )
-                        } else {
-                            let reporter = context
-                                .directory
-                                .users
-                                .iter()
-                                .find(|(name, actor)| {
-                                    Some(actor.as_str()) == message.sender_provider_name.as_deref()
-                                        && names.as_deref().is_some_and(|assigned| {
-                                            assigned
-                                                .split(',')
-                                                .any(|part| part.trim() == name.as_str())
-                                        })
-                                })
-                                .map_or("담당자", |(name, _)| name.as_str());
-                            let created = crate::completion_reviews::report(
-                                &mut tx,
-                                context.user_id,
-                                target.id,
-                                version,
-                                receipt,
-                                reporter,
-                                note,
-                            )
-                            .await?;
-                            (
-                                if created {
-                                    "review_pending"
-                                } else {
-                                    "already_pending"
-                                },
-                                format!(
-                                    "{code}의 완료 확인을 요청했어요. 최종 확인 전에는 CS·Redmine을 완료하지 않아요."
-                                ),
-                            )
-                        }
-                    }
-                } else {
-                    (
-                        "unknown_task",
-                        format!("{code}를 찾지 못했어요. 최신 알림이나 앱에서 확인해 주세요."),
+        let (outcome, feedback, task_id, delivery) = if let Ok(commands) = commands {
+            let mut outcomes = Vec::new();
+            for command in commands {
+                outcomes.push(
+                    report_processing::process_completion(
+                        &mut tx,
+                        &contexts,
+                        receipt,
+                        message.sender_provider_name.as_deref(),
+                        &command,
                     )
-                };
-                (outcome, text, Some(target.id), Some(context.delivery_id))
-            } else {
-                (
-                    "unknown_task",
-                    format!(
-                        "{code}를 이 알림에서 찾지 못했어요. 알림의 할 일 번호를 확인해 주세요."
-                    ),
-                    None,
-                    None,
-                )
+                    .await?,
+                );
             }
+            let primary = outcomes
+                .iter()
+                .find(|r| r.outcome == "review_pending")
+                .or_else(|| outcomes.iter().find(|r| r.outcome == "already_pending"))
+                .or_else(|| outcomes.first())
+                .ok_or(StorageError::InvalidConfiguration)?;
+            let outcome = primary.outcome;
+            // A batch receipt belongs to the message; each review owns its separate task.
+            let task_id = if outcomes.len() == 1 {
+                outcomes[0].task_id
+            } else {
+                None
+            };
+            let delivery = if outcomes.len() == 1 {
+                outcomes[0].delivery_id
+            } else {
+                None
+            };
+            let feedback = outcomes
+                .into_iter()
+                .map(|r| r.feedback)
+                .collect::<Vec<_>>()
+                .join("\n");
+            (outcome, feedback, task_id, delivery)
         } else {
             ("invalid","완료할 할 일 번호를 확인해 주세요. 첫 줄에 ‘완료 T-번호’를 적고, 완료 답글은 다음 줄에 적어 주세요.".into(),None,None)
         };
