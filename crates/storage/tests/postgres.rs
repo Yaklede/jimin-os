@@ -11587,7 +11587,7 @@ async fn itsm_sync_preserves_task_completion_shared_deadlines_and_retry_fences()
                     parent_task_id: None,
                     title: title.into(),
                     notes: None,
-                    assignee_name: None,
+                    assignee_name: (title == "둘째 작업").then(|| "조 지민".into()),
                     priority: 1,
                     due_at: Some(deadline),
                 })
@@ -11608,7 +11608,7 @@ async fn itsm_sync_preserves_task_completion_shared_deadlines_and_retry_fences()
             parent_task_id: None,
             title: "첫 작업 수정".into(),
             notes: None,
-            assignee_name: None,
+            assignee_name: Some("조지민".into()),
             status: TaskStatus::Open,
             priority: 1,
             due_at: Some(due),
@@ -11621,6 +11621,13 @@ async fn itsm_sync_preserves_task_completion_shared_deadlines_and_retry_fences()
     let old = database.claim_itsm_sync(worker).await.unwrap().unwrap();
     assert_eq!(old.linked_count, 2);
     assert_eq!(old.due_at, Some(due + TimeDuration::days(2)));
+    assert_eq!(
+        old.assignee_names
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["조지민", "조 지민"])
+    );
     assert!(!old.should_complete);
     assert!(
         database
@@ -11629,8 +11636,20 @@ async fn itsm_sync_preserves_task_completion_shared_deadlines_and_retry_fences()
             .unwrap()
             .is_none()
     );
-    database
-        .complete_task(user, first.id, first.version)
+    let reassigned = database
+        .update_task(&TaskUpdate {
+            id: first.id,
+            user_id: user,
+            project_id: None,
+            parent_task_id: None,
+            title: first.title.clone(),
+            notes: None,
+            assignee_name: Some("김경주".into()),
+            status: TaskStatus::Open,
+            priority: first.priority,
+            due_at: first.due_at,
+            expected_version: first.version,
+        })
         .await
         .unwrap()
         .unwrap();
@@ -11644,6 +11663,23 @@ async fn itsm_sync_preserves_task_completion_shared_deadlines_and_retry_fences()
     let after_first = database.claim_itsm_sync(worker).await.unwrap().unwrap();
     assert!(!after_first.should_complete);
     assert_eq!(after_first.attempt_count, 1);
+    assert!(
+        after_first
+            .assignee_names
+            .iter()
+            .any(|name| name == "김경주")
+    );
+    assert!(
+        after_first
+            .assignee_names
+            .iter()
+            .all(|name| name != "조지민")
+    );
+    database
+        .complete_task(user, reassigned.id, reassigned.version)
+        .await
+        .unwrap()
+        .unwrap();
     database
         .complete_task(user, tasks[1].id, tasks[1].version)
         .await
@@ -11798,7 +11834,7 @@ async fn itsm_sync_preserves_task_completion_shared_deadlines_and_retry_fences()
                 parent_task_id: None,
                 title: task.title,
                 notes: None,
-                assignee_name: None,
+                assignee_name: Some("김경주".into()),
                 status: TaskStatus::Cancelled,
                 priority: 1,
                 due_at: None,
@@ -11809,6 +11845,10 @@ async fn itsm_sync_preserves_task_completion_shared_deadlines_and_retry_fences()
             .unwrap();
     }
     let before_deletion = database.claim_itsm_sync(worker).await.unwrap().unwrap();
+    assert!(
+        before_deletion.assignee_names.is_empty(),
+        "cancelled assignees must not leak into sync"
+    );
     let last = database
         .task_for_user(user, tasks[1].id)
         .await
@@ -11837,6 +11877,7 @@ async fn itsm_sync_preserves_task_completion_shared_deadlines_and_retry_fences()
         "cancelling all work must not clear the remote date or close the ticket"
     );
     assert!(!cancelled.should_complete);
+    assert!(cancelled.assignee_names.is_empty());
     pool.close().await;
     database.close().await;
 }

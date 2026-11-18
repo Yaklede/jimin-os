@@ -21,6 +21,7 @@ pub struct ItsmSyncDelivery {
     pub version: i64,
     pub sync_deadline: bool,
     pub due_at: Option<OffsetDateTime>,
+    pub assignee_names: Vec<String>,
     pub should_complete: bool,
     pub linked_count: i64,
     pub attempt_count: i32,
@@ -186,6 +187,8 @@ impl Database {
         let delivery = sqlx::query_as::<_,ItsmSyncDelivery>(
             "SELECT j.id,j.issue_url,j.issue_id,j.leased_version AS version,j.sync_deadline,j.attempt_count,
                 MAX(t.due_at) FILTER(WHERE t.status<>'cancelled') AS due_at,
+                COALESCE(ARRAY_AGG(DISTINCT t.assignee_name)
+                  FILTER(WHERE t.status<>'cancelled' AND t.assignee_name IS NOT NULL), ARRAY[]::TEXT[]) AS assignee_names,
                 COUNT(t.id) FILTER(WHERE t.status<>'cancelled') AS linked_count,
                 (COUNT(t.id)>0
                   AND COUNT(t.id) FILTER(WHERE t.status='completed')=COUNT(t.id)

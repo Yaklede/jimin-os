@@ -8,6 +8,10 @@ use serde_json::{Map, Value, json};
 use std::time::Duration;
 use time::UtcOffset;
 
+mod assignee;
+#[cfg(test)]
+mod assignee_tests;
+
 #[derive(Debug, Clone, Copy)]
 struct SyncError {
     code: &'static str,
@@ -34,9 +38,15 @@ struct IssueEnvelope {
 #[derive(Deserialize)]
 struct IssueState {
     id: u64,
+    project: Option<Reference>,
+    assigned_to: Option<Reference>,
     status: Status,
     due_date: Option<String>,
     allowed_statuses: Option<Vec<Status>>,
+}
+#[derive(Deserialize)]
+struct Reference {
+    id: u64,
 }
 #[derive(Debug, Clone, Deserialize)]
 struct Status {
@@ -148,6 +158,11 @@ impl ItsmClient {
             return Err(SyncError::permanent("itsm.superseded"));
         }
         let current = self.issue_state(id).await?;
+        // Redmine can reject an assignee without accepting any other fields in
+        // that request. Keep the existing deadline/completion operation separate.
+        let assignee_result = self
+            .sync_assignee(id, &current, &job.assignee_names, &is_current)
+            .await;
         let deadline = job.due_at.map(|value| {
             value
                 .to_offset(UtcOffset::from_hms(9, 0, 0).expect("Seoul offset"))
@@ -177,24 +192,12 @@ impl ItsmClient {
             changes.insert("status_id".into(), json!(target));
         }
         if changes.is_empty() {
-            return Ok(());
+            return assignee_result;
         }
         if !is_current().await? {
             return Err(SyncError::permanent("itsm.superseded"));
         }
-        let url = self
-            .base_url
-            .join(&format!("issues/{id}.json"))
-            .map_err(|_| SyncError::permanent("itsm.invalid_reference"))?;
-        // Only these two attributes can be emitted. No notes, assignee,
-        // description, project transfer or comment creates are sent on retry.
-        let response = self
-            .authenticated(self.client.put(url))
-            .json(&json!({"issue":changes}))
-            .send()
-            .await
-            .map_err(|_| SyncError::transient())?;
-        validate_response(&response)?;
+        self.update_issue(id, &changes).await?;
         let verified = self.issue_state(id).await?;
         if changes.contains_key("due_date")
             && verified.due_date.as_deref().filter(|date| !date.is_empty()) != deadline.as_deref()
@@ -206,7 +209,25 @@ impl ItsmClient {
         {
             return Err(SyncError::permanent("itsm.verification_failed"));
         }
-        Ok(())
+        assignee_result
+    }
+
+    async fn update_issue<T: serde::Serialize + Sync>(
+        &self,
+        id: u64,
+        fields: &T,
+    ) -> Result<(), SyncError> {
+        let url = self
+            .base_url
+            .join(&format!("issues/{id}.json"))
+            .map_err(|_| SyncError::permanent("itsm.invalid_reference"))?;
+        let response = self
+            .authenticated(self.client.put(url))
+            .json(&json!({"issue":fields}))
+            .send()
+            .await
+            .map_err(|_| SyncError::transient())?;
+        validate_response(&response)
     }
 }
 
@@ -297,7 +318,7 @@ async fn read_json<T: DeserializeOwned>(request: RequestBuilder) -> Result<T, Sy
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    fn delivery(client: &ItsmClient, complete: bool) -> ItsmSyncDelivery {
+    pub(super) fn delivery(client: &ItsmClient, complete: bool) -> ItsmSyncDelivery {
         ItsmSyncDelivery {
             id: uuid::Uuid::now_v7(),
             issue_url: client.base_url.join("issues/42").unwrap().to_string(),
@@ -312,11 +333,12 @@ mod tests {
                 .unwrap(),
             ),
             should_complete: complete,
+            assignee_names: Vec::new(),
             linked_count: 1,
             attempt_count: 1,
         }
     }
-    async fn server(
+    pub(super) async fn server(
         responses: Vec<(u16, String)>,
     ) -> (ItsmClient, tokio::task::JoinHandle<Vec<String>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -381,7 +403,7 @@ mod tests {
     fn issue(date: Option<&str>, status: u64) -> String {
         json!({"issue":{"id":42,"status":{"id":status},"due_date":date,"allowed_statuses":[{"id":7,"name":"완료"}]}}).to_string()
     }
-    fn catalog() -> String {
+    pub(super) fn catalog() -> String {
         json!({"issue_statuses":[{"id":1,"name":"신규","is_closed":false},{"id":7,"name":"완료","is_closed":true}]}).to_string()
     }
 
