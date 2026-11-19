@@ -66,6 +66,20 @@ fn canonical_issue_reference(value: &str) -> Option<(String, i64)> {
     (id > 0).then(|| (format!("{prefix}/issues/{id}"), id))
 }
 
+/// Only an exact, bounded ticket URL can enter a Google Chat link destination.
+/// Reject whitespace, credentials, query/fragment data and Chat markup delimiters.
+pub(crate) fn chat_issue_link(value: &str, issue_id: i64) -> Option<&str> {
+    if value.len() > 1024
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._~:/[]".contains(&b))
+    {
+        return None;
+    }
+    let (canonical, id) = canonical_issue_reference(value)?;
+    (id == issue_id && canonical == value).then_some(value)
+}
+
 pub(crate) async fn bind_promoted_itsm_task(
     tx: &mut Transaction<'_, Postgres>,
     user: Uuid,

@@ -127,6 +127,9 @@ pub struct ScheduledWorkPreview {
     #[serde(skip)]
     #[schema(ignore)]
     pub(crate) reply_tasks: Vec<crate::scheduled_chat_reply::ReplyTask>,
+    #[serde(skip)]
+    #[schema(ignore)]
+    chat_messages: Vec<Option<String>>,
     pub task_ids: Vec<Uuid>,
     pub messages: Vec<String>,
     pub warnings: Vec<String>,

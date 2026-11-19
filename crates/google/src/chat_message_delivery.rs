@@ -18,6 +18,7 @@ fn message_request(
     text: &str,
     id: &str,
     thread: Option<&str>,
+    chat_markup: bool,
 ) -> Result<MessageRequest, GoogleAuthError> {
     let space_id = validated_chat_space_id(space)?;
     if id.len() != 32
@@ -49,6 +50,9 @@ fn message_request(
         .append_pair("requestId", id)
         .append_pair("messageId", &message_id);
     let mut body = serde_json::json!({"text":text});
+    if chat_markup {
+        body["markupSyntax"] = "MARKUP_SYNTAX_CHAT".into();
+    }
     if let Some(thread) = thread {
         url.query_pairs_mut()
             .append_pair("messageReplyOption", "REPLY_MESSAGE_OR_FAIL");
@@ -73,8 +77,9 @@ impl GoogleChatAdapter {
         space: &str,
         text: &str,
         id: &str,
+        chat_markup: bool,
     ) -> Result<GoogleChatMessageReceipt, GoogleAuthError> {
-        self.send_named_message(access, message_request(space, text, id, None)?)
+        self.send_named_message(access, message_request(space, text, id, None, chat_markup)?)
             .await
     }
 
@@ -90,8 +95,11 @@ impl GoogleChatAdapter {
         text: &str,
         id: &str,
     ) -> Result<GoogleChatMessageReceipt, GoogleAuthError> {
-        self.send_named_message(access, message_request(space, text, id, Some(thread))?)
-            .await
+        self.send_named_message(
+            access,
+            message_request(space, text, id, Some(thread), false)?,
+        )
+        .await
     }
 
     async fn send_named_message(
@@ -209,7 +217,7 @@ mod tests {
 
     fn request(origin: &str, thread: Option<&str>) -> MessageRequest {
         let mut request =
-            message_request("spaces/test", "일감 · 완료되었어요.", ID, thread).unwrap();
+            message_request("spaces/test", "일감 · 완료되었어요.", ID, thread, false).unwrap();
         request.url = reqwest::Url::parse(
             &request
                 .url
@@ -321,7 +329,8 @@ mod tests {
 
     #[test]
     fn room_fallback_has_no_thread_and_validation_cannot_cross_spaces() {
-        let request = message_request("spaces/test", "제목 · 완료되었어요.", ID, None).unwrap();
+        let request =
+            message_request("spaces/test", "제목 · 완료되었어요.", ID, None, false).unwrap();
         assert!(request.body.get("thread").is_none());
         assert!(
             !request
@@ -334,10 +343,25 @@ mod tests {
                 "spaces/test",
                 "제목",
                 ID,
-                Some("spaces/foreign/threads/wrong")
+                Some("spaces/foreign/threads/wrong"),
+                false
             )
             .is_err()
         );
-        assert!(message_request("spaces/test", "제목", "invalid", None).is_err());
+        assert!(message_request("spaces/test", "제목", "invalid", None, false).is_err());
+    }
+
+    #[test]
+    fn linked_reminder_uses_explicit_chat_markup_without_changing_message_identity() {
+        let text = "<users/123>\n- <https://itsm.example.test/issues/3876|[T-AE09BC03B86C]> 확인";
+        let linked = message_request("spaces/test", text, ID, None, true).unwrap();
+        let plain = message_request("spaces/test", text, ID, None, false).unwrap();
+        assert_eq!(linked.url, plain.url);
+        assert_eq!(linked.lookup, plain.lookup);
+        assert_eq!(
+            linked.body,
+            serde_json::json!({"text": text, "markupSyntax": "MARKUP_SYNTAX_CHAT"})
+        );
+        assert!(plain.body.get("markupSyntax").is_none());
     }
 }
