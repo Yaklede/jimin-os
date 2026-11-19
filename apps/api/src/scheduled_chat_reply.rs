@@ -36,7 +36,7 @@ pub(crate) async fn deliver_reminder(
                 && c.space_name == context.space_name
         })
         .ok_or(GoogleChatOAuthError::ProviderRejected)?;
-    let text = delivery_text(id, &context.payload, &context.directory)?;
+    let (text, chat_markup) = delivery_text(id, &context.payload, &context.directory)?;
     if context.payload["taskChatKind"] == "completion" {
         let target = db
             .prepare_task_completion_target(id, worker, attempt)
@@ -50,11 +50,11 @@ pub(crate) async fn deliver_reminder(
             } => Some(thread_name.as_str()),
         };
         runtime
-            .send_task_chat_message(&connection, id, &text, thread)
+            .send_task_chat_message(&connection, id, &text, thread, false)
             .await
     } else {
         runtime
-            .send_scheduled_reminder(&connection, id, &text)
+            .send_scheduled_reminder(&connection, id, &text, chat_markup)
             .await
     }
 }
@@ -63,16 +63,26 @@ fn delivery_text(
     id: Uuid,
     payload: &serde_json::Value,
     directory: &jimin_storage::webhook::GoogleChatMentionDirectory,
-) -> Result<String, GoogleChatOAuthError> {
+) -> Result<(String, bool), GoogleChatOAuthError> {
     if payload["taskChatKind"] == "completion" {
         let title = payload["title"]
             .as_str()
             .filter(|title| !title.trim().is_empty() && title.chars().count() <= 200)
             .ok_or(GoogleChatOAuthError::Configuration)?;
-        return Ok(format!("{} · 완료되었어요.", title.trim()));
+        return Ok((format!("{} · 완료되었어요.", title.trim()), false));
     }
-    let message = payload["message"]
-        .as_str()
+    // Only the server's scheduled-run outbox opts in. Keep older queued
+    // reminders and regular task messages on the existing text contract.
+    let chat_message =
+        if payload["replyCompletion"].is_object() && payload.get("taskChatKind").is_none() {
+            payload["chatMessage"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty() && s.chars().count() <= 1800)
+        } else {
+            None
+        };
+    let message = chat_message
+        .or_else(|| payload["message"].as_str())
         .filter(|s| s.chars().count() <= 1800)
         .ok_or(GoogleChatOAuthError::Configuration)?;
     let text = if payload["taskChatKind"] == "assignment" {
@@ -96,7 +106,7 @@ fn delivery_text(
     if text.len() > 31_000 {
         return Err(GoogleChatOAuthError::Configuration);
     }
-    Ok(text)
+    Ok((text, chat_message.is_some()))
 }
 
 /// Handles only server-tracked reminder threads before ordinary work parsing.
@@ -202,6 +212,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn linked_scheduled_reminders_preserve_task_codes_tags_and_mentions() {
+        let id = Uuid::now_v7();
+        let directory = jimin_storage::webhook::GoogleChatMentionDirectory {
+            users: [("김경주".to_owned(), "users/123456789".to_owned())].into(),
+        };
+        let label = "[T-AE09BC03B86C]";
+        let link = format!("<https://itsm.example.test/issues/3876|{label}>");
+        let mut payload = serde_json::json!({
+            "replyCompletion": {"sourceId": Uuid::now_v7(), "tasks": []},
+            "message": format!("@김경주\n- {label} 확인"),
+            "chatMessage": format!("@김경주\n- {link} 확인")
+        });
+        let (text, markup) = delivery_text(id, &payload, &directory).unwrap();
+        assert!(markup);
+        assert_eq!(
+            text,
+            format!("{}\n<users/123456789>\n- {link} 확인", delivery_tag(id))
+        );
+        payload["chatMessage"] = "x".repeat(1801).into();
+        let (text, markup) = delivery_text(id, &payload, &directory).unwrap();
+        assert!(!markup);
+        assert!(text.ends_with(&format!("- {label} 확인")));
+        payload.as_object_mut().unwrap().remove("replyCompletion");
+        payload["chatMessage"] = link.clone().into();
+        let (text, markup) = delivery_text(id, &payload, &directory).unwrap();
+        assert!(!markup);
+        assert!(!text.contains(&link));
+    }
+
+    #[test]
     fn completion_uses_only_title_and_assignment_retains_reviewed_body() {
         let id = Uuid::now_v7();
         let directory = jimin_storage::webhook::GoogleChatMentionDirectory {
@@ -213,13 +253,14 @@ mod tests {
         });
         assert_eq!(
             delivery_text(id, &complete, &directory).unwrap(),
-            "테스트 일감 · 완료되었어요."
+            ("테스트 일감 · 완료되었어요.".into(), false)
         );
         let assign = serde_json::json!({
             "taskChatKind":"assignment", "assigneeName":"김경주",
             "message":"직접 수정한 배정 내용\nhttps://example.test/document\n완료 T-123"
         });
-        let text = delivery_text(id, &assign, &directory).unwrap();
+        let (text, chat_markup) = delivery_text(id, &assign, &directory).unwrap();
+        assert!(!chat_markup);
         assert!(text.starts_with("[일감 배정 A-"));
         assert!(text.contains("<users/123456789>"));
         assert!(text.ends_with(assign["message"].as_str().unwrap()));
@@ -227,6 +268,7 @@ mod tests {
         assert!(
             delivery_text(id, &legacy, &directory)
                 .unwrap()
+                .0
                 .starts_with(&delivery_tag(id))
         );
         assert!(

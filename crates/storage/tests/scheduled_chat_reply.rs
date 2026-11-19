@@ -149,6 +149,7 @@ async fn company_oauth_reply_completion_contract() {
     assert!(preview.messages.join("\n").contains("다음 동기화"));
     let serialized = serde_json::to_value(&preview).unwrap();
     assert!(serialized.get("replyTasks").is_none());
+    assert!(serialized.get("chatMessages").is_none());
     let mut legacy = definition.clone();
     legacy.reply_completion_source_id = None;
     assert!(
@@ -165,6 +166,19 @@ async fn company_oauth_reply_completion_contract() {
         .unwrap();
     let thread = "spaces/test/threads/reminder1";
     let id = delivered(&db, rule, owner, 1, thread).await;
+    let delivery_context = db.scheduled_reply_context(id).await.unwrap().unwrap();
+    let linked_label = format!("<https://itsm.example.test/issues/4390|[{code}]>");
+    assert!(
+        delivery_context.payload["chatMessage"]
+            .as_str()
+            .is_some_and(|text| text.contains(&linked_label)),
+        "scheduled Chat message must link the task code to its verified ticket"
+    );
+    assert!(!preview.messages.join("\n").contains("itsm.example.test"));
+    assert_eq!(
+        delivery_context.payload["message"],
+        preview.messages.join("\n")
+    );
     let connection: GoogleChatSourceSyncConnection = db
         .google_chat_source_sync_connection(source)
         .await
@@ -290,7 +304,7 @@ async fn company_oauth_reply_completion_contract() {
         "complete1",
         thread2,
         Some("users/123"),
-        &format!("완료 {code}\n검증 후 완료했습니다."),
+        &format!("완료 [{code}]\n검증 후 완료했습니다."),
     );
     let two = reply(
         "complete2",

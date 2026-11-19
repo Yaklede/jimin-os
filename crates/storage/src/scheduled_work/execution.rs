@@ -28,6 +28,8 @@ struct ReminderTask {
     action_items: Vec<String>,
     completion_criteria: Option<String>,
     reference_links: Vec<String>,
+    itsm_issue_url: Option<String>,
+    itsm_issue_id: Option<i64>,
 }
 
 fn matches_condition(
@@ -119,21 +121,54 @@ fn reminder_date_label(value: OffsetDateTime, at: OffsetDateTime) -> String {
     )
 }
 
-fn task_reminder(task: &ReminderTask, mode: WorkMessageDetail, at: OffsetDateTime) -> String {
+struct ReminderBlock {
+    plain: String,
+    chat_heading: Option<String>,
+}
+
+impl From<String> for ReminderBlock {
+    fn from(plain: String) -> Self {
+        Self {
+            plain,
+            chat_heading: None,
+        }
+    }
+}
+
+fn task_reminder(
+    task: &ReminderTask,
+    mode: WorkMessageDetail,
+    at: OffsetDateTime,
+    include_code: bool,
+) -> ReminderBlock {
     let due = task.due_at.map_or_else(
         || "기한 없음".into(),
         |due| format!("{} 마감", reminder_date_label(due, at)),
     );
-    let mut lines = vec![format!(
-        "- {} ({due})",
-        public_text(&task.title)
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    )];
+    let title = public_text(&task.title)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let label =
+        include_code.then(|| format!("[{}]", crate::scheduled_chat_reply::task_code(task.id)));
+    let chat_heading = label
+        .as_ref()
+        .zip(task.itsm_issue_url.as_deref().zip(task.itsm_issue_id))
+        .and_then(|(code, (url, id))| {
+            crate::itsm_sync::chat_issue_link(url, id)
+                .map(|url| format!("- <{url}|{code}> {title} ({due})"))
+        });
+    let plain = label.map_or_else(
+        || format!("- {title} ({due})"),
+        |code| format!("- {code} {title} ({due})"),
+    );
     if mode == WorkMessageDetail::TitleOnly {
-        return lines.join("\n");
+        return ReminderBlock {
+            plain,
+            chat_heading,
+        };
     }
+    let mut lines = vec![plain];
     lines.push(format!(
         "  프로젝트: {}",
         public_text(task.project_title.as_deref().unwrap_or("개인 할 일"))
@@ -156,7 +191,10 @@ fn task_reminder(task: &ReminderTask, mode: WorkMessageDetail, at: OffsetDateTim
             .iter()
             .map(|link| format!("  참고: {}", public_text(link))),
     );
-    lines.join("\n")
+    ReminderBlock {
+        plain: lines.join("\n"),
+        chat_heading,
+    }
 }
 
 fn matches_scope(
@@ -185,22 +223,44 @@ fn matches_scope(
 
 // Split on line boundaries whenever possible. Every character is retained;
 // a very long single line is continued explicitly, not silently discarded.
-fn split_messages(header: &str, blocks: &[String]) -> Vec<String> {
-    let mut messages = Vec::new();
-    let mut current = header.to_owned();
-    for line in blocks.iter().flat_map(|block| block.lines()) {
+fn split_messages(header: &str, blocks: &[ReminderBlock]) -> (Vec<String>, Vec<Option<String>>) {
+    const LIMIT: usize = 1800;
+    let (mut messages, mut chat_messages) = (Vec::new(), Vec::new());
+    let (mut current, mut chat_current) = (header.to_owned(), header.to_owned());
+    let mut flush = |plain: &mut String, chat: &mut String| {
+        let plain = std::mem::replace(plain, header.to_owned());
+        let chat = std::mem::replace(chat, header.to_owned());
+        chat_messages.push((chat != plain).then_some(chat));
+        messages.push(plain);
+    };
+    let capacity = LIMIT.saturating_sub(header.chars().count() + 1);
+    for (line, chat_heading) in blocks.iter().flat_map(|block| {
+        block.plain.lines().enumerate().map(|(index, line)| {
+            (
+                line,
+                (index == 0)
+                    .then_some(block.chat_heading.as_deref())
+                    .flatten(),
+            )
+        })
+    }) {
         let mut rest = line;
+        // Never cut link syntax halfway, even if a legacy task title is unusually long.
+        let mut chat_rest = chat_heading
+            .filter(|line| line.chars().count() <= capacity)
+            .unwrap_or(rest);
         loop {
-            let remaining = 1800_usize.saturating_sub(current.chars().count() + 1);
-            let length = rest.chars().count();
+            let remaining = LIMIT.saturating_sub(chat_current.chars().count() + 1);
+            let length = chat_rest.chars().count();
             if length <= remaining {
                 current.push('\n');
                 current.push_str(rest);
+                chat_current.push('\n');
+                chat_current.push_str(chat_rest);
                 break;
             }
             if current != header {
-                messages.push(current);
-                current = String::from(header);
+                flush(&mut current, &mut chat_current);
                 continue;
             }
             let cut = rest
@@ -209,15 +269,17 @@ fn split_messages(header: &str, blocks: &[String]) -> Vec<String> {
                 .map_or(rest.len(), |(index, _)| index);
             current.push('\n');
             current.push_str(&rest[..cut]);
-            messages.push(current);
-            current = String::from(header);
+            chat_current.push('\n');
+            chat_current.push_str(&rest[..cut]);
+            flush(&mut current, &mut chat_current);
             rest = &rest[cut..];
+            chat_rest = rest;
         }
     }
     if current != header {
-        messages.push(current);
+        flush(&mut current, &mut chat_current);
     }
-    messages
+    (messages, chat_messages)
 }
 
 #[allow(clippy::too_many_lines)] // Scope, current task data and reviewed outbound fields form one preview boundary.
@@ -239,9 +301,10 @@ pub(super) async fn preview_in_transaction(
           AND i.sender_provider_name IS DISTINCT FROM CONCAT('users/',a.provider_subject)
           AND i.sender_provider_name IS DISTINCT FROM 'users/app') AS latest_external_reply_at,
          COALESCE(d.action_items,'{}') AS action_items,d.completion_criteria,
-         COALESCE(d.reference_links,'{}') AS reference_links
+         COALESCE(d.reference_links,'{}') AS reference_links,l.issue_url AS itsm_issue_url,l.issue_id AS itsm_issue_id
          FROM tasks t LEFT JOIN projects p ON p.id=t.project_id AND p.user_id=t.user_id
          LEFT JOIN task_assignment_public_details d ON d.task_id=t.id AND d.user_id=t.user_id
+         LEFT JOIN task_itsm_links l ON l.task_id=t.id AND l.user_id=t.user_id AND l.enabled
          JOIN workspaces w ON w.id=$2 AND w.user_id=t.user_id
          WHERE t.user_id=$1 AND (t.status='open' OR ($4::BOOL AND t.status='completed'))
            AND NOT EXISTS(SELECT 1 FROM task_completion_reviews r WHERE r.task_id=t.id AND r.user_id=t.user_id AND r.status='pending')
@@ -262,7 +325,7 @@ pub(super) async fn preview_in_transaction(
         .iter()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
-    let mut tasks: Vec<_> = tasks
+    let tasks: Vec<_> = tasks
         .into_iter()
         .filter(|task| {
             (definition.condition != WorkCondition::Always
@@ -273,15 +336,6 @@ pub(super) async fn preview_in_transaction(
                     || !task.assignee_names().is_disjoint(&assignee_filter))
         })
         .collect();
-    if definition.reply_completion_source_id.is_some() {
-        for task in &mut tasks {
-            task.title = format!(
-                "[{}] {}",
-                crate::scheduled_chat_reply::task_code(task.id),
-                task.title
-            );
-        }
-    }
     let directory = if let Some(id) = definition.webhook_id {
         sqlx::query_scalar::<_, Json<GoogleChatMentionDirectory>>(
             "SELECT mention_directory FROM project_webhooks WHERE id=$1 AND user_id=$2 AND enabled FOR SHARE",
@@ -332,7 +386,7 @@ pub(super) async fn preview_in_transaction(
     }
     let mut blocks = Vec::new();
     if definition.reply_completion_source_id.is_some() {
-        blocks.push("이 알림의 답글에 ‘완료 T-번호’를 적어 주세요. 완료 메모는 다음 줄에 적을 수 있어요. 현재 담당자가 보고하면 다음 동기화 때 완료 확인 대기로 등록돼요. 최종 확인 후 CS·Redmine에 반영해요.".into());
+        blocks.push("이 알림의 답글에 ‘완료 T-번호’를 적어 주세요. 완료 메모는 다음 줄에 적을 수 있어요. 현재 담당자가 보고하면 다음 동기화 때 완료 확인 대기로 등록돼요. 최종 확인 후 CS·Redmine에 반영해요.".to_owned().into());
     }
     let additional = definition
         .mention_names
@@ -344,16 +398,18 @@ pub(super) async fn preview_in_transaction(
         .map(|name| format!("@{name}"))
         .collect::<BTreeSet<_>>();
     if !additional.is_empty() {
-        blocks.push(additional.into_iter().collect::<Vec<_>>().join(", "));
+        blocks.push(additional.into_iter().collect::<Vec<_>>().join(", ").into());
     }
     for (names, mut tasks) in groups {
         tasks.sort_by_key(|task| (task.due_at.is_none(), task.due_at, task.id));
-        blocks.push(format!(
-            "\n{}",
-            assignee_label(&names, definition.mention_assignees)
-        ));
+        blocks.push(format!("\n{}", assignee_label(&names, definition.mention_assignees)).into());
         for task in tasks {
-            blocks.push(task_reminder(task, definition.message_detail, at));
+            blocks.push(task_reminder(
+                task,
+                definition.message_detail,
+                at,
+                definition.reply_completion_source_id.is_some(),
+            ));
         }
     }
     let mut schedule_count = 0;
@@ -376,22 +432,26 @@ pub(super) async fn preview_in_transaction(
             .bind(user).bind(start).bind(end).bind(definition.workspace_id).bind(definition.project_id).fetch_all(&mut **tx).await.map_err(classify)?;
         schedule_count = schedules.len();
         if !schedules.is_empty() {
-            blocks.push("\n일정".into());
+            blocks.push("\n일정".to_owned().into());
         }
         for entry in schedules {
-            blocks.push(format!(
-                "- {} ({})",
-                public_text(&entry.title),
-                reminder_date_label(entry.starts_at, at)
-            ));
+            blocks.push(
+                format!(
+                    "- {} ({})",
+                    public_text(&entry.title),
+                    reminder_date_label(entry.starts_at, at)
+                )
+                .into(),
+            );
         }
     }
-    let messages = if tasks.is_empty() && schedule_count == 0 {
-        vec![]
+    let (messages, chat_messages) = if tasks.is_empty() && schedule_count == 0 {
+        (vec![], vec![])
     } else {
         split_messages(&header, &blocks)
     };
     Ok(ScheduledWorkPreview {
+        chat_messages,
         reply_tasks: tasks
             .iter()
             .map(|t| crate::scheduled_chat_reply::ReplyTask {
@@ -808,7 +868,13 @@ async fn execute(
     }
     // Opt-in reminders use the existing company OAuth identity, not a separate Chat app.
     let payloads = if let Some(source) = rule.definition.reply_completion_source_id {
-        preview.messages.iter().map(|message|json!({"message":message,"replyCompletion":crate::scheduled_chat_reply::ReplyEnvelope{source_id:source,tasks:preview.reply_tasks.clone()}})).collect::<Vec<_>>()
+        preview.messages.iter().zip(&preview.chat_messages).map(|(message, chat_message)|{
+            let mut payload = json!({"message":message,"replyCompletion":crate::scheduled_chat_reply::ReplyEnvelope{source_id:source,tasks:preview.reply_tasks.clone()}});
+            if let Some(chat_message) = chat_message {
+                payload["chatMessage"] = json!(chat_message);
+            }
+            payload
+        }).collect::<Vec<_>>()
     } else {
         preview.messages.iter().map(|message| json!({"event":"chat.message","projectId":rule.definition.project_id,"message":message,"occurredAt":now.format(&Rfc3339).unwrap_or_default()})).collect()
     };
@@ -873,6 +939,8 @@ mod tests {
             action_items: vec![],
             completion_criteria: None,
             reference_links: vec![],
+            itsm_issue_url: None,
+            itsm_issue_id: None,
         };
         assert!(matches_condition(&task, &definition, at));
         task.due_at = Some(at + Duration::hours(24) + Duration::seconds(1));
@@ -929,12 +997,14 @@ mod tests {
             action_items: vec!["@추가멘션 없이 <원문> 확인".into()],
             completion_criteria: Some("검토 결과 공유".into()),
             reference_links: vec!["https://example.test/docs".into()],
+            itsm_issue_url: None,
+            itsm_issue_id: None,
         };
         assert_eq!(
-            task_reminder(&task, WorkMessageDetail::TitleOnly, at),
+            task_reminder(&task, WorkMessageDetail::TitleOnly, at, false).plain,
             "- 계약서 검토 (9월 16일 18:00 마감)"
         );
-        let detailed = task_reminder(&task, WorkMessageDetail::TitleAndDetails, at);
+        let detailed = task_reminder(&task, WorkMessageDetail::TitleAndDetails, at, false).plain;
         for text in [
             "- 계약서 검토 (9월 16일 18:00 마감)",
             "계약 프로젝트",
@@ -946,9 +1016,44 @@ mod tests {
             assert!(detailed.contains(text), "{text}");
         }
         assert!(!detailed.contains('@'));
+        // A public reference is not a verified ticket binding.
+        let code = crate::scheduled_chat_reply::task_code(task.id);
+        let expected = format!("- [{code}] 계약서 검토 (9월 16일 18:00 마감)");
+        let unlinked = task_reminder(&task, WorkMessageDetail::TitleOnly, at, true);
+        assert_eq!(unlinked.plain, expected);
+        assert!(unlinked.chat_heading.is_none());
+        task.itsm_issue_id = Some(3876);
+        let url = "https://itsm.example.test/redmine/issues/3876";
+        task.itsm_issue_url = Some(url.into());
+        for mode in [
+            WorkMessageDetail::TitleOnly,
+            WorkMessageDetail::TitleAndDetails,
+        ] {
+            let linked = task_reminder(&task, mode, at, true);
+            assert!(linked.plain.starts_with(&expected));
+            assert_eq!(
+                linked.chat_heading.unwrap(),
+                format!("- <{url}|[{code}]> 계약서 검토 (9월 16일 18:00 마감)")
+            );
+            assert!(task_reminder(&task, mode, at, false).chat_heading.is_none());
+        }
+        for invalid in [
+            "http://itsm.example.test/issues/3876",
+            "https://itsm.example.test/issues/999",
+            "https://itsm.example.test/issues/3876?token=value",
+            "https://itsm.example.test/issues/3876#journal",
+            "https://user@itsm.example.test/issues/3876",
+            "https://itsm.example.test|<users/all>/issues/3876",
+            "https://itsm.example.test\\redirect/issues/3876",
+        ] {
+            task.itsm_issue_url = Some(invalid.into());
+            let reminder = task_reminder(&task, WorkMessageDetail::TitleOnly, at, true);
+            assert_eq!(reminder.plain, expected, "{invalid}");
+            assert!(reminder.chat_heading.is_none(), "{invalid}");
+        }
         task.due_at = None;
         assert_eq!(
-            task_reminder(&task, WorkMessageDetail::TitleOnly, at),
+            task_reminder(&task, WorkMessageDetail::TitleOnly, at, false).plain,
             "- 계약서 검토 (기한 없음)"
         );
         let next_year = OffsetDateTime::parse("2026-12-31T15:30:00Z", &Rfc3339).unwrap();
@@ -973,6 +1078,8 @@ mod tests {
             action_items: vec![],
             completion_criteria: None,
             reference_links: vec![],
+            itsm_issue_url: None,
+            itsm_issue_id: None,
         };
         let names = task.assignee_names();
         assert_eq!(names, BTreeSet::from(["김경주", "송인준"]));
@@ -996,13 +1103,19 @@ mod tests {
         let blocks = (0..80)
             .map(|i| format!("일감 {i}: {}", "할 일 상세 ".repeat(50)))
             .collect::<Vec<_>>();
-        let messages = split_messages("마감 안내", &blocks);
+        let rendered = blocks
+            .iter()
+            .cloned()
+            .map(ReminderBlock::from)
+            .collect::<Vec<_>>();
+        let (messages, chat) = split_messages("마감 안내", &rendered);
+        assert!(chat.iter().all(Option::is_none));
         assert!(messages.iter().all(|m| m.chars().count() <= 1800));
         for block in blocks {
             assert!(messages.join("\n").contains(&block));
         }
         let long = "가".repeat(5000);
-        let messages = split_messages("안내", &[long]);
+        let (messages, _) = split_messages("안내", &[long.into()]);
         assert_eq!(
             messages
                 .iter()
@@ -1011,5 +1124,40 @@ mod tests {
             5000
         );
         assert_eq!(public_text("@전체 <users/all>"), "＠전체 users/all");
+    }
+
+    #[test]
+    fn link_is_not_split_at_chat_message_boundary() {
+        let id = "[T-AE09BC03B86C]";
+        let linked = format!("<https://itsm.example.test/issues/3876|{id}>");
+        let plain_line = format!("- {id} 일감");
+        let chat_line = format!("- {linked} 일감");
+        let (plain, chat) = split_messages(
+            "안내",
+            &[
+                "가".repeat(1765).into(),
+                ReminderBlock {
+                    plain: plain_line.clone(),
+                    chat_heading: Some(chat_line.clone()),
+                },
+            ],
+        );
+        assert_eq!(
+            plain.len(),
+            2,
+            "a link can push the next row into a new chunk"
+        );
+        assert_eq!(chat.len(), 2);
+        assert_eq!(chat[0], None);
+        assert_eq!(plain[1], format!("안내\n{plain_line}"));
+        assert_eq!(
+            chat[1].as_deref(),
+            Some(format!("안내\n{chat_line}").as_str())
+        );
+        assert!(
+            chat.into_iter()
+                .flatten()
+                .all(|m| m.chars().count() <= 1800)
+        );
     }
 }

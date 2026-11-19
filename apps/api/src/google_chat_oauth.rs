@@ -290,8 +290,9 @@ impl GoogleChatOAuthRuntime {
         connection: &GoogleChatSourceSyncConnection,
         id: Uuid,
         text: &str,
+        chat_markup: bool,
     ) -> Result<jimin_google::GoogleChatMessageReceipt, GoogleChatOAuthError> {
-        self.send_task_chat_message(connection, id, text, None)
+        self.send_task_chat_message(connection, id, text, None, chat_markup)
             .await
     }
 
@@ -301,6 +302,7 @@ impl GoogleChatOAuthRuntime {
         id: Uuid,
         text: &str,
         thread: Option<&str>,
+        chat_markup: bool,
     ) -> Result<jimin_google::GoogleChatMessageReceipt, GoogleChatOAuthError> {
         if !Self::completion_scope_granted(&connection.granted_scopes)
             || !connection
@@ -336,6 +338,7 @@ impl GoogleChatOAuthRuntime {
                     &connection.space_name,
                     text,
                     &id.simple().to_string(),
+                    chat_markup,
                 )
                 .await
         }
