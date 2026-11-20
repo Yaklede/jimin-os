@@ -1,7 +1,11 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it } from "vitest";
-import { CompletionReviewCard } from "./CompletionReviewPanel";
+import {
+  canConfirmTogether,
+  CompletionReviewCard,
+  sameReviewVersion,
+} from "./CompletionReviewPanel";
 import type { CompletionReview } from "../api/completionReviews";
 const review: CompletionReview = {
   id: "review",
@@ -46,5 +50,29 @@ it("shows evidence and separate owner decisions; rework requires a reason", () =
   expect(html).toContain("현재 일감 내용");
   expect(html).toContain("완료 보고 이후 일감이 바뀌었어요");
   expect(html).toMatch(/disabled=""[^>]*>재작업 요청/);
+  expect(html).toContain("완료 확인</button>");
+});
+
+it("excludes changed tasks from bulk approval without hiding the individual review", () => {
+  const changed = { ...review, taskVersion: 3 };
+  expect(canConfirmTogether(review)).toBe(true);
+  expect(canConfirmTogether(changed)).toBe(false);
+  expect(sameReviewVersion(review, changed)).toBe(false);
+  expect(sameReviewVersion(review, { ...review, version: 2 })).toBe(false);
+  const html = renderToStaticMarkup(
+    createElement(CompletionReviewCard, {
+      review: changed,
+      busy: false,
+      saving: false,
+      initiallyOpen: true,
+      picked: false,
+      onPick: () => {},
+      onDecide: async () => {},
+    }),
+  );
+  expect(html).toMatch(/type="checkbox"[^>]*disabled=""/);
+  expect(html).toContain(
+    "보고 이후 바뀐 일감은 내용을 열어 따로 확인해 주세요.",
+  );
   expect(html).toContain("완료 확인</button>");
 });

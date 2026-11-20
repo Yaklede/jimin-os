@@ -8,6 +8,7 @@ import {
   isAssistantMessageStreaming,
 } from "./ConversationWorkspace";
 import { commandStatus } from "./HomeWorkspace";
+import { assistantTurnFeedback } from "./conversationResponse";
 
 function message(
   id: string,
@@ -42,6 +43,37 @@ function job(state: AgentJob["state"]): AgentJob {
 }
 
 describe("assistant response terminal state", () => {
+  it("shows durable request stages without treating drafting or approval as completion", () => {
+    expect(assistantTurnFeedback(job("queued"), undefined)?.label).toBe(
+      copy.conversations.preparing,
+    );
+    expect(assistantTurnFeedback(job("running"), undefined)?.label).toBe(
+      copy.conversations.streaming,
+    );
+    expect(
+      assistantTurnFeedback(job("waiting_approval"), undefined)?.tone,
+    ).toBe("warning");
+    expect(assistantTurnFeedback(job("completed"), undefined)?.label).toBe(
+      copy.conversations.replyReady,
+    );
+  });
+
+  it("keeps an interrupted response distinct from confirmed completion", () => {
+    const partial = message(
+      "partial",
+      "assistant",
+      "먼저 확인한 내용",
+      "streaming",
+    );
+    expect(assistantTurnFeedback(job("failed"), partial)).toEqual({
+      tone: "error",
+      label: copy.conversations.responseInterrupted,
+    });
+    expect(assistantTurnFeedback(job("cancelled"), partial)?.tone).toBe(
+      "neutral",
+    );
+  });
+
   it("selects only an assistant response created after the latest request", () => {
     const oldResponse = message("assistant-old", "assistant", "이전 답변");
     const latestRequest = message("user-new", "user", "내일 미팅 추가");

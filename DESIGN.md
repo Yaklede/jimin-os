@@ -431,3 +431,32 @@ All five dark primary palettes retain their existing fills and labels; accent ti
 now mixes20% active primary with the card surface rather than using fixed gray.
 Supporting faint text uses#aeb4be. Current layouts, sizes, light semantics and the
 user-approved light-blue contrast exception remain unchanged.
+
+## Home operations revision — 2026-11-20
+
+The home defaults to an unread request list, with four preview rows and a
+control for all remaining requests. The existing received-date view stays
+available as a choice. Opening detail is explicit; today’s work remains
+directly below the brief request entry. The approval of this revision replaces
+the previous home calendar default without removing the calendar.
+
+On desktop the sidebar and top bar stay in view while the workspace scrolls.
+Mobile keeps the existing bottom navigation. The home overview and its active
+conversation share the same navigation; returning preserves the overview
+where supported. Use one short receipt to reopen a result. Show preparation,
+writing, approval, completion and failure from actual request state, not from
+a simulated progress estimate. Keep review history in More, retain actionable
+failures on home, and do not conflate saved work with delivery.
+
+## Work dialogs and daily shortcuts — 2026-11-20
+
+Keep the unread queue first in the home workspace and keep a compact scheduled
+work entry and today's task shortcut in the header. The shortcut shows the first
+due item and jumps to the today filter instead of rendering a second task list.
+The shortcut and work list share the Seoul business date. The wide unread queue
+can show the list and selection together; a narrow window shows one at a time.
+
+Task registration, planning edits and scheduled work share fixed header and
+footer regions with a single scrolling body. Phone dialogs fill the usable
+viewport above the keyboard. Preserve focus return, distinct draft and activate
+actions, existing tokens, and deliberate dirty-close confirmations.

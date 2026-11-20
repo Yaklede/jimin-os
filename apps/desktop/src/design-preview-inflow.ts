@@ -64,8 +64,8 @@ export function designPreviewInflow(now = new Date()): ProjectInflowItem[] {
       completionErrorCode: null,
       completionAttemptCount: 0,
       assigneeOptions: ["김경주", "송천안"],
-      notifiableAssigneeNames: [],
-      assigneeNotificationAvailable: false,
+      notifiableAssigneeNames: index < 4 ? ["김경주"] : [],
+      assigneeNotificationAvailable: index < 4,
       version: 1,
     };
   });

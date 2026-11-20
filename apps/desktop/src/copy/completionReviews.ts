@@ -1,4 +1,5 @@
 export const completionReviewCopy = {
+  tab: "완료 보고",
   title: "완료 확인 대기",
   help: "담당자의 완료 보고를 확인해 주세요. 확인한 뒤 CS·Redmine을 완료 처리해요.",
   note: "담당자의 완료 메모",
@@ -26,4 +27,20 @@ export const completionReviewCopy = {
   collapse: "간략히 보기",
   approved: "완료를 확인했어요. CS·Redmine 반영을 진행해요.",
   rejected: "재작업을 요청했어요. 일감은 열린 상태로 유지해요.",
+  loading: "완료 보고를 불러오고 있어요.",
+  empty: "확인할 완료 보고가 없어요.",
+  select: (title: string) => `${title} 완료 보고 선택`,
+  selectVisible: "표시된 보고 선택",
+  selectionCount: (count: number) => `${count}건 선택`,
+  confirmSelected: (count: number) => `${count}건 완료 확인`,
+  confirming: (done: number, total: number) =>
+    `완료 확인 중 · ${done}/${total}`,
+  batchResult: (approved: number, remaining: number) =>
+    remaining
+      ? `${approved}건을 확인했어요. 처리하지 못한 ${remaining}건은 목록에서 확인한 뒤 다시 시도해 주세요.`
+      : `${approved}건의 완료를 확인했어요. CS·Redmine 반영을 진행해요.`,
+  needsIndividualReview:
+    "보고 이후 바뀐 일감은 내용을 열어 따로 확인해 주세요.",
+  selectionChanged:
+    "선택한 일감이 바뀌었어요. 최신 내용을 확인한 뒤 다시 선택해 주세요.",
 };

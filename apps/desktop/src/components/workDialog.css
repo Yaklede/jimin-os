@@ -1,0 +1,208 @@
+/* The dialog never scrolls. Only its form/content region does. */
+.work-dialog.work-dialog[open] {
+  --work-dialog-gutter: 24px;
+  --work-dialog-height: var(--mobile-viewport-height, 100dvh);
+  box-sizing: border-box;
+  max-height: calc(var(--work-dialog-height) - 32px);
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-float);
+}
+
+.work-dialog.work-dialog::backdrop {
+  background: rgb(23 23 32 / 58%);
+}
+
+.work-dialog .work-dialog__layout,
+.work-dialog.work-dialog--scheduled[open] {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 0;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+.work-dialog .work-dialog__layout {
+  max-height: inherit;
+}
+
+.work-dialog .work-dialog__header {
+  position: static;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px;
+  align-items: start;
+  gap: 12px;
+  margin: 0;
+  padding: 16px var(--work-dialog-gutter);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  backdrop-filter: none;
+}
+
+.work-dialog .work-dialog__header:has(> .work-dialog__leading) {
+  grid-template-columns: 40px minmax(0, 1fr) 44px;
+}
+
+.work-dialog .work-dialog__header h2 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 28px;
+}
+
+.work-dialog .work-dialog__header p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.work-dialog .work-dialog__body,
+.work-dialog .project-inflow-item__promote > .work-dialog__body {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 0;
+  padding: 16px var(--work-dialog-gutter);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scroll-padding-block: 16px;
+  scrollbar-gutter: stable;
+}
+
+.work-dialog .work-dialog__body > [role="alert"] {
+  margin-block: 12px;
+}
+
+.work-dialog .work-dialog__footer,
+.work-dialog .project-inflow-item__promote > .work-dialog__footer {
+  position: static;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 12px var(--work-dialog-gutter);
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  backdrop-filter: none;
+}
+
+.work-dialog .work-dialog__footer button {
+  min-width: 0;
+  min-height: 44px;
+}
+
+.inflow-promotion-dialog
+  .project-inflow-item__fields
+  > :is(
+    .project-inflow-item__assignee-field,
+    .project-inflow-item__deadline-field
+  ) {
+  grid-column: 1 / -1;
+}
+
+.work-dialog__registration-summary {
+  display: flex;
+  flex: 1 0 100%;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  min-width: 0;
+  margin: 0;
+  font-size: 14px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
+.work-dialog__registration-summary > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 4px;
+  min-width: 0;
+}
+
+.work-dialog__registration-summary dt {
+  color: var(--muted);
+}
+
+.work-dialog__registration-summary dd {
+  margin: 0;
+  color: var(--text-strong);
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .work-dialog.work-dialog[open] {
+    --work-dialog-gutter: 16px;
+    inset: 0 auto auto 0;
+    width: 100%;
+    max-width: none;
+    height: var(--work-dialog-height);
+    max-height: var(--work-dialog-height);
+    margin: 0;
+    border-radius: 0;
+  }
+
+  .work-dialog .work-dialog__layout {
+    height: 100%;
+  }
+
+  .work-dialog .work-dialog__header,
+  .work-dialog .work-dialog__header:has(> .work-dialog__leading) {
+    grid-template-columns: minmax(0, 1fr) 44px;
+    padding-block: max(8px, var(--safe-area-top, 0px)) 8px;
+  }
+
+  .work-dialog .work-dialog__header > .work-dialog__leading {
+    display: none;
+  }
+
+  .work-dialog .work-dialog__footer {
+    padding-bottom: max(8px, var(--safe-area-bottom, 0px));
+  }
+
+  .work-dialog .work-dialog__footer button {
+    flex: 1 1 auto;
+    padding-inline: 8px;
+    white-space: normal;
+  }
+
+  .work-dialog .work-dialog__footer .planning-editor__action-spacer {
+    display: none;
+  }
+
+  .meeting-composer > .work-dialog__footer {
+    display: grid;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 13fr);
+  }
+}
+
+@media (max-height: 520px) {
+  .work-dialog .work-dialog__header {
+    align-items: center;
+    padding-block: 8px;
+  }
+
+  .work-dialog .work-dialog__header p {
+    /* Retain the accessible description in constrained windows. */
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .work-dialog.work-dialog[open],
+  .work-dialog.work-dialog::backdrop {
+    animation: none;
+  }
+}

@@ -1,6 +1,6 @@
 import {
   AudioLines,
-  BrainCircuit,
+  History,
   CalendarDays,
   FolderKanban,
   House,
@@ -15,6 +15,8 @@ import {
   type ReactNode,
   Suspense,
   useEffect,
+  useEffectEvent,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -26,9 +28,20 @@ import { RepresentativeImage } from "./RepresentativeImage";
 import { type VoiceCommandOutcome } from "./VoiceCommandSheet";
 import { registerMobileBackHandler } from "../mobileBack";
 import {
+  appleKeyboard,
+  defaultShortcuts,
+  editableShortcutTarget,
+  sameShortcut,
+  shortcutActions,
+  shortcutFromEvent,
+  shortcutLabel,
+  type Shortcuts,
+} from "../keyboardShortcuts";
+import {
   mobileCapabilitySnapshot,
   type MobilePlatform,
 } from "../mobile-capabilities";
+import "./operationWorkspace.css";
 
 const VoiceCommandSheet = lazy(() =>
   import("./VoiceCommandSheet").then((module) => ({
@@ -43,13 +56,17 @@ export type OsDestination =
   | "meetings"
   | "decisions"
   | "chat"
-  | "memory"
   | "settings";
 
 type OsShellProps = {
   destination: OsDestination;
+  homeChatVisible?: boolean;
   children: ReactNode;
   onNavigate(destination: OsDestination): void;
+  onOpenHomeChat?(): void;
+  shortcuts?: Shortcuts;
+  onQuestionShortcut?(): void;
+  onScheduledWorkShortcut?(): void;
   onVoiceTranscript(value: string): void;
   onVoiceCommand(value: string): Promise<VoiceCommandOutcome>;
   onRefresh(): void;
@@ -59,8 +76,13 @@ type OsShellProps = {
 
 export function OsShell({
   destination,
+  homeChatVisible,
   children,
   onNavigate,
+  onOpenHomeChat,
+  shortcuts = defaultShortcuts,
+  onQuestionShortcut,
+  onScheduledWorkShortcut,
   onVoiceTranscript,
   onVoiceCommand,
   onRefresh,
@@ -75,18 +97,66 @@ export function OsShell({
   );
   const deferredRefreshing = useDeferredBusy(refreshing);
   const previousDestinationRef = useRef(destination);
+  const workspaceRef = useRef<HTMLElement>(null);
+  const scrollPositions = useRef(new Map<string, number>());
+  const scrollKey =
+    destination === "home" && homeChatVisible ? "home-chat" : destination;
   const mobileMoreRef = useRef<HTMLDetailsElement>(null);
   const routeDirection = destinationDirection(
     previousDestinationRef.current,
     destination,
   );
-  const openChat = () => onNavigate("chat");
+  const openChat = () => {
+    if (destination === "home" && onOpenHomeChat) onOpenHomeChat();
+    else onNavigate("chat");
+  };
   const openVoiceSheet = () => setVoiceSheetOpen(true);
+  const apple = appleKeyboard();
+  const onShortcut = useEffectEvent((event: KeyboardEvent) => {
+    if (event.defaultPrevented || voiceSheetOpen) return;
+    const binding = shortcutFromEvent(event, apple);
+    if (!binding) return;
+    const action = shortcutActions.find((kind) =>
+      sameShortcut(binding, shortcuts[kind]),
+    );
+    if (!action || (action === "scheduled" && !onScheduledWorkShortcut)) return;
+    const target = event.target;
+    if (
+      (target instanceof Element && target.closest("[data-shortcut-recorder]")) ||
+      Array.from(
+        document.querySelectorAll('dialog[open], [role="dialog"][aria-modal="true"]'),
+      ).some((dialog) => dialog.getClientRects().length > 0)
+    ) return;
+    const emptyQuestion = target instanceof HTMLTextAreaElement &&
+      target.id === "agent-message" && !target.value;
+    const refocusingQuestion = action === "ask" && (homeChatVisible ||
+      destination === "chat" ||
+      (target instanceof Element && target.closest(".home-assistant-entry")));
+    if (
+      editableShortcutTarget(target) && !emptyQuestion && !refocusingQuestion
+    ) return;
+    event.preventDefault();
+    if (action === "ask") (onQuestionShortcut ?? openChat)();
+    else if (action === "calendar") onNavigate("calendar");
+    else onScheduledWorkShortcut?.();
+  });
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => onShortcut(event);
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, []);
 
   useEffect(() => {
     previousDestinationRef.current = destination;
     if (mobileMoreRef.current) mobileMoreRef.current.open = false;
   }, [destination]);
+
+  useLayoutEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace || getComputedStyle(workspace).overflowY !== "auto") return;
+    workspace.scrollTop = scrollPositions.current.get(scrollKey) ?? 0;
+  }, [scrollKey]);
 
   useEffect(() => {
     if (!voiceSheetOpen) return;
@@ -134,7 +204,7 @@ export function OsShell({
       <summary
         className="os-nav__button focus-visible-control"
         aria-label={copy.navigation.more}
-        data-active={["memory", "settings"].includes(destination)}
+        data-active={["settings", "decisions"].includes(destination)}
       >
         <MoreHorizontal aria-hidden="true" />
         <span className="sr-only">{copy.navigation.more}</span>
@@ -143,14 +213,14 @@ export function OsShell({
         {(
           [
             [
-              "memory",
-              copy.navigation.memory,
-              <BrainCircuit aria-hidden="true" />,
-            ],
-            [
               "settings",
               copy.navigation.settings,
               <Settings2 aria-hidden="true" />,
+            ],
+            [
+              "decisions",
+              copy.home.openDecisionInbox,
+              <History aria-hidden="true" />,
             ],
           ] as const
         ).map(([target, label, icon]) => (
@@ -173,6 +243,7 @@ export function OsShell({
     <div
       className="os-shell"
       data-destination={destination}
+      data-home-chat={homeChatVisible || undefined}
       data-platform={runtimePlatform}
     >
       <aside className="os-sidebar" aria-label={copy.navigation.label}>
@@ -221,12 +292,6 @@ export function OsShell({
             onClick={() => navigateFromSidebar("meetings")}
           />
           <NavigationButton
-            active={destination === "memory"}
-            icon={<BrainCircuit aria-hidden="true" />}
-            label={copy.navigation.memory}
-            onClick={() => navigateFromSidebar("memory")}
-          />
-          <NavigationButton
             active={destination === "settings"}
             icon={<Settings2 aria-hidden="true" />}
             label={copy.navigation.settings}
@@ -237,7 +302,7 @@ export function OsShell({
         <button
           className="os-sidebar__assistant focus-visible-control"
           type="button"
-          onClick={() => navigateFromSidebar("chat")}
+          onClick={openChat}
           aria-label={copy.actions.startAssistantConversation}
         >
           <Mic aria-hidden="true" />
@@ -251,6 +316,11 @@ export function OsShell({
             <button
               className="os-command-launcher focus-visible-control"
               type="button"
+              aria-keyshortcuts={
+                runtimePlatform === "android" || runtimePlatform === "ios"
+                  ? undefined
+                  : shortcutLabel(shortcuts.ask, apple, true)
+              }
               onClick={
                 runtimePlatform === "android" || runtimePlatform === "ios"
                   ? openVoiceSheet
@@ -259,7 +329,8 @@ export function OsShell({
             >
               <Mic aria-hidden="true" />
               <span>{copy.home.commandPlaceholder}</span>
-              <kbd>⌘K</kbd>
+              {runtimePlatform !== "android" && runtimePlatform !== "ios" &&
+                <kbd>{shortcutLabel(shortcuts.ask, apple)}</kbd>}
             </button>
             <time
               className="os-topbar__date"
@@ -297,7 +368,16 @@ export function OsShell({
             </span>
           )}
         </div>
-        <main className="os-content">
+        <main
+          className="os-content"
+          ref={workspaceRef}
+          onScroll={(event) => {
+            const workspace = event.currentTarget;
+            if (getComputedStyle(workspace).overflowY === "auto") {
+              scrollPositions.current.set(scrollKey, workspace.scrollTop);
+            }
+          }}
+        >
           <div
             className="os-content__view"
             data-route-direction={routeDirection}

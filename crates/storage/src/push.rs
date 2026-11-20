@@ -2,7 +2,7 @@ use sqlx::{Postgres, Transaction};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::{Database, StorageError};
+use crate::{Database, StorageError, google_chat::google_chat_attention_query};
 
 const MAX_TOKEN_CIPHERTEXT_BYTES: usize = 8 * 1024;
 const MAX_ERROR_CODE_BYTES: usize = 120;
@@ -221,7 +221,7 @@ impl Database {
         now: OffsetDateTime,
     ) -> Result<usize, StorageError> {
         self.cancel_stale_push_deliveries().await?;
-        let candidates = sqlx::query_as::<_, ReminderCandidate>(
+        let candidates = sqlx::query_as::<_, ReminderCandidate>(google_chat_attention_query!(
             "SELECT task.user_id, 'task'::TEXT AS item_type, task.id AS item_id,
                     task.version AS item_version, task.project_id,
                     task.title AS raw_title, NULL::TEXT AS raw_body,
@@ -265,7 +265,7 @@ impl Database {
              SELECT analysis.user_id, 'google_chat_inflow'::TEXT AS item_type,
                     analysis.id AS item_id, 1000000000 + analysis.source_revision::BIGINT AS item_version,
                     analysis.project_id,
-                    CASE WHEN COALESCE(analysis.linked_task_id, representative.promoted_task_id) IS NOT NULL
+                    CASE WHEN COALESCE(item.promoted_task_id, analysis.linked_task_id) IS NOT NULL
                         THEN '일감에 새 답글 · ' ELSE '새 업무 요청 · ' END || COALESCE(
                         analysis.suggested_task_title,
                         analysis.summary,
@@ -280,17 +280,18 @@ impl Database {
                AND project.user_id = analysis.user_id
              JOIN project_google_chat_sources source ON source.id = analysis.source_id
              JOIN google_chat_accounts account ON account.id = source.account_id
-             JOIN project_inflow_items representative ON representative.id = analysis.representative_item_id
+             JOIN project_inflow_items item ON item.id = analysis.representative_item_id
              WHERE analysis.state = 'ready'
                AND source.enabled AND account.status = 'active'
                AND (analysis.classification IN ('new_task', 'follow_up', 'question')
-                    OR (analysis.classification = 'status_update' AND COALESCE(analysis.linked_task_id, representative.promoted_task_id) IS NOT NULL))
+                    OR (analysis.classification = 'status_update' AND COALESCE(item.promoted_task_id, analysis.linked_task_id) IS NOT NULL))
                AND analysis.analyzed_revision = analysis.source_revision
-               AND representative.received_at >= source.created_at
-               AND representative.received_at >= $1 - INTERVAL '1 day'
-               AND representative.reviewed_at IS NULL
-               AND representative.status = 'pending'
-               AND representative.sender_provider_name IS DISTINCT FROM CONCAT('users/', account.provider_subject)
+               AND item.received_at >= source.created_at
+               AND item.received_at >= $1 - INTERVAL '1 day'
+               AND item.reviewed_at IS NULL
+               AND item.status = 'pending'
+               AND item.sender_provider_name IS DISTINCT FROM CONCAT('users/', account.provider_subject)
+               AND (", ")
                AND EXISTS (
                    SELECT 1
                    FROM project_inflow_items AS item
@@ -368,7 +369,7 @@ impl Database {
                AND snapshot.period_start + INTERVAL '7 days' > $1
              ORDER BY notify_at, item_id
              LIMIT 500",
-        )
+        ))
         .bind(now)
         .fetch_all(self.pool())
         .await
@@ -582,7 +583,7 @@ impl Database {
         reason = "All delivery source invariants stay in one atomic stale-delivery predicate."
     )]
     async fn cancel_stale_push_deliveries(&self) -> Result<(), StorageError> {
-        sqlx::query(
+        sqlx::query(google_chat_attention_query!(
             "UPDATE push_deliveries AS delivery
              SET status = 'cancelled', next_attempt_at = NULL,
                  lease_owner = NULL, lease_expires_at = NULL,
@@ -654,16 +655,17 @@ impl Database {
                             FROM project_inflow_analyses AS analysis
                             JOIN project_google_chat_sources source ON source.id = analysis.source_id
                             JOIN google_chat_accounts account ON account.id = source.account_id
-                            JOIN project_inflow_items representative ON representative.id = analysis.representative_item_id
+                            JOIN project_inflow_items item ON item.id = analysis.representative_item_id
                             WHERE analysis.id = delivery.item_id
                               AND analysis.user_id = delivery.user_id
                               AND 1000000000 + analysis.source_revision::BIGINT = delivery.item_version
                               AND analysis.state = 'ready'
                               AND source.enabled AND account.status = 'active'
-                              AND representative.status = 'pending'
-                              AND representative.reviewed_at IS NULL
-                              AND representative.received_at >= source.created_at
-                              AND representative.sender_provider_name IS DISTINCT FROM CONCAT('users/', account.provider_subject)
+                              AND item.status = 'pending'
+                              AND item.reviewed_at IS NULL
+                              AND item.received_at >= source.created_at
+                              AND item.sender_provider_name IS DISTINCT FROM CONCAT('users/', account.provider_subject)
+                              AND (", ")
                               AND (analysis.classification IN ('new_task', 'follow_up', 'question')
                                   OR (analysis.classification = 'status_update' AND EXISTS (
                                       SELECT 1 FROM project_inflow_items linked
@@ -703,7 +705,7 @@ impl Database {
                         ))
                    )
                )",
-        )
+        ))
         .execute(self.pool())
         .await
         .map_err(classify)?;

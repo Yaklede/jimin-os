@@ -626,6 +626,7 @@ function MeetingComposer({
   const uploadChainRef = useRef<Promise<void>>(Promise.resolve());
   const notesRef = useRef(notes);
   const pendingWindowCloseRef = useRef(false);
+  const composerCloseRef = useRef<HTMLButtonElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioMeterFrameRef = useRef<number | null>(null);
   const audioMeterLastUpdateRef = useRef(0);
@@ -634,6 +635,16 @@ function MeetingComposer({
   useEffect(() => {
     notesRef.current = notes;
   }, [notes]);
+
+  useEffect(() => {
+    const opener = document.activeElement;
+    composerCloseRef.current?.focus({ preventScroll: true });
+    return () => {
+      if (opener instanceof HTMLElement && opener.isConnected) {
+        opener.focus({ preventScroll: true });
+      }
+    };
+  }, []);
 
   const recordingActive = Boolean(recordingSession);
 
@@ -982,17 +993,21 @@ function MeetingComposer({
     <div
       className="modal-backdrop"
       role="presentation"
-      onMouseDown={requestClose}
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget && event.button === 0) {
+          event.preventDefault();
+          requestClose();
+        }
+      }}
     >
       <section
-        className="meeting-composer"
+        className="meeting-composer work-dialog"
         data-recording={recordingActive}
         role="dialog"
         aria-modal="true"
         aria-labelledby="meeting-composer-title"
-        onMouseDown={(event) => event.stopPropagation()}
       >
-        <header>
+        <header className="work-dialog__header">
           <div>
             <span>{copy.meetings.composerEyebrow}</span>
             <h2 id="meeting-composer-title">
@@ -1007,6 +1022,7 @@ function MeetingComposer({
             </p>
           </div>
           <button
+            ref={composerCloseRef}
             className="icon-button focus-visible-control"
             type="button"
             aria-label={
@@ -1020,167 +1036,169 @@ function MeetingComposer({
           </button>
         </header>
 
-        {!recordingActive ? (
-          <div className="meeting-composer__fields">
-            <label>
-              <span>{copy.meetings.nameLabel}</span>
-              <input
-                value={title}
-                maxLength={200}
-                placeholder={copy.meetings.namePlaceholder}
-                onChange={(event) => setTitle(event.target.value)}
-              />
-            </label>
-            <label>
-              <span>{copy.meetings.purposeLabel}</span>
-              <input
-                value={purpose}
-                maxLength={2_000}
-                placeholder={copy.meetings.purposePlaceholder}
-                onChange={(event) => setPurpose(event.target.value)}
-              />
-            </label>
-            <label>
-              <span>{copy.meetings.participantsLabel}</span>
-              <input
-                value={participants}
-                placeholder={copy.meetings.participantsPlaceholder}
-                onChange={(event) => setParticipants(event.target.value)}
-              />
-            </label>
-            <div className="meeting-composer__scope">
+        <div className="work-dialog__body">
+          {!recordingActive ? (
+            <div className="meeting-composer__fields">
               <label>
-                <span>{copy.meetings.workspaceLabel}</span>
-                <select
-                  value={selectedWorkspaceId ?? ""}
-                  onChange={(event) => {
-                    setProjectId("");
-                    onSelectWorkspace(event.target.value);
-                  }}
-                >
-                  {workspaces.map((workspace) => (
-                    <option key={workspace.id} value={workspace.id}>
-                      {workspace.name}
-                    </option>
-                  ))}
-                </select>
+                <span>{copy.meetings.nameLabel}</span>
+                <input
+                  value={title}
+                  maxLength={200}
+                  placeholder={copy.meetings.namePlaceholder}
+                  onChange={(event) => setTitle(event.target.value)}
+                />
               </label>
               <label>
-                <span>{copy.meetings.projectLabel}</span>
-                <select
-                  value={projectId}
-                  onChange={(event) => setProjectId(event.target.value)}
-                >
-                  <option value="">{copy.meetings.noProject}</option>
-                  {projects.map((project) => (
-                    <option key={project.id} value={project.id}>
-                      {project.title}
-                    </option>
-                  ))}
-                </select>
+                <span>{copy.meetings.purposeLabel}</span>
+                <input
+                  value={purpose}
+                  maxLength={2_000}
+                  placeholder={copy.meetings.purposePlaceholder}
+                  onChange={(event) => setPurpose(event.target.value)}
+                />
               </label>
-            </div>
-            <label className="meeting-composer__transcript">
-              <span>{copy.meetings.transcriptLabel}</span>
-              <textarea
-                value={transcript}
-                maxLength={120_000}
-                rows={7}
-                placeholder={copy.meetings.transcriptPlaceholder}
-                onChange={(event) => setTranscript(event.target.value)}
-              />
-            </label>
-          </div>
-        ) : (
-          <div className="meeting-recorder">
-            <span className="sr-only" role="status">
-              {copy.meetings.recordingTitle}
-            </span>
-            <MeetingPipeline stage="recording" />
-            <div className="meeting-recorder__status">
-              <span className="meeting-recorder__pulse" aria-hidden="true" />
-              <div>
-                <strong>
-                  {audioLevel > 0.035
-                    ? copy.meetings.recordingSignalActive
-                    : copy.meetings.recordingSignalWaiting}
-                </strong>
-                <p>{copy.meetings.recordingDescription}</p>
-              </div>
-              <time
-                aria-label={copy.meetings.recordingElapsed(
-                  recordingTime(recordingSeconds),
-                )}
-              >
-                {recordingTime(recordingSeconds)}
-              </time>
-              <div className="meeting-recorder__meter" aria-hidden="true">
-                {RECORDER_METER_WEIGHTS.map((weight, index) => (
-                  <span
-                    key={`${weight}-${index}`}
-                    style={{
-                      height: `${Math.max(
-                        6,
-                        Math.round(7 + audioLevel * weight * 38),
-                      )}px`,
+              <label>
+                <span>{copy.meetings.participantsLabel}</span>
+                <input
+                  value={participants}
+                  placeholder={copy.meetings.participantsPlaceholder}
+                  onChange={(event) => setParticipants(event.target.value)}
+                />
+              </label>
+              <div className="meeting-composer__scope">
+                <label>
+                  <span>{copy.meetings.workspaceLabel}</span>
+                  <select
+                    value={selectedWorkspaceId ?? ""}
+                    onChange={(event) => {
+                      setProjectId("");
+                      onSelectWorkspace(event.target.value);
                     }}
-                  />
-                ))}
+                  >
+                    {workspaces.map((workspace) => (
+                      <option key={workspace.id} value={workspace.id}>
+                        {workspace.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>{copy.meetings.projectLabel}</span>
+                  <select
+                    value={projectId}
+                    onChange={(event) => setProjectId(event.target.value)}
+                  >
+                    <option value="">{copy.meetings.noProject}</option>
+                    {projects.map((project) => (
+                      <option key={project.id} value={project.id}>
+                        {project.title}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <label className="meeting-composer__transcript">
+                <span>{copy.meetings.transcriptLabel}</span>
+                <textarea
+                  value={transcript}
+                  maxLength={120_000}
+                  rows={7}
+                  placeholder={copy.meetings.transcriptPlaceholder}
+                  onChange={(event) => setTranscript(event.target.value)}
+                />
+              </label>
+            </div>
+          ) : (
+            <div className="meeting-recorder">
+              <span className="sr-only" role="status">
+                {copy.meetings.recordingTitle}
+              </span>
+              <MeetingPipeline stage="recording" />
+              <div className="meeting-recorder__status">
+                <span className="meeting-recorder__pulse" aria-hidden="true" />
+                <div>
+                  <strong>
+                    {audioLevel > 0.035
+                      ? copy.meetings.recordingSignalActive
+                      : copy.meetings.recordingSignalWaiting}
+                  </strong>
+                  <p>{copy.meetings.recordingDescription}</p>
+                </div>
+                <time
+                  aria-label={copy.meetings.recordingElapsed(
+                    recordingTime(recordingSeconds),
+                  )}
+                >
+                  {recordingTime(recordingSeconds)}
+                </time>
+                <div className="meeting-recorder__meter" aria-hidden="true">
+                  {RECORDER_METER_WEIGHTS.map((weight, index) => (
+                    <span
+                      key={`${weight}-${index}`}
+                      style={{
+                        height: `${Math.max(
+                          6,
+                          Math.round(7 + audioLevel * weight * 38),
+                        )}px`,
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
+              <label className="meeting-recorder__notes">
+                <span>
+                  <strong>{copy.meetings.notesPadLabel}</strong>
+                  <small data-state={notesState}>
+                    {notesSaveLabel(notesState)}
+                  </small>
+                </span>
+                <textarea
+                  autoFocus
+                  value={notes}
+                  maxLength={40_000}
+                  rows={12}
+                  placeholder={copy.meetings.notesPadPlaceholder}
+                  onChange={(event) => setNotes(event.target.value)}
+                />
+              </label>
+            </div>
+          )}
+
+          {!recordingActive && (
+            <div className="meeting-composer__dictation" data-active="false">
+              <button
+                className="dictation-button focus-visible-control"
+                type="button"
+                disabled={!title.trim() || recordingBusy}
+                onClick={() => void startRecording()}
+              >
+                {recordingBusy ? (
+                  <LoaderCircle className="spin" aria-hidden="true" />
+                ) : (
+                  <Mic aria-hidden="true" />
+                )}
+                {recordingBusy
+                  ? copy.meetings.startingRecording
+                  : copy.meetings.startRecording}
+              </button>
+              <div>
+                <strong>{copy.meetings.recordingReadyTitle}</strong>
+                <p>{copy.meetings.recordingReadyDescription}</p>
               </div>
             </div>
-            <label className="meeting-recorder__notes">
-              <span>
-                <strong>{copy.meetings.notesPadLabel}</strong>
-                <small data-state={notesState}>
-                  {notesSaveLabel(notesState)}
-                </small>
-              </span>
-              <textarea
-                autoFocus
-                value={notes}
-                maxLength={40_000}
-                rows={12}
-                placeholder={copy.meetings.notesPadPlaceholder}
-                onChange={(event) => setNotes(event.target.value)}
-              />
-            </label>
-          </div>
-        )}
+          )}
+          {recordingError && (
+            <p className="meeting-composer__error" role="alert">
+              {recordingError}
+            </p>
+          )}
+        </div>
 
-        {!recordingActive && (
-          <div className="meeting-composer__dictation" data-active="false">
-            <button
-              className="dictation-button focus-visible-control"
-              type="button"
-              disabled={!title.trim() || recordingBusy}
-              onClick={() => void startRecording()}
-            >
-              {recordingBusy ? (
-                <LoaderCircle className="spin" aria-hidden="true" />
-              ) : (
-                <Mic aria-hidden="true" />
-              )}
-              {recordingBusy
-                ? copy.meetings.startingRecording
-                : copy.meetings.startRecording}
-            </button>
-            <div>
-              <strong>{copy.meetings.recordingReadyTitle}</strong>
-              <p>{copy.meetings.recordingReadyDescription}</p>
-            </div>
-          </div>
-        )}
-        {recordingError && (
-          <p className="meeting-composer__error" role="alert">
-            {recordingError}
-          </p>
-        )}
-
-        <footer>
+        <footer className="work-dialog__footer">
           {recordingActive ? (
             <>
               <button
-                className="secondary-button"
+                className="secondary-button focus-visible-control"
                 type="button"
                 disabled={recordingBusy}
                 onClick={requestClose}
@@ -1188,7 +1206,7 @@ function MeetingComposer({
                 {copy.meetings.closeRecording}
               </button>
               <button
-                className="primary-button"
+                className="primary-button focus-visible-control"
                 type="button"
                 disabled={recordingBusy}
                 onClick={() => void saveRecordingAndClose()}
@@ -1204,14 +1222,14 @@ function MeetingComposer({
           ) : (
             <>
               <button
-                className="secondary-button"
+                className="secondary-button focus-visible-control"
                 type="button"
                 onClick={requestClose}
               >
                 {copy.actions.cancel}
               </button>
               <button
-                className="primary-button"
+                className="primary-button focus-visible-control"
                 type="button"
                 disabled={!canSubmit || saving}
                 onClick={() => void submit()}

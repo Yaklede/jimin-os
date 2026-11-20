@@ -20,6 +20,11 @@ import {
   type WeekTimedItem,
 } from "../planning-week-layout";
 import type { CalendarReport } from "./planning-calendar";
+import {
+  shouldPinCalendarPreview,
+  useCalendarTaskPreview,
+} from "./CalendarTaskPreview";
+import { calendarTaskPreviewCopy as previewCopy } from "../copy/calendarTaskPreview";
 
 interface PlanningWeekCalendarProps {
   range: PlanningViewRange;
@@ -57,6 +62,13 @@ export function PlanningWeekCalendar({
 }: PlanningWeekCalendarProps) {
   const hintId = useId();
   const dateButtons = useRef<Array<HTMLButtonElement | null>>([]);
+  const pressedWithTouch = useRef<HTMLButtonElement | null>(null);
+  const preview = useCalendarTaskPreview(
+    snapshot?.tasks,
+    range.from.getTime(),
+    loading,
+    onOpenTask,
+  );
   const restoreFocus = useRef(false);
   const days = planningCalendarDays(range);
   const schedule = (snapshot?.schedule ?? []).filter(
@@ -202,14 +214,52 @@ export function PlanningWeekCalendar({
                       <button
                         className="planning-week__chip focus-visible-control"
                         data-kind="task"
+                        data-task-id={task.id}
                         type="button"
                         key={task.id}
                         disabled={loading}
-                        title={task.title}
-                        aria-label={copy.home.editTask(task.title)}
-                        onClick={() =>
-                          onOpenTask ? onOpenTask(task) : select(day)
+                        aria-label={previewCopy.openTask(task.title)}
+                        aria-haspopup="dialog"
+                        aria-describedby={
+                          preview.anchor?.dataset.taskId === task.id
+                            ? preview.descriptionId
+                            : undefined
                         }
+                        onPointerEnter={(event) => {
+                          if (event.pointerType === "mouse")
+                            preview.open(event.currentTarget, "pointer", [
+                              task,
+                            ]);
+                        }}
+                        onPointerLeave={preview.leave}
+                        onFocus={(event) => {
+                          if (event.currentTarget.matches(":focus-visible"))
+                            preview.open(event.currentTarget, "focus", [task]);
+                        }}
+                        onBlur={(event) => preview.blur(event.currentTarget)}
+                        onPointerDown={(event) => {
+                          pressedWithTouch.current =
+                            event.pointerType === "touch"
+                              ? event.currentTarget
+                              : null;
+                        }}
+                        onPointerCancel={() => {
+                          pressedWithTouch.current = null;
+                        }}
+                        onClick={(event) => {
+                          const touched =
+                            pressedWithTouch.current === event.currentTarget;
+                          pressedWithTouch.current = null;
+                          if (
+                            shouldPinCalendarPreview(event.nativeEvent, touched)
+                          ) {
+                            preview.open(event.currentTarget, "touch", [task]);
+                            return;
+                          }
+                          preview.close();
+                          if (onOpenTask) onOpenTask(task);
+                          else select(day);
+                        }}
                       >
                         {task.title}
                       </button>
@@ -242,6 +292,7 @@ export function PlanningWeekCalendar({
               ))}
             </div>
           )}
+          {preview.content}
           <div
             className="planning-week__body"
             style={

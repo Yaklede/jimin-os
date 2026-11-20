@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { PlanningSnapshot, ScheduleEntry } from "./api/planning";
+import { calendarTaskStatus } from "./components/CalendarTaskPreview";
 import { PlanningCalendar } from "./components/planning-calendar";
 import { planningViewRange } from "./planningRange";
 const day = new Date(2026, 9, 5);
@@ -62,6 +63,7 @@ describe("weekly calendar content", () => {
       html.indexOf('class="planning-week__body"'),
     );
     expect(allDay).toContain("Due task");
+    expect(allDay).toContain('data-kind="task" data-task-id="task"');
     expect(allDay).toContain("All-day appointment");
     expect(allDay).not.toContain("Timed appointment");
     expect(html).not.toContain("Cancelled appointment");
@@ -90,12 +92,32 @@ describe("weekly calendar content", () => {
     const html = renderToStaticMarkup(
       createElement(PlanningCalendar, {
         range: planningViewRange("month", day),
-        snapshot,
+        snapshot: { ...snapshot, schedule: snapshot.schedule.slice(0, 1) },
         loading: false,
         onSelectDate: () => {},
       }),
     );
     expect(html).toContain('class="planning-calendar__grid"');
     expect(html).not.toContain('class="planning-week__body"');
+    expect(html).toContain('data-kind="task" data-task-id="task"');
+    expect(html).not.toContain('role="tooltip"');
+  });
+});
+
+describe("calendar task preview status", () => {
+  it("uses the task workflow and gives terminal statuses precedence", () => {
+    expect(calendarTaskStatus({ status: "open" })).toBe("진행 전");
+    expect(
+      calendarTaskStatus({ status: "open", workflowState: "in_progress" }),
+    ).toBe("진행 중");
+    expect(
+      calendarTaskStatus({ status: "open", workflowState: "waiting" }),
+    ).toBe("대기 중");
+    expect(
+      calendarTaskStatus({ status: "completed", workflowState: "waiting" }),
+    ).toBe("완료");
+    expect(
+      calendarTaskStatus({ status: "cancelled", workflowState: "in_progress" }),
+    ).toBe("취소");
   });
 });

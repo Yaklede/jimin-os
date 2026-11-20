@@ -64,7 +64,7 @@ describe("home inflow review", () => {
       /\.home-inflow-review__detail\s*\{[^}]*min-height: 0;[^}]*overflow-y: auto;/,
     );
   });
-  it("separates new requests, existing task updates and reviewed conversations", () => {
+  it("separates unread requests and updates without rendering reviewed history on home", () => {
     const markup = renderReview([
       inflow("new"),
       inflow("update", { promotedTaskId: "existing-task" }),
@@ -72,14 +72,12 @@ describe("home inflow review", () => {
     ]);
     expect(markup).toContain(copy.projects.inflowNewTitle);
     expect(markup).toContain(copy.projects.inflowExistingTitle);
-    expect(markup).toContain(copy.projects.inflowReviewedTitle);
-    expect(markup).toContain('<details class="project-inflow__history">');
-    expect(markup).not.toContain(
-      '<details open="" class="project-inflow__history">',
-    );
+    expect(markup).toContain(copy.projects.inflowExistingRowBadge);
+    expect(markup).not.toContain(copy.projects.inflowReviewedTitle);
+    expect(markup).not.toContain("업무 read");
     expect(markup).toContain('id="home-inflow-queue-title-new"');
     expect(markup).toContain('id="home-inflow-queue-title-existing"');
-    expect(markup).toContain(copy.projects.inflowMarkSeen);
+    expect(markup).toContain('data-has-selection="false"');
     expect(markup.match(/role="tablist"/g)).toHaveLength(1);
     expect(markup.match(/role="tab"/g)).toHaveLength(3);
     expect(markup.match(/role="tabpanel"/g)).toHaveLength(3);
@@ -115,7 +113,7 @@ describe("home inflow review", () => {
     ]);
     expect(markup).toMatch(/id="home-inflow-tab-new"[^>]*aria-selected="true"/);
     expect(markup).toContain("업무 owner");
-    expect(markup).toContain(copy.projects.inflowMarkSeen);
+    expect(markup).toContain('data-view="list"');
     expect(markup).not.toContain('<details class="project-inflow__history">');
   });
   it("keeps an uncertain owner-authored request available instead of hiding it as reviewed", () => {
@@ -144,15 +142,17 @@ describe("home inflow review", () => {
     expect(markup).toContain('id="home-inflow-panel-new"');
     expect(markup).toContain(copy.projects.inflowNewEmpty);
   });
-  it("offers the full queue instead of silently truncating after five items", () => {
+  it("shows four rows and offers to reveal the entire unread queue", () => {
     const items = Array.from({ length: 7 }, (_, index) =>
       inflow(`${index + 1}`),
     );
     const markup = renderReview(items);
 
     expect(markup).toContain('class="home-inflow-review__queue"');
-    expect(markup).toContain("업무 5");
-    expect(markup).toContain("업무 7");
+    expect(markup).toContain("업무 4");
+    expect(markup).not.toContain("업무 5");
+    expect(markup).toContain(copy.home.inboxMore(3));
+    expect(visibleHomeInflowItems(items, false)).toHaveLength(4);
     expect(visibleHomeInflowItems(items, true)).toHaveLength(7);
   });
 
@@ -170,13 +170,11 @@ describe("home inflow review", () => {
     expect(
       homeInflowPendingItems([pending, followUp, promoted, dismissed]),
     ).toEqual([pending, followUp]);
-    expect(renderReview([followUp])).toContain(
-      copy.projects.inflowFollowUpTitle,
+    expect(renderReview([followUp])).toContain("업무 follow-up");
+    expect(renderReview([followUp])).toMatch(
+      /id="home-inflow-tab-existing"[^>]*aria-selected="true"/,
     );
-    expect(renderReview([followUp])).toContain(
-      copy.projects.inflowFollowUpOpenTask,
-    );
-    expect(renderReview([promoted, dismissed])).toBe("");
+    expect(renderReview([promoted, dismissed])).toContain(copy.home.inboxClear);
   });
 
   it("falls back to a visible conversation when filtering or collapsing removes the selection", () => {

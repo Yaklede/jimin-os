@@ -2209,6 +2209,35 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         Some("회사 요청 개발 범위 확인"),
         "a new reply must not blank the last ready task draft"
     );
+    assert!(
+        database
+            .project_inflow_items(
+                owner.profile.id,
+                first_project.id,
+                Some(ProjectInflowStatus::Pending)
+            )
+            .await
+            .expect("completed-thread attention should load")
+            .is_empty(),
+        "new replies must not put a completed task back in the attention queue"
+    );
+    database
+        .update_task(&TaskUpdate {
+            id: completed_again.id,
+            user_id: owner.profile.id,
+            project_id: completed_again.project_id,
+            parent_task_id: completed_again.parent_task_id,
+            title: completed_again.title.clone(),
+            notes: completed_again.notes.clone(),
+            assignee_name: completed_again.assignee_name.clone(),
+            status: TaskStatus::Open,
+            priority: completed_again.priority,
+            due_at: completed_again.due_at,
+            expected_version: completed_again.version,
+        })
+        .await
+        .expect("explicit reopen should allow attention again")
+        .expect("version matches");
     let pending_follow_ups = database
         .project_inflow_items(
             owner.profile.id,
@@ -11075,8 +11104,33 @@ async fn inflow_notifications_skip_history_read_noise_and_cross_owner() {
         .bind(task).bind(owner.profile.id).bind(project.id).execute(&pool).await.expect("task");
     let fresh = Uuid::now_v7();
     let update = Uuid::now_v7();
+    let ignored_reply = Uuid::now_v7();
+    let closed_reply = Uuid::now_v7();
+    let closed_task = Uuid::now_v7();
+    sqlx::query("INSERT INTO tasks (id,user_id,project_id,title,status,priority,completed_at) VALUES ($1,$2,$3,'완료된 일감','completed',1,NOW())")
+        .bind(closed_task).bind(owner.profile.id).bind(project.id).execute(&pool).await.expect("closed task");
+    sqlx::query("INSERT INTO project_inflow_items (id,user_id,project_id,source_id,provider_message_name,provider_thread_name,content_text,status,received_at,reviewed_at) VALUES ($1,$2,$3,$4,'spaces/notification-test/messages/ignored-first','spaces/notification-test/threads/ignored','이미 제외한 대화','dismissed',NOW()-INTERVAL '10 minutes',NOW()-INTERVAL '5 minutes')")
+        .bind(Uuid::now_v7()).bind(owner.profile.id).bind(project.id).bind(source).execute(&pool).await.expect("excluded thread");
     for (id, marker, sender, classification, old, read, linked) in [
         (fresh, "fresh", "users/200", "question", false, false, None),
+        (
+            ignored_reply,
+            "ignored",
+            "users/200",
+            "question",
+            false,
+            false,
+            None,
+        ),
+        (
+            closed_reply,
+            "closed",
+            "users/200",
+            "follow_up",
+            false,
+            false,
+            Some(closed_task),
+        ),
         (
             update,
             "update",
@@ -11129,6 +11183,43 @@ async fn inflow_notifications_skip_history_read_noise_and_cross_owner() {
             .bind(id).bind(owner.profile.id).bind(project.id).bind(source).bind(format!("thread:spaces/notification-test/threads/{marker}")).bind(classification).bind(linked).execute(&pool).await.expect("analysis");
     }
     let now = OffsetDateTime::now_utc();
+    for pending in [
+        database
+            .pending_project_inflow_for_user(owner.profile.id)
+            .await
+            .expect("home"),
+        database
+            .project_inflow_items(
+                owner.profile.id,
+                project.id,
+                Some(ProjectInflowStatus::Pending),
+            )
+            .await
+            .expect("project"),
+    ] {
+        assert!(pending.iter().any(|item| item.id == fresh));
+        assert!(pending.iter().any(|item| item.id == update));
+        assert!(
+            !pending.iter().any(|item| item.id == ignored_reply),
+            "a reply must not reopen an excluded thread"
+        );
+        assert!(
+            !pending.iter().any(|item| item.id == closed_reply),
+            "a closed task must not need review"
+        );
+    }
+    assert_eq!(
+        database
+            .project_inflow_items(
+                owner.profile.id,
+                project.id,
+                Some(ProjectInflowStatus::Dismissed)
+            )
+            .await
+            .expect("history")
+            .len(),
+        1
+    );
     let after = (now - TimeDuration::minutes(5)).unix_timestamp() * 1000;
     let notifications = database
         .inflow_notifications(owner.profile.id, after, Uuid::nil(), now)
@@ -11194,6 +11285,19 @@ async fn inflow_notifications_skip_history_read_noise_and_cross_owner() {
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].item_id, update);
     assert!(claimed[0].title.starts_with("일감에 새 답글 · "));
+    database
+        .complete_task(owner.profile.id, task, 1)
+        .await
+        .expect("complete linked task")
+        .expect("version matches");
+    assert!(
+        !database
+            .pending_project_inflow_for_user(owner.profile.id)
+            .await
+            .expect("updated home list")
+            .iter()
+            .any(|item| item.id == update)
+    );
     pool.close().await;
     database.close().await;
 }

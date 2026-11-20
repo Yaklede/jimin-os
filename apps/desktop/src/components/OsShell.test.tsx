@@ -24,7 +24,16 @@ describe("OS shell platform layout", () => {
   );
 
   it("marks a resizable macOS shell as desktop", () => {
-    expect(renderShell("desktop")).toContain('data-platform="desktop"');
+    const markup = renderShell("desktop");
+    expect(markup).toContain('data-platform="desktop"');
+    expect(markup).not.toContain(">기억<");
+  });
+
+  it("marks embedded chat without selecting a different destination", () => {
+    expect(renderShell("desktop", true)).toContain(
+      'data-destination="home" data-home-chat="true"',
+    );
+    expect(renderShell("desktop")).not.toContain("data-home-chat");
   });
 
   it("marks native phone shells independently from viewport width", () => {
@@ -49,8 +58,9 @@ describe("OS shell platform layout", () => {
       expect(bottom.match(/class="os-nav__button /g)).toHaveLength(4);
       expect(header).toContain('class="os-mobile-more"');
       expect(header).toContain('aria-label="더보기"');
-      expect(header).toContain("기억");
+      expect(header).not.toContain("기억");
       expect(header).toContain("설정");
+      expect(header).toContain("확인·처리 기록");
       expect(bottom).toContain("os-mobile-nav__assistant");
       expect(bottom).toContain('aria-label="지민에게 말하기"');
       expect(bottom.indexOf("프로젝트")).toBeLessThan(bottom.indexOf("일정"));
@@ -84,9 +94,11 @@ describe("OS shell platform layout", () => {
 
 function renderShell(
   platform?: NonNullable<ComponentProps<typeof OsShell>["platform"]>,
+  homeChatVisible?: boolean,
 ): string {
   const props: ComponentProps<typeof OsShell> = {
     destination: "home",
+    homeChatVisible,
     platform,
     onNavigate: () => undefined,
     onVoiceTranscript: () => undefined,

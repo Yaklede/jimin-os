@@ -5,6 +5,7 @@ import { FormEvent, useEffect, useRef, useState, type ReactNode } from "react";
 import { type ScheduleEntry, type Task } from "../api/planning";
 import { copy } from "../copy";
 import { deadlinePickerCopy } from "../copy/deadlinePicker";
+import { workspaceActionCopy } from "../copy/workspaceActions";
 import { registerMobileBackHandler } from "../mobileBack";
 import {
   DeadlinePicker,
@@ -330,7 +331,7 @@ export function PlanningItemEditor({
   return (
     <dialog
       ref={dialogRef}
-      className="planning-editor"
+      className="planning-editor work-dialog"
       aria-labelledby="planning-editor-title"
       aria-describedby="planning-editor-description"
       onCancel={(event) => {
@@ -344,9 +345,13 @@ export function PlanningItemEditor({
       }}
       onClose={handleClose}
     >
-      <form aria-busy={saving} onSubmit={(event) => void submit(event)}>
-        <header className="planning-editor__heading">
-          <span aria-hidden="true">
+      <form
+        className="work-dialog__layout"
+        aria-busy={saving}
+        onSubmit={(event) => void submit(event)}
+      >
+        <header className="planning-editor__heading work-dialog__header">
+          <span className="work-dialog__leading" aria-hidden="true">
             {taskTarget ? <ListTodo /> : <CalendarClock />}
           </span>
           <div>
@@ -358,190 +363,195 @@ export function PlanningItemEditor({
             type="button"
             onClick={requestClose}
             disabled={saving}
-            aria-label={copy.actions.cancel}
+            aria-label={workspaceActionCopy.closeEditor}
           >
             <X aria-hidden="true" />
           </button>
         </header>
 
-        <fieldset disabled={saving}>
-          <EditorField label={copy.forms.title} htmlFor="planning-edit-title">
-            <input
-              ref={titleInputRef}
-              id="planning-edit-title"
-              required
-              maxLength={200}
-              value={title}
-              onChange={(event) => {
-                setTitle(event.target.value);
-                setError(undefined);
-              }}
-            />
-          </EditorField>
+        <div className="work-dialog__body">
+          <fieldset disabled={saving}>
+            <EditorField label={copy.forms.title} htmlFor="planning-edit-title">
+              <input
+                ref={titleInputRef}
+                id="planning-edit-title"
+                required
+                maxLength={200}
+                value={title}
+                onChange={(event) => {
+                  setTitle(event.target.value);
+                  setError(undefined);
+                }}
+              />
+            </EditorField>
 
-          <EditorField label={copy.forms.notes} htmlFor="planning-edit-notes">
-            <textarea
-              id="planning-edit-notes"
-              maxLength={10_000}
-              rows={4}
-              value={notes}
-              onChange={(event) => setNotes(event.target.value)}
-            />
-          </EditorField>
+            <EditorField label={copy.forms.notes} htmlFor="planning-edit-notes">
+              <textarea
+                id="planning-edit-notes"
+                maxLength={10_000}
+                rows={4}
+                value={notes}
+                onChange={(event) => setNotes(event.target.value)}
+              />
+            </EditorField>
 
-          {activeTarget.kind === "task" && activeTarget.item.completionNote && (
-            <section className="task-completion-result">
-              <strong>완료 답글</strong>
-              <p>{activeTarget.item.completionNote}</p>
-            </section>
-          )}
-          {activeTarget.kind === "task" ? (
-            <>
-              <EditorField
-                label={copy.forms.assignee}
-                htmlFor="planning-edit-assignee"
-              >
-                <input
-                  id="planning-edit-assignee"
-                  maxLength={80}
-                  value={assigneeName}
-                  placeholder={copy.forms.assigneePlaceholder}
-                  onChange={(event) => {
-                    setAssigneeName(event.target.value);
-                    setError(undefined);
-                  }}
-                />
-              </EditorField>
-              <div className="planning-editor__field-grid">
+            {activeTarget.kind === "task" &&
+              activeTarget.item.completionNote && (
+                <section className="task-completion-result">
+                  <strong>완료 답글</strong>
+                  <p>{activeTarget.item.completionNote}</p>
+                </section>
+              )}
+            {activeTarget.kind === "task" ? (
+              <>
                 <EditorField
-                  label={copy.forms.priority}
-                  htmlFor="planning-edit-priority"
+                  label={copy.forms.assignee}
+                  htmlFor="planning-edit-assignee"
                 >
-                  <select
-                    id="planning-edit-priority"
-                    value={priority}
-                    onChange={(event) =>
-                      setPriority(Number(event.target.value))
-                    }
-                  >
-                    <option value={0}>{copy.forms.priorityNormal}</option>
-                    <option value={1}>{copy.forms.prioritySoon}</option>
-                    <option value={2}>{copy.forms.priorityImportant}</option>
-                    <option value={3}>{copy.forms.priorityHighest}</option>
-                  </select>
-                </EditorField>
-                <DeadlinePicker
-                  className="planning-editor__field"
-                  id="planning-edit-due-at"
-                  label={copy.forms.dueAt}
-                  value={dueAt}
-                  disabled={saving}
-                  showPresets
-                  onChange={setDueAt}
-                />
-              </div>
-              <EditorField label="진행 상태" htmlFor="planning-edit-workflow">
-                <select
-                  id="planning-edit-workflow"
-                  value={workflowState}
-                  disabled={saving}
-                  onChange={(event) =>
-                    setWorkflowState(
-                      event.target.value as NonNullable<Task["workflowState"]>,
-                    )
-                  }
-                >
-                  <option value="not_started">진행 전</option>
-                  <option value="in_progress">진행 중</option>
-                  <option value="waiting">대기 중</option>
-                </select>
-              </EditorField>
-              {workflowState === "waiting" && (
-                <EditorField
-                  label="대기 사유"
-                  htmlFor="planning-edit-waiting-reason"
-                >
-                  <textarea
-                    id="planning-edit-waiting-reason"
-                    required
-                    maxLength={1000}
-                    rows={2}
-                    value={waitingReason}
-                    disabled={saving}
-                    onChange={(event) => setWaitingReason(event.target.value)}
+                  <input
+                    id="planning-edit-assignee"
+                    maxLength={80}
+                    value={assigneeName}
+                    placeholder={copy.forms.assigneePlaceholder}
+                    onChange={(event) => {
+                      setAssigneeName(event.target.value);
+                      setError(undefined);
+                    }}
                   />
                 </EditorField>
-              )}
-            </>
-          ) : (
-            <>
-              <div className="planning-editor__field-grid">
-                <DeadlinePicker
-                  className="planning-editor__field"
-                  id="planning-edit-starts-at"
-                  label={copy.forms.startsAt}
-                  value={startsAt}
-                  disabled={saving}
-                  required
-                  allowClear={false}
-                  onChange={(value) => {
-                    setStartsAt(value);
-                    setError(undefined);
-                  }}
-                />
-                <DeadlinePicker
-                  className="planning-editor__field"
-                  id="planning-edit-ends-at"
-                  label={copy.forms.endsAt}
-                  value={endsAt}
-                  disabled={saving}
-                  required
-                  allowClear={false}
-                  onChange={(value) => {
-                    setEndsAt(value);
-                    setError(undefined);
-                  }}
-                />
-              </div>
-              {activeTarget.item.source === "manual" && (
-                <EditorField
-                  label={copy.forms.linkedTask}
-                  htmlFor="planning-edit-linked-task"
-                  description={copy.forms.linkedTaskDescription}
-                >
-                  <select
-                    id="planning-edit-linked-task"
-                    aria-describedby="planning-edit-linked-task-description"
-                    value={linkedTaskId}
-                    onChange={(event) => setLinkedTaskId(event.target.value)}
+                <div className="planning-editor__field-grid">
+                  <EditorField
+                    label={copy.forms.priority}
+                    htmlFor="planning-edit-priority"
                   >
-                    <option value="">{copy.forms.linkedTaskNone}</option>
-                    {linkableTasks.map((task) => (
-                      <option key={task.id} value={task.id}>
-                        {scheduleTaskOptionLabel(task, projects, {
-                          noProject: copy.forms.linkedTaskNoProject,
-                          unknownProject: copy.forms.linkedTaskUnknownProject,
-                          unassigned: copy.home.unassignedTaskGroup,
-                          noDueDate: copy.home.noDueDateTaskGroup,
-                        })}
-                      </option>
-                    ))}
+                    <select
+                      id="planning-edit-priority"
+                      value={priority}
+                      onChange={(event) =>
+                        setPriority(Number(event.target.value))
+                      }
+                    >
+                      <option value={0}>{copy.forms.priorityNormal}</option>
+                      <option value={1}>{copy.forms.prioritySoon}</option>
+                      <option value={2}>{copy.forms.priorityImportant}</option>
+                      <option value={3}>{copy.forms.priorityHighest}</option>
+                    </select>
+                  </EditorField>
+                  <DeadlinePicker
+                    className="planning-editor__field"
+                    id="planning-edit-due-at"
+                    label={copy.forms.dueAt}
+                    value={dueAt}
+                    disabled={saving}
+                    showPresets
+                    onChange={setDueAt}
+                  />
+                </div>
+                <EditorField label="진행 상태" htmlFor="planning-edit-workflow">
+                  <select
+                    id="planning-edit-workflow"
+                    value={workflowState}
+                    disabled={saving}
+                    onChange={(event) =>
+                      setWorkflowState(
+                        event.target.value as NonNullable<
+                          Task["workflowState"]
+                        >,
+                      )
+                    }
+                  >
+                    <option value="not_started">진행 전</option>
+                    <option value="in_progress">진행 중</option>
+                    <option value="waiting">대기 중</option>
                   </select>
                 </EditorField>
-              )}
-            </>
-          )}
-        </fieldset>
+                {workflowState === "waiting" && (
+                  <EditorField
+                    label="대기 사유"
+                    htmlFor="planning-edit-waiting-reason"
+                  >
+                    <textarea
+                      id="planning-edit-waiting-reason"
+                      required
+                      maxLength={1000}
+                      rows={2}
+                      value={waitingReason}
+                      disabled={saving}
+                      onChange={(event) => setWaitingReason(event.target.value)}
+                    />
+                  </EditorField>
+                )}
+              </>
+            ) : (
+              <>
+                <div className="planning-editor__field-grid">
+                  <DeadlinePicker
+                    className="planning-editor__field"
+                    id="planning-edit-starts-at"
+                    label={copy.forms.startsAt}
+                    value={startsAt}
+                    disabled={saving}
+                    required
+                    allowClear={false}
+                    onChange={(value) => {
+                      setStartsAt(value);
+                      setError(undefined);
+                    }}
+                  />
+                  <DeadlinePicker
+                    className="planning-editor__field"
+                    id="planning-edit-ends-at"
+                    label={copy.forms.endsAt}
+                    value={endsAt}
+                    disabled={saving}
+                    required
+                    allowClear={false}
+                    onChange={(value) => {
+                      setEndsAt(value);
+                      setError(undefined);
+                    }}
+                  />
+                </div>
+                {activeTarget.item.source === "manual" && (
+                  <EditorField
+                    label={copy.forms.linkedTask}
+                    htmlFor="planning-edit-linked-task"
+                    description={copy.forms.linkedTaskDescription}
+                  >
+                    <select
+                      id="planning-edit-linked-task"
+                      aria-describedby="planning-edit-linked-task-description"
+                      value={linkedTaskId}
+                      onChange={(event) => setLinkedTaskId(event.target.value)}
+                    >
+                      <option value="">{copy.forms.linkedTaskNone}</option>
+                      {linkableTasks.map((task) => (
+                        <option key={task.id} value={task.id}>
+                          {scheduleTaskOptionLabel(task, projects, {
+                            noProject: copy.forms.linkedTaskNoProject,
+                            unknownProject: copy.forms.linkedTaskUnknownProject,
+                            unassigned: copy.home.unassignedTaskGroup,
+                            noDueDate: copy.home.noDueDateTaskGroup,
+                          })}
+                        </option>
+                      ))}
+                    </select>
+                  </EditorField>
+                )}
+              </>
+            )}
+          </fieldset>
 
-        {error && (
-          <p className="planning-editor__error" role="alert">
-            {error}
-          </p>
-        )}
+          {error && (
+            <p className="planning-editor__error" role="alert">
+              {error}
+            </p>
+          )}
+        </div>
 
         {confirmingDiscard ? (
           <section
-            className="planning-editor__discard-confirmation"
+            className="planning-editor__discard-confirmation work-dialog__footer"
             role="group"
             aria-label="변경 내용 확인"
           >
@@ -571,7 +581,7 @@ export function PlanningItemEditor({
           </section>
         ) : confirmingDelete ? (
           <section
-            className="planning-editor__delete-confirmation"
+            className="planning-editor__delete-confirmation work-dialog__footer"
             role="group"
             aria-label={
               taskTarget
@@ -624,7 +634,7 @@ export function PlanningItemEditor({
             </div>
           </section>
         ) : (
-          <footer className="planning-editor__actions">
+          <footer className="planning-editor__actions work-dialog__footer">
             <span className="planning-editor__action-spacer" />
             <button
               ref={deleteTriggerRef}
@@ -634,6 +644,14 @@ export function PlanningItemEditor({
               disabled={saving}
             >
               {copy.actions.deleteContent}
+            </button>
+            <button
+              className="secondary-button focus-visible-control"
+              type="button"
+              onClick={requestClose}
+              disabled={saving}
+            >
+              {copy.actions.cancel}
             </button>
             <button
               className="primary-button focus-visible-control"

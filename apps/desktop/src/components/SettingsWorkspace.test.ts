@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { GmailAccount } from "../api/gmail";
 import type { Workspace } from "../api/projects";
 import { copy } from "../copy";
+import { defaultShortcuts } from "../keyboardShortcuts";
 import {
   gmailAccountActionActive,
   gmailAccountDetail,
@@ -321,6 +322,8 @@ function renderSettings(
   overrides: Partial<ComponentProps<typeof SettingsWorkspace>> = {},
 ): string {
   const props: ComponentProps<typeof SettingsWorkspace> = {
+    shortcuts: defaultShortcuts,
+    onSaveShortcuts: () => true,
     authentication: {
       state: "ready",
       verificationUrl: null,

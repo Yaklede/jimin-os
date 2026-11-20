@@ -1,5 +1,9 @@
 import { useEffect, useId, useRef, type KeyboardEvent } from "react";
 import { PlanningWeekCalendar } from "./planning-week-calendar";
+import {
+  shouldPinCalendarPreview,
+  useCalendarTaskPreview,
+} from "./CalendarTaskPreview";
 import type { ScheduleEntry, Task, PlanningSnapshot } from "../api/planning";
 import { copy } from "../copy";
 import {
@@ -38,6 +42,13 @@ export function PlanningCalendar({
 }: PlanningCalendarProps) {
   const hintId = useId();
   const buttons = useRef<Array<HTMLButtonElement | null>>([]);
+  const pressedWithTouch = useRef(false);
+  const preview = useCalendarTaskPreview(
+    snapshot?.tasks,
+    range.mode === "month" ? range.from.getTime() : -1,
+    loading,
+    onOpenTask,
+  );
   const days = planningCalendarDays(range);
   const restoreDateFocus = useRef(false);
   useEffect(() => {
@@ -147,6 +158,7 @@ export function PlanningCalendar({
           const dayReports = (reports ?? []).filter((report) =>
             samePlanningDay(new Date(report.receivedAt), date),
           );
+          const canPreview = !reports && !outside && tasks.length > 0;
           const entries = [
             ...dayReports.map((report) => ({
               id: report.id,
@@ -179,6 +191,11 @@ export function PlanningCalendar({
               tabIndex={selected ? 0 : -1}
               aria-pressed={selected}
               aria-current={current ? "date" : undefined}
+              aria-describedby={
+                canPreview && preview.anchor === buttons.current[index]
+                  ? preview.descriptionId
+                  : undefined
+              }
               aria-label={
                 reports
                   ? copy.projects.inflowHomeCalendarDate(
@@ -191,8 +208,65 @@ export function PlanningCalendar({
                       schedule.length,
                     )
               }
-              onClick={() => {
-                restoreDateFocus.current = true;
+              onPointerOver={
+                canPreview
+                  ? (event) => {
+                      if (event.pointerType !== "mouse") return;
+                      const taskId =
+                        event.target instanceof Element
+                          ? event.target.closest<HTMLElement>("[data-task-id]")
+                              ?.dataset.taskId
+                          : undefined;
+                      const hoveredTask = tasks.find(
+                        (task) => task.id === taskId,
+                      );
+                      preview.open(
+                        event.currentTarget,
+                        "pointer",
+                        hoveredTask ? [hoveredTask] : tasks,
+                      );
+                    }
+                  : undefined
+              }
+              onPointerLeave={canPreview ? preview.leave : undefined}
+              onPointerDown={
+                canPreview
+                  ? (event) => {
+                      pressedWithTouch.current = event.pointerType === "touch";
+                    }
+                  : undefined
+              }
+              onPointerCancel={
+                canPreview
+                  ? () => {
+                      pressedWithTouch.current = false;
+                    }
+                  : undefined
+              }
+              onFocus={
+                canPreview
+                  ? (event) => {
+                      if (event.currentTarget.matches(":focus-visible"))
+                        preview.open(event.currentTarget, "focus", tasks);
+                    }
+                  : undefined
+              }
+              onBlur={
+                canPreview
+                  ? (event) => preview.blur(event.currentTarget)
+                  : undefined
+              }
+              onClick={(event) => {
+                const pin =
+                  canPreview &&
+                  shouldPinCalendarPreview(
+                    event.nativeEvent,
+                    pressedWithTouch.current,
+                  );
+                if (pin) preview.open(event.currentTarget, "touch", tasks);
+                else preview.close();
+                pressedWithTouch.current = false;
+                restoreDateFocus.current = !pin;
                 onSelectDate(date);
               }}
               onKeyDown={(event) => moveFocus(event, index)}
@@ -230,7 +304,10 @@ export function PlanningCalendar({
                       <span
                         className="planning-calendar__entry"
                         data-kind={entry.kind}
-                        key={entry.id}
+                        data-task-id={
+                          entry.kind === "task" ? entry.id : undefined
+                        }
+                        key={`${entry.kind}:${entry.id}`}
                       >
                         {entry.title}
                       </span>
@@ -247,6 +324,7 @@ export function PlanningCalendar({
           );
         })}
       </div>
+      {preview.content}
       <div className="planning-calendar__legend">
         {reports ? (
           <span>

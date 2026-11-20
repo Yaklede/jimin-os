@@ -42,12 +42,16 @@ import {
   requestNotificationPermission,
 } from "../local-notifications";
 import { DesktopInflowNotificationSettings } from "./DesktopInflowNotificationSettings";
+import { ShortcutSettings } from "./ShortcutSettings";
+import { type Shortcuts } from "../keyboardShortcuts";
 
 export type GmailSettingsAction =
   | { kind: "authorizing"; workspaceId: string; accountId?: string }
   | { kind: "syncing" | "disconnecting"; accountId: string };
 
 type SettingsWorkspaceProps = {
+  shortcuts: Shortcuts;
+  onSaveShortcuts(value: Shortcuts): boolean;
   authentication: AgentAuthentication | undefined;
   requesting: boolean;
   modelSettings: AgentModelSettings | undefined;
@@ -100,6 +104,8 @@ type SettingsWorkspaceProps = {
 };
 
 export function SettingsWorkspace({
+  shortcuts,
+  onSaveShortcuts,
   authentication,
   requesting,
   modelSettings,
@@ -451,6 +457,7 @@ export function SettingsWorkspace({
         <span>{copy.settings.description}</span>
       </header>
       <section className="settings-list" aria-label={copy.settings.title}>
+        <ShortcutSettings shortcuts={shortcuts} onSave={onSaveShortcuts} />
         <div className="settings-model-field">
           <div className="settings-model-field__heading">
             <strong>{copy.settings.modelTitle}</strong>

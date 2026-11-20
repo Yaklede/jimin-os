@@ -1,8 +1,12 @@
 import { designPreviewInflow } from "./design-preview-inflow";
 import { applyDesignPreviewInflowDecision } from "./design-preview-inflow-decision";
-import type { Task } from "./api/planning";
+import {
+  PLANNING_TIME_ZONE,
+  type ScheduleEntry,
+  type Task,
+} from "./api/planning";
 import type { WeeklyReport } from "./api/projects";
-import type { Conversation, ConversationMessage } from "./api/agent";
+import type { AgentJob, Conversation, ConversationMessage } from "./api/agent";
 import type { Recommendation } from "./api/home";
 import type { DeliveryRecovery } from "./api/deliveryRecovery";
 import type {
@@ -12,11 +16,26 @@ import type {
 import { scheduledWorkTemplate } from "./components/ScheduledWorkPanel";
 import type { ProjectGoogleChatSource } from "./api/googleChat";
 import type { TaskChatRoute } from "./api/chatRouting";
+import type { CompletionReview } from "./api/completionReviews";
 
 // Fixtures for local preview or an explicit design-preview build only.
 export function installDesignPreview(): void {
   const originalFetch = window.fetch.bind(window);
   const now = new Date().toISOString();
+  const schedules: ScheduleEntry[] = [
+    {
+      id: "preview-schedule-review",
+      title: "예시: 검수 일정",
+      notes: "개발 화면에서 저장과 닫기를 검수하는 예시 일정이에요.",
+      startsAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      endsAt: new Date(Date.now() + 90 * 60_000).toISOString(),
+      timeZone: PLANNING_TIME_ZONE,
+      status: "confirmed",
+      source: "manual",
+      editable: true,
+      version: 1,
+    },
+  ];
   const chatSources: ProjectGoogleChatSource[] = [
     "operations",
     "developers",
@@ -78,6 +97,22 @@ export function installDesignPreview(): void {
     version: 1,
   }));
   const inflow = designPreviewInflow();
+  const completionReviews: CompletionReview[] = tasks.slice(0, 3).map((task, index) => ({
+    id: `preview-completion-${index}`,
+    taskId: task.id,
+    projectId: task.projectId,
+    projectTitle: "예시 프로젝트",
+    title: task.title,
+    taskNotes: task.notes,
+    assigneeName: task.assigneeName ?? null,
+    dueAt: task.dueAt,
+    reporterName: index === 1 ? "송천안" : "김경주",
+    completionNote: "예시 완료 보고입니다. 실제 Chat이나 ITSM에는 반영하지 않아요.",
+    reportedTaskVersion: index === 2 ? task.version - 1 : task.version,
+    taskVersion: task.version,
+    version: 1,
+    createdAt: now,
+  }));
   // Synthetic, non-routable evidence demonstrates single/multiple ticket selection.
   for (const index of [0, 2]) {
     inflow[index].referenceDocuments = [42, ...(index === 0 ? [43] : [])].map(
@@ -313,6 +348,42 @@ export function installDesignPreview(): void {
     version: 1,
   };
   const conversations = [conversation];
+  const transcriptById = new Map([[conversation.id, messages]]);
+  const previewTurns = new Map<
+    string,
+    {
+      job: AgentJob;
+      reply: ConversationMessage;
+      chunks: string[];
+      started: number;
+    }
+  >();
+
+  function previewSnapshot(id: string) {
+    const history = transcriptById.get(id) ?? [];
+    const turn = previewTurns.get(id);
+    if (!turn) return { messages: history, job: null };
+    const count = Math.min(
+      turn.chunks.length,
+      Math.floor((Date.now() - turn.started) / 450),
+    );
+    const completed = count === turn.chunks.length;
+    const reply: ConversationMessage = {
+      ...turn.reply,
+      content: turn.chunks.slice(0, count).join(""),
+      status: completed ? "completed" : "streaming",
+      completedAt: completed ? turn.reply.createdAt : null,
+      version: count,
+    };
+    const job: AgentJob = {
+      ...turn.job,
+      state: completed ? "completed" : count ? "running" : "queued",
+      finishedAt: completed ? turn.reply.createdAt : null,
+      version: count + 1,
+    };
+    return { messages: count === 0 ? history : [...history, reply], job };
+  }
+
   const list = (items: unknown[]) => ({ items, nextCursor: null });
   const json = (body: unknown, status = 200) => Response.json(body, { status });
   window.fetch = async (input, init) => {
@@ -326,6 +397,132 @@ export function installDesignPreview(): void {
     ).toUpperCase();
     if (!path.startsWith("/v1/") && !path.startsWith("/health/"))
       return originalFetch(input, init);
+    const conversationRoute =
+      /^\/v1\/conversations\/([^/]+)\/(turns|stream|messages|jobs\/latest)$/u.exec(
+        path,
+      );
+    if (conversationRoute?.[2] === "stream") {
+      const id = conversationRoute[1];
+      const signal =
+        init?.signal ?? (input instanceof Request ? input.signal : undefined);
+      const encoder = new TextEncoder();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let detach = () => {};
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            const stop = () => {
+              clearTimeout(timer);
+              detach();
+              controller.close();
+            };
+            const send = () => {
+              const snapshot = previewSnapshot(id);
+              controller.enqueue(
+                encoder.encode(
+                  "event: snapshot\ndata: " + JSON.stringify(snapshot) + "\n\n",
+                ),
+              );
+              if (!snapshot.job || snapshot.job.state === "completed") stop();
+              else timer = setTimeout(send, 450);
+            };
+            if (signal?.aborted) {
+              stop();
+              return;
+            }
+            detach = () => signal?.removeEventListener("abort", stop);
+            signal?.addEventListener("abort", stop, { once: true });
+            send();
+          },
+          cancel() {
+            clearTimeout(timer);
+            detach();
+          },
+        }),
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+    }
+    if (conversationRoute?.[2] === "turns" && method === "POST") {
+      const id = conversationRoute[1];
+      const current = conversations.find((item) => item.id === id);
+      if (!current) return json({ error: "preview_item_missing" }, 404);
+      const body = init?.body
+        ? JSON.parse(String(init.body))
+        : await (input as Request).json();
+      const request = body?.input?.[0]?.text;
+      if (typeof request !== "string" || !request.trim())
+        return json({ error: "preview_missing_text" }, 400);
+      const snapshot = previewSnapshot(id);
+      if (snapshot.job && snapshot.job.state !== "completed")
+        return json({ error: "preview_busy" }, 409);
+      const prior = [...snapshot.messages]
+        .reverse()
+        .find((item) => item.role === "user");
+      const createdAt = new Date().toISOString();
+      const messageId = crypto.randomUUID();
+      const jobId = crypto.randomUUID();
+      transcriptById.set(id, [
+        ...snapshot.messages,
+        {
+          id: messageId,
+          role: "user",
+          content: request,
+          presentation: null,
+          status: "completed",
+          createdAt,
+          completedAt: createdAt,
+          version: 1,
+        },
+      ]);
+      current.title ??= request.slice(0, 40);
+      current.lastMessageAt = createdAt;
+      previewTurns.set(id, {
+        started: Date.now(),
+        job: {
+          id: jobId,
+          conversationId: id,
+          state: "queued",
+          createdAt,
+          finishedAt: null,
+          pendingAction: null,
+          version: 1,
+        },
+        reply: {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: "",
+          presentation: null,
+          status: "streaming",
+          createdAt,
+          completedAt: null,
+          version: 1,
+        },
+        chunks: /mermaid|흐름도|플로우차트/u.test(request.toLowerCase())
+          ? [
+              "## 일감이 처리되는 흐름\n\n",
+              "| 단계 | 할 일 | 상태 |\n| --- | --- | :---: |\n",
+              "| 접수 | 요청의 목적 확인 | 완료 |\n| 검토 | 담당자와 마감일 확인 | 진행 중 |\n\n",
+              "```mermaid\nflowchart TD\n  A[업무 요청] --> B{등록할까요?}\n",
+              "  B -->|예| C[할 일에 추가]\n  B -->|아니요| D[확인한 대화로 이동]\n",
+              "```\n\n> 개발 화면에서 표와 흐름도를 확인하기 위한 예시예요.",
+            ]
+          : [
+              prior ? "## 앞선 대화에 이어서\n\n" : "## 요청을 정리했어요\n\n",
+              prior
+                ? "앞서 요청한 내용: " +
+                  prior.content.replace(/\s+/gu, " ").slice(0, 120) +
+                  "\n\n"
+                : "먼저 해야 할 일과 확인할 내용을 나눴어요.\n\n",
+              "- **먼저 할 일:** 오늘 마감인 업무부터 확인해요.\n",
+              "- **다음:** 담당자와 아직 정해지지 않은 기한을 확인해요.\n\n",
+              "> 개발 화면에서 흐름을 확인하기 위한 예시 답변이에요.",
+            ],
+      });
+      return json(
+        { jobId, messageId, conversationId: id, state: "queued" },
+        202,
+      );
+    }
     if (path.endsWith("/stream")) {
       return new Response(
         new ReadableStream({
@@ -440,6 +637,28 @@ export function installDesignPreview(): void {
       );
     if (path === "/v1/scheduled-work/capabilities")
       return json({ completionRepliesAvailable: true });
+    if (path === "/v1/task-completion-reviews" && method === "GET")
+      return json(list(completionReviews));
+    const completionDecision = /^\/v1\/task-completion-reviews\/([^/]+)\/decision$/.exec(path);
+    if (completionDecision && method === "POST") {
+      const index = completionReviews.findIndex((review) => review.id === completionDecision[1]);
+      const review = completionReviews[index];
+      const task = tasks.find((current) => current.id === review?.taskId);
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (!task || body.expectedVersion !== review.version ||
+        body.expectedTaskVersion !== task.version) {
+        return json({ error: "preview_review_changed" }, 409);
+      }
+      if (body.kind === "approve") {
+        task.status = "completed";
+        task.completedAt = new Date().toISOString();
+        task.version++;
+      } else if (body.kind !== "reject") {
+        return json({ error: "preview_review_invalid" }, 400);
+      }
+      completionReviews.splice(index, 1);
+      return json({ ok: true });
+    }
     if (path === "/v1/access/session" || path === "/v1/auth/refresh")
       return json({
         accessToken: "design-preview",
@@ -448,10 +667,17 @@ export function installDesignPreview(): void {
       });
     if (path === "/v1/home")
       return json({
-        schedule: [],
+        schedule: schedules,
         tasks: tasks.filter((task) => task.status === "open"),
         dueTasks: tasks,
-        inflow: inflow.filter((item) => item.status === "pending"),
+        inflow: inflow.filter(
+          (item) =>
+            item.status === "pending" &&
+            !tasks.some(
+              (task) =>
+                task.id === item.promotedTaskId && task.status !== "open",
+            ),
+        ),
         recentInflow: inflow.filter(
           (item) =>
             (item.status === "promoted" && item.completionStatus !== "sent") ||
@@ -503,6 +729,35 @@ export function installDesignPreview(): void {
       return new Response(null, { status: 204 });
     }
     if (path === "/v1/recommendations") return json(list(recommendations));
+    if (path === "/v1/schedule-entries" && method === "GET") {
+      const from = url.searchParams.get("from");
+      const to = url.searchParams.get("to");
+      return json(
+        list(
+          schedules.filter(
+            (entry) =>
+              (!from || Date.parse(entry.endsAt) > Date.parse(from)) &&
+              (!to || Date.parse(entry.startsAt) < Date.parse(to)),
+          ),
+        ),
+      );
+    }
+    if (/^\/v1\/schedule-entries\/[^/]+$/.test(path) && method === "PUT") {
+      const entry = schedules.find(({ id }) => id === path.split("/")[3]);
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (!entry || body.expectedVersion !== entry.version)
+        return json({ error: "preview_conflict" }, 409);
+      for (const field of [
+        "title",
+        "notes",
+        "startsAt",
+        "endsAt",
+        "timeZone",
+      ] as const)
+        if (field in body) entry[field] = body[field];
+      entry.version++;
+      return json(entry);
+    }
     if (
       /^\/v1\/projects\/[^/]+\/itsm-connection$/.test(path) &&
       method === "GET"
@@ -699,9 +954,17 @@ export function installDesignPreview(): void {
       item.version += 1;
       return new Response(null, { status: 204 });
     }
-    if (path.endsWith("/messages"))
-      return json(list(path.split("/")[3] === conversation.id ? messages : []));
-    if (path.endsWith("/jobs/latest") && path.split("/")[3] !== conversation.id)
+    if (conversationRoute?.[2] === "messages")
+      return json(list(previewSnapshot(conversationRoute[1]).messages));
+    if (
+      conversationRoute?.[2] === "jobs/latest" &&
+      previewTurns.has(conversationRoute[1])
+    )
+      return json(previewSnapshot(conversationRoute[1]).job);
+    if (
+      path.endsWith("/jobs/latest") &&
+      conversationRoute?.[1] !== conversation.id
+    )
       return new Response(null, { status: 204 });
     if (path.endsWith("/jobs/latest"))
       return json({

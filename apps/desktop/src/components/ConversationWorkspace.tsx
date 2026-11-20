@@ -1,7 +1,9 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
+  ArrowLeft,
   ArrowUpRight,
+  ArrowDown,
   CircleAlert,
   Clipboard,
   ExternalLink,
@@ -12,8 +14,10 @@ import {
 } from "lucide-react";
 import {
   type FormEvent,
+  type ReactNode,
   type RefObject,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -31,9 +35,14 @@ import {
   SkeletonGroup,
   useDelayedSkeleton,
 } from "./ContentSkeleton";
-import { assistantResponseAfterLatestRequest } from "./conversationResponse";
+import {
+  assistantResponseAfterLatestRequest,
+  assistantTurnFeedback,
+} from "./conversationResponse";
+import { AssistantMarkdown } from "./AssistantMarkdown";
 import { LinkifiedText } from "./ExternalTextLink";
 import { RepresentativeImage } from "./RepresentativeImage";
+import "./assistantConversation.css";
 
 export { assistantResponseAfterLatestRequest } from "./conversationResponse";
 
@@ -55,11 +64,18 @@ type ConversationWorkspaceProps = {
       }
     | undefined;
   onSelect(conversationId: string): void;
+  onReturnHome?(): void;
+  shortcutFocus?: boolean;
+  onShortcutFocusHandled?(): void;
   onInitialDraftApplied(): void;
   onStartConversation(): Promise<boolean>;
   onStartAuthentication(): Promise<void>;
   onSend(text: string, clientMessageId: string): Promise<boolean>;
   onResolveAction(decision: "approve" | "decline"): Promise<void>;
+  renderResult?(
+    message: ConversationMessage,
+    onContinue: () => void,
+  ): ReactNode;
 };
 
 export function ConversationWorkspace({
@@ -74,11 +90,15 @@ export function ConversationWorkspace({
   error,
   initialDraft,
   onSelect,
+  onReturnHome,
+  shortcutFocus,
+  onShortcutFocusHandled,
   onInitialDraftApplied,
   onStartConversation,
   onStartAuthentication,
   onSend,
   onResolveAction,
+  renderResult,
 }: ConversationWorkspaceProps) {
   const [draft, setDraft] = useState("");
   const [startingNew, setStartingNew] = useState(false);
@@ -86,8 +106,9 @@ export function ConversationWorkspace({
   const pendingMessageId = useRef<string | undefined>(undefined);
   const pendingMessageText = useRef<string | undefined>(undefined);
   const appliedInitialDraftId = useRef<string | undefined>(undefined);
-  const transcriptEnd = useRef<HTMLDivElement>(null);
-  const isWaiting = hasActiveJob;
+  const sendingRef = useRef(false);
+  const [sending, setSending] = useState(false);
+  const isWaiting = hasActiveJob || sending;
   const selectedConversation = conversations.find(
     (conversation) => conversation.id === selectedConversationId,
   );
@@ -100,31 +121,36 @@ export function ConversationWorkspace({
   const canSend = authentication?.state === "ready";
 
   useEffect(() => {
-    if (isNewConversation) return;
-    transcriptEnd.current?.scrollIntoView({
-      block: "end",
-      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
-        ? "auto"
-        : "smooth",
-    });
-  }, [isNewConversation, job?.state, messages]);
+    if (canSend && composer.current &&
+      (shortcutFocus || window.matchMedia("(pointer: fine)").matches)) {
+      composer.current.focus({ preventScroll: true });
+      if (shortcutFocus) onShortcutFocusHandled?.();
+    }
+  }, [canSend, shortcutFocus, onShortcutFocusHandled]);
 
   async function sendText(value: string): Promise<boolean> {
     const text = value.trim();
-    if (!text) return false;
+    if (!text || sendingRef.current || hasActiveJob || !canSend) return false;
     const clientMessageId =
       pendingMessageId.current && pendingMessageText.current === text
         ? pendingMessageId.current
         : createUuidV7();
     pendingMessageId.current = clientMessageId;
     pendingMessageText.current = text;
-    const sent = await onSend(text, clientMessageId);
-    if (sent) {
-      pendingMessageId.current = undefined;
-      pendingMessageText.current = undefined;
-      setDraft((current) => (current.trim() === text ? "" : current));
+    sendingRef.current = true;
+    setSending(true);
+    try {
+      const sent = await onSend(text, clientMessageId);
+      if (sent) {
+        pendingMessageId.current = undefined;
+        pendingMessageText.current = undefined;
+        setDraft((current) => (current.trim() === text ? "" : current));
+      }
+      return sent;
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
     }
-    return sent;
   }
 
   useEffect(() => {
@@ -156,25 +182,38 @@ export function ConversationWorkspace({
     pendingMessageId.current = undefined;
     pendingMessageText.current = undefined;
     setDraft("");
-    requestAnimationFrame(() => composer.current?.focus());
+    composer.current?.focus({ preventScroll: true });
   }
 
   function chooseStarter(text: string) {
     setDraft(text);
-    requestAnimationFrame(() => composer.current?.focus());
+    composer.current?.focus({ preventScroll: true });
   }
 
   async function retryLastRequest(text: string) {
     await sendText(text);
-    requestAnimationFrame(() => composer.current?.focus());
+    composer.current?.focus({ preventScroll: true });
   }
 
   return (
     <section
       className="assistant-page assistant-page--conversation"
       data-view={isNewConversation ? "new" : "thread"}
+      data-surface={onReturnHome ? "home" : undefined}
       aria-busy={loading}
     >
+      {onReturnHome && (
+        <div className="assistant-home-navigation">
+          <button
+            className="assistant-home-navigation__return focus-visible-control"
+            type="button"
+            onClick={onReturnHome}
+          >
+            <ArrowLeft aria-hidden="true" />
+            {copy.conversations.returnHome}
+          </button>
+        </div>
+      )}
       {error && (
         <p className="assistant-inline-alert" role="alert">
           {error}
@@ -197,6 +236,9 @@ export function ConversationWorkspace({
         >
           <MobileAssistantHeader
             disabled={isWaiting || startingNew}
+            conversations={conversations}
+            selectedConversationId={selectedConversationId}
+            onSelect={onSelect}
             onStartConversation={() => void startConversation()}
           />
           {isNewConversation ? (
@@ -216,7 +258,10 @@ export function ConversationWorkspace({
               onStartConversation={() => void startConversation()}
               onResolveAction={onResolveAction}
               onRetry={retryLastRequest}
-              transcriptEnd={transcriptEnd}
+              renderResult={renderResult}
+              onContinue={() =>
+                composer.current?.focus({ preventScroll: true })
+              }
             />
           )}
 
@@ -245,8 +290,14 @@ export function ConversationWorkspace({
 
 function MobileAssistantHeader({
   disabled,
+  conversations,
+  selectedConversationId,
+  onSelect,
   onStartConversation,
-}: {
+}: Pick<
+  ConversationWorkspaceProps,
+  "conversations" | "selectedConversationId" | "onSelect"
+> & {
   disabled: boolean;
   onStartConversation(): void;
 }) {
@@ -257,12 +308,30 @@ function MobileAssistantHeader({
       </span>
       <div>
         <strong>{copy.conversations.identity}</strong>
-        <p>{copy.conversations.mobileDescription}</p>
+        {conversations.length > 0 ? (
+          <select
+            className="assistant-mobile-identity__history focus-visible-control"
+            aria-label={copy.conversations.listTitle}
+            value={selectedConversationId ?? ""}
+            onChange={(event) => onSelect(event.currentTarget.value)}
+          >
+            <option value="" disabled>
+              {copy.conversations.newConversation}
+            </option>
+            {conversations.map((conversation) => (
+              <option key={conversation.id} value={conversation.id}>
+                {conversation.title ?? copy.conversations.untitled}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <p>{copy.conversations.mobileDescription}</p>
+        )}
       </div>
       <button
         className="assistant-mobile-identity__new focus-visible-control"
         type="button"
-        aria-label={copy.actions.startConversation}
+        aria-label={copy.conversations.newConversation}
         onClick={onStartConversation}
         disabled={disabled}
       >
@@ -302,7 +371,7 @@ function ConversationHistory({
         <button
           className="assistant-history__new focus-visible-control"
           type="button"
-          aria-label={copy.actions.startConversation}
+          aria-label={copy.conversations.newConversation}
           onClick={onStartConversation}
           disabled={loading || disabled}
         >
@@ -411,7 +480,8 @@ function ConversationThread({
   onStartConversation,
   onResolveAction,
   onRetry,
-  transcriptEnd,
+  renderResult,
+  onContinue,
 }: Pick<
   ConversationWorkspaceProps,
   "conversations" | "messages" | "job" | "loading"
@@ -420,15 +490,37 @@ function ConversationThread({
   onStartConversation(): void;
   onResolveAction(decision: "approve" | "decline"): Promise<void>;
   onRetry(text: string): Promise<void>;
-  transcriptEnd: RefObject<HTMLDivElement | null>;
+  renderResult: ConversationWorkspaceProps["renderResult"];
+  onContinue(): void;
 }) {
   const skeletonVisible = useDelayedSkeleton(loading);
   const showingSkeleton = loading || skeletonVisible;
-  const lastUserRequest = [...messages]
+  const lastUserMessage = [...messages]
     .reverse()
-    .find((message) => message.role === "user")?.content;
+    .find((message) => message.role === "user");
+  const lastUserRequest = lastUserMessage?.content;
   const latestTurnAssistantMessage =
     assistantResponseAfterLatestRequest(messages);
+  const transcript = useRef<HTMLDivElement>(null);
+  const following = useRef(true);
+  const [showLatest, setShowLatest] = useState(false);
+  const latestUserId = lastUserMessage?.id;
+  const feedback = assistantTurnFeedback(job, latestTurnAssistantMessage);
+
+  function scrollToLatest() {
+    const element = transcript.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }
+
+  useLayoutEffect(() => {
+    following.current = true;
+    setShowLatest(false);
+    scrollToLatest();
+  }, [conversationId, latestUserId]);
+
+  useLayoutEffect(() => {
+    if (following.current) scrollToLatest();
+  }, [messages, job?.state]);
 
   return (
     <section className="assistant-thread-panel" aria-busy={showingSkeleton}>
@@ -442,7 +534,7 @@ function ConversationThread({
         <button
           className="assistant-thread-header__new focus-visible-control"
           type="button"
-          aria-label={copy.actions.startConversation}
+          aria-label={copy.conversations.newConversation}
           onClick={onStartConversation}
           disabled={loading || Boolean(job && !isTerminalJob(job.state))}
         >
@@ -450,7 +542,18 @@ function ConversationThread({
           <span>{copy.conversations.newConversation}</span>
         </button>
       </header>
-      <div className="assistant-transcript" aria-live="off">
+      <div
+        className="assistant-transcript"
+        ref={transcript}
+        aria-live="off"
+        onScroll={(event) => {
+          const element = event.currentTarget;
+          following.current =
+            element.scrollHeight - element.clientHeight - element.scrollTop <=
+            48;
+          setShowLatest(!following.current);
+        }}
+      >
         {messages.length ? (
           <ol className="assistant-message-list">
             {messages.map((message) => {
@@ -480,24 +583,16 @@ function ConversationThread({
                       {formatMessageTime(message.createdAt)}
                     </time>
                   </div>
-                  <p className="assistant-message__content">
-                    <LinkifiedText text={message.content} />
-                    {streaming && (
-                      <span
-                        className="assistant-message__caret"
-                        aria-hidden="true"
+                  <div className="assistant-message__content">
+                    {message.role === "assistant" ? (
+                      <AssistantMarkdown
+                        text={message.content}
+                        streaming={streaming}
                       />
+                    ) : (
+                      <LinkifiedText text={message.content} />
                     )}
-                  </p>
-                  {streaming && (
-                    <span
-                      className="assistant-message__streaming"
-                      role="status"
-                    >
-                      <LoaderCircle aria-hidden="true" className="spin" />
-                      {copy.conversations.streaming}
-                    </span>
-                  )}
+                  </div>
                 </li>
               );
             })}
@@ -515,10 +610,9 @@ function ConversationThread({
             submitting={loading}
             onResolve={onResolveAction}
           />
-        ) : (
-          job &&
-          !isTerminalJob(job.state) && <AgentProgress state={job.state} />
-        )}
+        ) : null}
+        {latestTurnAssistantMessage?.status === "completed" &&
+          renderResult?.(latestTurnAssistantMessage, onContinue)}
         {job &&
           isFailedJob(job.state) &&
           lastUserRequest &&
@@ -529,8 +623,34 @@ function ConversationThread({
               onRetry={onRetry}
             />
           )}
-        <div className="assistant-transcript__end" ref={transcriptEnd} />
       </div>
+      {feedback && (
+        <p
+          className="assistant-turn-feedback assistant-turn-feedback--thread"
+          data-tone={feedback.tone}
+          role={feedback.tone === "error" ? "alert" : "status"}
+        >
+          {feedback.tone === "busy" && (
+            <LoaderCircle aria-hidden="true" className="spin" />
+          )}
+          {feedback.label}
+        </p>
+      )}
+      {showLatest && (
+        <button
+          className="assistant-thread-panel__latest focus-visible-control"
+          type="button"
+          onClick={() => {
+            following.current = true;
+            setShowLatest(false);
+            scrollToLatest();
+            onContinue();
+          }}
+        >
+          <ArrowDown aria-hidden="true" />
+          {copy.conversations.jumpToLatest}
+        </button>
+      )}
     </section>
   );
 }
@@ -558,22 +678,41 @@ function AssistantComposer({
       data-welcome={isNewConversation}
       onSubmit={onSubmit}
     >
-      <label className="assistant-request-field__label" htmlFor="agent-message">
+      <label className="sr-only" htmlFor="agent-message">
         {copy.conversations.composerLabel}
       </label>
       <textarea
         ref={composer}
         id="agent-message"
+        aria-describedby="agent-message-help"
         value={draft}
         onChange={(event) => onChange(event.target.value)}
         maxLength={24_000}
-        placeholder={copy.conversations.composerPlaceholder}
-        disabled={loading || waiting}
+        placeholder={
+          isNewConversation
+            ? copy.conversations.composerPlaceholder
+            : copy.conversations.followUpPlaceholder
+        }
+        onKeyDown={(event) => {
+          if (
+            event.key !== "Enter" ||
+            event.shiftKey ||
+            event.nativeEvent.isComposing ||
+            event.nativeEvent.keyCode === 229 ||
+            !window.matchMedia("(pointer: fine)").matches
+          )
+            return;
+          event.preventDefault();
+          if (!loading && !waiting && draft.trim())
+            event.currentTarget.form?.requestSubmit();
+        }}
         required
-        rows={isNewConversation ? 3 : 4}
+        rows={1}
       />
       <div className="assistant-request-field__footer">
-        <span>{copy.conversations.composerHelp}</span>
+        <span className="sr-only" id="agent-message-help">
+          {copy.conversations.composerHelp}
+        </span>
         <button
           className="assistant-request-field__send focus-visible-control"
           type="submit"
@@ -730,22 +869,6 @@ function AuthenticationHeading({ children }: { children: string }) {
       <Sparkles aria-hidden="true" />
       <h2 id="assistant-authentication-title">{children}</h2>
     </div>
-  );
-}
-
-function AgentProgress({ state }: { state: AgentJob["state"] }) {
-  const message =
-    state === "queued" || state === "claimed"
-      ? copy.conversations.preparing
-      : state === "waiting_approval"
-        ? copy.conversations.waitingApproval
-        : copy.conversations.processing;
-
-  return (
-    <p className="assistant-job-state" role="status">
-      <LoaderCircle aria-hidden="true" className="spin" />
-      {message}
-    </p>
   );
 }
 

@@ -26,6 +26,7 @@ export function InflowPromotionDialog({
   children,
   dialogCopy = inflowPromotionDialogCopy,
   className,
+  inline = false,
 }: {
   open: boolean;
   busy: boolean;
@@ -34,7 +35,9 @@ export function InflowPromotionDialog({
   children: ReactNode | ((requestClose: () => void) => ReactNode);
   dialogCopy?: typeof inflowPromotionDialogCopy;
   className?: string;
+  inline?: boolean;
 }) {
+  const modalOpen = open && !inline;
   const dialogRef = useRef<HTMLDialogElement>(null);
   const keepEditingRef = useRef<HTMLButtonElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
@@ -60,7 +63,7 @@ export function InflowPromotionDialog({
   };
 
   useEffect(() => {
-    if (!open) return;
+    if (!modalOpen) return;
     const dialog = dialogRef.current;
     if (!dialog) return;
     const opener = document.activeElement;
@@ -87,7 +90,7 @@ export function InflowPromotionDialog({
         opener.focus({ preventScroll: true });
       }
     };
-  }, [open]);
+  }, [modalOpen]);
 
   useEffect(() => {
     if (confirming) keepEditingRef.current?.focus();
@@ -97,10 +100,12 @@ export function InflowPromotionDialog({
   }, [confirming]);
 
   if (!open) return null;
+  if (inline)
+    return <>{typeof children === "function" ? children(onClose) : children}</>;
   return (
     <dialog
       ref={dialogRef}
-      className={["inflow-promotion-dialog", className]
+      className={["inflow-promotion-dialog work-dialog", className]
         .filter(Boolean)
         .join(" ")}
       aria-label={dialogCopy.title}
@@ -141,8 +146,8 @@ export function InflowPromotionDialog({
           requestClose();
       }}
     >
-      <header className="inflow-promotion-dialog__heading">
-        <ListTodo aria-hidden="true" />
+      <header className="inflow-promotion-dialog__heading work-dialog__header">
+        <ListTodo className="work-dialog__leading" aria-hidden="true" />
         <div>
           <h2>{dialogCopy.title}</h2>
           <p>{dialogCopy.description}</p>
@@ -162,7 +167,7 @@ export function InflowPromotionDialog({
       </div>
       {confirming && (
         <section
-          className="inflow-promotion-dialog__confirmation"
+          className="inflow-promotion-dialog__confirmation work-dialog__body"
           role="alertdialog"
           aria-label={dialogCopy.discardTitle}
         >
