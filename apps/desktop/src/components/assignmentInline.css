@@ -1,0 +1,154 @@
+.project-inflow-item__promote[data-inline="true"] {
+  gap: 12px;
+  padding: 12px 0 0;
+  border-block-start: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+}
+
+.project-inflow-item__promote[data-inline="true"]
+  > .inflow-promotion-dialog__body,
+.project-inflow-item__promote[data-inline="true"] .project-inflow-item__fields,
+.inline-assignment__details > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+}
+
+.project-inflow-item__promote[data-inline="true"] h3 {
+  margin: 0 0 4px;
+  color: var(--text-strong);
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 600;
+}
+
+.project-inflow-item__promote[data-inline="true"]
+  .project-inflow-item__deadline-field {
+  grid-column: 1;
+}
+
+.project-inflow-item__promote[data-inline="true"]
+  :is(.inline-assignment__details, .deadline-picker__shortcuts)
+  > summary {
+  min-height: 44px;
+  align-content: center;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.project-inflow-item__promote[data-inline="true"] .inflow-assignment-preview {
+  margin-block-start: 0;
+  padding-block: 0;
+}
+
+.project-inflow-item__promote[data-inline="true"]
+  .inflow-assignment-preview
+  > pre {
+  padding-block-end: 12px;
+}
+
+.project-inflow-item__promote[data-inline="true"]
+  .inflow-assignment-preview:not(details) {
+  padding-block: 8px;
+}
+
+.project-inflow-item__promote[data-inline="true"]
+  .project-inflow-item__register-actions {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.inline-assignment__destination {
+  flex: 1 1 200px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.inline-assignment__secondary {
+  margin-block-start: 4px;
+}
+
+.inline-assignment__disclosures {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+}
+
+.home-inflow-review__queue-origin {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.home-inflow-review__queue-origin > span {
+  flex-shrink: 0;
+  padding-inline: 4px;
+  border-radius: 4px;
+  background: var(--surface-hover);
+  color: var(--text-strong);
+  font-weight: 600;
+}
+
+@container (min-width: 560px) {
+  .project-inflow-item__promote[data-inline="true"]
+    .project-inflow-item__fields {
+    grid-template-columns: minmax(120px, 1fr) minmax(0, 3fr);
+    gap: 8px 16px;
+  }
+
+  .project-inflow-item__promote[data-inline="true"]
+    .project-inflow-item__deadline-field {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
+
+  .project-inflow-item__promote[data-inline="true"]
+    .project-inflow-item__assignee-field {
+    align-self: start;
+    padding-block-start: 28px;
+  }
+
+  .project-inflow-item__promote[data-inline="true"]
+    .project-inflow-item__fields
+    > .project-inflow-item__no-deadline {
+    grid-column: 1;
+    align-self: start;
+  }
+
+  .inline-assignment__disclosures {
+    grid-column: 1 / -1;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (width > 1000px) {
+  .home-inflow-review__detail:has(
+    .project-inflow-item__promote[data-inline="true"]
+  ) {
+    padding-block-end: 0;
+    scroll-padding-block-end: 80px;
+  }
+
+  /* Keep the end spacing inside the scroll content so fields never peek below the sticky footer. */
+  .home-inflow-review__detail:has(
+    .project-inflow-item__promote[data-inline="true"]
+  ) > ul {
+    padding-block-end: 16px;
+  }
+
+  .project-inflow-item__promote[data-inline="true"]
+    .project-inflow-item__register-actions {
+    position: sticky;
+    inset-block-end: 0;
+    z-index: 1;
+    border-block-start: 1px solid var(--border);
+    padding-block: 8px;
+    background: var(--surface-subtle);
+  }
+}

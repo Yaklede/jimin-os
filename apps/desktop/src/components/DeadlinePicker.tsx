@@ -1,10 +1,23 @@
-import { useId, useRef } from "react";
-import { CalendarDays } from "lucide-react";
+import { useId, useRef, type ReactNode } from "react";
+import { CalendarDays, Check } from "lucide-react";
 
 import { deadlinePickerCopy } from "../copy/deadlinePicker";
 
 const SEOUL_OFFSET_MILLIS = 9 * 60 * 60 * 1_000;
 const LOCAL_DATE_TIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/;
+const HOURS = Array.from({ length: 24 }, (_, index) => index);
+const MINUTES = Array.from({ length: 60 }, (_, index) => index);
+const TIME_PRESETS = [
+  { label: deadlinePickerCopy.todayTen, day: 0, hour: 10, minute: 0 },
+  { label: deadlinePickerCopy.todayThree, day: 0, hour: 15, minute: 0 },
+  { label: deadlinePickerCopy.todaySix, day: 0, hour: 18, minute: 0 },
+  { label: deadlinePickerCopy.todayEnd, day: 0, hour: 23, minute: 45 },
+  { label: deadlinePickerCopy.tomorrowSix, day: 1, hour: 18, minute: 0 },
+];
+const DATE_PRESETS = [
+  { label: deadlinePickerCopy.today, day: 0 },
+  { label: deadlinePickerCopy.tomorrow, day: 1 },
+];
 
 type DeadlinePickerProps = {
   id: string;
@@ -16,6 +29,7 @@ type DeadlinePickerProps = {
   invalid?: boolean;
   describedBy?: string;
   showPresets?: boolean;
+  collapsePresets?: boolean;
   allowClear?: boolean;
   now?: Date;
   className?: string;
@@ -31,8 +45,9 @@ export function DeadlinePicker({
   invalid = false,
   describedBy,
   showPresets = false,
+  collapsePresets = false,
   allowClear = true,
-  now = new Date(),
+  now,
   className,
 }: DeadlinePickerProps) {
   const generatedId = useId();
@@ -40,13 +55,20 @@ export function DeadlinePicker({
   const labelId = `${id || generatedId}-label`;
   const [date = "", time = ""] = value.split("T");
   const [hour = "", minute = ""] = time.split(":");
+  const presetTime = now ?? new Date();
+
+  function currentTime() {
+    return now ?? new Date();
+  }
 
   function changeDate(nextDate: string) {
     if (!nextDate) {
       onChange("");
       return;
     }
-    onChange(combineLocalDateTime(nextDate, time || nextQuarterHour(now)));
+    onChange(
+      combineLocalDateTime(nextDate, time || nextQuarterHour(currentTime())),
+    );
   }
 
   return (
@@ -80,7 +102,7 @@ export function DeadlinePicker({
           </label>
           <button
             type="button"
-            className="deadline-picker__calendar"
+            className="deadline-picker__calendar focus-visible-control"
             disabled={disabled}
             aria-label={`${label} ${deadlinePickerCopy.openCalendar}`}
             onClick={() => {
@@ -96,26 +118,6 @@ export function DeadlinePicker({
           >
             <CalendarDays aria-hidden="true" />
           </button>
-          {showPresets && (
-            <div className="deadline-picker__date-presets">
-              <button
-                type="button"
-                disabled={disabled}
-                onClick={() => changeDate(seoulDatePart(now))}
-              >
-                {deadlinePickerCopy.today}
-              </button>
-              <button
-                type="button"
-                disabled={disabled}
-                onClick={() =>
-                  changeDate(seoulDatePart(new Date(now.getTime() + 86400000)))
-                }
-              >
-                {deadlinePickerCopy.tomorrow}
-              </button>
-            </div>
-          )}
         </div>
         <div className="deadline-picker__time">
           <label>
@@ -133,13 +135,13 @@ export function DeadlinePicker({
                     value,
                     "hour",
                     event.currentTarget.value,
-                    now,
+                    currentTime(),
                   ),
                 )
               }
             >
               <option value="">{deadlinePickerCopy.hour}</option>
-              {Array.from({ length: 24 }, (_, index) => (
+              {HOURS.map((index) => (
                 <option key={index} value={pad(index)}>
                   {pad(index)}
                   {deadlinePickerCopy.hour}
@@ -164,58 +166,73 @@ export function DeadlinePicker({
                     value,
                     "minute",
                     event.currentTarget.value,
-                    now,
+                    currentTime(),
                   ),
                 )
               }
             >
               <option value="">{deadlinePickerCopy.minute}</option>
-              {Array.from({ length: 60 }, (_, index) => (
-                <option key={index} value={pad(index)}>
-                  {pad(index)}
-                  {deadlinePickerCopy.minute}
-                </option>
-              ))}
+              {MINUTES.map(minuteOption)}
             </select>
           </label>
         </div>
       </div>
       {showPresets && (
-        <div
-          className="deadline-picker__presets"
-          aria-label={deadlinePickerCopy.presets}
-        >
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={() => onChange(seoulPreset(now, 0, 18, 0))}
+        <DeadlinePresets collapsed={collapsePresets}>
+          <div
+            className="deadline-picker__date-presets"
+            role="group"
+            aria-label={deadlinePickerCopy.datePresets}
           >
-            {deadlinePickerCopy.todaySix}
-          </button>
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={() => onChange(seoulPreset(now, 0, 23, 45))}
+            {DATE_PRESETS.map(({ label, day }) => (
+              <button
+                key={label}
+                type="button"
+                className="focus-visible-control"
+                disabled={disabled}
+                onClick={() => changeDate(seoulDatePart(currentTime(), day))}
+              >
+                {label}
+              </button>
+            ))}
+            {allowClear && !required && (
+              <button
+                type="button"
+                className="focus-visible-control"
+                disabled={disabled || !value}
+                onClick={() => onChange("")}
+              >
+                {deadlinePickerCopy.clear}
+              </button>
+            )}
+          </div>
+          <div
+            className="deadline-picker__presets"
+            role="group"
+            aria-label={deadlinePickerCopy.presets}
           >
-            {deadlinePickerCopy.todayEnd}
-          </button>
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={() => onChange(seoulPreset(now, 1, 18, 0))}
-          >
-            {deadlinePickerCopy.tomorrowSix}
-          </button>
-          {allowClear && (
-            <button
-              type="button"
-              disabled={disabled || !value}
-              onClick={() => onChange("")}
-            >
-              {deadlinePickerCopy.clear}
-            </button>
-          )}
-        </div>
+            {TIME_PRESETS.map(({ label, day, hour, minute }) => (
+              <button
+                key={label}
+                type="button"
+                className="focus-visible-control"
+                disabled={disabled}
+                aria-pressed={
+                  value === seoulPreset(presetTime, day, hour, minute)
+                }
+                onClick={() =>
+                  onChange(seoulPreset(currentTime(), day, hour, minute))
+                }
+              >
+                <Check
+                  className="deadline-picker__preset-check"
+                  aria-hidden="true"
+                />
+                <span>{label}</span>
+              </button>
+            ))}
+          </div>
+        </DeadlinePresets>
       )}
       <p
         className="deadline-picker__preview"
@@ -225,6 +242,34 @@ export function DeadlinePicker({
         {formatSeoulDateTimePreview(value)}
       </p>
     </div>
+  );
+}
+
+function DeadlinePresets({
+  collapsed,
+  children,
+}: {
+  collapsed: boolean;
+  children: ReactNode;
+}) {
+  if (!collapsed) return <>{children}</>;
+  return (
+    <details className="deadline-picker__shortcuts">
+      <summary className="focus-visible-control">
+        {deadlinePickerCopy.presets}
+      </summary>
+      {children}
+    </details>
+  );
+}
+
+function minuteOption(minute: number) {
+  const value = pad(minute);
+  return (
+    <option key={value} value={value}>
+      {value}
+      {deadlinePickerCopy.minute}
+    </option>
   );
 }
 
@@ -354,8 +399,9 @@ function nextQuarterHour(now: Date): string {
   return `${pad(seoul.getUTCHours())}:${pad(seoul.getUTCMinutes())}`;
 }
 
-function seoulDatePart(now: Date): string {
+function seoulDatePart(now: Date, dayOffset = 0): string {
   const seoul = new Date(now.getTime() + SEOUL_OFFSET_MILLIS);
+  seoul.setUTCDate(seoul.getUTCDate() + dayOffset);
   return `${seoul.getUTCFullYear()}-${pad(seoul.getUTCMonth() + 1)}-${pad(
     seoul.getUTCDate(),
   )}`;
@@ -367,11 +413,7 @@ function seoulPreset(
   hour: number,
   minute: number,
 ): string {
-  const seoul = new Date(now.getTime() + SEOUL_OFFSET_MILLIS);
-  seoul.setUTCDate(seoul.getUTCDate() + dayOffset);
-  return `${seoul.getUTCFullYear()}-${pad(seoul.getUTCMonth() + 1)}-${pad(
-    seoul.getUTCDate(),
-  )}T${pad(hour)}:${pad(minute)}`;
+  return `${seoulDatePart(now, dayOffset)}T${pad(hour)}:${pad(minute)}`;
 }
 
 function pad(value: number): string {

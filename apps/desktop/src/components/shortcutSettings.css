@@ -1,0 +1,53 @@
+.settings-shortcuts {
+  min-inline-size: 0;
+}
+
+.settings-shortcuts h2 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 24px;
+}
+
+.settings-shortcuts ul {
+  display: grid;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.settings-shortcuts li,
+.settings-shortcuts__footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 8px 16px;
+  border-block-end: 1px solid var(--border);
+}
+
+.settings-shortcuts button {
+  min-block-size: 44px;
+  max-inline-size: 100%;
+}
+
+.settings-shortcuts kbd {
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-shortcuts__footer button {
+  margin-inline-start: auto;
+}
+
+.settings-shortcuts__footer p {
+  flex: 1 1 200px;
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  margin: 0;
+}
+
+.settings-shortcuts__footer p:empty {
+  display: none;
+}

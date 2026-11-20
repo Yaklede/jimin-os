@@ -34,7 +34,7 @@ import {
 } from "./ProjectInflowPanel";
 
 type DecisionInboxWorkspaceProps = {
-  mode?: "page" | "home";
+  mode?: "page" | "home" | "history";
   recovery?: {
     deliveryItems: DeliveryRecovery[];
     sourceItems: ProjectInflowItem[];
@@ -183,7 +183,11 @@ export function DecisionInboxWorkspace({
         <header className="page-heading decision-page__heading">
           <div>
             <span>{copy.decisions.eyebrow}</span>
-            <h1>{copy.decisions.title}</h1>
+            <h1>
+              {mode === "history"
+                ? copy.home.openDecisionInbox
+                : copy.decisions.title}
+            </h1>
             <p>{copy.decisions.description}</p>
           </div>
           <span className="decision-page__symbol" aria-hidden="true">
@@ -198,7 +202,7 @@ export function DecisionInboxWorkspace({
         </p>
       )}
 
-      {mode === "home" &&
+      {mode !== "page" &&
         recovery &&
         (recovery.deliveryItems.length > 0 || sourceRecovery.length > 0) && (
           <div className="home-review-actions__recoveries">
@@ -228,7 +232,7 @@ export function DecisionInboxWorkspace({
             confirmingId={confirmingItsmId}
             onConfirm={confirmItsm}
           />
-          {mode !== "home" && (
+          {mode === "page" && (
             <InflowDecisionSection
               items={pendingInflow}
               saving={inflowSaving}
@@ -239,7 +243,7 @@ export function DecisionInboxWorkspace({
               onOpenTask={onOpenTask}
             />
           )}
-          {mode !== "home" && <GmailInflowReview {...gmailReview} />}
+          {mode === "page" && <GmailInflowReview {...gmailReview} />}
           {(mode !== "home" || pending.length > 0) && (
             <DecisionSection
               id="pending-decisions"

@@ -78,6 +78,7 @@ import { ReportEvidencePanel } from "./ReportEvidencePanel";
 import { ProjectChatRoutingPanel } from "./ProjectChatRoutingPanel";
 import type { ChatAuthenticate } from "../api/chatRouting";
 import type { ReportEvidenceMetric, ReportEvidencePage } from "../api/projects";
+import "./weeklyReportDisclosure.css";
 
 type ProjectDetailTab =
   "tasks" | "weekly" | "inflow" | "integrations" | "activity";
@@ -753,13 +754,12 @@ export function ProjectsWorkspace({
       {(weeklyReport || weeklyReportError) &&
         projects.length > 0 &&
         !(mobile && selectedProject) && (
-          <MobileDisclosure mobile={mobile} title="이번 주 운영 리포트">
-            <WeeklyWorkspaceOverview
-              report={weeklyReport}
-              error={weeklyReportError}
-              onSelectProject={onSelectProject}
-            />
-          </MobileDisclosure>
+          <WeeklyWorkspaceOverview
+            key={selectedWorkspaceId}
+            report={weeklyReport}
+            error={weeklyReportError}
+            onSelectProject={onSelectProject}
+          />
         )}
 
       <div
@@ -1654,15 +1654,10 @@ function WeeklyWorkspaceOverview({
     ) : null;
   }
   return (
-    <section
-      className="project-weekly-overview"
-      aria-labelledby="project-weekly-overview-title"
-    >
-      <header className="project-weekly-overview__heading">
-        <span>
-          <h2 id="project-weekly-overview-title">
-            {copy.projects.weeklyReportTitle}
-          </h2>
+    <details className="project-weekly-overview project-weekly-overview--disclosure">
+      <summary className="focus-visible-control">
+        <span className="project-weekly-overview__summary">
+          <strong>{copy.projects.weeklyReportTitle}</strong>
           <small>
             {copy.projects.weeklyReportSummary(
               report.createdTaskCount,
@@ -1674,7 +1669,8 @@ function WeeklyWorkspaceOverview({
         <span className="project-weekly-overview__period">
           {formatWeeklyPeriod(report.periodStart, report.periodEnd)}
         </span>
-      </header>
+        <ChevronRight aria-hidden="true" />
+      </summary>
       <div className="project-weekly-overview__body">
         <dl className="project-weekly-metrics">
           <WeeklyMetric
@@ -1740,7 +1736,7 @@ function WeeklyWorkspaceOverview({
           ))}
         </div>
       </div>
-    </section>
+    </details>
   );
 }
 
@@ -2048,6 +2044,7 @@ function ProjectWeeklyReportPanel({
             <label className="project-report-document__summary">
               <span>{copy.projects.reportSummaryLabel}</span>
               <textarea
+                id={`weekly-report-summary-${latestReport.id}`}
                 value={summaryDraft}
                 onChange={(event) => setSummaryDraft(event.target.value)}
                 readOnly={latestReport.status !== "draft"}

@@ -176,9 +176,9 @@ describe("decision inbox actions", () => {
     expect(markup.match(/class="home-review-actions"/g)).toHaveLength(1);
   });
 
-  it("keeps approvals, retry and history collapsed on home without repeating Chat or Gmail inflow", () => {
+  it("keeps approvals and history on a separate page without repeating Chat or Gmail inflow", () => {
     const markup = renderDecisionInbox({
-      mode: "home",
+      mode: "history",
       recommendations: [
         recommendation("review", null),
         {
@@ -194,13 +194,13 @@ describe("decision inbox actions", () => {
       ],
       inflowItems: [promotableInflow()],
     });
-    expect(markup).toContain('<details id="home-review-actions"');
-    expect(markup).not.toContain('<details open="" id="home-review-actions"');
+    expect(markup).not.toContain('<details id="home-review-actions"');
+    expect(markup).toContain(copy.home.openDecisionInbox);
     expect(markup).toContain(copy.decisions.approve);
     expect(markup).toContain(copy.decisions.historyTitle);
     expect(markup).toContain(copy.decisions.retryAnalysis);
     expect(markup).not.toContain("신규 업무 확인");
-    expect(markup).not.toContain('class="page-heading decision-page__heading"');
+    expect(markup).toContain('class="page-heading decision-page__heading"');
   });
   it("surfaces a discovered ITSM project as an explicit owner decision", () => {
     const markup = renderToStaticMarkup(

@@ -598,11 +598,8 @@
     font-size: 16px;
     min-height: 48px;
   }
-  html[data-mobile-layout="true"] .deadline-picker__inputs {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  html[data-mobile-layout="true"] .deadline-picker__time {
-    width: 100%;
+  html[data-mobile-layout="true"] .deadline-picker .deadline-picker__inputs :is(input, select) {
+    font-size: 16px;
   }
   html[data-mobile-layout="true"] .planning-editor__actions,
   html[data-mobile-layout="true"] .planning-editor__delete-confirmation,

@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import type { Task } from "../api/planning";
+import { copy } from "../copy";
 import { designPreviewInflow } from "../design-preview-inflow";
 import { HomeWorkspace } from "./HomeWorkspace";
 
@@ -109,24 +110,43 @@ function homeProps(): ComponentProps<typeof HomeWorkspace> {
 }
 
 describe("home request-first layout", () => {
+  it("starts with compact filters and counts a shared task once across assignee groups", () => {
+    const props = homeProps();
+    props.snapshot!.tasks[0].assigneeName = "김경주, 송천안";
+    const markup = renderToStaticMarkup(createElement(HomeWorkspace, props));
+    expect(markup).toContain(
+      'aria-expanded="false" aria-controls="home-task-filter-controls"',
+    );
+    expect(markup).toContain('id="home-task-filter-controls" hidden=""');
+    expect(markup.match(/class="home-direct-tasks__shared"/g)).toHaveLength(2);
+    expect(markup).toContain(
+      'id="mobile-task-queue-title">할 일 <small>1개</small>',
+    );
+  });
   it.each([false, true])(
-    "keeps incoming and assistant requests before direct tasks (mobile=%s)",
+    "keeps scheduling and today's shortcut above the queue, then direct tasks (mobile=%s)",
     (mobile) => {
       layout.mobile = mobile;
       const markup = renderToStaticMarkup(
         createElement(HomeWorkspace, homeProps()),
       );
       const incoming = markup.indexOf('class="inflow-review-queues"');
-      const assistant = markup.indexOf('class="home-command"');
+      const assistant = markup.indexOf(
+        'class="home-command home-command--compact"',
+      );
       const tasks = markup.indexOf(
         'class="mobile-task-queue home-direct-tasks"',
       );
       const scheduled = markup.indexOf('data-testid="scheduled-layout-test"');
+      const today = markup.indexOf('class="home-today-shortcut');
       expect(scheduled).toBeGreaterThan(-1);
-      expect(incoming).toBeGreaterThan(scheduled);
-      expect(assistant).toBeGreaterThan(incoming);
-      expect(tasks).toBeGreaterThan(assistant);
+      expect(today).toBeGreaterThan(scheduled);
+      expect(incoming).toBeGreaterThan(today);
+      expect(tasks).toBeGreaterThan(incoming);
+      expect(assistant).toBeGreaterThan(tasks);
+      expect(markup).toContain('aria-controls="home-today-task-list"');
       expect(markup).not.toContain('class="inflow-recovery"');
+      expect(markup).not.toContain(copy.home.openDecisionInbox);
       expect(
         markup.match(/class="mobile-task-queue home-direct-tasks"/g),
       ).toHaveLength(1);

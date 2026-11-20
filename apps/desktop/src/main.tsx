@@ -5,6 +5,7 @@ import App from "./App";
 import { initializeAppearance } from "./appearance-preferences";
 import "./styles.css";
 import "./mobileWorkspace.css";
+import "./components/workDialog.css";
 
 const root = document.getElementById("root");
 

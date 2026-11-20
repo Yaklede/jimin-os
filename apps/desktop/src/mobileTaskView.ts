@@ -3,6 +3,17 @@ import type { Task } from "./api/planning";
 export type MobileTaskFilter = "today" | "overdue" | "all";
 export type MobileTaskGrouping = "assignee" | "date";
 
+export function taskAssignees(value: Task["assigneeName"]): string[] {
+  return [
+    ...new Set(
+      (value ?? "")
+        .split(",")
+        .map((name) => name.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
 export function seoulTaskDay(value: string | Date): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Seoul",
@@ -44,14 +55,7 @@ export function groupMobileTasks(tasks: Task[], grouping: MobileTaskGrouping) {
   for (const task of tasks) {
     const labels =
       grouping === "assignee"
-        ? [
-            ...new Set(
-              task.assigneeName
-                ?.split(",")
-                .map((name) => name.trim())
-                .filter(Boolean) ?? [],
-            ),
-          ]
+        ? taskAssignees(task.assigneeName)
         : task.dueAt
           ? [seoulTaskDay(task.dueAt)]
           : ["기한 없음"];

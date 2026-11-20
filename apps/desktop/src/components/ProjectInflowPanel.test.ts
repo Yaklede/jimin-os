@@ -9,6 +9,7 @@ import {
 } from "../api/googleChat";
 import { copy } from "../copy";
 import {
+  InflowItemRow,
   ProjectInflowPanel,
   isExistingTaskFollowUp,
   inflowContextScrollBehavior,
@@ -19,9 +20,86 @@ import {
   projectInflowAttentionCount,
   localInputToIso,
   resolvePromotionDeadline,
+  inflowRegistrationSummary,
 } from "./ProjectInflowPanel";
 
 describe("project inflow deadline", () => {
+  it("exposes assignment immediately for home without changing the existing follow-up actions", () => {
+    const row = (overrides: Partial<ProjectInflowItem>) =>
+      renderToStaticMarkup(
+        createElement(InflowItemRow, {
+          item: inflowItem("inline", overrides),
+          inlinePromotion: true,
+          saving: false,
+          onPromote: async () => undefined,
+          onDismiss: async () => undefined,
+          onRetryAnalysis: async () => undefined,
+          onRetryCompletion: async () => undefined,
+          onOpenTask: () => undefined,
+        }),
+      );
+    const ready = row({
+      suggestedAssigneeName: "김경주",
+      assigneeOptions: ["김경주"],
+      notifiableAssigneeNames: ["김경주"],
+    });
+    expect(ready).toContain('data-inline="true"');
+    expect(ready).toContain(copy.projects.inflowInlineAssignment);
+    expect(ready).toContain(copy.projects.inflowAssignmentNotify("김경주"));
+    expect(ready).toContain('class="inline-assignment__details"');
+    expect(ready).not.toContain("<dialog");
+    expect(row({ promotedTaskId: "already-open" })).toContain(
+      copy.projects.inflowFollowUpTitle,
+    );
+    expect(row({ promotedTaskId: "already-open" })).not.toContain(
+      'data-inline="true"',
+    );
+    expect(row({ analysisStatus: "failed" })).not.toContain(
+      'data-inline="true"',
+    );
+  });
+  it("summarizes the same Seoul deadline and notification availability used to register", () => {
+    expect(
+      inflowRegistrationSummary(
+        "김경주",
+        ["김경주"],
+        resolvePromotionDeadline("2026-11-20T15:00", false),
+      ),
+    ).toEqual({
+      assigneeLabel: "김경주",
+      deadlineLabel: "11월 20일 오후 3:00",
+      chatLabel: copy.projects.inflowSummaryChatScheduled,
+      canNotifyAssignee: true,
+    });
+    expect(inflowRegistrationSummary("", ["김경주"], undefined)).toEqual({
+      assigneeLabel: copy.projects.inflowSummaryNoAssignee,
+      deadlineLabel: copy.projects.inflowSummaryChooseDeadline,
+      chatLabel: copy.projects.inflowSummaryChatOff,
+      canNotifyAssignee: false,
+    });
+    expect(
+      inflowRegistrationSummary(
+        "송천안",
+        ["김경주"],
+        resolvePromotionDeadline("", true),
+      ),
+    ).toMatchObject({
+      deadlineLabel: copy.projects.inflowSummaryNoDeadline,
+      canNotifyAssignee: false,
+    });
+  });
+
+  it("shows a review action for unread requests but not for already reviewed ones", () => {
+    const unread = renderPanel({ items: [inflowItem("unread")] });
+    const reviewed = renderPanel({
+      items: [inflowItem("reviewed", { reviewed: true })],
+    });
+
+    expect(unread).toContain(`${copy.projects.inflowMarkSeen}</button>`);
+    expect(reviewed).not.toContain(`${copy.projects.inflowMarkSeen}</button>`);
+    expect(reviewed).toContain(copy.projects.inflowReviewed);
+  });
+
   it("offers independent collection and delivery purposes without treating a reporting room as acknowledged inflow", () => {
     const markup = renderPanel({
       sources: [{ ...googleChatSource(), purpose: "delivery" }],

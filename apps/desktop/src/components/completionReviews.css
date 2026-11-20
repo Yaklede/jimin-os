@@ -1,11 +1,79 @@
 .completion-reviews {
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 18px;
-  padding: 18px;
+  padding: 16px;
   display: grid;
   gap: 12px;
   min-width: 0;
+}
+.completion-reviews__selection {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding-block-end: 8px;
+  border-block-end: 1px solid var(--border);
+}
+.completion-reviews__selection > button {
+  margin-inline-start: auto;
+}
+.completion-reviews__count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.completion-review__row:has(.completion-reviews__pick) {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+}
+.completion-reviews__pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  min-width: 44px;
+  cursor: pointer;
+}
+.completion-review__row .completion-reviews__pick {
+  justify-content: center;
+}
+.completion-reviews__pick-control {
+  display: inline-grid;
+  flex: none;
+  inline-size: 20px;
+  block-size: 20px;
+}
+.completion-reviews__pick-control > * {
+  grid-area: 1 / 1;
+}
+.completion-reviews__pick-control > input {
+  inline-size: 100%;
+  block-size: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: inherit;
+}
+.completion-reviews__pick-control > svg {
+  color: var(--muted);
+  border-radius: 50%;
+  pointer-events: none;
+}
+.completion-reviews__pick-control > input:is(:checked, :indeterminate) + svg {
+  color: var(--completion);
+}
+.completion-reviews__pick-control > input:disabled + svg {
+  opacity: 0.55;
+}
+.completion-reviews__pick-control > input:focus-visible + svg {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+@media (hover: hover) {
+  .completion-reviews__pick:hover input:not(:disabled, :checked, :indeterminate) + svg {
+    color: var(--text-strong);
+  }
+}
+.completion-reviews__pick:has(input:disabled) {
+  cursor: default;
 }
 .completion-reviews > header {
   display: flex;
@@ -24,12 +92,12 @@
 }
 .completion-reviews h2 > span {
   color: var(--accent);
-  font-size: 0.85rem;
+  font-size: 14px;
 }
 .completion-reviews header p {
   color: var(--muted);
   margin: 8px 0 0;
-  font-size: 0.85rem;
+  font-size: 14px;
 }
 .completion-review {
   min-width: 0;
@@ -129,13 +197,15 @@
   background: var(--accent);
   color: var(--on-accent);
   border-color: transparent;
-  font-weight: 650;
+  font-weight: 600;
 }
 .completion-reviews button:disabled {
   cursor: default;
   opacity: 0.5;
 }
 .completion-reviews button:focus-visible,
+.completion-reviews input:focus-visible,
+.completion-reviews h2:focus-visible,
 .completion-reviews textarea:focus-visible,
 .completion-reviews summary:focus-visible {
   outline: 2px solid var(--focus);

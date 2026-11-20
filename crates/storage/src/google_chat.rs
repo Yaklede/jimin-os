@@ -9,6 +9,35 @@ use sqlx::types::Json;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+// Shared by Home, project review and delivery. Keep excluded/closed threads out
+// before pagination without mutating their audit or pending delivery records.
+// Callers provide a project_inflow_items row aliased as `item`.
+macro_rules! google_chat_attention_query {
+    ($before:literal, $after:literal $(,)?) => {
+        concat!(
+            $before,
+            " NOT EXISTS (
+        SELECT 1 FROM project_inflow_items AS decision
+        WHERE decision.user_id = item.user_id AND decision.source_id = item.source_id
+          AND decision.provider_thread_name = item.provider_thread_name
+          AND decision.status = 'dismissed' AND decision.promoted_task_id IS NULL
+    ) AND NOT EXISTS (
+        SELECT 1 FROM tasks AS task
+        WHERE task.user_id = item.user_id AND task.status <> 'open'
+          AND task.id = COALESCE(item.promoted_task_id, (
+              SELECT analysis.linked_task_id FROM project_inflow_analyses AS analysis
+              WHERE analysis.user_id = item.user_id AND analysis.source_id = item.source_id
+                AND analysis.conversation_key = CASE WHEN item.provider_thread_name IS NOT NULL
+                    THEN 'thread:' || item.provider_thread_name
+                    ELSE 'message:' || item.provider_message_name END
+          ))
+    ) ",
+            $after
+        )
+    };
+}
+pub(crate) use google_chat_attention_query;
+
 use crate::{
     Database, StorageError,
     auth::{append_change, append_delete_change},
@@ -1557,7 +1586,7 @@ impl Database {
         status: Option<ProjectInflowStatus>,
     ) -> Result<Vec<ProjectInflowItem>, StorageError> {
         let status = status.map(status_name);
-        let rows = sqlx::query_as::<_, ProjectInflowItemRow>(
+        let query = google_chat_attention_query!(
             "SELECT item.id, item.project_id, project.title AS project_name,
                 item.source_id, source.display_name AS source_name,
                 item.provider_thread_name, item.sender_provider_name,
@@ -1593,15 +1622,18 @@ impl Database {
              JOIN projects AS project ON project.id = item.project_id
              WHERE item.user_id = $1 AND item.project_id = $2
                AND ($3::TEXT IS NULL OR item.status = $3)
+               AND (item.status <> 'pending' OR (",
+            "))
              ORDER BY item.received_at DESC, item.id DESC
              LIMIT 200",
-        )
-        .bind(user_id)
-        .bind(project_id)
-        .bind(status)
-        .fetch_all(self.pool())
-        .await
-        .map_err(classify)?;
+        );
+        let rows = sqlx::query_as::<_, ProjectInflowItemRow>(query)
+            .bind(user_id)
+            .bind(project_id)
+            .bind(status)
+            .fetch_all(self.pool())
+            .await
+            .map_err(classify)?;
         rows.into_iter().map(ProjectInflowItem::try_from).collect()
     }
 
@@ -1619,7 +1651,7 @@ impl Database {
         if !is_v7(user_id) {
             return Err(StorageError::InvalidConfiguration);
         }
-        let rows = sqlx::query_as::<_, ProjectInflowItemRow>(
+        let query = google_chat_attention_query!(
             "SELECT item.id, item.project_id, project.title AS project_name,
                 item.source_id, source.display_name AS source_name,
                 item.provider_thread_name, item.sender_provider_name,
@@ -1654,13 +1686,16 @@ impl Database {
              JOIN google_chat_accounts AS account ON account.id = source.account_id
              JOIN projects AS project ON project.id = item.project_id
              WHERE item.user_id = $1 AND item.status = 'pending'
+               AND (",
+            ")
              ORDER BY item.received_at DESC, item.id DESC
              LIMIT 200",
-        )
-        .bind(user_id)
-        .fetch_all(self.pool())
-        .await
-        .map_err(classify)?;
+        );
+        let rows = sqlx::query_as::<_, ProjectInflowItemRow>(query)
+            .bind(user_id)
+            .fetch_all(self.pool())
+            .await
+            .map_err(classify)?;
         rows.into_iter().map(ProjectInflowItem::try_from).collect()
     }
 

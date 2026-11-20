@@ -11,7 +11,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { createUuidV7 } from "../uuid";
 import { registerMobileBackHandler } from "../mobileBack";
 import { PlanningRequestError } from "../api/planning";
@@ -35,7 +35,9 @@ import {
   type ScheduledWorkRunPage,
 } from "../api/scheduledWork";
 import { scheduledWorkCopy as c } from "../copy/scheduledWork";
+import { copy } from "../copy";
 import { scheduledChatCopy as chatCopy } from "../copy/scheduledChat";
+import { workspaceActionCopy } from "../copy/workspaceActions";
 import {
   latestScheduledFailure,
   mergeScheduledRuns,
@@ -142,6 +144,9 @@ export function ScheduledWorkPanel({
   const [deleteItem, setDeleteItem] = useState<ScheduledWork>();
   const [runItem, setRunItem] = useState<ScheduledWork>();
   const dialog = useRef<HTMLDialogElement>(null);
+  const editorId = useId();
+  const previewHeading = useRef<HTMLHeadingElement>(null);
+  const errorNotice = useRef<HTMLParagraphElement>(null);
   const confirmation = useRef<HTMLElement>(null);
   const opener = useRef<HTMLElement | null>(null);
   const generation = useRef(0);
@@ -408,6 +413,13 @@ export function ScheduledWorkPanel({
     scoped.map((item) => item.id),
   );
   const key = definition ? JSON.stringify(definition) : "";
+  useEffect(() => {
+    if (previewKey && previewKey === key && !busy)
+      previewHeading.current?.focus();
+  }, [previewKey, key, busy]);
+  useEffect(() => {
+    if (error && !busy) errorNotice.current?.focus();
+  }, [error, busy]);
   const names =
     webhooks.find((h) => h.id === definition?.webhookId)?.mentionDirectory
       .users ?? {};
@@ -427,7 +439,9 @@ export function ScheduledWorkPanel({
         <span>
           <strong>
             {c.title}
-            {active.length > 0 ? ` · ${active.length}개 실행 중` : ""}
+            {active.length > 0
+              ? ` · ${copy.home.scheduledEnabledCount(active.length)}`
+              : ""}
           </strong>
           <small>
             {latestFailure
@@ -441,7 +455,7 @@ export function ScheduledWorkPanel({
       </button>
       <dialog
         ref={dialog}
-        className="scheduled-dialog"
+        className="scheduled-dialog work-dialog work-dialog--scheduled"
         aria-labelledby="scheduled-title"
         aria-busy={!!busy}
         onCancel={(event) => {
@@ -449,7 +463,7 @@ export function ScheduledWorkPanel({
           close();
         }}
       >
-        <header className="scheduled-heading">
+        <header className="scheduled-heading work-dialog__header">
           <div>
             <h2 id="scheduled-title">{c.title}</h2>
             <p>{c.description}</p>
@@ -464,827 +478,850 @@ export function ScheduledWorkPanel({
             <X />
           </button>
         </header>
-        <div className="scheduled-toolbar">
-          <div className="scheduled-tabs">
-            <button
-              type="button"
-              aria-pressed={tab === "list"}
-              onClick={() => setTab("list")}
-            >
-              {c.list}
-            </button>
-            <button
-              type="button"
-              aria-pressed={tab === "history"}
-              onClick={() => {
-                setTab("history");
-                void reload();
-              }}
-            >
-              <History />
-              {c.history}
-            </button>
-          </div>
-          <button
-            type="button"
-            className="scheduled-icon"
-            aria-label="예약 새로고침"
-            disabled={!!busy}
-            onClick={() => void perform("reload", reload)}
-          >
-            <RefreshCw className={busy === "reload" ? "scheduled-spin" : ""} />
-          </button>
-        </div>
-        {error && (
-          <p className="inline-alert" role="alert">
-            {error}
-          </p>
-        )}
-        {notice && (
-          <p className="scheduled-notice" role="status">
-            {notice}
-          </p>
-        )}
-        <ScheduledWorkCloseConfirmation
-          open={confirm === "close"}
-          onKeepEditing={() => setConfirm(undefined)}
-          onDiscard={() => {
-            setConfirm(undefined);
-            setDefinition(undefined);
-            setEditing(undefined);
-            setOpen(false);
-          }}
-        />
-        {confirm && confirm !== "close" && (
-          <section
-            ref={confirmation}
-            className="scheduled-confirm"
-            aria-label="변경 확인"
-          >
-            <p>
-              {confirm === "delete"
-                ? c.deleteHelp
-                : confirm === "run"
-                  ? c.manualHolidayHelp
-                  : c.closeHelp}
-            </p>
-            <div className="scheduled-actions">
-              <button type="button" onClick={() => setConfirm(undefined)}>
-                돌아가기
-              </button>
+        <div className="work-dialog__body">
+          {!definition && (
+            <div className="scheduled-toolbar">
+              <div className="scheduled-tabs">
+                <button
+                  type="button"
+                  aria-pressed={tab === "list"}
+                  onClick={() => setTab("list")}
+                >
+                  {c.list}
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={tab === "history"}
+                  onClick={() => {
+                    setTab("history");
+                    void reload();
+                  }}
+                >
+                  <History />
+                  {c.history}
+                </button>
+              </div>
               <button
                 type="button"
+                className="scheduled-icon"
+                aria-label="예약 새로고침"
                 disabled={!!busy}
-                onClick={() =>
-                  confirm === "run"
-                    ? runItem && void action(runItem, "run_now", true)
-                    : confirm === "list"
-                      ? (setDefinition(undefined),
-                        setEditing(undefined),
-                        setConfirm(undefined))
-                      : deleteItem && void action(deleteItem, "delete")
-                }
+                onClick={() => void perform("reload", reload)}
               >
+                <RefreshCw
+                  className={busy === "reload" ? "scheduled-spin" : ""}
+                />
+              </button>
+            </div>
+          )}
+          {error && (
+            <p
+              ref={errorNotice}
+              tabIndex={-1}
+              className="inline-alert"
+              role="alert"
+            >
+              {error}
+            </p>
+          )}
+          {notice && (
+            <p className="scheduled-notice" role="status">
+              {notice}
+            </p>
+          )}
+          <ScheduledWorkCloseConfirmation
+            open={confirm === "close"}
+            onKeepEditing={() => setConfirm(undefined)}
+            onDiscard={() => {
+              setConfirm(undefined);
+              setDefinition(undefined);
+              setEditing(undefined);
+              setOpen(false);
+            }}
+          />
+          {confirm && confirm !== "close" && (
+            <section
+              ref={confirmation}
+              className="scheduled-confirm"
+              aria-label="변경 확인"
+            >
+              <p>
                 {confirm === "delete"
-                  ? "예약 지우기"
+                  ? c.deleteHelp
                   : confirm === "run"
-                    ? "확인하고 지금 실행"
-                    : "저장하지 않고 닫기"}
-              </button>
-            </div>
-          </section>
-        )}
-        {tab === "list" && !definition && (
-          <div className="scheduled-content">
-            <div className="scheduled-actions">
-              <button
-                className="primary-button"
-                type="button"
-                disabled={workspaces.length === 0}
-                onClick={() => edit()}
-              >
-                <Plus />
-                {c.add}
-              </button>
-              <button
-                type="button"
-                disabled={workspaces.length === 0}
-                onClick={() => edit(undefined, "brief")}
-              >
-                저녁 브리핑 만들기
-              </button>
-            </div>
-            {!scoped.length && <p className="scheduled-empty">{c.empty}</p>}
-            {scoped.map((item) => (
-              <article className="scheduled-rule" key={item.id}>
-                <div>
-                  <strong>{item.definition.title}</strong>
-                  <span className="scheduled-badge">
-                    {item.enabled ? c.active : c.paused}
-                  </span>
-                  <p>
-                    {item.definition.weekdays
-                      .map((day) => days[day - 1])
-                      .join("·")}{" "}
-                    {item.definition.time}
-                    {item.definition.followUpTime
-                      ? ` / ${item.definition.followUpTime} 재확인`
-                      : ""}{" "}
-                    · 한국 시간
-                  </p>
-                  <p>
-                    {item.definition.destination === "google_chat"
-                      ? "Google Chat"
-                      : "홈과 앱 알림"}{" "}
-                    ·{" "}
-                    {item.definition.messageDetail === "title_and_details"
-                      ? "제목 + 내용"
-                      : "제목만"}{" "}
-                    ·{" "}
-                    {item.enabled
-                      ? `다음 ${date(item.nextRunAt)}`
-                      : "다시 시작할 때까지 실행하지 않아요."}
-                  </p>
-                </div>
-                <div className="scheduled-actions">
-                  <button
-                    type="button"
-                    disabled={!!busy}
-                    onClick={() => edit(item)}
-                  >
-                    <Pencil />
-                    수정
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!!busy}
-                    onClick={() => {
-                      if (item.definition.skipHolidays) {
-                        setRunItem(item);
-                        setConfirm("run");
-                      } else void action(item, "run_now");
-                    }}
-                  >
-                    <Play />
-                    지금 실행
-                  </button>
-                  {item.enabled ? (
-                    <>
-                      <button
-                        type="button"
-                        disabled={!!busy}
-                        onClick={() => void action(item, "skip_once")}
-                      >
-                        <SkipForward />
-                        이번만 건너뛰기
-                      </button>
-                      <button
-                        type="button"
-                        disabled={!!busy}
-                        onClick={() => void action(item, "pause")}
-                      >
-                        <Pause />
-                        정지
-                      </button>
-                    </>
-                  ) : (
+                    ? c.manualHolidayHelp
+                    : c.closeHelp}
+              </p>
+              <div className="scheduled-actions">
+                <button type="button" onClick={() => setConfirm(undefined)}>
+                  돌아가기
+                </button>
+                <button
+                  type="button"
+                  disabled={!!busy}
+                  onClick={() =>
+                    confirm === "run"
+                      ? runItem && void action(runItem, "run_now", true)
+                      : confirm === "list"
+                        ? (setDefinition(undefined),
+                          setEditing(undefined),
+                          setConfirm(undefined))
+                        : deleteItem && void action(deleteItem, "delete")
+                  }
+                >
+                  {confirm === "delete"
+                    ? "예약 지우기"
+                    : confirm === "run"
+                      ? "확인하고 지금 실행"
+                      : "저장하지 않고 닫기"}
+                </button>
+              </div>
+            </section>
+          )}
+          {tab === "list" && !definition && (
+            <div className="scheduled-content">
+              <div className="scheduled-actions">
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={workspaces.length === 0}
+                  onClick={() => edit()}
+                >
+                  <Plus />
+                  {c.add}
+                </button>
+                <button
+                  type="button"
+                  disabled={workspaces.length === 0}
+                  onClick={() => edit(undefined, "brief")}
+                >
+                  저녁 브리핑 만들기
+                </button>
+              </div>
+              {!scoped.length && <p className="scheduled-empty">{c.empty}</p>}
+              {scoped.map((item) => (
+                <article className="scheduled-rule" key={item.id}>
+                  <div>
+                    <strong>{item.definition.title}</strong>
+                    <span className="scheduled-badge">
+                      {item.enabled ? c.active : c.paused}
+                    </span>
+                    <p>
+                      {item.definition.weekdays
+                        .map((day) => days[day - 1])
+                        .join("·")}{" "}
+                      {item.definition.time}
+                      {item.definition.followUpTime
+                        ? ` / ${item.definition.followUpTime} 재확인`
+                        : ""}{" "}
+                      · 한국 시간
+                    </p>
+                    <p>
+                      {item.definition.destination === "google_chat"
+                        ? "Google Chat"
+                        : "홈과 앱 알림"}{" "}
+                      ·{" "}
+                      {item.definition.messageDetail === "title_and_details"
+                        ? "제목 + 내용"
+                        : "제목만"}{" "}
+                      ·{" "}
+                      {item.enabled
+                        ? `다음 ${date(item.nextRunAt)}`
+                        : "다시 시작할 때까지 실행하지 않아요."}
+                    </p>
+                  </div>
+                  <div className="scheduled-actions">
                     <button
                       type="button"
                       disabled={!!busy}
                       onClick={() => edit(item)}
                     >
-                      <Play />
-                      확인하고 시작
+                      <Pencil />
+                      수정
                     </button>
-                  )}
-                  <button
-                    type="button"
-                    aria-label={`${item.definition.title} 지우기`}
-                    disabled={!!busy}
-                    onClick={() => {
-                      setDeleteItem(item);
-                      setConfirm("delete");
-                    }}
-                  >
-                    <Trash2 />
-                  </button>
-                </div>
-              </article>
-            ))}
-          </div>
-        )}
-        {tab === "list" && definition && (
-          <form
-            className="scheduled-form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void perform("preview", async () => {
-                const value = await request<ScheduledWorkPreview>(
-                  "/preview",
-                  definition,
-                  "POST",
-                );
-                setPreview(value);
-                setPreviewKey(key);
-              });
-            }}
-          >
-            <fieldset disabled={!!busy}>
-              <legend>{editing ? "예약 수정" : "새 예약"}</legend>
-              {!editing && (
-                <label>
-                  시작 양식
-                  <select
-                    aria-label="시작 양식"
-                    value={
-                      definition.includeSchedules
-                        ? "brief"
-                        : definition.followUpTime
-                          ? "followup"
-                          : "deadline"
-                    }
-                    onChange={(event) =>
-                      edit(
-                        undefined,
-                        event.target.value as "deadline" | "followup" | "brief",
-                      )
-                    }
-                  >
-                    <option value="deadline">마감 안내</option>
-                    <option value="followup">
-                      마감 안내 + 오후 남은 일 재확인
-                    </option>
-                    <option value="brief">저녁에 내일 준비 브리핑</option>
-                  </select>
-                </label>
-              )}
-              <label>
-                예약 이름
-                <input
-                  aria-label="예약 이름"
-                  required
-                  maxLength={120}
-                  value={definition.title}
-                  onChange={(event) => update({ title: event.target.value })}
-                />
-              </label>
-              <div className="scheduled-grid">
-                <label>
-                  업무 공간
-                  <select
-                    aria-label="업무 공간"
-                    required
-                    value={definition.workspaceId}
-                    onChange={(event) =>
-                      update({
-                        workspaceId: event.target.value,
-                        projectId: null,
-                        webhookId: null,
-                        replyCompletionSourceId: null,
-                        includeSchedules: false,
-                      })
-                    }
-                  >
-                    {workspaces.map((space) => (
-                      <option key={space.id} value={space.id}>
-                        {space.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  프로젝트
-                  <select
-                    aria-label="프로젝트"
-                    value={definition.projectId ?? ""}
-                    required={definition.destination === "google_chat"}
-                    onChange={(event) =>
-                      update({
-                        projectId: event.target.value || null,
-                        webhookId: null,
-                        replyCompletionSourceId: null,
-                      })
-                    }
-                  >
-                    <option value="">공간 전체</option>
-                    {projects.map((project) => (
-                      <option key={project.id} value={project.id}>
-                        {project.title}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              <fieldset className="scheduled-days">
-                <legend>반복 요일</legend>
-                {days.map((day, index) => (
-                  <button
-                    type="button"
-                    aria-pressed={definition.weekdays.includes(index + 1)}
-                    aria-label={`${day}요일`}
-                    key={day}
-                    onClick={() =>
-                      update({
-                        weekdays: definition.weekdays.includes(index + 1)
-                          ? definition.weekdays.filter((d) => d !== index + 1)
-                          : [...definition.weekdays, index + 1].sort(),
-                      })
-                    }
-                  >
-                    {day}
-                  </button>
-                ))}
-              </fieldset>
-              <div className="scheduled-grid">
-                <label>
-                  실행 시각
-                  <input
-                    aria-label="실행 시각"
-                    type="time"
-                    required
-                    value={definition.time}
-                    onChange={(event) => update({ time: event.target.value })}
-                  />
-                  <small>한국 시간 기준이에요.</small>
-                </label>
-                <label>
-                  후속 확인 시각 (선택)
-                  <input
-                    aria-label="후속 확인 시각 (선택)"
-                    type="time"
-                    value={definition.followUpTime ?? ""}
-                    disabled={definition.includeSchedules}
-                    onChange={(event) =>
-                      update({ followUpTime: event.target.value || null })
-                    }
-                  />
-                  <small>앞서 안내한 일 중 남은 일만 확인해요.</small>
-                </label>
-              </div>
-              <label>
-                확인할 할 일
-                <select
-                  aria-label="확인할 할 일"
-                  disabled={(definition.condition ?? "always") !== "always"}
-                  value={definition.taskScope}
-                  onChange={(event) =>
-                    update({
-                      taskScope: event.target
-                        .value as ScheduledWorkDefinition["taskScope"],
-                    })
-                  }
-                >
-                  <option value="today">오늘 마감</option>
-                  <option value="tomorrow">내일 마감</option>
-                  <option value="today_tomorrow">오늘과 내일 마감</option>
-                  <option value="overdue">기한이 지난 일</option>
-                  <option value="all_open">모든 열린 할 일</option>
-                </select>
-              </label>
-              <label>
-                알릴 조건
-                <select
-                  aria-label="알릴 조건"
-                  value={definition.condition ?? "always"}
-                  onChange={(event) =>
-                    update({
-                      condition: event.target
-                        .value as ScheduledWorkDefinition["condition"],
-                      ...(event.target.value === "completion_confirmation"
-                        ? { replyCompletionSourceId: null }
-                        : {}),
-                      ...(event.target.value !== "always"
-                        ? { includeSchedules: false }
-                        : {}),
-                      ...(event.target.value !== "always"
-                        ? { taskScope: "all_open" }
-                        : {}),
-                    })
-                  }
-                >
-                  <option value="always">범위에 맞는 일 안내</option>
-                  <option value="deadline_near">마감이 가까운 일만</option>
-                  <option value="no_response">대기 중 응답이 없는 일만</option>
-                  <option value="completion_confirmation">
-                    완료 후 응답이 없는 일만
-                  </option>
-                </select>
-              </label>
-              {definition.condition && definition.condition !== "always" && (
-                <label>
-                  {definition.condition === "deadline_near"
-                    ? "마감까지 남은 시간 이내"
-                    : "응답 없이 지난 시간 이상"}
-                  <input
-                    aria-label={
-                      definition.condition === "deadline_near"
-                        ? "마감까지 남은 시간 이내"
-                        : "응답 없이 지난 시간 이상"
-                    }
-                    type="number"
-                    min={1}
-                    max={168}
-                    required
-                    value={definition.conditionHours ?? 24}
-                    onChange={(event) =>
-                      update({ conditionHours: Number(event.target.value) })
-                    }
-                  />
-                  <small>
-                    시간 단위예요. 예약 시각마다 최신 상태를 확인해요. 같은
-                    날짜·실행 차례는 중복 전송하지 않아요. 대기 중 응답은 대기
-                    사유를 저장한 이후의 외부 답글로 판단해요. 완료 확인은 최근
-                    30일 내 완료한 일을 대상으로 해요.
-                  </small>
-                </label>
-              )}
-              <label className="scheduled-check">
-                <input
-                  aria-label={c.skipHolidays}
-                  type="checkbox"
-                  checked={definition.skipHolidays ?? false}
-                  onChange={(event) =>
-                    update({ skipHolidays: event.target.checked })
-                  }
-                />
-                {c.skipHolidays}
-              </label>
-              <p className="scheduled-hint">{c.holidayHelp}</p>
-              <label className="scheduled-check">
-                <input
-                  aria-label="기한이 지난 일도 포함"
-                  type="checkbox"
-                  checked={definition.includeOverdue}
-                  onChange={(event) =>
-                    update({ includeOverdue: event.target.checked })
-                  }
-                />
-                기한이 지난 일도 포함
-              </label>
-              <label className="scheduled-check">
-                <input
-                  aria-label="개인 일정도 함께 확인"
-                  type="checkbox"
-                  disabled={
-                    (definition.condition ?? "always") !== "always" ||
-                    definition.destination === "google_chat" ||
-                    !!definition.followUpTime ||
-                    workspaces.find((w) => w.id === definition.workspaceId)
-                      ?.scope !== "personal"
-                  }
-                  checked={definition.includeSchedules}
-                  onChange={(event) =>
-                    update({ includeSchedules: event.target.checked })
-                  }
-                />
-                개인 일정도 함께 확인
-              </label>
-              <label>
-                전달할 곳
-                <select
-                  aria-label="전달할 곳"
-                  value={definition.destination}
-                  onChange={(event) =>
-                    update({
-                      destination: event.target.value as
-                        "google_chat" | "in_app",
-                      webhookId: null,
-                      replyCompletionSourceId: null,
-                      mentionNames: [],
-                      mentionAssignees: event.target.value === "google_chat",
-                      includeSchedules: false,
-                    })
-                  }
-                >
-                  <option value="in_app">홈과 앱 알림</option>
-                  <option value="google_chat">Google Chat</option>
-                </select>
-              </label>
-              <label>
-                알림에 표시할 내용
-                <select
-                  aria-label="알림에 표시할 내용"
-                  value={definition.messageDetail ?? "title_only"}
-                  aria-describedby="scheduled-message-detail-help"
-                  onChange={(event) =>
-                    update({
-                      messageDetail: event.target
-                        .value as ScheduledWorkDefinition["messageDetail"],
-                    })
-                  }
-                >
-                  <option value="title_only">제목만</option>
-                  <option value="title_and_details">제목 + 내용</option>
-                </select>
-                <small id="scheduled-message-detail-help">
-                  {definition.messageDetail === "title_and_details"
-                    ? "제목과 마감일에 설명, 처리할 내용, 참고 링크를 함께 보내요."
-                    : "담당자별로 할 일 제목과 마감일만 보내요."}
-                </small>
-              </label>
-              {definition.destination === "google_chat" && (
-                <>
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      onClick={() => {
+                        if (item.definition.skipHolidays) {
+                          setRunItem(item);
+                          setConfirm("run");
+                        } else void action(item, "run_now");
+                      }}
+                    >
+                      <Play />
+                      지금 실행
+                    </button>
+                    {item.enabled ? (
+                      <>
+                        <button
+                          type="button"
+                          disabled={!!busy}
+                          onClick={() => void action(item, "skip_once")}
+                        >
+                          <SkipForward />
+                          이번만 건너뛰기
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!!busy}
+                          onClick={() => void action(item, "pause")}
+                        >
+                          <Pause />
+                          정지
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={!!busy}
+                        onClick={() => edit(item)}
+                      >
+                        <Play />
+                        확인하고 시작
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      aria-label={`${item.definition.title} 지우기`}
+                      disabled={!!busy}
+                      onClick={() => {
+                        setDeleteItem(item);
+                        setConfirm("delete");
+                      }}
+                    >
+                      <Trash2 />
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+          {tab === "list" && definition && (
+            <form
+              id={editorId}
+              className="scheduled-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void perform("preview", async () => {
+                  const value = await request<ScheduledWorkPreview>(
+                    "/preview",
+                    definition,
+                    "POST",
+                  );
+                  setPreview(value);
+                  setPreviewKey(key);
+                });
+              }}
+            >
+              <fieldset disabled={!!busy}>
+                <legend>{editing ? "예약 수정" : "새 예약"}</legend>
+                {!editing && (
                   <label>
-                    프로젝트 연결
+                    시작 양식
                     <select
-                      aria-label="프로젝트 연결"
+                      aria-label="시작 양식"
+                      value={
+                        definition.includeSchedules
+                          ? "brief"
+                          : definition.followUpTime
+                            ? "followup"
+                            : "deadline"
+                      }
+                      onChange={(event) =>
+                        edit(
+                          undefined,
+                          event.target.value as
+                            "deadline" | "followup" | "brief",
+                        )
+                      }
+                    >
+                      <option value="deadline">마감 안내</option>
+                      <option value="followup">
+                        마감 안내 + 오후 남은 일 재확인
+                      </option>
+                      <option value="brief">저녁에 내일 준비 브리핑</option>
+                    </select>
+                  </label>
+                )}
+                <label>
+                  예약 이름
+                  <input
+                    aria-label="예약 이름"
+                    required
+                    maxLength={120}
+                    value={definition.title}
+                    onChange={(event) => update({ title: event.target.value })}
+                  />
+                </label>
+                <div className="scheduled-grid">
+                  <label>
+                    업무 공간
+                    <select
+                      aria-label="업무 공간"
                       required
-                      value={definition.webhookId ?? ""}
+                      value={definition.workspaceId}
                       onChange={(event) =>
                         update({
-                          webhookId: event.target.value || null,
-                          mentionNames: [],
+                          workspaceId: event.target.value,
+                          projectId: null,
+                          webhookId: null,
+                          replyCompletionSourceId: null,
+                          includeSchedules: false,
                         })
                       }
                     >
-                      <option value="">연결 선택</option>
-                      {webhooks.map((webhook) => (
-                        <option key={webhook.id} value={webhook.id}>
-                          {webhook.destinationLabel}
+                      {workspaces.map((space) => (
+                        <option key={space.id} value={space.id}>
+                          {space.name}
                         </option>
                       ))}
                     </select>
                   </label>
-                  {!webhooks.length && (
-                    <p>프로젝트에 Google Chat 웹훅을 먼저 연결해 주세요.</p>
-                  )}
-                  <label className="scheduled-check">
-                    <input
-                      type="checkbox"
-                      aria-label={chatCopy.complete}
-                      disabled={
-                        !definition.replyCompletionSourceId &&
-                        (!completionRepliesAvailable ||
-                          !chatSources.length ||
-                          definition.condition === "completion_confirmation")
-                      }
-                      checked={!!definition.replyCompletionSourceId}
+                  <label>
+                    프로젝트
+                    <select
+                      aria-label="프로젝트"
+                      value={definition.projectId ?? ""}
+                      required={definition.destination === "google_chat"}
                       onChange={(event) =>
                         update({
-                          replyCompletionSourceId: event.target.checked
-                            ? (chatSources[0]?.id ?? null)
-                            : null,
+                          projectId: event.target.value || null,
+                          webhookId: null,
+                          replyCompletionSourceId: null,
                         })
                       }
-                    />
-                    {chatCopy.complete}
+                    >
+                      <option value="">공간 전체</option>
+                      {projects.map((project) => (
+                        <option key={project.id} value={project.id}>
+                          {project.title}
+                        </option>
+                      ))}
+                    </select>
                   </label>
-                  <p className="scheduled-hint">
-                    {!completionRepliesAvailable
-                      ? chatCopy.setupHelp
-                      : chatSourcesState === "failed"
-                        ? chatCopy.spaceRetry
-                        : chatSourcesState === "loading"
-                          ? chatCopy.checkingSpace
-                          : !chatSources.length
-                            ? chatCopy.noSpace
-                            : chatCopy.help}
-                  </p>
-                  {!!definition.replyCompletionSourceId && (
-                    <>
-                      <label>
-                        {chatCopy.space}
-                        <select
-                          aria-label={chatCopy.space}
-                          required
-                          value={definition.replyCompletionSourceId}
-                          onChange={(event) =>
-                            update({
-                              replyCompletionSourceId:
-                                event.target.value || null,
-                            })
-                          }
-                        >
-                          <option value="">대화방 선택</option>
-                          {chatSources.map((source) => (
-                            <option key={source.id} value={source.id}>
-                              {source.displayName} ({source.accountEmail})
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <p
-                        className="scheduled-hint"
-                        style={{ overflowWrap: "anywhere" }}
-                      >
-                        {chatCopy.sender}:{" "}
-                        {
-                          chatSources.find(
-                            (source) =>
-                              source.id === definition.replyCompletionSourceId,
-                          )?.accountEmail
-                        }
-                      </p>
-                      <p className="scheduled-hint">{chatCopy.preview}</p>
-                    </>
-                  )}
-                  <label className="scheduled-check">
+                </div>
+                <fieldset className="scheduled-days">
+                  <legend>반복 요일</legend>
+                  {days.map((day, index) => (
+                    <button
+                      type="button"
+                      aria-pressed={definition.weekdays.includes(index + 1)}
+                      aria-label={`${day}요일`}
+                      key={day}
+                      onClick={() =>
+                        update({
+                          weekdays: definition.weekdays.includes(index + 1)
+                            ? definition.weekdays.filter((d) => d !== index + 1)
+                            : [...definition.weekdays, index + 1].sort(),
+                        })
+                      }
+                    >
+                      {day}
+                    </button>
+                  ))}
+                </fieldset>
+                <div className="scheduled-grid">
+                  <label>
+                    실행 시각
                     <input
-                      aria-label="할 일의 현재 담당자 멘션"
-                      type="checkbox"
-                      checked={definition.mentionAssignees}
+                      aria-label="실행 시각"
+                      type="time"
+                      required
+                      value={definition.time}
+                      onChange={(event) => update({ time: event.target.value })}
+                    />
+                    <small>한국 시간 기준이에요.</small>
+                  </label>
+                  <label>
+                    후속 확인 시각 (선택)
+                    <input
+                      aria-label="후속 확인 시각 (선택)"
+                      type="time"
+                      value={definition.followUpTime ?? ""}
+                      disabled={definition.includeSchedules}
                       onChange={(event) =>
-                        update({ mentionAssignees: event.target.checked })
+                        update({ followUpTime: event.target.value || null })
                       }
                     />
-                    할 일의 현재 담당자 멘션
+                    <small>앞서 안내한 일 중 남은 일만 확인해요.</small>
                   </label>
-                  <fieldset>
-                    <legend>추가로 멘션할 사람</legend>
-                    <div className="scheduled-people">
-                      {Object.keys(names).map((name) => (
-                        <label className="scheduled-check" key={name}>
-                          <input
-                            aria-label={name}
-                            type="checkbox"
-                            checked={definition.mentionNames.includes(name)}
+                </div>
+                <label>
+                  확인할 할 일
+                  <select
+                    aria-label="확인할 할 일"
+                    disabled={(definition.condition ?? "always") !== "always"}
+                    value={definition.taskScope}
+                    onChange={(event) =>
+                      update({
+                        taskScope: event.target
+                          .value as ScheduledWorkDefinition["taskScope"],
+                      })
+                    }
+                  >
+                    <option value="today">오늘 마감</option>
+                    <option value="tomorrow">내일 마감</option>
+                    <option value="today_tomorrow">오늘과 내일 마감</option>
+                    <option value="overdue">기한이 지난 일</option>
+                    <option value="all_open">모든 열린 할 일</option>
+                  </select>
+                </label>
+                <label>
+                  알릴 조건
+                  <select
+                    aria-label="알릴 조건"
+                    value={definition.condition ?? "always"}
+                    onChange={(event) =>
+                      update({
+                        condition: event.target
+                          .value as ScheduledWorkDefinition["condition"],
+                        ...(event.target.value === "completion_confirmation"
+                          ? { replyCompletionSourceId: null }
+                          : {}),
+                        ...(event.target.value !== "always"
+                          ? { includeSchedules: false }
+                          : {}),
+                        ...(event.target.value !== "always"
+                          ? { taskScope: "all_open" }
+                          : {}),
+                      })
+                    }
+                  >
+                    <option value="always">범위에 맞는 일 안내</option>
+                    <option value="deadline_near">마감이 가까운 일만</option>
+                    <option value="no_response">
+                      대기 중 응답이 없는 일만
+                    </option>
+                    <option value="completion_confirmation">
+                      완료 후 응답이 없는 일만
+                    </option>
+                  </select>
+                </label>
+                {definition.condition && definition.condition !== "always" && (
+                  <label>
+                    {definition.condition === "deadline_near"
+                      ? "마감까지 남은 시간 이내"
+                      : "응답 없이 지난 시간 이상"}
+                    <input
+                      aria-label={
+                        definition.condition === "deadline_near"
+                          ? "마감까지 남은 시간 이내"
+                          : "응답 없이 지난 시간 이상"
+                      }
+                      type="number"
+                      min={1}
+                      max={168}
+                      required
+                      value={definition.conditionHours ?? 24}
+                      onChange={(event) =>
+                        update({ conditionHours: Number(event.target.value) })
+                      }
+                    />
+                    <small>
+                      시간 단위예요. 예약 시각마다 최신 상태를 확인해요. 같은
+                      날짜·실행 차례는 중복 전송하지 않아요. 대기 중 응답은 대기
+                      사유를 저장한 이후의 외부 답글로 판단해요. 완료 확인은
+                      최근 30일 내 완료한 일을 대상으로 해요.
+                    </small>
+                  </label>
+                )}
+                <label className="scheduled-check">
+                  <input
+                    aria-label={c.skipHolidays}
+                    type="checkbox"
+                    checked={definition.skipHolidays ?? false}
+                    onChange={(event) =>
+                      update({ skipHolidays: event.target.checked })
+                    }
+                  />
+                  {c.skipHolidays}
+                </label>
+                <p className="scheduled-hint">{c.holidayHelp}</p>
+                <label className="scheduled-check">
+                  <input
+                    aria-label="기한이 지난 일도 포함"
+                    type="checkbox"
+                    checked={definition.includeOverdue}
+                    onChange={(event) =>
+                      update({ includeOverdue: event.target.checked })
+                    }
+                  />
+                  기한이 지난 일도 포함
+                </label>
+                <label className="scheduled-check">
+                  <input
+                    aria-label="개인 일정도 함께 확인"
+                    type="checkbox"
+                    disabled={
+                      (definition.condition ?? "always") !== "always" ||
+                      definition.destination === "google_chat" ||
+                      !!definition.followUpTime ||
+                      workspaces.find((w) => w.id === definition.workspaceId)
+                        ?.scope !== "personal"
+                    }
+                    checked={definition.includeSchedules}
+                    onChange={(event) =>
+                      update({ includeSchedules: event.target.checked })
+                    }
+                  />
+                  개인 일정도 함께 확인
+                </label>
+                <label>
+                  전달할 곳
+                  <select
+                    aria-label="전달할 곳"
+                    value={definition.destination}
+                    onChange={(event) =>
+                      update({
+                        destination: event.target.value as
+                          "google_chat" | "in_app",
+                        webhookId: null,
+                        replyCompletionSourceId: null,
+                        mentionNames: [],
+                        mentionAssignees: event.target.value === "google_chat",
+                        includeSchedules: false,
+                      })
+                    }
+                  >
+                    <option value="in_app">홈과 앱 알림</option>
+                    <option value="google_chat">Google Chat</option>
+                  </select>
+                </label>
+                <label>
+                  알림에 표시할 내용
+                  <select
+                    aria-label="알림에 표시할 내용"
+                    value={definition.messageDetail ?? "title_only"}
+                    aria-describedby="scheduled-message-detail-help"
+                    onChange={(event) =>
+                      update({
+                        messageDetail: event.target
+                          .value as ScheduledWorkDefinition["messageDetail"],
+                      })
+                    }
+                  >
+                    <option value="title_only">제목만</option>
+                    <option value="title_and_details">제목 + 내용</option>
+                  </select>
+                  <small id="scheduled-message-detail-help">
+                    {definition.messageDetail === "title_and_details"
+                      ? "제목과 마감일에 설명, 처리할 내용, 참고 링크를 함께 보내요."
+                      : "담당자별로 할 일 제목과 마감일만 보내요."}
+                  </small>
+                </label>
+                {definition.destination === "google_chat" && (
+                  <>
+                    <label>
+                      프로젝트 연결
+                      <select
+                        aria-label="프로젝트 연결"
+                        required
+                        value={definition.webhookId ?? ""}
+                        onChange={(event) =>
+                          update({
+                            webhookId: event.target.value || null,
+                            mentionNames: [],
+                          })
+                        }
+                      >
+                        <option value="">연결 선택</option>
+                        {webhooks.map((webhook) => (
+                          <option key={webhook.id} value={webhook.id}>
+                            {webhook.destinationLabel}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {!webhooks.length && (
+                      <p>프로젝트에 Google Chat 웹훅을 먼저 연결해 주세요.</p>
+                    )}
+                    <label className="scheduled-check">
+                      <input
+                        type="checkbox"
+                        aria-label={chatCopy.complete}
+                        disabled={
+                          !definition.replyCompletionSourceId &&
+                          (!completionRepliesAvailable ||
+                            !chatSources.length ||
+                            definition.condition === "completion_confirmation")
+                        }
+                        checked={!!definition.replyCompletionSourceId}
+                        onChange={(event) =>
+                          update({
+                            replyCompletionSourceId: event.target.checked
+                              ? (chatSources[0]?.id ?? null)
+                              : null,
+                          })
+                        }
+                      />
+                      {chatCopy.complete}
+                    </label>
+                    <p className="scheduled-hint">
+                      {!completionRepliesAvailable
+                        ? chatCopy.setupHelp
+                        : chatSourcesState === "failed"
+                          ? chatCopy.spaceRetry
+                          : chatSourcesState === "loading"
+                            ? chatCopy.checkingSpace
+                            : !chatSources.length
+                              ? chatCopy.noSpace
+                              : chatCopy.help}
+                    </p>
+                    {!!definition.replyCompletionSourceId && (
+                      <>
+                        <label>
+                          {chatCopy.space}
+                          <select
+                            aria-label={chatCopy.space}
+                            required
+                            value={definition.replyCompletionSourceId}
                             onChange={(event) =>
                               update({
-                                mentionNames: event.target.checked
-                                  ? [...definition.mentionNames, name]
-                                  : definition.mentionNames.filter(
-                                      (n) => n !== name,
-                                    ),
+                                replyCompletionSourceId:
+                                  event.target.value || null,
                               })
                             }
-                          />
-                          {name}
+                          >
+                            <option value="">대화방 선택</option>
+                            {chatSources.map((source) => (
+                              <option key={source.id} value={source.id}>
+                                {source.displayName} ({source.accountEmail})
+                              </option>
+                            ))}
+                          </select>
                         </label>
-                      ))}
-                    </div>
-                  </fieldset>
-                </>
+                        <p
+                          className="scheduled-hint"
+                          style={{ overflowWrap: "anywhere" }}
+                        >
+                          {chatCopy.sender}:{" "}
+                          {
+                            chatSources.find(
+                              (source) =>
+                                source.id ===
+                                definition.replyCompletionSourceId,
+                            )?.accountEmail
+                          }
+                        </p>
+                        <p className="scheduled-hint">{chatCopy.preview}</p>
+                      </>
+                    )}
+                    <label className="scheduled-check">
+                      <input
+                        aria-label="할 일의 현재 담당자 멘션"
+                        type="checkbox"
+                        checked={definition.mentionAssignees}
+                        onChange={(event) =>
+                          update({ mentionAssignees: event.target.checked })
+                        }
+                      />
+                      할 일의 현재 담당자 멘션
+                    </label>
+                    <fieldset>
+                      <legend>추가로 멘션할 사람</legend>
+                      <div className="scheduled-people">
+                        {Object.keys(names).map((name) => (
+                          <label className="scheduled-check" key={name}>
+                            <input
+                              aria-label={name}
+                              type="checkbox"
+                              checked={definition.mentionNames.includes(name)}
+                              onChange={(event) =>
+                                update({
+                                  mentionNames: event.target.checked
+                                    ? [...definition.mentionNames, name]
+                                    : definition.mentionNames.filter(
+                                        (n) => n !== name,
+                                      ),
+                                })
+                              }
+                            />
+                            {name}
+                          </label>
+                        ))}
+                      </div>
+                    </fieldset>
+                  </>
+                )}
+                <label>
+                  특정 담당자의 일만 확인 (선택)
+                  <input
+                    aria-label="특정 담당자의 일만 확인 (선택)"
+                    value={assigneeFilter}
+                    placeholder="예: 김경주, 주홍석"
+                    onChange={(event) => {
+                      setAssigneeFilter(event.target.value);
+                      update({
+                        assigneeNames: parseAssigneeFilter(event.target.value),
+                      });
+                    }}
+                  />
+                  <small>비워 두면 모든 담당자의 일을 확인해요.</small>
+                </label>
+              </fieldset>
+              <p className="scheduled-muted">{c.previewHelp}</p>
+              {preview && (
+                <section
+                  className="scheduled-preview"
+                  aria-label="전송 미리보기"
+                >
+                  <h3 ref={previewHeading} tabIndex={-1}>
+                    할 일 {preview.taskIds.length}개 · 일정{" "}
+                    {preview.scheduleCount}개
+                  </h3>
+                  <p>다음 예약 시각: {date(preview.nextRunAt)}</p>
+                  {definition.skipHolidays &&
+                    (preview.holidayStatus?.status === "holiday" ? (
+                      <p role="status">
+                        {preview.holidayStatus.name}에는 전송하지 않아요.
+                      </p>
+                    ) : preview.holidayStatus?.status === "working_day" ? (
+                      <p>다음 예약일은 공휴일이 아니에요.</p>
+                    ) : (
+                      <p className="inline-alert" role="alert">
+                        {c.holidayUnavailable}
+                      </p>
+                    ))}
+                  {preview.warnings.map((warning) => (
+                    <p role="alert" className="inline-alert" key={warning}>
+                      {warning}
+                    </p>
+                  ))}
+                  {!preview.messages.length && <p>{c.noMatches}</p>}
+                  {preview.messages.map((message, index) => (
+                    <details key={index} open={index === 0}>
+                      <summary>
+                        전달 내용 {index + 1}/{preview.messages.length}
+                      </summary>
+                      <pre>{message}</pre>
+                    </details>
+                  ))}
+                </section>
               )}
-              <label>
-                특정 담당자의 일만 확인 (선택)
-                <input
-                  aria-label="특정 담당자의 일만 확인 (선택)"
-                  value={assigneeFilter}
-                  placeholder="예: 김경주, 주홍석"
-                  onChange={(event) => {
-                    setAssigneeFilter(event.target.value);
-                    update({
-                      assigneeNames: parseAssigneeFilter(event.target.value),
-                    });
-                  }}
-                />
-                <small>비워 두면 모든 담당자의 일을 확인해요.</small>
-              </label>
-            </fieldset>
-            <p className="scheduled-muted">{c.previewHelp}</p>
-            <div className="scheduled-actions">
+            </form>
+          )}
+          {tab === "history" && (
+            <div className="scheduled-content">
+              {!runs.items.length && <p>아직 실행한 예약이 없어요.</p>}
+              {runs.items
+                .filter(
+                  (run) =>
+                    (!projectId && !workspaceId) ||
+                    scoped.some((item) => item.id === run.scheduledWorkId),
+                )
+                .map((run) => (
+                  <article className="scheduled-rule" key={run.id}>
+                    <strong>
+                      {items.find((item) => item.id === run.scheduledWorkId)
+                        ?.definition.title ?? c.title}
+                    </strong>
+                    <span className="scheduled-badge" data-status={run.status}>
+                      {
+                        {
+                          delivering: "전송 중",
+                          completed: "처리 완료",
+                          skipped: "건너뜀",
+                          failed: "확인 필요",
+                        }[run.status]
+                      }
+                    </span>
+                    <p>
+                      {date(run.scheduledFor)} ·{" "}
+                      {run.kind === "followup"
+                        ? "후속 확인"
+                        : run.kind === "manual"
+                          ? "직접 실행"
+                          : "예약 실행"}{" "}
+                      · 할 일 {run.taskIds.length}개
+                    </p>
+                    {run.reason && (
+                      <p>
+                        {c.reasons[run.reason] ?? "실행 결과를 확인해 주세요."}
+                      </p>
+                    )}
+                    {run.messages.length > 0 && (
+                      <details>
+                        <summary>결과 펼치기</summary>
+                        {run.messages.map((message, index) => (
+                          <pre key={index}>{message}</pre>
+                        ))}
+                      </details>
+                    )}
+                  </article>
+                ))}
+              {runs.nextCursor && (
+                <button
+                  type="button"
+                  disabled={!!busy}
+                  onClick={() =>
+                    void perform("history", async () => {
+                      const page = await request<ScheduledWorkRunPage>(
+                        `/runs?before=${runs.nextCursor}`,
+                      );
+                      setRuns((current) => ({
+                        ...page,
+                        items: [...current.items, ...page.items],
+                      }));
+                    })
+                  }
+                >
+                  이전 실행 더 보기
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        {tab === "list" && definition && (
+          <footer className="scheduled-actions work-dialog__footer">
+            <button
+              type="button"
+              disabled={!!busy}
+              onClick={() => {
+                if (key !== initialKey) {
+                  setConfirm("list");
+                  return;
+                }
+                setDefinition(undefined);
+                setEditing(undefined);
+              }}
+            >
+              목록으로
+            </button>
+            <button
+              type="button"
+              disabled={!!busy}
+              onClick={() => void save(false)}
+            >
+              {busy === "save" ? workspaceActionCopy.saveInProgress : c.draft}
+            </button>
+            {preview &&
+            previewKey === key &&
+            !preview.warnings.length &&
+            (!definition.skipHolidays ||
+              (preview.holidayStatus &&
+                preview.holidayStatus.status !== "unavailable")) ? (
               <button
+                className="primary-button"
+                type="button"
+                disabled={!!busy}
+                onClick={() => void save(true)}
+              >
+                {busy === "save"
+                  ? workspaceActionCopy.saveInProgress
+                  : c.activate}
+              </button>
+            ) : (
+              <button
+                className="primary-button"
                 type="submit"
+                form={editorId}
                 disabled={!!busy || !definition.weekdays.length}
               >
                 {busy === "preview" ? "내용 확인 중…" : c.preview}
               </button>
-              <button
-                type="button"
-                disabled={!!busy}
-                onClick={() => void save(false)}
-              >
-                {c.draft}
-              </button>
-            </div>
-            {preview && (
-              <section className="scheduled-preview" aria-label="전송 미리보기">
-                <h3>
-                  할 일 {preview.taskIds.length}개 · 일정{" "}
-                  {preview.scheduleCount}개
-                </h3>
-                <p>다음 예약 시각: {date(preview.nextRunAt)}</p>
-                {definition.skipHolidays &&
-                  (preview.holidayStatus?.status === "holiday" ? (
-                    <p role="status">
-                      {preview.holidayStatus.name}에는 전송하지 않아요.
-                    </p>
-                  ) : preview.holidayStatus?.status === "working_day" ? (
-                    <p>다음 예약일은 공휴일이 아니에요.</p>
-                  ) : (
-                    <p className="inline-alert" role="alert">
-                      {c.holidayUnavailable}
-                    </p>
-                  ))}
-                {preview.warnings.map((warning) => (
-                  <p role="alert" className="inline-alert" key={warning}>
-                    {warning}
-                  </p>
-                ))}
-                {!preview.messages.length && <p>{c.noMatches}</p>}
-                {preview.messages.map((message, index) => (
-                  <details key={index} open={index === 0}>
-                    <summary>
-                      전달 내용 {index + 1}/{preview.messages.length}
-                    </summary>
-                    <pre>{message}</pre>
-                  </details>
-                ))}
-              </section>
             )}
-            <footer className="scheduled-actions">
-              <button
-                type="button"
-                disabled={!!busy}
-                onClick={() => {
-                  if (key !== initialKey) {
-                    setConfirm("list");
-                    return;
-                  }
-                  setDefinition(undefined);
-                  setEditing(undefined);
-                }}
-              >
-                목록으로
-              </button>
-              <button
-                className="primary-button"
-                type="button"
-                disabled={
-                  !!busy ||
-                  !preview ||
-                  previewKey !== key ||
-                  !!preview.warnings.length ||
-                  (definition.skipHolidays === true &&
-                    (!preview.holidayStatus ||
-                      preview.holidayStatus.status === "unavailable"))
-                }
-                onClick={() => void save(true)}
-              >
-                {busy === "save" ? "저장 중…" : c.activate}
-              </button>
-            </footer>
-          </form>
-        )}
-        {tab === "history" && (
-          <div className="scheduled-content">
-            {!runs.items.length && <p>아직 실행한 예약이 없어요.</p>}
-            {runs.items
-              .filter(
-                (run) =>
-                  (!projectId && !workspaceId) ||
-                  scoped.some((item) => item.id === run.scheduledWorkId),
-              )
-              .map((run) => (
-                <article className="scheduled-rule" key={run.id}>
-                  <strong>
-                    {items.find((item) => item.id === run.scheduledWorkId)
-                      ?.definition.title ?? c.title}
-                  </strong>
-                  <span className="scheduled-badge" data-status={run.status}>
-                    {
-                      {
-                        delivering: "전송 중",
-                        completed: "처리 완료",
-                        skipped: "건너뜀",
-                        failed: "확인 필요",
-                      }[run.status]
-                    }
-                  </span>
-                  <p>
-                    {date(run.scheduledFor)} ·{" "}
-                    {run.kind === "followup"
-                      ? "후속 확인"
-                      : run.kind === "manual"
-                        ? "직접 실행"
-                        : "예약 실행"}{" "}
-                    · 할 일 {run.taskIds.length}개
-                  </p>
-                  {run.reason && (
-                    <p>
-                      {c.reasons[run.reason] ?? "실행 결과를 확인해 주세요."}
-                    </p>
-                  )}
-                  {run.messages.length > 0 && (
-                    <details>
-                      <summary>결과 펼치기</summary>
-                      {run.messages.map((message, index) => (
-                        <pre key={index}>{message}</pre>
-                      ))}
-                    </details>
-                  )}
-                </article>
-              ))}
-            {runs.nextCursor && (
-              <button
-                type="button"
-                disabled={!!busy}
-                onClick={() =>
-                  void perform("history", async () => {
-                    const page = await request<ScheduledWorkRunPage>(
-                      `/runs?before=${runs.nextCursor}`,
-                    );
-                    setRuns((current) => ({
-                      ...page,
-                      items: [...current.items, ...page.items],
-                    }));
-                  })
-                }
-              >
-                이전 실행 더 보기
-              </button>
-            )}
-          </div>
+          </footer>
         )}
       </dialog>
     </>

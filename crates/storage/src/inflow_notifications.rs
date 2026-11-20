@@ -3,6 +3,7 @@
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
+use crate::google_chat::google_chat_attention_query;
 use crate::{Database, StorageError};
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -35,11 +36,11 @@ impl Database {
             return Err(StorageError::InvalidConfiguration);
         }
         let oldest = epoch_millis(now - Duration::days(1));
-        sqlx::query_as::<_, InflowNotification>(
+        let query = google_chat_attention_query!(
             "WITH eligible AS (
                 SELECT analysis.id, 'google_chat_inflow'::TEXT AS item_type,
                     analysis.source_revision AS revision, analysis.project_id,
-                    COALESCE(analysis.linked_task_id, representative.promoted_task_id)
+                    COALESCE(item.promoted_task_id, analysis.linked_task_id)
                         IS NOT NULL AS existing_task,
                     COALESCE(analysis.suggested_task_title, analysis.summary, project.title) AS title,
                     COALESCE(analysis.summary, '새 대화를 확인해 주세요.') AS body,
@@ -49,16 +50,17 @@ impl Database {
                 JOIN projects project ON project.id = analysis.project_id AND project.user_id = analysis.user_id
                 JOIN project_google_chat_sources source ON source.id = analysis.source_id AND source.user_id = analysis.user_id
                 JOIN google_chat_accounts account ON account.id = source.account_id AND account.user_id = analysis.user_id
-                JOIN project_inflow_items representative ON representative.id = analysis.representative_item_id
+                JOIN project_inflow_items item ON item.id = analysis.representative_item_id
                 WHERE analysis.user_id = $1 AND source.enabled AND account.status = 'active'
                     AND analysis.state = 'ready' AND analysis.analyzed_revision = analysis.source_revision
                     AND (analysis.classification IN ('new_task', 'follow_up', 'question')
                         OR (analysis.classification = 'status_update' AND
-                            COALESCE(analysis.linked_task_id, representative.promoted_task_id) IS NOT NULL))
-                    AND representative.received_at >= source.created_at
-                    AND representative.received_at >= $4 - INTERVAL '1 day'
-                    AND representative.status = 'pending' AND representative.reviewed_at IS NULL
-                    AND representative.sender_provider_name IS DISTINCT FROM CONCAT('users/', account.provider_subject)
+                            COALESCE(item.promoted_task_id, analysis.linked_task_id) IS NOT NULL))
+                    AND item.received_at >= source.created_at
+                    AND item.received_at >= $4 - INTERVAL '1 day'
+                    AND item.status = 'pending' AND item.reviewed_at IS NULL
+                    AND item.sender_provider_name IS DISTINCT FROM CONCAT('users/', account.provider_subject)
+                    AND (", ")
                 UNION ALL
                 SELECT review.id, 'task_completion_review'::TEXT, 1,
                     task.project_id, TRUE, task.title,
@@ -87,15 +89,16 @@ impl Database {
               WHERE (occurred_at_epoch_millis, id) > ($2, $3)
                 AND occurred_at_epoch_millis <= $5
               ORDER BY occurred_at_epoch_millis, id LIMIT 201",
-        )
-        .bind(user_id)
-        .bind(after.max(oldest))
-        .bind(after_id)
-        .bind(now)
-        .bind(now_millis)
-        .fetch_all(self.pool())
-        .await
-        .map_err(|_| StorageError::PersistenceUnavailable)
+        );
+        sqlx::query_as::<_, InflowNotification>(query)
+            .bind(user_id)
+            .bind(after.max(oldest))
+            .bind(after_id)
+            .bind(now)
+            .bind(now_millis)
+            .fetch_all(self.pool())
+            .await
+            .map_err(|_| StorageError::PersistenceUnavailable)
     }
 }
 

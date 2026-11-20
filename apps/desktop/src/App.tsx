@@ -10,6 +10,7 @@ import { approveInflowChange } from "./api/inflowChanges";
 import { InflowChangeDialog } from "./components/InflowChangeDialog";
 import { Server, Sparkles } from "lucide-react";
 import { ScheduledWorkPanel } from "./components/ScheduledWorkPanel";
+import { readShortcuts, saveShortcuts, type Shortcuts } from "./keyboardShortcuts";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -261,6 +262,11 @@ import {
   type ReminderSyncStatus,
 } from "./local-notifications";
 import { WorkspaceRouteBoundary } from "./components/WorkspaceRouteBoundary";
+import { DeliveryRecoveryPanel } from "./components/DeliveryRecoveryPanel";
+import { InflowRecoveryPanel } from "./components/InflowRecoveryPanel";
+import { canRetryInflowDelivery } from "./inflowDeliveryState";
+import { AssistantInteractiveCanvas } from "./components/AssistantInteractiveCanvas";
+import { presentationForMessage } from "./assistantPresentation";
 
 type AppMode =
   "configuration" | "server-unreachable" | "loading" | "ready" | "error";
@@ -282,11 +288,6 @@ const ConversationWorkspace = lazy(() =>
 const DecisionInboxWorkspace = lazy(() =>
   import("./components/DecisionInboxWorkspace").then((module) => ({
     default: module.DecisionInboxWorkspace,
-  })),
-);
-const MemoryWorkspace = lazy(() =>
-  import("./components/MemoryWorkspace").then((module) => ({
-    default: module.MemoryWorkspace,
   })),
 );
 const MeetingsWorkspace = lazy(() =>
@@ -329,6 +330,16 @@ export default function App() {
   const [mode, setMode] = useState<AppMode>("loading");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [destination, setDestination] = useState<OsDestination>("home");
+  const [shortcuts, setShortcuts] = useState(readShortcuts);
+  const [shortcutComposerFocus, setShortcutComposerFocus] = useState(false);
+  const consumeShortcutComposerFocus = useCallback(
+    () => setShortcutComposerFocus(false),
+    [],
+  );
+  const [homeChatOpen, setHomeChatOpen] = useState(false);
+  const homeChatVisible = destination === "home" && homeChatOpen;
+  const homeChatEntryGenerationRef = useRef(0);
+  const restoreHomeFocusRef = useRef(false);
   const navigationHistoryRef = useRef<OsDestination[]>([]);
   const calendarNavigationIntentRef = useRef<
     CalendarNavigationIntent | undefined
@@ -2192,6 +2203,8 @@ export default function App() {
     } finally {
       activeSessionRef.current = undefined;
       setTokens(undefined);
+      setHomeChatOpen(false);
+      homeChatEntryGenerationRef.current += 1;
       setConversations([]);
       setHomeSnapshot(undefined);
       setHomeError(undefined);
@@ -2312,7 +2325,7 @@ export default function App() {
     if (durableHome.id !== homeConversationId) {
       setHomeConversationId(durableHome.id);
     }
-    if (destination !== "home") return;
+    if (destination !== "home" || homeChatVisible) return;
     if (selectedConversationId === durableHome.id) return;
     setCurrentConversationId(durableHome.id);
     setConversationMessages([]);
@@ -2323,6 +2336,7 @@ export default function App() {
   }, [
     conversations,
     destination,
+    homeChatVisible,
     homeConversationId,
     loadConversationMessages,
     selectedConversationId,
@@ -2985,7 +2999,7 @@ export default function App() {
             job.conversationId,
             controller.signal,
             (snapshot) => {
-              if (!current) return;
+              if (!current || snapshot.job?.id !== job.id) return;
               const streamedJob = snapshot.job;
               if (streamedJob) {
                 setConversationJobs((known) => ({
@@ -2993,7 +3007,10 @@ export default function App() {
                   [streamedJob.conversationId]: streamedJob,
                 }));
               }
-              if (job.conversationId === selectedConversationId) {
+              if (job.conversationId === selectedConversationIdRef.current) {
+                // A slower messages GET must not overwrite a newer live reply.
+                conversationMessageRequestGateRef.current.invalidate();
+                setConversationLoading(false);
                 setConversationMessages(snapshot.messages);
               }
               if (streamedJob && isTerminalAgentJob(streamedJob.state)) {
@@ -3046,7 +3063,13 @@ export default function App() {
   ]);
 
   function selectConversation(conversationId: string) {
-    navigate("chat");
+    if (destination === "home") {
+      homeChatEntryGenerationRef.current += 1;
+      setHomeChatOpen(true);
+    } else if (destination !== "chat") {
+      navigate("chat");
+    }
+    if (selectedConversationIdRef.current === conversationId) return;
     setAssistantDraft(undefined);
     setCurrentConversationId(conversationId);
     setConversationMessages([]);
@@ -3077,6 +3100,12 @@ export default function App() {
     setConversationLoading(false);
     setConversationError(undefined);
     pendingConversationId.current = undefined;
+  }
+
+  async function startChatConversation(): Promise<boolean> {
+    setAssistantDraft(undefined);
+    startConversation();
+    return true;
   }
 
   async function startHomeConversation(): Promise<boolean> {
@@ -3146,18 +3175,47 @@ export default function App() {
   }
 
   function openHomeAssistant() {
-    if (!homeConversationId) {
-      void openNewAssistantRequest();
+    if (homeChatVisible) {
+      document.getElementById("agent-message")?.focus();
       return;
     }
+    homeChatEntryGenerationRef.current += 1;
+    setHomeChatOpen(true);
     setAssistantDraft(undefined);
-    navigate("chat");
+    if (!homeConversationId) {
+      startConversation();
+      return;
+    }
     if (selectedConversationId !== homeConversationId) {
       setCurrentConversationId(homeConversationId);
       setConversationMessages([]);
       void loadConversationMessages(homeConversationId);
     }
     void restoreConversationJob(homeConversationId);
+  }
+
+  function returnToHomeOverview() {
+    homeChatEntryGenerationRef.current += 1;
+    restoreHomeFocusRef.current = true;
+    setAssistantDraft(undefined);
+    setHomeChatOpen(false);
+  }
+
+  function openQuestionFromShortcut() {
+    if (destination === "home") {
+      openHomeAssistant();
+      setShortcutComposerFocus(true);
+    } else if (destination === "chat") {
+      setShortcutComposerFocus(true);
+    } else {
+      navigate("chat", { focusAssistant: true });
+    }
+  }
+
+  function saveShortcutSettings(value: Shortcuts) {
+    if (!saveShortcuts(value)) return false;
+    setShortcuts(value);
+    return true;
   }
 
   async function decideHomeRecommendation(
@@ -3262,6 +3320,9 @@ export default function App() {
             ...current,
             tasks: current.tasks.filter((item) => item.id !== task.id),
             dueTasks: current.dueTasks.filter((item) => item.id !== task.id),
+            inflow: current.inflow.filter(
+              (item) => item.promotedTaskId !== task.id,
+            ),
           }
         : current,
     );
@@ -3282,7 +3343,15 @@ export default function App() {
     setProjectTasks((current) =>
       current.map((item) => (item.id === completed.id ? completed : item)),
     );
+    setProjectInflowItems((current) =>
+      current.filter(
+        (item) => item.status !== "pending" || item.promotedTaskId !== task.id,
+      ),
+    );
+    void loadHomeSnapshot();
     if (task.projectId) {
+      if (selectedProjectId === task.projectId)
+        void loadProjectInflow(task.projectId);
       setProjects((current) =>
         current.map((project) =>
           project.id === task.projectId
@@ -4793,14 +4862,12 @@ export default function App() {
   }
 
   async function openNewAssistantRequest(): Promise<void> {
-    setAssistantDraft(undefined);
+    await startChatConversation();
     navigate("chat");
-    await startHomeConversation();
   }
 
   async function handleVoiceTranscript(value: string): Promise<void> {
-    const started = await startHomeConversation();
-    if (!started) return;
+    await startChatConversation();
     setAssistantDraft({ id: createUuidV7(), text: value, autoSend: true });
     navigate("chat");
   }
@@ -4944,10 +5011,30 @@ export default function App() {
           pendingAction: null,
         },
       }));
-      await loadConversationMessages(queued.conversationId);
+      if (selectedConversationIdRef.current === queued.conversationId) {
+        const acceptedAt = new Date().toISOString();
+        setConversationMessages((current) =>
+          current.some((message) => message.id === queued.messageId)
+            ? current
+            : [
+                ...current,
+                {
+                  id: queued.messageId,
+                  role: "user",
+                  content: text.trim(),
+                  presentation: null,
+                  status: "completed",
+                  createdAt: acceptedAt,
+                  completedAt: acceptedAt,
+                  version: 1,
+                },
+              ],
+        );
+      }
       void refreshConversations();
       if (isTerminalAgentJob(queued.state)) {
-        await loadHomeSnapshot();
+        void loadConversationMessages(queued.conversationId, true);
+        void loadHomeSnapshot();
       }
       return true;
     } catch (error) {
@@ -5052,9 +5139,10 @@ export default function App() {
     options: {
       projectDataReady?: boolean;
       calendarDataReady?: boolean;
+      focusAssistant?: boolean;
+      openScheduledWork?: boolean;
     } = {},
   ): void {
-    if (nextDestination === "decisions") nextDestination = "home";
     if (
       nextDestination !== destination &&
       document.querySelector('.meeting-transcript-editor[data-dirty="true"]') &&
@@ -5068,6 +5156,10 @@ export default function App() {
         destination,
       ];
     }
+    homeChatEntryGenerationRef.current += 1;
+    setHomeChatOpen(false);
+    setShortcutComposerFocus(options.focusAssistant === true);
+    if (options.openScheduledWork) setDeckIntent({ id: Date.now(), view: "scheduled" });
     if (mobileLayout) startTransition(() => setDestination(nextDestination));
     else setDestination(nextDestination);
     if (
@@ -5180,7 +5272,9 @@ export default function App() {
         setHighlightedScheduleId(entry.id);
         return;
       }
-      const view = action.view || "home";
+      const requestedView = action.view || "home";
+      // Existing Open Deck buttons may still address the removed page.
+      const view = requestedView === "memory" ? "home" : requestedView;
       setDeckIntent(
         ["scheduled", "new-schedule", "new-task", "requests"].includes(view)
           ? { id: Date.now(), view }
@@ -5201,8 +5295,20 @@ export default function App() {
   });
   useEffect(() => installAndroidBackBridge(), []);
   useEffect(() => {
-    if (destination === "decisions") setDestination("home");
-    if (destination === "home") void loadDecisionInbox();
+    if (
+      destination !== "home" ||
+      homeChatVisible ||
+      !restoreHomeFocusRef.current
+    )
+      return;
+    restoreHomeFocusRef.current = false;
+    document
+      .getElementById("home-overview-title")
+      ?.focus({ preventScroll: true });
+  }, [destination, homeChatVisible]);
+  useEffect(() => {
+    if (destination === "home" || destination === "decisions")
+      void loadDecisionInbox();
   }, [destination, loadDecisionInbox]);
 
   useEffect(
@@ -5210,6 +5316,10 @@ export default function App() {
       registerMobileBackHandler(() => {
         if (planningEditTarget) {
           setPlanningEditTarget(undefined);
+          return true;
+        }
+        if (homeChatVisible) {
+          returnToHomeOverview();
           return true;
         }
         if (destination === "projects" && selectedProjectId) {
@@ -5235,7 +5345,7 @@ export default function App() {
         }
         return false;
       }, 10),
-    [destination, planningEditTarget, selectedProjectId],
+    [destination, homeChatVisible, planningEditTarget, selectedProjectId],
   );
 
   return (
@@ -5259,6 +5369,11 @@ export default function App() {
       ) : (
         <OsShell
           destination={destination}
+          homeChatVisible={homeChatVisible}
+          onOpenHomeChat={openHomeAssistant}
+          shortcuts={shortcuts}
+          onQuestionShortcut={openQuestionFromShortcut}
+          onScheduledWorkShortcut={() => navigate("home", { openScheduledWork: true })}
           onNavigate={navigate}
           onVoiceTranscript={handleVoiceTranscript}
           onVoiceCommand={handleVoiceCommand}
@@ -5278,133 +5393,185 @@ export default function App() {
             onRetry={() => window.location.reload()}
           >
             {destination === "home" && (
-              <HomeWorkspace
-                completionReviews={
-                  <CompletionReviewPanel
-                    baseUrl={apiBaseUrl}
-                    authenticate={withAuthenticatedSession}
-                    highlightedId={highlightedCompletionReviewId}
-                    onChanged={async () => {
-                      await loadHomeSnapshot();
-                    }}
-                  />
-                }
-                onRequestOpenHandled={consumeDeckIntent}
-                requestOpenRequest={
-                  deckIntent?.view === "requests" ? deckIntent.id : undefined
-                }
-                scheduledWork={
-                  <ScheduledWorkPanel
-                    onOpenRequestHandled={consumeDeckIntent}
-                    openRequest={
-                      deckIntent?.view === "scheduled"
-                        ? deckIntent.id
-                        : undefined
-                    }
-                    baseUrl={apiBaseUrl}
-                    authenticate={withAuthenticatedSession}
-                  />
-                }
-                snapshot={homeSnapshot}
-                onLoadAllTasks={() =>
-                  withAuthenticatedSession((accessToken) =>
-                    fetchOpenTasks(apiBaseUrl, accessToken),
-                  )
-                }
-                loading={homeLoading || mode === "loading"}
-                error={homeError ?? (mode === "error" ? message : undefined)}
-                assistantReady={agentAuthentication?.state === "ready"}
-                assistantJob={
-                  homeConversationId
-                    ? conversationJobs[homeConversationId]
-                    : undefined
-                }
-                assistantConversationId={homeConversationId}
-                assistantRequest={
-                  selectedConversationId === homeConversationId
-                    ? latestUserRequest
-                    : undefined
-                }
-                assistantMessage={
-                  selectedConversationId === homeConversationId
-                    ? latestAssistantMessage
-                    : undefined
-                }
-                onOpenAssistant={openHomeAssistant}
-                onOpenPlanning={() => navigate("calendar")}
-                onStartNewAssistant={startHomeConversation}
-                onSendAssistant={(text, clientMessageId) =>
-                  sendConversationRequest(text, clientMessageId, {
-                    startFresh: !homeConversationId,
-                    targetConversationId: homeConversationId,
-                    rememberForHome: true,
-                  })
-                }
-                onCompleteTask={completeHomeTask}
-                onLoadAssistantTask={loadTaskFromAssistant}
-                onCompleteAssistantTask={completeTaskFromAssistant}
-                onRestoreAssistantTask={restoreTaskFromAssistant}
-                onEditAssistantTask={editTaskFromAssistant}
-                onEditAssistantSchedule={editScheduleFromAssistant}
-                onEditTask={(task) =>
-                  setPlanningEditTarget({ kind: "task", item: task })
-                }
-                onEditSchedule={(entry) =>
-                  setPlanningEditTarget({ kind: "schedule", item: entry })
-                }
-                onOpenPlanningTask={openPlanningTask}
-                onOpenTask={openTaskFromAssistant}
-                onOpenProject={openProjectFromAssistant}
-                onOpenSchedule={openScheduleFromAssistant}
-                suppressDecisionSuggestions
-                onOpenDecisionInbox={() => {
-                  const panel = document.getElementById(
-                    "home-review-actions",
-                  ) as HTMLDetailsElement | null;
-                  if (panel) {
-                    panel.open = true;
-                    panel.scrollIntoView({ block: "start" });
+              <div className="home-overview-frame" hidden={homeChatVisible}>
+                <HomeWorkspace
+                  actionNeeded={
+                    <>
+                      <DeliveryRecoveryPanel
+                        items={(homeSnapshot?.deliveryRecovery ?? []).filter(
+                          (item) => item.status === "failed",
+                        )}
+                        onRetry={async (item) => {
+                          await withAuthenticatedSession((accessToken) =>
+                            retryDeliveryRecovery(
+                              apiBaseUrl,
+                              accessToken,
+                              item,
+                            ),
+                          );
+                          await loadHomeSnapshot();
+                        }}
+                      />
+                      <InflowRecoveryPanel
+                        items={(homeSnapshot?.recentInflow ?? []).filter(
+                          canRetryInflowDelivery,
+                        )}
+                        saving={inflowSaving}
+                        onRetry={retryWorkspaceInflowCompletion}
+                        onOpenTask={async (id) => {
+                          const task = await loadTaskFromAssistant({
+                            id,
+                            projectId: null,
+                          });
+                          await openTaskFromAssistant(task);
+                          if (!task.projectId) await openPlanningTask(task);
+                        }}
+                      />
+                    </>
                   }
-                  void loadDecisionInbox();
-                }}
-                onOpenMeetings={() => navigate("meetings")}
-                onOpenSettings={() => navigate("settings")}
-                onDecideRecommendation={decideHomeRecommendation}
-                inflowSaving={inflowSaving}
-                onPromoteInflow={promoteWorkspaceInflow}
-                onDismissInflow={dismissWorkspaceInflow}
-                onRetryInflowAnalysis={retryWorkspaceInflowAnalysis}
-                onRetryInflowCompletion={retryWorkspaceInflowCompletion}
-                onReviewInflowChange={setInflowChangeItem}
-                gmailInflowItems={gmailInflowItems}
-                gmailInflowProjects={gmailInflowProjects}
-                gmailInflowLoading={gmailInflowLoading}
-                gmailInflowLoadingMore={gmailInflowLoadingMore}
-                gmailInflowLoadMoreError={
-                  gmailInflowLoadHealth.initialFailedWorkspaces.length === 0 &&
-                  gmailInflowLoadHealth.loadMoreFailedWorkspaces.length > 0
-                }
-                gmailInflowHasMore={Object.values(gmailInflowCursors).some(
-                  Boolean,
-                )}
-                gmailInflowError={
-                  gmailInflowError ??
-                  (gmailInflowLoadHealth.initialFailedWorkspaces.length > 0
-                    ? copy.gmailInflow.initialPartialProblem(
-                        gmailInflowLoadHealth.initialFailedWorkspaces,
-                      )
-                    : gmailInflowLoadHealth.loadMoreFailedWorkspaces.length > 0
-                      ? copy.gmailInflow.moreLoadProblem
-                      : undefined)
-                }
-                gmailInflowSavingId={gmailInflowSavingId}
-                onReloadGmailInflow={loadGmailInflow}
-                onLoadMoreGmailInflow={loadMoreGmailInflow}
-                onPromoteGmailInflow={promoteGmailInflow}
-                onDismissGmailInflow={dismissGmailInflow}
-                onDeferGmailInflow={deferGmailInflow}
-                onRetryGmailInflowAnalysis={retryGmailInflowAnalysis}
-              />
+                  completionReviews={
+                    <CompletionReviewPanel
+                      baseUrl={apiBaseUrl}
+                      authenticate={withAuthenticatedSession}
+                      highlightedId={highlightedCompletionReviewId}
+                      onChanged={async () => {
+                        await loadHomeSnapshot();
+                      }}
+                    />
+                  }
+                  highlightedCompletionReviewId={highlightedCompletionReviewId}
+                  onRequestOpenHandled={consumeDeckIntent}
+                  requestOpenRequest={
+                    deckIntent?.view === "requests" ? deckIntent.id : undefined
+                  }
+                  scheduledWork={
+                    <ScheduledWorkPanel
+                      onOpenRequestHandled={consumeDeckIntent}
+                      openRequest={
+                        deckIntent?.view === "scheduled"
+                          ? deckIntent.id
+                          : undefined
+                      }
+                      baseUrl={apiBaseUrl}
+                      authenticate={withAuthenticatedSession}
+                    />
+                  }
+                  snapshot={homeSnapshot}
+                  onLoadAllTasks={() =>
+                    withAuthenticatedSession((accessToken) =>
+                      fetchOpenTasks(apiBaseUrl, accessToken),
+                    )
+                  }
+                  loading={homeLoading || mode === "loading"}
+                  error={homeError ?? (mode === "error" ? message : undefined)}
+                  assistantReady={agentAuthentication?.state === "ready"}
+                  assistantJob={
+                    homeConversationId
+                      ? conversationJobs[homeConversationId]
+                      : undefined
+                  }
+                  assistantConversationId={homeConversationId}
+                  assistantRequest={
+                    selectedConversationId === homeConversationId
+                      ? latestUserRequest
+                      : undefined
+                  }
+                  assistantMessage={
+                    selectedConversationId === homeConversationId
+                      ? latestAssistantMessage
+                      : undefined
+                  }
+                  onOpenAssistant={openHomeAssistant}
+                  onOpenPlanning={() => navigate("calendar")}
+                  onStartNewAssistant={async () => {
+                    const entry = homeChatEntryGenerationRef.current;
+                    const started = await startHomeConversation();
+                    if (
+                      started &&
+                      homeChatEntryGenerationRef.current === entry
+                    ) {
+                      setHomeChatOpen(true);
+                    }
+                    return started;
+                  }}
+                  onSendAssistant={async (text, clientMessageId) => {
+                    const entry = homeChatEntryGenerationRef.current;
+                    const accepted = await sendConversationRequest(
+                      text,
+                      clientMessageId,
+                      {
+                        startFresh: !homeConversationId,
+                        targetConversationId: homeConversationId,
+                        rememberForHome: true,
+                      },
+                    );
+                    if (
+                      accepted &&
+                      homeChatEntryGenerationRef.current === entry
+                    ) {
+                      setHomeChatOpen(true);
+                    }
+                    return accepted;
+                  }}
+                  onCompleteTask={completeHomeTask}
+                  onLoadAssistantTask={loadTaskFromAssistant}
+                  onCompleteAssistantTask={completeTaskFromAssistant}
+                  onRestoreAssistantTask={restoreTaskFromAssistant}
+                  onEditAssistantTask={editTaskFromAssistant}
+                  onEditAssistantSchedule={editScheduleFromAssistant}
+                  onEditTask={(task) =>
+                    setPlanningEditTarget({ kind: "task", item: task })
+                  }
+                  onEditSchedule={(entry) =>
+                    setPlanningEditTarget({ kind: "schedule", item: entry })
+                  }
+                  onOpenPlanningTask={openPlanningTask}
+                  onOpenTask={openTaskFromAssistant}
+                  onOpenProject={openProjectFromAssistant}
+                  onOpenSchedule={openScheduleFromAssistant}
+                  suppressDecisionSuggestions
+                  onOpenDecisionInbox={() => navigate("decisions")}
+                  onOpenMeetings={() => navigate("meetings")}
+                  onOpenSettings={() => navigate("settings")}
+                  onDecideRecommendation={decideHomeRecommendation}
+                  inflowSaving={inflowSaving}
+                  onPromoteInflow={promoteWorkspaceInflow}
+                  onDismissInflow={dismissWorkspaceInflow}
+                  onRetryInflowAnalysis={retryWorkspaceInflowAnalysis}
+                  onRetryInflowCompletion={retryWorkspaceInflowCompletion}
+                  onReviewInflowChange={setInflowChangeItem}
+                  gmailInflowItems={gmailInflowItems}
+                  gmailInflowProjects={gmailInflowProjects}
+                  gmailInflowLoading={gmailInflowLoading}
+                  gmailInflowLoadingMore={gmailInflowLoadingMore}
+                  gmailInflowLoadMoreError={
+                    gmailInflowLoadHealth.initialFailedWorkspaces.length ===
+                      0 &&
+                    gmailInflowLoadHealth.loadMoreFailedWorkspaces.length > 0
+                  }
+                  gmailInflowHasMore={Object.values(gmailInflowCursors).some(
+                    Boolean,
+                  )}
+                  gmailInflowError={
+                    gmailInflowError ??
+                    (gmailInflowLoadHealth.initialFailedWorkspaces.length > 0
+                      ? copy.gmailInflow.initialPartialProblem(
+                          gmailInflowLoadHealth.initialFailedWorkspaces,
+                        )
+                      : gmailInflowLoadHealth.loadMoreFailedWorkspaces.length >
+                          0
+                        ? copy.gmailInflow.moreLoadProblem
+                        : undefined)
+                  }
+                  gmailInflowSavingId={gmailInflowSavingId}
+                  onReloadGmailInflow={loadGmailInflow}
+                  onLoadMoreGmailInflow={loadMoreGmailInflow}
+                  onPromoteGmailInflow={promoteGmailInflow}
+                  onDismissGmailInflow={dismissGmailInflow}
+                  onDeferGmailInflow={deferGmailInflow}
+                  onRetryGmailInflowAnalysis={retryGmailInflowAnalysis}
+                />
+              </div>
             )}
             {destination === "calendar" && (
               <PlanningWorkspace
@@ -5565,9 +5732,9 @@ export default function App() {
                 onReviewInflowChange={setInflowChangeItem}
               />
             )}
-            {(destination === "home" || destination === "decisions") && (
+            {destination === "decisions" && (
               <DecisionInboxWorkspace
-                mode="home"
+                mode="history"
                 recovery={{
                   deliveryItems: homeSnapshot?.deliveryRecovery ?? [],
                   sourceItems: homeSnapshot?.recentInflow ?? [],
@@ -5654,11 +5821,10 @@ export default function App() {
                 onSelectWorkspace={selectWorkspace}
               />
             )}
-            {destination === "memory" && (
-              <MemoryWorkspace onOpenConversation={openNewAssistantRequest} />
-            )}
             {destination === "settings" && (
               <SettingsWorkspace
+                shortcuts={shortcuts}
+                onSaveShortcuts={saveShortcutSettings}
                 authentication={agentAuthentication}
                 requesting={authenticationRequesting}
                 modelSettings={agentModelSettings}
@@ -5705,7 +5871,7 @@ export default function App() {
                 onRefreshDeviceSignals={() => synchronizeDeviceSignals(false)}
               />
             )}
-            {destination === "chat" && (
+            {(destination === "chat" || homeChatVisible) && (
               <ConversationWorkspace
                 conversations={conversations}
                 messages={conversationMessages}
@@ -5729,12 +5895,37 @@ export default function App() {
                   conversationError ?? (mode === "error" ? message : undefined)
                 }
                 initialDraft={assistantDraft}
+                shortcutFocus={shortcutComposerFocus}
+                onShortcutFocusHandled={consumeShortcutComposerFocus}
+                onReturnHome={
+                  homeChatVisible ? returnToHomeOverview : undefined
+                }
                 onSelect={selectConversation}
                 onInitialDraftApplied={() => setAssistantDraft(undefined)}
-                onStartConversation={startHomeConversation}
+                onStartConversation={startChatConversation}
                 onStartAuthentication={beginAgentAuthentication}
                 onSend={sendConversationRequest}
                 onResolveAction={resolveConversationAction}
+                renderResult={(reply, onContinue) => {
+                  if (!reply.presentation) return null;
+                  const presentation = presentationForMessage(reply);
+                  if (!presentation.sections.length) return null;
+                  return (
+                    <AssistantInteractiveCanvas
+                      key={reply.id}
+                      presentation={{ ...presentation, summary: "" }}
+                      onContinue={onContinue}
+                      onLoadTask={loadTaskFromAssistant}
+                      onCompleteTask={completeTaskFromAssistant}
+                      onRestoreTask={restoreTaskFromAssistant}
+                      onEditTask={editTaskFromAssistant}
+                      onEditSchedule={editScheduleFromAssistant}
+                      onOpenTask={openTaskFromAssistant}
+                      onOpenProject={openProjectFromAssistant}
+                      onOpenSchedule={openScheduleFromAssistant}
+                    />
+                  );
+                }}
               />
             )}
           </WorkspaceRouteBoundary>
