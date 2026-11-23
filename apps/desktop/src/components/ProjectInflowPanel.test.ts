@@ -179,6 +179,18 @@ describe("project inflow deadline", () => {
     ).toBe("mutation-snapshot");
   });
 
+  it("keeps an archived task separate from new work in the same conversation", () => {
+    const active = inflowItem("new", { conversationId: "thread" });
+    const archived = inflowItem("old", {
+      conversationId: "thread",
+      status: "promoted",
+      promotedTaskId: "closed-task",
+    });
+    expect(inflowConversationKey(active)).not.toBe(
+      inflowConversationKey(archived),
+    );
+  });
+
   it("updates AI suggestions without overwriting fields the user changed", () => {
     const current = {
       title: "사용자가 다듬은 제목",
@@ -227,6 +239,7 @@ describe("project inflow deadline", () => {
     const markup = renderPanel({
       items: [
         inflowItem("stale", {
+          analysisStatus: "stale",
           sourceRevision: 3,
           analyzedRevision: 2,
         }),
@@ -239,6 +252,21 @@ describe("project inflow deadline", () => {
     expect(projectInflowPromotionProblem("missing_context")).toBe(
       copy.projects.inflowPromotionContextMissing,
     );
+  });
+
+  it("keeps the previous summary without offering a duplicate retry during refresh", () => {
+    const markup = renderPanel({
+      items: [
+        inflowItem("refresh", {
+          analysisStatus: "refreshing",
+          analysisSummary: "기존 분석 결과",
+          sourceRevision: 3,
+          analyzedRevision: 2,
+        }),
+      ],
+    });
+    expect(markup).toContain("기존 분석 결과");
+    expect(markup).not.toContain(copy.projects.inflowAnalysisRetry);
   });
 
   it("keeps fetched reference evidence collapsed and read-only", () => {

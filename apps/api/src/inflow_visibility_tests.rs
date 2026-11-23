@@ -84,11 +84,39 @@ fn owner_new_task_is_unread_without_any_external_reply() {
 
 #[test]
 fn owner_first_analysis_is_visible_and_unread() {
-    let (item, _) = owner_request(InflowClassification::NewTask);
-    let candidates = group_project_inflow_candidates(vec![item], vec![]);
+    let (item, mut analysis) = owner_request(InflowClassification::NewTask);
+    analysis.state = InflowAnalysisState::Queued;
+    analysis.analyzed_revision = None;
+    analysis.classification = None;
+    analysis.summary = None;
+    analysis.suggested_task_title = None;
+    let candidates = group_project_inflow_candidates(vec![item], vec![analysis]);
     let response = project_inflow_item_response(candidates.into_iter().next().unwrap()).unwrap();
     assert_eq!(response.analysis_status, "queued");
     assert!(!response.reviewed);
+}
+
+#[test]
+fn missing_analysis_is_not_presented_as_a_queued_job() {
+    let (item, _) = owner_request(InflowClassification::NewTask);
+    let candidates = group_project_inflow_candidates(vec![item], vec![]);
+    let response = project_inflow_item_response(candidates.into_iter().next().unwrap()).unwrap();
+    assert_eq!(response.analysis_status, "failed");
+    assert_eq!(
+        response.analysis_error_code.as_deref(),
+        Some("inflow.analysis_missing")
+    );
+    assert!(!response.reviewed);
+}
+
+#[test]
+fn a_finished_question_uses_its_summary_instead_of_a_progress_title() {
+    let (item, analysis) = owner_request(InflowClassification::Question);
+    let expected_summary = analysis.summary.clone().unwrap();
+    let candidates = group_project_inflow_candidates(vec![item], vec![analysis]);
+    let response = project_inflow_item_response(candidates.into_iter().next().unwrap()).unwrap();
+    assert_eq!(response.analysis_status, "ready");
+    assert_eq!(response.suggested_task_title, expected_summary);
 }
 
 #[test]

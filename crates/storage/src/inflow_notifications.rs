@@ -40,8 +40,9 @@ impl Database {
             "WITH eligible AS (
                 SELECT analysis.id, 'google_chat_inflow'::TEXT AS item_type,
                     analysis.source_revision AS revision, analysis.project_id,
-                    COALESCE(item.promoted_task_id, analysis.linked_task_id)
-                        IS NOT NULL AS existing_task,
+                    analysis.classification <> 'new_task'
+                        AND COALESCE(item.promoted_task_id, analysis.linked_task_id)
+                            IS NOT NULL AS existing_task,
                     COALESCE(analysis.suggested_task_title, analysis.summary, project.title) AS title,
                     COALESCE(analysis.summary, '새 대화를 확인해 주세요.') AS body,
                     FLOOR(EXTRACT(EPOCH FROM analysis.analyzed_at) * 1000)::BIGINT

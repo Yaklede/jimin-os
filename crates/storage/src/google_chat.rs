@@ -9,18 +9,77 @@ use sqlx::types::Json;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-// Shared by Home, project review and delivery. Keep excluded/closed threads out
-// before pagination without mutating their audit or pending delivery records.
-// Callers provide a project_inflow_items row aliased as `item`.
+// Preserve the last independent result across a refresh. Promotion and
+// notification separately require a ready and current revision.
+macro_rules! independent_inflow_candidate {
+    ($after:literal) => {
+        concat!(
+            "EXISTS (
+            SELECT 1 FROM project_inflow_analyses AS current_analysis
+            WHERE current_analysis.user_id = item.user_id
+              AND current_analysis.project_id = item.project_id
+              AND current_analysis.source_id = item.source_id
+              AND current_analysis.conversation_key = COALESCE(
+                  'thread:' || item.provider_thread_name,
+                  'message:' || item.provider_message_name
+              )
+              AND current_analysis.representative_item_id = item.id
+              AND current_analysis.classification = 'new_task'
+              AND ((current_analysis.state = 'ready'
+                    AND current_analysis.analyzed_revision = current_analysis.source_revision)
+                OR (current_analysis.analyzed_revision < current_analysis.source_revision
+                    AND EXISTS (
+                        SELECT 1 FROM project_inflow_items AS evidence
+                        WHERE evidence.user_id = item.user_id AND evidence.project_id = item.project_id
+                          AND evidence.source_id = item.source_id
+                          AND evidence.provider_thread_name = item.provider_thread_name
+                          AND evidence.status = 'pending' AND evidence.reviewed_at IS NULL
+                          AND evidence.created_at <= current_analysis.analyzed_at
+                          AND (evidence.received_at, evidence.id) < (item.received_at, item.id)
+                          AND evidence.received_at > ",
+            $after,
+            ")))
+        )"
+        )
+    };
+}
+pub(crate) use independent_inflow_candidate;
+
+// Before migration 57 the manual dismiss action had no reviewed_at column.
+// Automatic single-message exclusion was introduced in a later schema.
+macro_rules! manual_inflow_dismissal {
+    () => {
+        "decision.status = 'dismissed' AND decision.promoted_task_id IS NULL
+          AND (decision.reviewed_at IS NOT NULL OR decision.updated_at <= (
+              SELECT migration.installed_on FROM _sqlx_migrations AS migration
+              WHERE migration.version = 57 AND migration.success
+          ))"
+    };
+}
+pub(crate) use manual_inflow_dismissal;
+
+// Shared by Home, project review and delivery. The caller's row is named item.
 macro_rules! google_chat_attention_query {
-    ($before:literal, $after:literal $(,)?) => {
+    ($before:expr, $after:expr $(,)?) => {
         concat!(
             $before,
             " NOT EXISTS (
         SELECT 1 FROM project_inflow_items AS decision
         WHERE decision.user_id = item.user_id AND decision.source_id = item.source_id
           AND decision.provider_thread_name = item.provider_thread_name
-          AND decision.status = 'dismissed' AND decision.promoted_task_id IS NULL
+          AND ",
+            $crate::google_chat::manual_inflow_dismissal!(),
+            "
+          AND NOT EXISTS (
+              SELECT 1 FROM project_inflow_items AS accepted
+              WHERE accepted.user_id = item.user_id AND accepted.source_id = item.source_id
+                AND accepted.provider_thread_name = item.provider_thread_name
+                AND accepted.status = 'promoted' AND accepted.promoted_task_id = item.promoted_task_id
+                AND accepted.received_at > COALESCE(decision.reviewed_at, decision.updated_at)
+          )
+          AND NOT (item.received_at > COALESCE(decision.reviewed_at, decision.updated_at) AND ",
+            $crate::google_chat::independent_inflow_candidate!("COALESCE(decision.reviewed_at, decision.updated_at)"),
+            ")
     ) AND NOT EXISTS (
         SELECT 1 FROM tasks AS task
         WHERE task.user_id = item.user_id AND task.status <> 'open'
@@ -31,12 +90,106 @@ macro_rules! google_chat_attention_query {
                     THEN 'thread:' || item.provider_thread_name
                     ELSE 'message:' || item.provider_message_name END
           ))
+          AND NOT (task.status = 'completed' AND task.completed_at IS NOT NULL
+              AND item.received_at > task.completed_at AND ",
+            $crate::google_chat::independent_inflow_candidate!("task.completed_at"),
+            ")
     ) ",
             $after
         )
     };
 }
 pub(crate) use google_chat_attention_query;
+
+const PROJECT_INFLOW_REVIEW_QUERY: &str = google_chat_attention_query!(
+    "WITH eligible AS (
+        SELECT item.id, item.source_id, item.status, item.promoted_task_id,
+            COALESCE('thread:' || item.provider_thread_name, 'item:' || item.id::text)
+                AS conversation_key,
+            item.received_at, item.reviewed_at IS NULL AS unread,
+            COALESCE(item.sender_provider_name = CONCAT('users/', account.provider_subject),
+                     FALSE) AS sent_by_owner
+        FROM project_inflow_items AS item
+        JOIN project_google_chat_sources AS source ON source.id = item.source_id
+        JOIN google_chat_accounts AS account ON account.id = source.account_id
+        WHERE item.user_id = $1 AND ($2::UUID IS NULL OR item.project_id = $2)
+          AND ($3::TEXT IS NULL OR item.status = $3)
+          AND ($5::UUID IS NULL OR item.id = $5)
+          AND ($5 IS NOT NULL OR item.status <> 'pending' OR (",
+    concat!(
+        "))
+     ), conversation_state AS (
+        SELECT *,
+            BOOL_OR(NOT sent_by_owner) OVER conversation AS has_external,
+            BOOL_OR(unread AND NOT sent_by_owner) OVER conversation AS external_unread,
+            BOOL_OR(unread) OVER conversation AS any_unread,
+            MAX(received_at) OVER conversation AS latest
+        FROM eligible
+        WINDOW conversation AS (
+            PARTITION BY source_id, conversation_key, status, promoted_task_id
+        )
+     ), message_order AS (
+        SELECT *,
+            status = 'pending' AND CASE WHEN has_external THEN external_unread
+                                        ELSE any_unread END AS needs_review,
+            ROW_NUMBER() OVER (
+                PARTITION BY source_id, conversation_key, status, promoted_task_id
+                ORDER BY (unread AND (NOT has_external OR NOT sent_by_owner)) DESC,
+                         received_at DESC, id DESC
+            ) AS message_position
+        FROM conversation_state
+     ), page AS (
+        SELECT id, ROW_NUMBER() OVER (
+            PARTITION BY needs_review
+            ORDER BY message_position, latest DESC, id DESC
+        ) AS page_position
+        FROM message_order
+        WHERE NOT $4 OR needs_review
+     )
+     SELECT item.id, item.project_id, project.title AS project_name,
+        item.source_id, source.display_name AS source_name,
+        item.provider_thread_name, item.sender_provider_name,
+        COALESCE(item.sender_name, (
+            SELECT mention.name
+            FROM project_webhooks AS sender_webhook
+            CROSS JOIN LATERAL jsonb_each_text(
+                sender_webhook.mention_directory -> 'users'
+            ) AS mention(name, resource_name)
+            WHERE sender_webhook.project_id = item.project_id
+              AND mention.resource_name = item.sender_provider_name
+            ORDER BY sender_webhook.created_at, mention.name
+            LIMIT 1
+        )) AS sender_name,
+        COALESCE(
+            item.sender_provider_name = CONCAT('users/', account.provider_subject),
+            FALSE
+        ) AS sent_by_owner,
+        item.content_text,
+        item.received_at, item.status,
+        CASE WHEN item.status = 'pending' AND EXISTS (
+            SELECT 1 FROM tasks AS previous
+            WHERE previous.id = item.promoted_task_id AND previous.user_id = item.user_id
+              AND previous.status = 'completed' AND previous.completed_at < item.received_at
+              AND ",
+        independent_inflow_candidate!("previous.completed_at"),
+        ") THEN NULL ELSE item.promoted_task_id END AS promoted_task_id,
+        item.acknowledged_at, item.reviewed_at, item.dismissal_reason,
+        (SELECT CASE WHEN reply.sent_at IS NOT NULL THEN 'sent'
+            WHEN reply.error_code IS NOT NULL THEN 'failed' ELSE 'pending' END
+         FROM project_inflow_dismissal_replies AS reply
+         WHERE reply.inflow_id = item.id) AS dismissal_reply_status,
+        item.completion_requested_at,
+        item.completion_reaction_at, item.completion_reply_at,
+        item.completion_delivery_error_code,
+        item.completion_delivery_attempt_count, item.version
+     FROM project_inflow_items AS item
+     JOIN project_google_chat_sources AS source ON source.id = item.source_id
+     JOIN google_chat_accounts AS account ON account.id = source.account_id
+     JOIN projects AS project ON project.id = item.project_id
+     JOIN page ON page.id = item.id AND page.page_position <= 200
+     ORDER BY item.received_at DESC, item.id DESC"
+    ),
+);
 
 use crate::{
     Database, StorageError,
@@ -1072,7 +1225,7 @@ impl Database {
                      FROM project_inflow_items
                      WHERE source_id = $1 AND provider_thread_name = $2
                        AND status = 'promoted' AND promoted_task_id IS NOT NULL
-                     ORDER BY updated_at DESC, received_at DESC, id DESC
+                     ORDER BY received_at DESC, id DESC
                      LIMIT 1",
                 )
                 .bind(connection.source_id)
@@ -1132,15 +1285,19 @@ impl Database {
                     provider_message_name: message.provider_message_name.clone(),
                 });
             } else if message.sender_provider_name.is_some() || message.sender_name.is_some() {
-                let repaired = sqlx::query_as::<_, (Uuid, i64)>(
-                    "UPDATE project_inflow_items
+                let repaired = sqlx::query_as::<_, (Uuid, i64, bool)>(concat!(
+                    "UPDATE project_inflow_items AS decision
                      SET sender_provider_name = COALESCE(sender_provider_name, $3),
-                         sender_name = COALESCE(sender_name, $4)
+                         sender_name = COALESCE(sender_name, $4),
+                         reviewed_at = CASE WHEN ",
+                    manual_inflow_dismissal!(),
+                    "
+                           THEN COALESCE(reviewed_at, updated_at) ELSE reviewed_at END
                      WHERE source_id = $1 AND provider_message_name = $2
                        AND ((sender_provider_name IS NULL AND $3::TEXT IS NOT NULL)
                          OR (sender_name IS NULL AND $4::TEXT IS NOT NULL))
-                     RETURNING id, version",
-                )
+                     RETURNING id, version, status = 'pending'"
+                ))
                 .bind(connection.source_id)
                 .bind(&message.provider_message_name)
                 .bind(&message.sender_provider_name)
@@ -1148,7 +1305,7 @@ impl Database {
                 .fetch_optional(&mut *transaction)
                 .await
                 .map_err(classify)?;
-                if let Some((inflow_id, version)) = repaired {
+                if let Some((inflow_id, version, reanalyze)) = repaired {
                     append_change(
                         &mut transaction,
                         connection.user_id,
@@ -1157,15 +1314,17 @@ impl Database {
                         version,
                     )
                     .await?;
-                    queue_inflow_analysis_in_transaction(
-                        &mut transaction,
-                        connection.user_id,
-                        connection.project_id,
-                        connection.source_id,
-                        &inflow_conversation_key(message),
-                        inflow_id,
-                    )
-                    .await?;
+                    if reanalyze {
+                        queue_inflow_analysis_in_transaction(
+                            &mut transaction,
+                            connection.user_id,
+                            connection.project_id,
+                            connection.source_id,
+                            &inflow_conversation_key(message),
+                            inflow_id,
+                        )
+                        .await?;
+                    }
                 }
             }
         }
@@ -1513,20 +1672,60 @@ impl Database {
         failure_code: &str,
         reauth_required: bool,
     ) -> Result<(), StorageError> {
+        self.save_google_chat_source_failure(source_id, failure_code, reauth_required, None)
+            .await
+    }
+
+    /// Records manual sync failure only on a source owned by the requesting project.
+    ///
+    /// # Errors
+    /// Returns a validation or persistence error. An unowned source is left unchanged.
+    pub async fn mark_owned_google_chat_source_failure(
+        &self,
+        user_id: Uuid,
+        project_id: Uuid,
+        source_id: Uuid,
+        failure_code: &str,
+        reauth_required: bool,
+    ) -> Result<(), StorageError> {
+        if ![user_id, project_id].into_iter().all(is_v7) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        self.save_google_chat_source_failure(
+            source_id,
+            failure_code,
+            reauth_required,
+            Some((user_id, project_id)),
+        )
+        .await
+    }
+
+    async fn save_google_chat_source_failure(
+        &self,
+        source_id: Uuid,
+        failure_code: &str,
+        reauth_required: bool,
+        owner: Option<(Uuid, Uuid)>,
+    ) -> Result<(), StorageError> {
         if !is_v7(source_id) || !valid_failure_code(failure_code) {
             return Err(StorageError::InvalidConfiguration);
         }
+        let (user_id, project_id) =
+            owner.map_or((None, None), |(user, project)| (Some(user), Some(project)));
         let mut transaction = self.pool().begin().await.map_err(classify)?;
         let source = sqlx::query_as::<_, (Uuid, i64)>(
             "UPDATE project_google_chat_sources AS source
              SET last_error_code = $2
              FROM google_chat_accounts AS account
              WHERE source.id = $1 AND account.id = source.account_id
+               AND ($3::uuid IS NULL OR (source.user_id = $3 AND source.project_id = $4))
                AND source.last_error_code IS DISTINCT FROM $2
              RETURNING source.user_id, source.version",
         )
         .bind(source_id)
         .bind(failure_code)
+        .bind(user_id)
+        .bind(project_id)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(classify)?;
@@ -1540,6 +1739,7 @@ impl Database {
              SET status = $3, last_error_code = $2
              FROM project_google_chat_sources AS source
              WHERE source.id = $1 AND source.account_id = account.id
+               AND ($4::uuid IS NULL OR (source.user_id = $4 AND source.project_id = $5))
                AND (account.status IS DISTINCT FROM $3
                     OR account.last_error_code IS DISTINCT FROM $2)
              RETURNING account.id, account.user_id, account.version",
@@ -1547,6 +1747,8 @@ impl Database {
         .bind(source_id)
         .bind(failure_code)
         .bind(status)
+        .bind(user_id)
+        .bind(project_id)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(classify)?;
@@ -1585,61 +1787,17 @@ impl Database {
         project_id: Uuid,
         status: Option<ProjectInflowStatus>,
     ) -> Result<Vec<ProjectInflowItem>, StorageError> {
-        let status = status.map(status_name);
-        let query = google_chat_attention_query!(
-            "SELECT item.id, item.project_id, project.title AS project_name,
-                item.source_id, source.display_name AS source_name,
-                item.provider_thread_name, item.sender_provider_name,
-                COALESCE(item.sender_name, (
-                    SELECT mention.name
-                    FROM project_webhooks AS sender_webhook
-                    CROSS JOIN LATERAL jsonb_each_text(
-                        sender_webhook.mention_directory -> 'users'
-                    ) AS mention(name, resource_name)
-                    WHERE sender_webhook.project_id = item.project_id
-                      AND mention.resource_name = item.sender_provider_name
-                    ORDER BY sender_webhook.created_at, mention.name
-                    LIMIT 1
-                )) AS sender_name,
-                COALESCE(
-                    item.sender_provider_name = CONCAT('users/', account.provider_subject),
-                    FALSE
-                ) AS sent_by_owner,
-                item.content_text,
-                item.received_at, item.status, item.promoted_task_id,
-                item.acknowledged_at, item.reviewed_at, item.dismissal_reason,
-                (SELECT CASE WHEN reply.sent_at IS NOT NULL THEN 'sent'
-                    WHEN reply.error_code IS NOT NULL THEN 'failed' ELSE 'pending' END
-                 FROM project_inflow_dismissal_replies AS reply
-                 WHERE reply.inflow_id = item.id) AS dismissal_reply_status,
-                item.completion_requested_at,
-                item.completion_reaction_at, item.completion_reply_at,
-                item.completion_delivery_error_code,
-                item.completion_delivery_attempt_count, item.version
-             FROM project_inflow_items AS item
-             JOIN project_google_chat_sources AS source ON source.id = item.source_id
-             JOIN google_chat_accounts AS account ON account.id = source.account_id
-             JOIN projects AS project ON project.id = item.project_id
-             WHERE item.user_id = $1 AND item.project_id = $2
-               AND ($3::TEXT IS NULL OR item.status = $3)
-               AND (item.status <> 'pending' OR (",
-            "))
-             ORDER BY item.received_at DESC, item.id DESC
-             LIMIT 200",
-        );
-        let rows = sqlx::query_as::<_, ProjectInflowItemRow>(query)
-            .bind(user_id)
-            .bind(project_id)
-            .bind(status)
-            .fetch_all(self.pool())
-            .await
-            .map_err(classify)?;
-        rows.into_iter().map(ProjectInflowItem::try_from).collect()
+        self.project_inflow_review_list(
+            user_id,
+            Some(project_id),
+            status.map(status_name),
+            false,
+            None,
+        )
+        .await
     }
 
-    /// Lists pending Chat inflow across every owned project for the home brief.
-    /// Provider identifiers remain server-side; sender labels are resolved from
-    /// the project's registered Google Chat mention directory when available.
+    /// Lists unread Chat conversations across owned projects for the home brief.
     ///
     /// # Errors
     ///
@@ -1648,51 +1806,45 @@ impl Database {
         &self,
         user_id: Uuid,
     ) -> Result<Vec<ProjectInflowItem>, StorageError> {
-        if !is_v7(user_id) {
+        self.project_inflow_review_list(user_id, None, Some("pending"), true, None)
+            .await
+    }
+
+    /// Fetches the result of a decision by exact owner, project and message ID.
+    ///
+    /// # Errors
+    /// Returns a validation or persistence error.
+    pub async fn project_inflow_item(
+        &self,
+        user_id: Uuid,
+        project_id: Uuid,
+        item_id: Uuid,
+    ) -> Result<Option<ProjectInflowItem>, StorageError> {
+        self.project_inflow_review_list(user_id, Some(project_id), None, false, Some(item_id))
+            .await
+            .map(|mut items| items.pop())
+    }
+
+    async fn project_inflow_review_list(
+        &self,
+        user_id: Uuid,
+        project_id: Option<Uuid>,
+        status: Option<&str>,
+        unread_only: bool,
+        item_id: Option<Uuid>,
+    ) -> Result<Vec<ProjectInflowItem>, StorageError> {
+        if !is_v7(user_id) || project_id.is_some_and(|id| !is_v7(id)) {
             return Err(StorageError::InvalidConfiguration);
         }
-        let query = google_chat_attention_query!(
-            "SELECT item.id, item.project_id, project.title AS project_name,
-                item.source_id, source.display_name AS source_name,
-                item.provider_thread_name, item.sender_provider_name,
-                COALESCE(item.sender_name, (
-                    SELECT mention.name
-                    FROM project_webhooks AS sender_webhook
-                    CROSS JOIN LATERAL jsonb_each_text(
-                        sender_webhook.mention_directory -> 'users'
-                    ) AS mention(name, resource_name)
-                    WHERE sender_webhook.project_id = item.project_id
-                      AND mention.resource_name = item.sender_provider_name
-                    ORDER BY sender_webhook.created_at, mention.name
-                    LIMIT 1
-                )) AS sender_name,
-                COALESCE(
-                    item.sender_provider_name = CONCAT('users/', account.provider_subject),
-                    FALSE
-                ) AS sent_by_owner,
-                item.content_text,
-                item.received_at, item.status, item.promoted_task_id,
-                item.acknowledged_at, item.reviewed_at, item.dismissal_reason,
-                (SELECT CASE WHEN reply.sent_at IS NOT NULL THEN 'sent'
-                    WHEN reply.error_code IS NOT NULL THEN 'failed' ELSE 'pending' END
-                 FROM project_inflow_dismissal_replies AS reply
-                 WHERE reply.inflow_id = item.id) AS dismissal_reply_status,
-                item.completion_requested_at,
-                item.completion_reaction_at, item.completion_reply_at,
-                item.completion_delivery_error_code,
-                item.completion_delivery_attempt_count, item.version
-             FROM project_inflow_items AS item
-             JOIN project_google_chat_sources AS source ON source.id = item.source_id
-             JOIN google_chat_accounts AS account ON account.id = source.account_id
-             JOIN projects AS project ON project.id = item.project_id
-             WHERE item.user_id = $1 AND item.status = 'pending'
-               AND (",
-            ")
-             ORDER BY item.received_at DESC, item.id DESC
-             LIMIT 200",
-        );
-        let rows = sqlx::query_as::<_, ProjectInflowItemRow>(query)
+
+        // Unread conversations and history have separate message budgets.
+        // Take one message per conversation before allocating deeper context.
+        let rows = sqlx::query_as::<_, ProjectInflowItemRow>(PROJECT_INFLOW_REVIEW_QUERY)
             .bind(user_id)
+            .bind(project_id)
+            .bind(status)
+            .bind(unread_only)
+            .bind(item_id)
             .fetch_all(self.pool())
             .await
             .map_err(classify)?;
@@ -2461,11 +2613,16 @@ struct PromotionGroup {
     source_id: Uuid,
     provider_thread_name: Option<String>,
     conversation_key: String,
+    isolate_message: bool,
 }
 
 impl PromotionGroup {
     fn thread_name(&self) -> Option<&str> {
-        self.provider_thread_name.as_deref()
+        if self.isolate_message {
+            None
+        } else {
+            self.provider_thread_name.as_deref()
+        }
     }
 }
 
@@ -2481,9 +2638,17 @@ async fn lock_promotion_group(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     command: &PromoteProjectInflowItem,
 ) -> Result<Option<PromotionGroup>, StorageError> {
-    let locked = sqlx::query_as::<_, (Uuid, Option<String>, String)>(
-        "SELECT item.source_id, item.provider_thread_name,
-            item.provider_message_name
+    let query = google_chat_attention_query!(
+        concat!(
+            "SELECT item.source_id, item.provider_thread_name,
+            item.provider_message_name,
+            item.promoted_task_id IS NOT NULL OR EXISTS (
+                SELECT 1 FROM project_inflow_items AS decision
+                WHERE decision.user_id = item.user_id AND decision.source_id = item.source_id
+                  AND decision.provider_thread_name = item.provider_thread_name AND ",
+            manual_inflow_dismissal!(),
+            "
+            ) AS isolate_message
          FROM project_inflow_items AS item
          JOIN project_google_chat_sources AS source
            ON source.id = item.source_id
@@ -2491,24 +2656,35 @@ async fn lock_promotion_group(
           AND source.project_id = item.project_id
          WHERE item.id = $1 AND item.user_id = $2 AND item.project_id = $3
            AND item.version = $4 AND item.status = 'pending'
-           AND item.promoted_task_id IS NULL
+           AND (item.promoted_task_id IS NULL OR EXISTS (
+             SELECT 1 FROM tasks AS previous
+             WHERE previous.id = item.promoted_task_id AND previous.user_id = item.user_id
+               AND previous.status = 'completed' AND previous.completed_at < item.received_at
+           ))
+           AND ("
+        ),
+        ")
          FOR UPDATE OF source, item",
-    )
-    .bind(command.item_id)
-    .bind(command.user_id)
-    .bind(command.project_id)
-    .bind(command.expected_version)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(classify)?;
+    );
+    let locked = sqlx::query_as::<_, (Uuid, Option<String>, String, bool)>(query)
+        .bind(command.item_id)
+        .bind(command.user_id)
+        .bind(command.project_id)
+        .bind(command.expected_version)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(classify)?;
     Ok(locked.map(
-        |(source_id, provider_thread_name, provider_message_name)| PromotionGroup {
-            source_id,
-            conversation_key: provider_thread_name.as_ref().map_or_else(
-                || format!("message:{provider_message_name}"),
-                |thread| format!("thread:{thread}"),
-            ),
-            provider_thread_name,
+        |(source_id, provider_thread_name, provider_message_name, isolate_message)| {
+            PromotionGroup {
+                source_id,
+                conversation_key: provider_thread_name.as_ref().map_or_else(
+                    || format!("message:{provider_message_name}"),
+                    |thread| format!("thread:{thread}"),
+                ),
+                provider_thread_name,
+                isolate_message,
+            }
         },
     ))
 }
@@ -2528,7 +2704,13 @@ async fn lock_promotion_analysis(
            AND source_revision = $7 AND analyzed_revision = $8
            AND source_revision = analyzed_revision
            AND state = 'ready' AND classification = 'new_task'
-           AND linked_task_id IS NULL
+           AND (linked_task_id IS NULL OR EXISTS (
+             SELECT 1 FROM tasks AS previous
+             JOIN project_inflow_items AS origin ON origin.id = $6
+             WHERE previous.id = project_inflow_analyses.linked_task_id
+               AND previous.user_id = $2 AND previous.status = 'completed'
+               AND previous.completed_at < origin.received_at
+           ))
          FOR UPDATE",
     )
     .bind(command.analysis_id)
@@ -2554,6 +2736,7 @@ async fn inflow_group_messages(
         "SELECT id, sender_name, content_text, received_at
          FROM project_inflow_items
          WHERE user_id = $1 AND project_id = $2 AND status = 'pending'
+           AND (promoted_task_id IS NULL OR id = $4)
            AND (($3::TEXT IS NULL AND id = $4)
              OR ($3::TEXT IS NOT NULL AND source_id = $5
                AND provider_thread_name = $3))
@@ -2681,7 +2864,6 @@ async fn link_promotion_analysis(
            AND source_revision = $6 AND analyzed_revision = $7
            AND source_revision = analyzed_revision
            AND state = 'ready' AND classification = 'new_task'
-           AND linked_task_id IS NULL
          RETURNING version",
     )
     .bind(command.analysis_id)
@@ -2731,6 +2913,7 @@ async fn mark_inflow_group_promoted(
          FROM project_google_chat_sources AS source
          WHERE item.user_id = $3 AND item.project_id = $4
            AND item.status = 'pending' AND source.id = item.source_id
+           AND (item.promoted_task_id IS NULL OR item.id = $1)
            AND (($5::TEXT IS NULL AND item.id = $1)
              OR ($5::TEXT IS NOT NULL AND item.source_id = $6
                AND item.provider_thread_name = $5))
@@ -2809,6 +2992,7 @@ async fn pending_inflow_completion_target(
          JOIN google_chat_accounts AS account ON account.id = source.account_id
          WHERE item.user_id = $1 AND item.project_id = $2
            AND item.status = 'pending'
+           AND (item.promoted_task_id IS NULL OR item.id = $4)
            AND (($3::TEXT IS NULL AND item.id = $4)
              OR ($3::TEXT IS NOT NULL AND item.source_id = $5
                AND item.provider_thread_name = $3))
