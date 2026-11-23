@@ -330,6 +330,51 @@ impl Database {
         analyses(self, user_id, Some(project_id)).await
     }
 
+    /// Loads the persisted analysis for the selected messages' conversations.
+    ///
+    /// # Errors
+    /// Returns an error if identifiers are invalid or the owner-scoped lookup fails.
+    pub async fn project_inflow_analyses_for_items(
+        &self,
+        user_id: Uuid,
+        item_ids: &[Uuid],
+    ) -> Result<Vec<ProjectInflowAnalysis>, StorageError> {
+        if !is_v7(user_id) || item_ids.iter().any(|id| !is_v7(*id)) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        if item_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, ProjectInflowAnalysisRow>(
+            "SELECT analysis.id, analysis.project_id, analysis.source_id, analysis.conversation_key,
+                analysis.representative_item_id, analysis.source_revision, analysis.analyzed_revision,
+                analysis.state, analysis.classification, analysis.confidence, analysis.summary,
+                analysis.suggested_task_title, analysis.suggested_action_items,
+                analysis.suggested_completion_criteria, analysis.suggested_assignee_name,
+                analysis.suggested_due_at, analysis.suggested_priority, analysis.linked_task_id,
+                analysis.reference_documents, analysis.error_code, analysis.version
+             FROM (
+                SELECT DISTINCT item.project_id, item.source_id,
+                    COALESCE('thread:' || item.provider_thread_name,
+                             'message:' || item.provider_message_name) AS conversation_key
+                FROM project_inflow_items AS item
+                WHERE item.user_id = $1 AND item.id = ANY($2)
+             ) AS selected
+             JOIN project_inflow_analyses AS analysis
+               ON analysis.user_id = $1 AND analysis.project_id = selected.project_id
+              AND analysis.source_id = selected.source_id
+              AND analysis.conversation_key = selected.conversation_key",
+        )
+        .bind(user_id)
+        .bind(item_ids)
+        .fetch_all(self.pool())
+        .await
+        .map_err(classify)?;
+        rows.into_iter()
+            .map(ProjectInflowAnalysis::try_from)
+            .collect()
+    }
+
     /// Claims the oldest queued inflow conversation for one worker.
     ///
     /// # Errors
@@ -350,10 +395,10 @@ impl Database {
             "WITH recovered AS (
                 UPDATE project_inflow_analyses
                 SET state = 'queued', claim_owner = NULL, claim_expires_at = NULL
-                WHERE state = 'claimed' AND claim_expires_at < NOW()
+                WHERE state = 'claimed' AND claim_expires_at < NOW() AND attempt_count < 8
              ), candidate AS (
                 SELECT id FROM project_inflow_analyses
-                WHERE state = 'queued'
+                WHERE state = 'queued' AND attempt_count < 8
                 ORDER BY created_at, id
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
@@ -668,7 +713,7 @@ impl Database {
         Ok(true)
     }
 
-    /// Requeues one failed analysis after an explicit user retry.
+    /// Requeues one failed analysis or creates a missing job for one explicit retry.
     ///
     /// # Errors
     ///
@@ -685,29 +730,33 @@ impl Database {
             return Err(StorageError::InvalidConfiguration);
         }
         let mut transaction = self.pool().begin().await.map_err(classify)?;
-        let row = sqlx::query_as::<_, (Uuid, i64)>(
-            "UPDATE project_inflow_analyses AS analysis
-             SET state = 'queued', attempt_count = 0, error_code = NULL
+        let query = crate::google_chat::google_chat_attention_query!(
+            "INSERT INTO project_inflow_analyses
+                (id, user_id, project_id, source_id, conversation_key, representative_item_id)
+             SELECT $5, item.user_id, item.project_id, item.source_id,
+                COALESCE('thread:' || item.provider_thread_name,
+                         'message:' || item.provider_message_name),
+                item.id
              FROM project_inflow_items AS item
              WHERE item.id = $3 AND item.user_id = $1 AND item.project_id = $2
-               AND item.version = $4
-               AND analysis.user_id = item.user_id
-               AND analysis.project_id = item.project_id
-               AND analysis.source_id = item.source_id
-               AND analysis.conversation_key = COALESCE(
-                    'thread:' || item.provider_thread_name,
-                    'message:' || item.provider_message_name
-               )
-               AND analysis.state = 'failed'
-             RETURNING analysis.id, analysis.version",
-        )
-        .bind(user_id)
-        .bind(project_id)
-        .bind(item_id)
-        .bind(expected_item_version)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(classify)?;
+               AND item.version = $4 AND item.status = 'pending'
+               AND (",
+            ")
+             ON CONFLICT (source_id, conversation_key) DO UPDATE
+             SET state = 'queued', attempt_count = 0, error_code = NULL
+             WHERE project_inflow_analyses.user_id = $1 AND project_inflow_analyses.project_id = $2
+               AND project_inflow_analyses.state = 'failed'
+             RETURNING id, version",
+        );
+        let row = sqlx::query_as::<_, (Uuid, i64)>(query)
+            .bind(user_id)
+            .bind(project_id)
+            .bind(item_id)
+            .bind(expected_item_version)
+            .bind(Uuid::now_v7())
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(classify)?;
         let Some((analysis_id, version)) = row else {
             transaction.rollback().await.map_err(classify)?;
             return Ok(false);
@@ -724,7 +773,7 @@ impl Database {
         Ok(true)
     }
 
-    /// Fails running analyses whose processing lease has expired.
+    /// Fails interrupted running analyses and exhausted claims.
     ///
     /// # Errors
     ///
@@ -742,7 +791,9 @@ impl Database {
             "UPDATE project_inflow_analyses
              SET state = 'failed', claim_owner = NULL, claim_expires_at = NULL,
                  error_code = $1
-             WHERE state = 'running' AND claim_expires_at < NOW()
+             WHERE ((state = 'running' OR (state = 'claimed' AND attempt_count >= 8))
+                        AND claim_expires_at < NOW())
+                OR (state = 'queued' AND attempt_count >= 8)
              RETURNING id, user_id, version",
         )
         .bind(error_code)

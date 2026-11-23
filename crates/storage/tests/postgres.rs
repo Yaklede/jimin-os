@@ -11305,6 +11305,274 @@ async fn inflow_notifications_skip_history_read_noise_and_cross_owner() {
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
+    reason = "One Chat fixture checks the visible read model and safe retry boundaries."
+)]
+async fn chat_attention_keeps_unread_conversations_despite_history_and_automation() {
+    let Ok(url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let db = Database::connect_lazy(&SecretString::from(url.clone()), 2, Duration::from_secs(2))
+        .unwrap();
+    db.migrate().await.unwrap();
+    let owner = db
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .unwrap();
+    let user = owner.profile.id;
+    let workspace = db.workspaces_for_user(user).await.unwrap().remove(0);
+    let project = db
+        .create_project(&NewProject {
+            id: Uuid::now_v7(),
+            user_id: user,
+            workspace_id: workspace.id,
+            title: "유입 테스트".to_owned(),
+            objective: None,
+            management_mode: ProjectManagementMode::Operation,
+            reporting_enabled: false,
+            stale_threshold_days: 7,
+            risk_level: 0,
+            next_action: None,
+            due_at: None,
+        })
+        .await
+        .unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    let account = Uuid::now_v7();
+    let source = Uuid::now_v7();
+    sqlx::query("INSERT INTO google_chat_accounts (id,user_id,provider_subject,email,status) VALUES ($1,$2,'100','attention@example.test','active')")
+        .bind(account).bind(user).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO project_google_chat_sources (id,user_id,project_id,account_id,space_name,display_name) VALUES ($1,$2,$3,$4,'spaces/attention','유입 테스트')")
+        .bind(source).bind(user).bind(project.id).bind(account).execute(&pool).await.unwrap();
+    let old = Uuid::now_v7();
+    let actual = Uuid::now_v7();
+    for (id, marker, thread, status, received) in [
+        (old, "old", "old", "pending", "2026-07-01T00:00:00Z"),
+        (
+            Uuid::now_v7(),
+            "automatic",
+            "recent",
+            "dismissed",
+            "2026-08-01T00:00:00Z",
+        ),
+        (
+            actual,
+            "actual",
+            "recent",
+            "pending",
+            "2026-08-02T00:00:00Z",
+        ),
+    ] {
+        sqlx::query("INSERT INTO project_inflow_items(id,user_id,project_id,source_id,provider_message_name,provider_thread_name,content_text,status,received_at) VALUES($1,$2,$3,$4,$5,$6,'업무 요청',$7,$8::text::timestamptz)")
+            .bind(id).bind(user).bind(project.id).bind(source)
+            .bind(format!("spaces/attention/messages/{marker}"))
+            .bind(format!("spaces/attention/threads/{thread}")).bind(status).bind(received)
+            .execute(&pool).await.unwrap();
+    }
+    sqlx::query("INSERT INTO project_inflow_items(id,user_id,project_id,source_id,provider_message_name,provider_thread_name,content_text,status,received_at,reviewed_at)
+        SELECT ('00000000-0000-7000-8000-' || lpad(n::text,12,'0'))::uuid,$1,$2,$3,'spaces/attention/messages/seen-' || n,'spaces/attention/threads/seen','확인한 대화','pending',TIMESTAMPTZ '2026-09-01',TIMESTAMPTZ '2026-09-02' FROM generate_series(1,200) n")
+        .bind(user).bind(project.id).bind(source).execute(&pool).await.unwrap();
+    let home = db.pending_project_inflow_for_user(user).await.unwrap();
+    assert!(
+        home.iter().any(|item| item.id == old),
+        "read traffic must not crowd out older unread work"
+    );
+    assert!(
+        home.iter().any(|item| item.id == actual),
+        "an automated dismissal is message-scoped"
+    );
+    let project_items = db
+        .project_inflow_items(user, project.id, None)
+        .await
+        .unwrap();
+    assert!(
+        project_items.iter().any(|item| item.id == old),
+        "history must not crowd out unread work"
+    );
+    assert!(project_items.iter().any(|item| item.id == actual));
+
+    sqlx::query("INSERT INTO project_inflow_analyses (id,user_id,project_id,source_id,conversation_key,representative_item_id,state,classification,confidence,summary,analyzed_revision,analyzed_at,updated_at)
+        VALUES ($1,$2,$3,$4,'thread:spaces/attention/threads/old',$5,'ready','question',90,'보존된 분석',1,TIMESTAMPTZ '2026-07-01',TIMESTAMPTZ '2026-07-01')")
+        .bind(Uuid::now_v7()).bind(user).bind(project.id).bind(source).bind(old).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO project_inflow_analyses (id,user_id,project_id,source_id,conversation_key,representative_item_id,state)
+        SELECT gen_random_uuid(),$1,$2,$3,'thread:spaces/attention/threads/filler-' || n,$4,'failed' FROM generate_series(1,301) n")
+        .bind(user).bind(project.id).bind(source).bind(old).execute(&pool).await.unwrap();
+    let result = db
+        .project_inflow_analyses_for_items(user, &[old])
+        .await
+        .unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].summary.as_deref(), Some("보존된 분석"));
+    assert!(
+        db.project_inflow_analyses_for_items(Uuid::now_v7(), &[old])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    db.mark_owned_google_chat_source_failure(
+        Uuid::now_v7(),
+        project.id,
+        source,
+        "google_chat.authorization_rejected",
+        true,
+    )
+    .await
+    .unwrap();
+    db.mark_owned_google_chat_source_failure(
+        user,
+        Uuid::now_v7(),
+        source,
+        "google_chat.authorization_rejected",
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(
+        db.active_google_chat_source_ids()
+            .await
+            .unwrap()
+            .contains(&source)
+    );
+
+    let exact = db
+        .project_inflow_item(user, project.id, actual)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        db.retry_project_inflow_analysis(user, project.id, actual, exact.version)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !db.retry_project_inflow_analysis(user, project.id, actual, exact.version)
+            .await
+            .unwrap()
+    );
+    let recovered = db
+        .project_inflow_analyses_for_items(user, &[actual])
+        .await
+        .unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].state, InflowAnalysisState::Queued);
+
+    sqlx::query("INSERT INTO project_inflow_analyses(id,user_id,project_id,source_id,conversation_key,representative_item_id,state,claim_owner,claim_expires_at,attempt_count,created_at)
+        VALUES($1,$2,$3,$4,'thread:spaces/attention/threads/exhausted',$5,'claimed','interrupted',TIMESTAMPTZ '2026-08-01',8,TIMESTAMPTZ '2026-08-01')")
+        .bind(Uuid::now_v7()).bind(user).bind(project.id).bind(source).bind(old).execute(&pool).await.unwrap();
+    assert_eq!(
+        db.fail_expired_running_inflow_analyses("inflow.recovery_required")
+            .await
+            .unwrap(),
+        1
+    );
+    let job = db
+        .claim_next_inflow_analysis("following-worker", Duration::from_mins(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.representative_item_id, actual);
+
+    let closed = Uuid::now_v7();
+    sqlx::query("INSERT INTO tasks (id,user_id,project_id,title,status,priority,completed_at) VALUES ($1,$2,$3,'완료 업무','completed',1,TIMESTAMPTZ '2026-10-01')")
+        .bind(closed).bind(user).bind(project.id).execute(&pool).await.unwrap();
+    let (older_reply, new_request, previous_dismissal, new_after_dismissal) = (
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    );
+    for (id, marker, thread, received, linked) in [
+        (
+            older_reply,
+            "older-reply",
+            "completed",
+            "2026-09-30T00:00:00Z",
+            Some(closed),
+        ),
+        (
+            new_request,
+            "new-request",
+            "completed",
+            "2026-10-02T00:00:00Z",
+            Some(closed),
+        ),
+        (
+            previous_dismissal,
+            "dismissed-request",
+            "dismissed",
+            "2026-10-01T00:00:00Z",
+            None,
+        ),
+        (
+            new_after_dismissal,
+            "new-after-dismissal",
+            "dismissed",
+            "2026-10-03T00:00:00Z",
+            None,
+        ),
+    ] {
+        sqlx::query("INSERT INTO project_inflow_items(id,user_id,project_id,source_id,provider_message_name,provider_thread_name,content_text,received_at,promoted_task_id) VALUES($1,$2,$3,$4,$5,$6,'별개의 결과물을 요청합니다',$7::text::timestamptz,$8)")
+            .bind(id).bind(user).bind(project.id).bind(source)
+            .bind(format!("spaces/attention/messages/{marker}"))
+            .bind(format!("spaces/attention/threads/{thread}")).bind(received).bind(linked)
+            .execute(&pool).await.unwrap();
+    }
+    sqlx::query("UPDATE project_inflow_items SET status='dismissed',reviewed_at=TIMESTAMPTZ '2026-10-01T03:00:00Z' WHERE id=$1")
+        .bind(previous_dismissal).execute(&pool).await.unwrap();
+    let ready_id = Uuid::now_v7();
+    for (analysis_id, item_id, thread, linked) in [
+        (ready_id, new_request, "completed", Some(closed)),
+        (Uuid::now_v7(), new_after_dismissal, "dismissed", None),
+    ] {
+        sqlx::query("INSERT INTO project_inflow_analyses (id,user_id,project_id,source_id,conversation_key,representative_item_id,state,classification,confidence,summary,suggested_task_title,suggested_action_items,suggested_completion_criteria,suggested_priority,analyzed_revision,analyzed_at,linked_task_id)
+            VALUES ($1,$2,$3,$4,$5,$6,'ready','new_task',90,'독립 업무','새 업무',ARRAY['별개 검증을 진행한다'],'결과 전달',1,1,NOW(),$7)")
+            .bind(analysis_id).bind(user).bind(project.id).bind(source)
+            .bind(format!("thread:spaces/attention/threads/{thread}")).bind(item_id).bind(linked)
+            .execute(&pool).await.unwrap();
+    }
+    let visible = db.pending_project_inflow_for_user(user).await.unwrap();
+    assert!(
+        !visible
+            .iter()
+            .any(|item| item.id == older_reply || item.id == previous_dismissal)
+    );
+    assert!(visible.iter().any(|item| item.id == new_after_dismissal));
+    let new = visible.iter().find(|item| item.id == new_request).unwrap();
+    assert!(new.promoted_task_id.is_none());
+    let created = db
+        .promote_project_inflow_item(&PromoteProjectInflowItem {
+            user_id: user,
+            project_id: project.id,
+            item_id: new.id,
+            expected_version: new.version,
+            analysis_id: ready_id,
+            expected_representative_item_id: new.id,
+            expected_source_revision: 1,
+            expected_analyzed_revision: 1,
+            task_id: Uuid::now_v7(),
+            title: "별개 신규 업무".to_owned(),
+            notes: None,
+            assignee_name: None,
+            priority: 1,
+            due_at: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(created.status, ProjectInflowStatus::Promoted);
+    assert_ne!(created.promoted_task_id, Some(closed));
+    let untouched = db
+        .project_inflow_item(user, project.id, older_reply)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(untouched.promoted_task_id, Some(closed));
+    assert_eq!(untouched.status, ProjectInflowStatus::Pending);
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
     reason = "One isolated task lifecycle checks compatibility, report parity and safe notification retry."
 )]
 async fn workflow_report_and_delivery_recovery_preserve_owned_task_lifecycle() {

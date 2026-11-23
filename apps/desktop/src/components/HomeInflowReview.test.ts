@@ -95,6 +95,20 @@ describe("home inflow review", () => {
     expect(markup).toMatch(/id="home-inflow-panel-new"[^>]*hidden=""/);
     expect(markup).toContain(copy.projects.inflowNewEmpty);
   });
+
+  it("keeps questions in 확인 필요 while their existing analysis refreshes", () => {
+    for (const analysisStatus of ["refreshing", "stale"] as const) {
+      const markup = renderReview([
+        inflow("question", {
+          analysisStatus,
+          analysisClassification: "question",
+        }),
+      ]);
+      expect(markup).toMatch(
+        /id="home-inflow-tab-uncertain"[^>]*aria-selected="true"/,
+      );
+    }
+  });
   it("shows an unread owner-authored task in new requests without an external reply", () => {
     const markup = renderReview([
       inflow("owner", {

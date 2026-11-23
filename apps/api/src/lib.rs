@@ -3123,7 +3123,6 @@ async fn get_home_snapshot(
         recommendations,
         inflow_items,
         unsettled_inflow_items,
-        inflow_analyses,
         webhooks,
         workspaces,
         delivery_recovery,
@@ -3134,7 +3133,6 @@ async fn get_home_snapshot(
         planning.active_decisions_for_user(user_id, OffsetDateTime::now_utc(), 5),
         planning.pending_project_inflow_for_user(user_id),
         planning.unsettled_project_inflow_for_user(user_id),
-        planning.project_inflow_analyses_for_user(user_id),
         planning.user_project_webhooks(user_id),
         planning.workspaces_for_user(user_id),
         planning.delivery_recovery_for_user(user_id),
@@ -3184,6 +3182,18 @@ async fn get_home_snapshot(
         routed_inflow_assignment_contexts(planning, principal.identity().user_id(), webhooks).await
     else {
         return unavailable_response(request_id);
+    };
+    let selected_inflow_ids = inflow_items
+        .iter()
+        .chain(&unsettled_inflow_items)
+        .map(|item| item.id)
+        .collect::<Vec<_>>();
+    let inflow_analyses = match planning
+        .project_inflow_analyses_for_items(user_id, &selected_inflow_ids)
+        .await
+    {
+        Ok(analyses) => analyses,
+        Err(error) => return storage_error_response(&error, request_id),
     };
     let Ok(recent_inflow) =
         project_inflow_responses(unsettled_inflow_items, inflow_analyses.clone(), &contexts)
@@ -7816,7 +7826,9 @@ async fn sync_project_google_chat_source(
         },
         Err(error) => {
             let _ = planning
-                .mark_google_chat_source_failure(
+                .mark_owned_google_chat_source_failure(
+                    principal.identity().user_id(),
+                    project_id,
                     source_id,
                     error.failure_code(),
                     error.reauth_required(),
@@ -7858,10 +7870,17 @@ async fn list_project_inflow_items(
     let user_id = principal.identity().user_id();
     match tokio::try_join!(
         planning.project_inflow_items(user_id, project_id, status),
-        planning.project_inflow_analyses(user_id, project_id),
         planning.project_webhooks(user_id, project_id),
     ) {
-        Ok((items, analyses, webhooks)) => {
+        Ok((items, webhooks)) => {
+            let selected_ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
+            let analyses = match planning
+                .project_inflow_analyses_for_items(user_id, &selected_ids)
+                .await
+            {
+                Ok(analyses) => analyses,
+                Err(error) => return storage_error_response(&error, request_id),
+            };
             let contexts =
                 match routed_inflow_assignment_contexts(planning, user_id, webhooks).await {
                     Ok(contexts) => contexts,
@@ -7959,19 +7978,14 @@ async fn decide_project_inflow_item(
                         );
                     }
                 }
-                if let Ok(items) = planning
-                    .project_inflow_items(user_id, project_id, Some(item.status))
+                if let Ok(Some(refreshed)) = planning
+                    .project_inflow_item(user_id, project_id, item.id)
                     .await
-                    && let Some(refreshed) =
-                        items.into_iter().find(|candidate| candidate.id == item.id)
                 {
                     item = refreshed;
                 }
             }
-            match project_inflow_item_response(single_project_inflow_candidate(item)) {
-                Ok(response) => no_store_json(response),
-                Err(()) => unavailable_response(request_id),
-            }
+            project_inflow_decision_response(planning, user_id, item, request_id).await
         }
         Ok(_) => {
             let (code, message) = match request.decision.as_str() {
@@ -7996,6 +8010,25 @@ async fn decide_project_inflow_item(
         }
         Err(StorageError::InvalidConfiguration) => invalid_request_response(request_id),
         Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+async fn project_inflow_decision_response(
+    planning: &Database,
+    user_id: uuid::Uuid,
+    item: ProjectInflowItem,
+    request_id: RequestId,
+) -> Response {
+    let mut candidate = single_project_inflow_candidate(item);
+    if let Ok(mut analyses) = planning
+        .project_inflow_analyses_for_items(user_id, &[candidate.representative.id])
+        .await
+    {
+        candidate.analysis = analyses.pop();
+    }
+    match project_inflow_item_response(candidate) {
+        Ok(response) => no_store_json(response),
+        Err(()) => unavailable_response(request_id),
     }
 }
 
@@ -8117,9 +8150,8 @@ async fn apply_project_inflow_decision(
                 return Ok(None);
             }
             planning
-                .project_inflow_items(user_id, project_id, Some(ProjectInflowStatus::Pending))
+                .project_inflow_item(user_id, project_id, item_id)
                 .await
-                .map(|items| items.into_iter().find(|item| item.id == item_id))
         }
         _ => Err(StorageError::InvalidConfiguration),
     }
@@ -9032,12 +9064,22 @@ fn project_inflow_item_response(
         .and_then(|analysis| analysis.summary.clone());
     let analysis_error_code = analysis
         .as_ref()
-        .and_then(|analysis| analysis.error_code.clone());
+        .and_then(|analysis| analysis.error_code.clone())
+        .or_else(|| {
+            analysis
+                .is_none()
+                .then(|| "inflow.analysis_missing".to_owned())
+        });
     let suggested_task_title = analysis
         .as_ref()
         .and_then(|analysis| analysis.suggested_task_title.clone())
-        .unwrap_or_else(|| match analysis.as_ref().map(|value| value.state) {
-            Some(InflowAnalysisState::Failed) => "업무 내용을 정리하지 못했어요".to_owned(),
+        .or_else(|| {
+            analysis_summary
+                .as_ref()
+                .map(|summary| summary.chars().take(200).collect())
+        })
+        .unwrap_or_else(|| match analysis_status {
+            "failed" => "업무 내용을 정리하지 못했어요".to_owned(),
             _ => "대화를 업무로 정리하고 있어요".to_owned(),
         });
     let reference_links = inflow_reference_links(&messages);
@@ -9154,7 +9196,7 @@ fn inflow_analysis_state_name(state: InflowAnalysisState) -> &'static str {
 
 fn inflow_analysis_status(analysis: Option<&ProjectInflowAnalysis>) -> &'static str {
     let Some(analysis) = analysis else {
-        return "queued";
+        return "failed";
     };
     inflow_analysis_status_for(
         analysis.state,

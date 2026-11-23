@@ -287,6 +287,7 @@ export async function fetchProjectInflow(
 export function normalizeProjectInflowItem(
   item: ProjectInflowItem,
 ): ProjectInflowItem {
+  const analysisStatus = item.analysisStatus ?? "failed";
   return {
     ...item,
     conversationId: item.conversationId ?? null,
@@ -296,7 +297,11 @@ export function normalizeProjectInflowItem(
     projectName: item.projectName || item.sourceName,
     sentByOwner: item.sentByOwner ?? false,
     suggestedTaskTitle:
-      item.suggestedTaskTitle || "대화를 업무로 정리하고 있어요",
+      item.suggestedTaskTitle ||
+      item.analysisSummary ||
+      (analysisStatus === "failed"
+        ? "업무 내용을 정리하지 못했어요"
+        : "대화를 업무로 정리하고 있어요"),
     suggestedTaskNotes: item.suggestedTaskNotes || "",
     referenceLinks: Array.isArray(item.referenceLinks)
       ? item.referenceLinks
@@ -307,11 +312,13 @@ export function normalizeProjectInflowItem(
     suggestedAssigneeName: item.suggestedAssigneeName ?? null,
     suggestedDueAt: item.suggestedDueAt ?? null,
     suggestedPriority: item.suggestedPriority ?? null,
-    analysisStatus: item.analysisStatus ?? "queued",
+    analysisStatus,
     analysisClassification: item.analysisClassification ?? null,
     analysisConfidence: item.analysisConfidence ?? null,
     analysisSummary: item.analysisSummary ?? null,
-    analysisErrorCode: item.analysisErrorCode ?? null,
+    analysisErrorCode:
+      item.analysisErrorCode ??
+      (item.analysisStatus == null ? "inflow.analysis_missing" : null),
     completionStatus: item.completionStatus ?? "not_requested",
     completionReactionCompleted: item.completionReactionCompleted ?? false,
     completionReplyCompleted: item.completionReplyCompleted ?? false,

@@ -10,7 +10,11 @@ import { approveInflowChange } from "./api/inflowChanges";
 import { InflowChangeDialog } from "./components/InflowChangeDialog";
 import { Server, Sparkles } from "lucide-react";
 import { ScheduledWorkPanel } from "./components/ScheduledWorkPanel";
-import { readShortcuts, saveShortcuts, type Shortcuts } from "./keyboardShortcuts";
+import {
+  readShortcuts,
+  saveShortcuts,
+  type Shortcuts,
+} from "./keyboardShortcuts";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -150,7 +154,6 @@ import {
   type HomeSnapshot,
   type Recommendation,
   fetchHomeSnapshot,
-  requireDecisionInflow,
 } from "./api/home";
 import {
   decideRecommendation,
@@ -519,6 +522,8 @@ export default function App() {
   const conversationMessageRequestGateRef = useRef(new LatestRequestGate());
   const gmailInflowRequestGateRef = useRef(new LatestRequestGate());
   const projectItsmRequestGateRef = useRef(new LatestRequestGate());
+  const homeRequestGateRef = useRef(new LatestRequestGate());
+  const projectInflowRequestGateRef = useRef(new LatestRequestGate());
   const decisionInboxRequestGateRef = useRef(new LatestRequestGate());
   const openedAuthenticationUrl = useRef<string | undefined>(undefined);
   const activeSessionRef = useRef<SessionTokens | undefined>(undefined);
@@ -650,6 +655,7 @@ export default function App() {
 
   const loadHomeSnapshot = useCallback(async () => {
     if (!tokens) return undefined;
+    const requestGeneration = homeRequestGateRef.current.begin();
     setHomeLoading(true);
     setHomeError(undefined);
     try {
@@ -660,13 +666,18 @@ export default function App() {
       const snapshot = await withAuthenticatedSession((accessToken) =>
         fetchHomeSnapshot(apiBaseUrl, accessToken, from, to),
       );
-      setHomeSnapshot(snapshot);
+      if (homeRequestGateRef.current.isCurrent(requestGeneration)) {
+        setHomeSnapshot(snapshot);
+        setDecisionInflowItems(snapshot.inflow);
+      }
       return snapshot;
     } catch {
-      setHomeError(copy.messages.homeLoadNotice);
+      if (homeRequestGateRef.current.isCurrent(requestGeneration))
+        setHomeError(copy.messages.homeLoadNotice);
       return undefined;
     } finally {
-      setHomeLoading(false);
+      if (homeRequestGateRef.current.isCurrent(requestGeneration))
+        setHomeLoading(false);
     }
   }, [apiBaseUrl, tokens, withAuthenticatedSession]);
 
@@ -743,7 +754,6 @@ export default function App() {
           : { items: [], partialFailure: true };
 
       setDecisionRecommendations(items);
-      setDecisionInflowItems(snapshot ? requireDecisionInflow(snapshot) : []);
       setDecisionItsmCandidates(itsm.items);
 
       const failedSourceCount = [
@@ -1844,8 +1854,18 @@ export default function App() {
   const loadProjectInflow = useCallback(
     async (projectId: string) => {
       if (!tokens) return undefined;
-      setInflowLoading(true);
-      setInflowError(undefined);
+      const generation =
+        selectedProjectIdRef.current === projectId
+          ? projectInflowRequestGateRef.current.begin()
+          : undefined;
+      const isDisplayedRequest = () =>
+        generation !== undefined &&
+        projectInflowRequestGateRef.current.isCurrent(generation) &&
+        selectedProjectIdRef.current === projectId;
+      if (isDisplayedRequest()) {
+        setInflowLoading(true);
+        setInflowError(undefined);
+      }
       try {
         const [sources, items] = await withAuthenticatedSession((accessToken) =>
           Promise.all([
@@ -1853,16 +1873,17 @@ export default function App() {
             fetchProjectInflow(apiBaseUrl, accessToken, projectId, "all"),
           ]),
         );
-        setProjectGoogleChatSources(sources);
-        setProjectInflowItems(items);
+        if (isDisplayedRequest()) {
+          setProjectGoogleChatSources(sources);
+          setProjectInflowItems(items);
+        }
         return { sources, items };
       } catch {
-        setProjectGoogleChatSources([]);
-        setProjectInflowItems([]);
-        setInflowError(copy.projects.inflowLoadProblem);
+        if (isDisplayedRequest())
+          setInflowError(copy.projects.inflowLoadProblem);
         return undefined;
       } finally {
-        setInflowLoading(false);
+        if (isDisplayedRequest()) setInflowLoading(false);
       }
     },
     [apiBaseUrl, tokens, withAuthenticatedSession],
@@ -2031,6 +2052,9 @@ export default function App() {
         entityTypes.has("gmail_inflow_candidate");
 
       if (affectsWork) {
+        const homeGeneration = homeRequestGateRef.current.begin();
+        // Background updates do not own the visible refresh indicator.
+        setHomeLoading(false);
         const [from, to] = currentLocalDayRange();
         const synchronized = await withAuthenticatedSession(
           async (accessToken) => {
@@ -2067,10 +2091,12 @@ export default function App() {
             };
           },
         );
-        setHomeSnapshot(synchronized.home);
-        decisionInboxRequestGateRef.current.invalidate();
-        setDecisionsLoading(false);
-        setDecisionInflowItems(synchronized.home.inflow);
+        if (homeRequestGateRef.current.isCurrent(homeGeneration)) {
+          setHomeSnapshot(synchronized.home);
+          decisionInboxRequestGateRef.current.invalidate();
+          setDecisionsLoading(false);
+          setDecisionInflowItems(synchronized.home.inflow);
+        }
         setPlanningSnapshot(synchronized.planning);
         setGoals(synchronized.synchronizedGoals);
         if (synchronized.synchronizedProjects) {
@@ -2208,6 +2234,8 @@ export default function App() {
       setConversations([]);
       setHomeSnapshot(undefined);
       setHomeError(undefined);
+      homeRequestGateRef.current.invalidate();
+      projectInflowRequestGateRef.current.invalidate();
       decisionInboxRequestGateRef.current.invalidate();
       setDecisionRecommendations([]);
       setDecisionInflowItems([]);
@@ -2844,6 +2872,11 @@ export default function App() {
 
   useEffect(() => {
     projectItsmRequestGateRef.current.invalidate();
+    projectInflowRequestGateRef.current.invalidate();
+    setProjectGoogleChatSources([]);
+    setProjectInflowItems([]);
+    setInflowError(undefined);
+    setInflowLoading(false);
     setProjectItsmConnection(undefined);
     setItsmError(undefined);
     setItsmLoading(false);
@@ -3313,6 +3346,9 @@ export default function App() {
   }
 
   function applyCompletedTask(task: Task, completed: Task) {
+    homeRequestGateRef.current.invalidate();
+    if (selectedProjectIdRef.current === task.projectId)
+      projectInflowRequestGateRef.current.invalidate();
     void cancelLocalReminder("task", task.id).catch(() => false);
     setHomeSnapshot((current) =>
       current
@@ -4580,20 +4616,22 @@ export default function App() {
   async function syncWorkspaceGoogleChatSource(
     source: ProjectGoogleChatSource,
   ): Promise<void> {
-    setInflowLoading(true);
-    setInflowError(undefined);
+    if (source.projectId === selectedProjectIdRef.current) {
+      setInflowLoading(true);
+      setInflowError(undefined);
+    }
     try {
-      const sources = await withAuthenticatedSession((accessToken) =>
+      await withAuthenticatedSession((accessToken) =>
         syncProjectGoogleChatSource(apiBaseUrl, accessToken, source),
       );
-      setProjectGoogleChatSources(sources);
       await loadProjectInflow(source.projectId);
     } catch (error) {
-      setInflowError(googleChatSyncProblem(error));
+      if (source.projectId === selectedProjectIdRef.current) {
+        setInflowError(googleChatSyncProblem(error));
+        setInflowLoading(false);
+      }
       await loadGoogleChatAccounts();
       throw error;
-    } finally {
-      setInflowLoading(false);
     }
   }
 
@@ -4610,6 +4648,9 @@ export default function App() {
           ...input,
         }),
       );
+      homeRequestGateRef.current.invalidate();
+      if (selectedProjectIdRef.current === item.projectId)
+        projectInflowRequestGateRef.current.invalidate();
       setProjectInflowItems((current) =>
         current.filter(
           (currentItem) =>
@@ -4671,6 +4712,9 @@ export default function App() {
               }),
         }),
       );
+      homeRequestGateRef.current.invalidate();
+      if (selectedProjectIdRef.current === item.projectId)
+        projectInflowRequestGateRef.current.invalidate();
       const reconcile = (items: ProjectInflowItem[]) =>
         items.flatMap((currentItem) =>
           inflowConversationKey(currentItem) !== inflowConversationKey(item)
@@ -5159,7 +5203,8 @@ export default function App() {
     homeChatEntryGenerationRef.current += 1;
     setHomeChatOpen(false);
     setShortcutComposerFocus(options.focusAssistant === true);
-    if (options.openScheduledWork) setDeckIntent({ id: Date.now(), view: "scheduled" });
+    if (options.openScheduledWork)
+      setDeckIntent({ id: Date.now(), view: "scheduled" });
     if (mobileLayout) startTransition(() => setDestination(nextDestination));
     else setDestination(nextDestination);
     if (
@@ -5373,7 +5418,9 @@ export default function App() {
           onOpenHomeChat={openHomeAssistant}
           shortcuts={shortcuts}
           onQuestionShortcut={openQuestionFromShortcut}
-          onScheduledWorkShortcut={() => navigate("home", { openScheduledWork: true })}
+          onScheduledWorkShortcut={() =>
+            navigate("home", { openScheduledWork: true })
+          }
           onNavigate={navigate}
           onVoiceTranscript={handleVoiceTranscript}
           onVoiceCommand={handleVoiceCommand}

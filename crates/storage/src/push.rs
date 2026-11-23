@@ -265,7 +265,8 @@ impl Database {
              SELECT analysis.user_id, 'google_chat_inflow'::TEXT AS item_type,
                     analysis.id AS item_id, 1000000000 + analysis.source_revision::BIGINT AS item_version,
                     analysis.project_id,
-                    CASE WHEN COALESCE(item.promoted_task_id, analysis.linked_task_id) IS NOT NULL
+                    CASE WHEN analysis.classification <> 'new_task'
+                              AND COALESCE(item.promoted_task_id, analysis.linked_task_id) IS NOT NULL
                         THEN '일감에 새 답글 · ' ELSE '새 업무 요청 · ' END || COALESCE(
                         analysis.suggested_task_title,
                         analysis.summary,

@@ -1823,7 +1823,10 @@ export function isExistingTaskFollowUp(item: ProjectInflowItem): boolean {
 }
 
 export function inflowConversationKey(item: ProjectInflowItem): string {
-  return item.conversationId ?? item.id;
+  if (!item.conversationId || item.status === "pending")
+    return item.conversationId ?? item.id;
+  // A new request in the same Chat thread must not replace an older task's history.
+  return `${item.conversationId}:${item.status}:${item.promotedTaskId ?? ""}`;
 }
 
 export function mergeInflowDraftValues(

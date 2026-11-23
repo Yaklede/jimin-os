@@ -1,5 +1,12 @@
 import { ArrowLeft, ChevronDown, X } from "lucide-react";
-import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 
 import { type ProjectInflowItem } from "../api/googleChat";
@@ -73,10 +80,10 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
     props.highlightedCompletionReviewId && hasCompletion
       ? "completion"
       : groups.new.length > 0 || (hasCompletion && unread.length === 0)
-      ? "new"
-      : groups.existing.length > 0
-        ? "existing"
-        : "uncertain",
+        ? "new"
+        : groups.existing.length > 0
+          ? "existing"
+          : "uncertain",
   );
   const focusTarget = useRef<HTMLDivElement>(null);
   const emptyRequestRef = useRef<HTMLParagraphElement>(null);
@@ -216,8 +223,8 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
                   : kind === "completion"
                     ? completionReviewCopy.tab
                     : kind === "existing"
-                    ? copy.projects.inflowExistingTitle
-                    : copy.projects.inflowUncertainTitle}
+                      ? copy.projects.inflowExistingTitle
+                      : copy.projects.inflowUncertainTitle}
               </span>
               <span className="home-inflow-tabs__short-label">
                 {kind === "new"
@@ -225,11 +232,13 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
                   : kind === "completion"
                     ? completionReviewCopy.tab
                     : kind === "existing"
-                    ? copy.projects.inflowExistingTabShort
-                    : copy.projects.inflowUncertainTitle}
+                      ? copy.projects.inflowExistingTabShort
+                      : copy.projects.inflowUncertainTitle}
               </span>
               {kind !== "completion" && (
-                <span className="home-inflow-tabs__count">{groups[kind].length}</span>
+                <span className="home-inflow-tabs__count">
+                  {groups[kind].length}
+                </span>
               )}
             </button>
           ))}
@@ -244,7 +253,9 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
             hidden={activeTab !== kind}
             tabIndex={0}
           >
-            {kind === "completion" ? props.completionReviews : groups[kind].length > 0 ? (
+            {kind === "completion" ? (
+              props.completionReviews
+            ) : groups[kind].length > 0 ? (
               <HomeInflowGroup
                 {...props}
                 items={groups[kind]}
@@ -736,7 +747,7 @@ export function isUncertainInflow(item: ProjectInflowItem): boolean {
   return (
     !item.promotedTaskId &&
     (item.analysisStatus === "failed" ||
-      (item.analysisStatus === "ready" &&
+      (item.analysisClassification != null &&
         item.analysisClassification !== "new_task"))
   );
 }

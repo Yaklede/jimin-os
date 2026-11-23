@@ -179,6 +179,18 @@ describe("project inflow deadline", () => {
     ).toBe("mutation-snapshot");
   });
 
+  it("keeps an archived task separate from new work in the same conversation", () => {
+    const active = inflowItem("new", { conversationId: "thread" });
+    const archived = inflowItem("old", {
+      conversationId: "thread",
+      status: "promoted",
+      promotedTaskId: "closed-task",
+    });
+    expect(inflowConversationKey(active)).not.toBe(
+      inflowConversationKey(archived),
+    );
+  });
+
   it("updates AI suggestions without overwriting fields the user changed", () => {
     const current = {
       title: "사용자가 다듬은 제목",
