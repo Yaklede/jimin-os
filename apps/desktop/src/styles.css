@@ -7939,7 +7939,7 @@ svg {
   padding: 4px 8px;
   background: var(--accent-soft);
   color: var(--accent);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .project-report-document__meta span[data-status="finalized"] {
@@ -7961,7 +7961,7 @@ svg {
 .project-report-document__focus > strong {
   color: var(--text-strong);
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .project-report-document__summary textarea {
@@ -12683,12 +12683,10 @@ svg {
   }
 
   .os-brand > span:last-child,
-  .os-nav__button > span,
   .os-sidebar__assistant > span {
     display: none;
   }
 
-  .os-nav__button,
   .os-sidebar__assistant {
     width: 44px;
     justify-content: center;
@@ -15404,12 +15402,10 @@ svg {
   }
 
   .os-shell[data-platform="desktop"] .os-brand > span:last-child,
-  .os-shell[data-platform="desktop"] .os-sidebar .os-nav__button > span,
   .os-shell[data-platform="desktop"] .os-sidebar__assistant > span {
     display: none;
   }
 
-  .os-shell[data-platform="desktop"] .os-sidebar .os-nav__button,
   .os-shell[data-platform="desktop"] .os-sidebar__assistant {
     width: 44px;
     justify-content: center;
@@ -16061,19 +16057,34 @@ svg {
 .os-nav__button svg {
   flex: 0 0 20px;
 }
-@media (max-width: 720px) {
-  .os-shell[data-platform="desktop"] .os-nav {
-    width: 44px;
+@media (max-width: 840px) {
+  /* Only the sidebar becomes icon-only; the More disclosure stays labeled. */
+  .os-sidebar .os-nav {
+    --sidebar-nav-target: 44px;
+    inline-size: var(--sidebar-nav-target);
     justify-items: center;
     gap: 8px;
   }
-  .os-shell[data-platform="desktop"] .os-sidebar .os-nav__button {
-    width: 44px;
-    min-height: 44px;
-    height: 44px;
-    gap: 0;
-    padding: 8px;
+
+  .os-sidebar .os-nav__button {
+    display: grid;
+    place-items: center;
     justify-content: center;
+    inline-size: var(--sidebar-nav-target);
+    min-block-size: var(--sidebar-nav-target);
+    block-size: var(--sidebar-nav-target);
+    gap: 0;
+    padding: 0;
+  }
+
+  .os-sidebar .os-nav__button > span {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .os-sidebar .os-nav__button {
+    transition: none;
   }
 }
 

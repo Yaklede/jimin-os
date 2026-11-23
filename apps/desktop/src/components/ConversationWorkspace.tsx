@@ -31,6 +31,7 @@ import {
 } from "../api/agent";
 import { copy } from "../copy";
 import { conversationHistoryCopy as historyCopy } from "../copy/conversationHistory";
+import { homeChatEntryCopy } from "../copy/homeChatEntry";
 import { ConversationDeleteDialog } from "./ConversationDeleteDialog";
 import { createUuidV7 } from "../uuid";
 import {
@@ -68,6 +69,9 @@ type ConversationWorkspaceProps = {
     | undefined;
   onSelect(conversationId: string): void;
   onReturnHome?(): void;
+  historyOnly?: boolean;
+  historyJobs?: Readonly<Record<string, AgentJob>>;
+  onReturnToHistory?(): void;
   shortcutFocus?: boolean;
   onShortcutFocusHandled?(): void;
   onInitialDraftApplied(): void;
@@ -95,6 +99,9 @@ export function ConversationWorkspace({
   initialDraft,
   onSelect,
   onReturnHome,
+  historyOnly = false,
+  historyJobs,
+  onReturnToHistory,
   shortcutFocus,
   onShortcutFocusHandled,
   onInitialDraftApplied,
@@ -131,6 +138,7 @@ export function ConversationWorkspace({
 
   useEffect(() => {
     if (
+      !historyOnly &&
       canSend &&
       composer.current &&
       (shortcutFocus || window.matchMedia("(pointer: fine)").matches)
@@ -138,7 +146,7 @@ export function ConversationWorkspace({
       composer.current.focus({ preventScroll: true });
       if (shortcutFocus) onShortcutFocusHandled?.();
     }
-  }, [canSend, shortcutFocus, onShortcutFocusHandled]);
+  }, [canSend, historyOnly, shortcutFocus, onShortcutFocusHandled]);
 
   async function sendText(value: string): Promise<boolean> {
     const text = value.trim();
@@ -217,24 +225,27 @@ export function ConversationWorkspace({
     await sendText(text);
     composer.current?.focus({ preventScroll: true });
   }
+  const onBack = onReturnToHistory ?? onReturnHome;
 
   return (
     <section
       ref={workspace}
       className="assistant-page assistant-page--conversation"
-      data-view={isNewConversation ? "new" : "thread"}
-      data-surface={onReturnHome ? "home" : undefined}
+      data-view={historyOnly ? "history" : isNewConversation ? "new" : "thread"}
+      data-has-back={onBack ? true : undefined}
       aria-busy={loading}
     >
-      {onReturnHome && (
+      {onBack && (
         <div className="assistant-home-navigation">
           <button
             className="assistant-home-navigation__return focus-visible-control"
             type="button"
-            onClick={onReturnHome}
+            onClick={onBack}
           >
             <ArrowLeft aria-hidden="true" />
-            {copy.conversations.returnHome}
+            {onReturnToHistory
+              ? homeChatEntryCopy.returnToHistory
+              : copy.conversations.returnHome}
           </button>
         </div>
       )}
@@ -249,7 +260,13 @@ export function ConversationWorkspace({
 
       <div className="assistant-workbench">
         <ConversationHistory
-          conversations={conversations}
+          conversations={
+            historyOnly
+              ? conversations.filter((item) => item.title || item.lastMessageAt)
+              : conversations
+          }
+          standalone={historyOnly}
+          jobs={historyOnly ? historyJobs : undefined}
           loading={loading}
           selectedConversationId={selectedConversationId}
           disabled={isWaiting || startingNew}
@@ -258,60 +275,62 @@ export function ConversationWorkspace({
           onStartConversation={() => void startConversation()}
         />
 
-        <section
-          className="assistant-conversation"
-          aria-label={copy.conversations.identity}
-        >
-          <MobileAssistantHeader
-            disabled={isWaiting || startingNew}
-            conversations={conversations}
-            selectedConversationId={selectedConversationId}
-            onSelect={onSelect}
-            onDelete={requestDelete}
-            onStartConversation={() => void startConversation()}
-          />
-          {isNewConversation ? (
-            <AssistantWelcome
-              authentication={authentication}
-              authenticationRequesting={authenticationRequesting}
-              onChooseStarter={chooseStarter}
-              onStartAuthentication={onStartAuthentication}
-            />
-          ) : (
-            <ConversationThread
+        {!historyOnly && (
+          <section
+            className="assistant-conversation"
+            aria-label={copy.conversations.identity}
+          >
+            <MobileAssistantHeader
+              disabled={isWaiting || startingNew}
               conversations={conversations}
-              conversationId={selectedConversationId}
-              messages={messages}
-              job={job}
-              loading={loading || startingNew}
+              selectedConversationId={selectedConversationId}
+              onSelect={onSelect}
+              onDelete={requestDelete}
               onStartConversation={() => void startConversation()}
-              onResolveAction={onResolveAction}
-              onRetry={retryLastRequest}
-              renderResult={renderResult}
-              onContinue={() =>
-                composer.current?.focus({ preventScroll: true })
-              }
             />
-          )}
+            {isNewConversation ? (
+              <AssistantWelcome
+                authentication={authentication}
+                authenticationRequesting={authenticationRequesting}
+                onChooseStarter={chooseStarter}
+                onStartAuthentication={onStartAuthentication}
+              />
+            ) : (
+              <ConversationThread
+                conversations={conversations}
+                conversationId={selectedConversationId}
+                messages={messages}
+                job={job}
+                loading={loading || startingNew}
+                onStartConversation={() => void startConversation()}
+                onResolveAction={onResolveAction}
+                onRetry={retryLastRequest}
+                renderResult={renderResult}
+                onContinue={() =>
+                  composer.current?.focus({ preventScroll: true })
+                }
+              />
+            )}
 
-          {canSend ? (
-            <AssistantComposer
-              draft={draft}
-              composer={composer}
-              loading={loading || startingNew}
-              waiting={isWaiting}
-              isNewConversation={isNewConversation}
-              onChange={setDraft}
-              onSubmit={submit}
-            />
-          ) : !isNewConversation ? (
-            <AssistantAuthenticationGate
-              authentication={authentication}
-              requesting={authenticationRequesting}
-              onStartAuthentication={onStartAuthentication}
-            />
-          ) : null}
-        </section>
+            {canSend ? (
+              <AssistantComposer
+                draft={draft}
+                composer={composer}
+                loading={loading || startingNew}
+                waiting={isWaiting}
+                isNewConversation={isNewConversation}
+                onChange={setDraft}
+                onSubmit={submit}
+              />
+            ) : !isNewConversation ? (
+              <AssistantAuthenticationGate
+                authentication={authentication}
+                requesting={authenticationRequesting}
+                onStartAuthentication={onStartAuthentication}
+              />
+            ) : null}
+          </section>
+        )}
       </div>
       {deleteTarget && (
         <ConversationDeleteDialog
@@ -415,6 +434,8 @@ function ConversationHistory({
   conversations,
   loading,
   selectedConversationId,
+  standalone,
+  jobs,
   disabled,
   onSelect,
   onStartConversation,
@@ -424,11 +445,21 @@ function ConversationHistory({
   "conversations" | "loading" | "selectedConversationId" | "onSelect"
 > & {
   disabled: boolean;
+  standalone: boolean;
+  jobs?: Readonly<Record<string, AgentJob>>;
   onStartConversation(): void;
   onDelete(conversation: Conversation, trigger: HTMLButtonElement): void;
 }) {
   const skeletonVisible = useDelayedSkeleton(loading);
   const showingSkeleton = loading || skeletonVisible;
+  const title = useRef<HTMLHeadingElement>(null);
+  const list = useRef<HTMLUListElement>(null);
+  const standaloneScroll = useRef(0);
+  useLayoutEffect(() => {
+    if (!standalone) return;
+    if (list.current) list.current.scrollTop = standaloneScroll.current;
+    title.current?.focus({ preventScroll: true });
+  }, [standalone]);
 
   return (
     <aside
@@ -438,7 +469,13 @@ function ConversationHistory({
     >
       <div className="assistant-history__header">
         <div>
-          <h2 id="conversation-list-title">{copy.conversations.listTitle}</h2>
+          {standalone ? (
+            <h1 id="conversation-list-title" tabIndex={-1} ref={title}>
+              {homeChatEntryCopy.history}
+            </h1>
+          ) : (
+            <h2 id="conversation-list-title">{copy.conversations.listTitle}</h2>
+          )}
         </div>
         <button
           className="assistant-history__new focus-visible-control"
@@ -451,25 +488,42 @@ function ConversationHistory({
         </button>
       </div>
       {conversations.length ? (
-        <ul className="assistant-history__list">
+        <ul
+          ref={list}
+          className="assistant-history__list"
+          onScroll={(event) => {
+            if (standalone)
+              standaloneScroll.current = event.currentTarget.scrollTop;
+          }}
+        >
           {conversations.map((conversation) => {
             const selected = conversation.id === selectedConversationId;
+            const job = jobs?.[conversation.id];
+            const feedback =
+              job?.state !== "completed"
+                ? assistantTurnFeedback(job, undefined)
+                : undefined;
             return (
               <li key={conversation.id} className="assistant-history__entry">
                 <button
                   className="assistant-history__row focus-visible-control"
                   data-selected={selected}
                   type="button"
-                  onClick={() => onSelect(conversation.id)}
+                  onClick={() => {
+                    if (standalone)
+                      standaloneScroll.current = list.current?.scrollTop ?? 0;
+                    onSelect(conversation.id);
+                  }}
                   aria-current={selected ? "page" : undefined}
                 >
                   <strong>
                     {conversation.title ?? copy.conversations.untitled}
                   </strong>
                   <span>
-                    {conversation.lastMessageAt
-                      ? formatConversationTime(conversation.lastMessageAt)
-                      : copy.conversations.noMessages}
+                    {feedback?.label ??
+                      (conversation.lastMessageAt
+                        ? formatConversationTime(conversation.lastMessageAt)
+                        : copy.conversations.noMessages)}
                   </span>
                 </button>
                 <ConversationDeleteButton

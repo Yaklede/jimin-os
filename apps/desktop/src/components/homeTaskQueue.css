@@ -20,16 +20,22 @@
   height: 20px;
 }
 .home-direct-tasks .mobile-task-queue__filters,
-.home-direct-tasks .mobile-task-queue__grouping,
-.home-direct-tasks__tools {
+.home-direct-tasks__tools,
+.home-direct-tasks__tools > .mobile-task-queue__grouping {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
+}
+.home-direct-tasks .mobile-task-queue__filters {
   gap: 4px;
 }
 .home-direct-tasks__tools {
   gap: 8px;
   margin-block-end: 12px;
+}
+.home-direct-tasks__tools > .mobile-task-queue__grouping {
+  gap: inherit;
+  margin-block-start: 0;
 }
 .home-direct-tasks__today,
 .home-direct-tasks__filters,

@@ -290,7 +290,6 @@ function renderReview(
     onDismiss: async () => undefined,
     onMarkSeenMany: async () => ({ failed: [], updatedVersions: new Map() }),
     onRetryAnalysis: async () => undefined,
-    onRetryCompletion: async () => undefined,
     onOpenTask: async () => undefined,
   };
   return renderToStaticMarkup(createElement(HomeInflowReview, props));

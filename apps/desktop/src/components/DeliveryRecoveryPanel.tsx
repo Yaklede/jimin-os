@@ -7,9 +7,11 @@ import "./inflowRecovery.css";
 export function DeliveryRecoveryPanel({
   items,
   onRetry,
+  defaultExpanded = false,
 }: {
   items: DeliveryRecovery[];
   onRetry(item: DeliveryRecovery): Promise<void>;
+  defaultExpanded?: boolean;
 }) {
   const [pending, setPending] = useState<string>();
   const [error, setError] = useState("");
@@ -22,7 +24,7 @@ export function DeliveryRecoveryPanel({
   }, []);
   if (!items.length) return null;
   return (
-    <details className="inflow-recovery">
+    <details className="inflow-recovery" open={defaultExpanded || undefined}>
       <summary className="focus-visible-control">
         <span>
           <strong>알림·ITSM 반영 확인하기 · {items.length}개</strong>

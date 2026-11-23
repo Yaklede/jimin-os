@@ -34,7 +34,6 @@ describe("project inflow deadline", () => {
           onPromote: async () => undefined,
           onDismiss: async () => undefined,
           onRetryAnalysis: async () => undefined,
-          onRetryCompletion: async () => undefined,
           onOpenTask: () => undefined,
         }),
       );
@@ -383,7 +382,6 @@ function renderPanel(
     onPromote: async () => undefined,
     onDismiss: async () => undefined,
     onRetryAnalysis: async () => undefined,
-    onRetryCompletion: async () => undefined,
     onOpenTask: () => undefined,
     ...overrides,
   };

@@ -3,7 +3,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import type { Task } from "../api/planning";
-import { copy } from "../copy";
 import { designPreviewInflow } from "../design-preview-inflow";
 import { HomeWorkspace } from "./HomeWorkspace";
 
@@ -62,21 +61,17 @@ function homeProps(): ComponentProps<typeof HomeWorkspace> {
     loading: false,
     error: undefined,
     assistantReady: true,
-    assistantConversationId: undefined,
-    assistantRequest: undefined,
-    assistantJob: undefined,
-    assistantMessage: undefined,
+    homeChatDraft: { text: "" },
+    setHomeChatDraft: noop,
+    onOpenConversationHistory: noop,
+    deliveryFailureCount: 2,
+    onOpenDeliveryHistory: noop,
     onLoadAllTasks: async () => [task],
     onOpenAssistant: noop,
     onOpenPlanning: noop,
-    onStartNewAssistant: async () => true,
     onSendAssistant: async () => true,
     onCompleteTask: done,
     onLoadAssistantTask: loadTask,
-    onCompleteAssistantTask: loadTask,
-    onRestoreAssistantTask: loadTask,
-    onEditAssistantTask: noop,
-    onEditAssistantSchedule: noop,
     onEditTask: noop,
     onEditSchedule: noop,
     onOpenPlanningTask: noop,
@@ -91,7 +86,6 @@ function homeProps(): ComponentProps<typeof HomeWorkspace> {
     onPromoteInflow: done,
     onDismissInflow: done,
     onRetryInflowAnalysis: done,
-    onRetryInflowCompletion: done,
     gmailInflowItems: [],
     gmailInflowProjects: [],
     gmailInflowLoading: false,
@@ -146,7 +140,9 @@ describe("home request-first layout", () => {
       expect(assistant).toBeGreaterThan(tasks);
       expect(markup).toContain('aria-controls="home-today-task-list"');
       expect(markup).not.toContain('class="inflow-recovery"');
-      expect(markup).not.toContain(copy.home.openDecisionInbox);
+      expect(markup).toContain("반영 실패 2건 확인하기");
+      expect(markup).not.toContain("Chat 반영 확인하기");
+      expect(markup).not.toContain("이 알림만 다시 보내기");
       expect(
         markup.match(/class="mobile-task-queue home-direct-tasks"/g),
       ).toHaveLength(1);
@@ -158,4 +154,17 @@ describe("home request-first layout", () => {
       );
     },
   );
+  it("does not leave an empty delivery row and keeps the completion-review tab", () => {
+    const markup = renderToStaticMarkup(
+      createElement(HomeWorkspace, {
+        ...homeProps(),
+        completionReviews: createElement("p", null, "완료 보고 검수용"),
+        deliveryFailureCount: 0,
+      }),
+    );
+    expect(markup).not.toContain("home-delivery-attention");
+    expect(markup).toContain('id="home-inflow-tab-completion"');
+    expect(markup).toContain("완료 보고 검수용");
+    expect(markup).toContain('aria-controls="home-today-task-list"');
+  });
 });

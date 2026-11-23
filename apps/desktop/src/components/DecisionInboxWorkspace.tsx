@@ -6,7 +6,7 @@ import {
   ShieldAlert,
   XCircle,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { type Recommendation } from "../api/home";
 import { type DeliveryRecovery } from "../api/deliveryRecovery";
@@ -17,6 +17,7 @@ import {
 import { type RecommendationDecision } from "../api/intelligence";
 import { type ProjectItsmDecisionCandidate } from "../api/itsm";
 import { copy } from "../copy";
+import { deliveryAttentionCopy } from "../copy/deliveryAttention";
 import {
   canRetryInflowDelivery,
   inflowRecoveryItems,
@@ -35,6 +36,7 @@ import {
 
 type DecisionInboxWorkspaceProps = {
   mode?: "page" | "home" | "history";
+  recoveryEntry?: number;
   recovery?: {
     deliveryItems: DeliveryRecovery[];
     sourceItems: ProjectInflowItem[];
@@ -69,6 +71,7 @@ type DecisionInboxWorkspaceProps = {
 
 export function DecisionInboxWorkspace({
   mode = "page",
+  recoveryEntry = 0,
   recovery,
   recommendations,
   inflowItems,
@@ -90,6 +93,8 @@ export function DecisionInboxWorkspace({
   const [pendingId, setPendingId] = useState<string>();
   const [confirmingItsmId, setConfirmingItsmId] = useState<string>();
   const [decisionError, setDecisionError] = useState<string>();
+  const recoverySection = useRef<HTMLElement>(null);
+  const focusedRecoveryEntry = useRef(0);
   const pending = useMemo(
     () => recommendations.filter((item) => isDecisionActionableNow(item)),
     [recommendations],
@@ -117,6 +122,18 @@ export function DecisionInboxWorkspace({
     [inflowItems],
   );
   const sourceRecovery = inflowRecoveryItems(recovery?.sourceItems ?? []);
+  const hasRecovery =
+    (recovery?.deliveryItems.length ?? 0) > 0 || sourceRecovery.length > 0;
+  useEffect(() => {
+    if (
+      recoveryEntry === 0 ||
+      recoveryEntry === focusedRecoveryEntry.current ||
+      !recoverySection.current
+    )
+      return;
+    focusedRecoveryEntry.current = recoveryEntry;
+    recoverySection.current.focus({ preventScroll: true });
+  }, [hasRecovery, recoveryEntry]);
   const sourceFailureCount = sourceRecovery.filter(
     canRetryInflowDelivery,
   ).length;
@@ -202,22 +219,29 @@ export function DecisionInboxWorkspace({
         </p>
       )}
 
-      {mode !== "page" &&
-        recovery &&
-        (recovery.deliveryItems.length > 0 || sourceRecovery.length > 0) && (
-          <div className="home-review-actions__recoveries">
-            <DeliveryRecoveryPanel
-              items={recovery.deliveryItems}
-              onRetry={recovery.onRetryDelivery}
-            />
-            <InflowRecoveryPanel
-              items={sourceRecovery}
-              saving={inflowSaving}
-              onRetry={onRetryInflowCompletion}
-              onOpenTask={onOpenTask}
-            />
-          </div>
-        )}
+      {mode === "history" && recovery && hasRecovery && (
+        <section
+          ref={recoverySection}
+          className="home-review-actions__recoveries"
+          aria-label={deliveryAttentionCopy.section}
+          tabIndex={-1}
+        >
+          <DeliveryRecoveryPanel
+            key={`delivery-${recoveryEntry}`}
+            items={recovery.deliveryItems}
+            onRetry={recovery.onRetryDelivery}
+            defaultExpanded={recoveryEntry > 0}
+          />
+          <InflowRecoveryPanel
+            key={`chat-${recoveryEntry}`}
+            items={sourceRecovery}
+            saving={inflowSaving}
+            onRetry={onRetryInflowCompletion}
+            onOpenTask={onOpenTask}
+            defaultExpanded={recoveryEntry > 0}
+          />
+        </section>
+      )}
 
       {loading &&
       recommendations.length === 0 &&
@@ -239,7 +263,6 @@ export function DecisionInboxWorkspace({
               onPromote={onPromoteInflow}
               onDismiss={onDismissInflow}
               onRetryAnalysis={onRetryInflowAnalysis}
-              onRetryCompletion={onRetryInflowCompletion}
               onOpenTask={onOpenTask}
             />
           )}
@@ -401,7 +424,6 @@ function InflowDecisionSection({
   onPromote,
   onDismiss,
   onRetryAnalysis,
-  onRetryCompletion,
   onOpenTask,
 }: {
   items: ProjectInflowItem[];
@@ -412,7 +434,6 @@ function InflowDecisionSection({
     input?: { reason?: string; replyToSource?: boolean; markSeen?: boolean },
   ): Promise<void>;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
-  onRetryCompletion(item: ProjectInflowItem): Promise<void>;
   onOpenTask(taskId: string): Promise<void>;
 }) {
   return (
@@ -436,7 +457,6 @@ function InflowDecisionSection({
               onPromote={onPromote}
               onDismiss={onDismiss}
               onRetryAnalysis={onRetryAnalysis}
-              onRetryCompletion={onRetryCompletion}
               onOpenTask={(taskId) => void onOpenTask(taskId)}
             />
           ))}

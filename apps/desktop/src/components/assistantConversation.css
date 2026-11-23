@@ -21,16 +21,42 @@
   height: 100%;
 }
 
-.assistant-page[data-surface="home"] {
+.assistant-page[data-has-back="true"] {
   grid-template-rows: auto auto minmax(0, 1fr);
 }
 
-.assistant-page[data-surface="home"] > .assistant-inline-alert {
+.assistant-page[data-has-back="true"] > .assistant-inline-alert {
   grid-row: 2;
 }
 
-.assistant-page[data-surface="home"] > .assistant-workbench {
+.assistant-page[data-has-back="true"] > .assistant-workbench {
   grid-row: 3;
+}
+
+.assistant-page[data-view="history"] > .assistant-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.assistant-page[data-view="history"] .assistant-history {
+  display: grid;
+  min-width: 0;
+  padding: 16px;
+  border: 0;
+}
+
+.assistant-page[data-view="history"] .assistant-history__list {
+  padding: 4px;
+}
+
+.assistant-page[data-view="history"] .assistant-history__new {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.assistant-history__header h1 {
+  margin: 0;
+  color: var(--text-strong);
 }
 
 .assistant-home-navigation {
@@ -374,6 +400,10 @@
 }
 
 @media (max-width: 720px) {
+  .assistant-page[data-view="history"] .assistant-history__list {
+    padding-block-end: 32px;
+  }
+
   .assistant-conversation .assistant-request-field textarea {
     font-size: 16px;
   }

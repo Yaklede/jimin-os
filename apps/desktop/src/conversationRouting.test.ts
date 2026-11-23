@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { Conversation } from "./api/agent";
 import {
   conversationIdForRequest,
+  freshHomeRequest,
   mergeCreatedConversation,
 } from "./conversationRouting";
 
@@ -27,9 +28,9 @@ it("keeps a previous home thread in history but does not pile up empty drafts", 
 
 describe("conversationIdForRequest", () => {
   it("starts a fresh home conversation instead of reusing an unrelated thread", () => {
-    expect(
-      conversationIdForRequest("selected-chat", { startFresh: true }),
-    ).toBeUndefined();
+    const options = freshHomeRequest();
+    expect(conversationIdForRequest("selected-chat", options)).toBeUndefined();
+    expect(options.rememberForHome).toBe(true);
   });
 
   it("continues the remembered home conversation even after another thread was selected", () => {

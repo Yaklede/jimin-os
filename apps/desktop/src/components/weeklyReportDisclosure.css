@@ -37,3 +37,85 @@
 .project-weekly-overview--disclosure {
   max-width: 100%;
 }
+
+/* Overview disclosures and project rows share one trailing icon rail. */
+.projects-page {
+  --project-chevron-edge: 16px;
+  --project-chevron-size: 18px;
+}
+
+.projects-page .scheduled-summary {
+  padding-inline-end: calc(var(--project-chevron-edge) - 1px);
+}
+
+.projects-page .project-goals-drawer > summary,
+.projects-page > .mobile-disclosure > summary,
+.projects-page .project-weekly-overview--disclosure > summary,
+.projects-page .project-list > li > .project-list__item {
+  padding-inline-end: var(--project-chevron-edge);
+}
+
+.projects-page .scheduled-summary > svg:last-child,
+.projects-page .project-goals-drawer > summary > svg,
+.projects-page > .mobile-disclosure > summary > svg,
+.projects-page .project-weekly-overview--disclosure > summary > svg,
+.projects-page .project-list__arrow {
+  width: var(--project-chevron-size);
+  height: var(--project-chevron-size);
+  color: var(--muted);
+  flex: none;
+}
+
+.projects-page .project-goals-drawer > summary > svg {
+  align-self: center;
+}
+
+.projects-page .project-weekly-overview--disclosure > summary {
+  grid-template-columns: minmax(0, 1fr) auto var(--project-chevron-size);
+  grid-template-areas: "summary period arrow";
+}
+
+.project-weekly-overview--disclosure
+  > summary
+  > .project-weekly-overview__summary {
+  grid-area: summary;
+  min-width: 0;
+}
+
+.project-weekly-overview--disclosure
+  > summary
+  > .project-weekly-overview__period {
+  grid-area: period;
+}
+
+.project-weekly-overview--disclosure > summary > svg {
+  grid-area: arrow;
+  justify-self: end;
+  align-self: center;
+}
+
+.projects-page .projects-layout .project-list__item {
+  grid-template-columns: minmax(0, 1fr) var(--project-chevron-size);
+  grid-template-areas: "title arrow" "meta arrow";
+}
+
+@media (max-width: 900px) {
+  .projects-page .project-weekly-overview--disclosure > summary {
+    grid-template-columns: minmax(0, 1fr) var(--project-chevron-size);
+    grid-template-areas: "summary arrow" "period arrow";
+    row-gap: 4px;
+  }
+
+  .projects-page
+    .project-weekly-overview--disclosure
+    > summary
+    > .project-weekly-overview__period {
+    display: block;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .projects-page .project-goals-drawer > summary > svg {
+    transition: none;
+  }
+}

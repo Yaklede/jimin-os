@@ -5,7 +5,6 @@ import {
   Pencil,
   PlayCircle,
   Plus,
-  RotateCcw,
   Send,
   Trash2,
   Webhook,
@@ -24,6 +23,7 @@ import {
   parseWebhookMentionDirectory,
 } from "../api/webhooks";
 import { copy } from "../copy";
+import { deliveryAttentionCopy } from "../copy/deliveryAttention";
 
 const EVENT_OPTIONS: ProjectWebhookEvent[] = [
   "project.updated",
@@ -62,7 +62,7 @@ type ProjectWebhookPanelProps = {
   ): Promise<void>;
   onTest(webhook: ProjectWebhook): Promise<void>;
   onDelete(webhook: ProjectWebhook): Promise<void>;
-  onRetry(delivery: WebhookDelivery): Promise<void>;
+  onOpenDeliveryHistory(): void;
 };
 
 export function ProjectWebhookPanel({
@@ -75,7 +75,7 @@ export function ProjectWebhookPanel({
   onUpdate,
   onTest,
   onDelete,
-  onRetry,
+  onOpenDeliveryHistory,
 }: ProjectWebhookPanelProps) {
   const [formOpen, setFormOpen] = useState(false);
   const [provider, setProvider] =
@@ -95,7 +95,6 @@ export function ProjectWebhookPanel({
   const [deleteTarget, setDeleteTarget] = useState<string>();
   const [editTarget, setEditTarget] = useState<string>();
   const [actionMenuTarget, setActionMenuTarget] = useState<string>();
-  const [retryTarget, setRetryTarget] = useState<string>();
   const [pendingAction, setPendingAction] = useState<{
     kind: PendingWebhookAction;
     id: string;
@@ -111,14 +110,13 @@ export function ProjectWebhookPanel({
   const restoreEditTargetRef = useRef<string | undefined>(undefined);
   const deleteSafeActionRef = useRef<HTMLButtonElement>(null);
   const restoreDeleteTargetRef = useRef<string | undefined>(undefined);
-  const panelBusy = loading || saving || Boolean(pendingAction || retryTarget);
+  const panelBusy = loading || saving || Boolean(pendingAction);
 
   useEffect(() => {
     setFormOpen(false);
     setDeleteTarget(undefined);
     setEditTarget(undefined);
     setActionMenuTarget(undefined);
-    setRetryTarget(undefined);
     setPendingAction(undefined);
     restoreCreateFocusRef.current = false;
     restoreEditTargetRef.current = undefined;
@@ -627,39 +625,22 @@ export function ProjectWebhookPanel({
                 <time dateTime={delivery.createdAt}>
                   {formatDeliveryTime(delivery.createdAt)}
                 </time>
-                <small>
-                  {copy.projects.webhookDeliveryMeta(
-                    delivery.attemptCount,
-                    delivery.responseCode ?? undefined,
-                  )}
-                </small>
+                {delivery.status !== "failed" && (
+                  <small>
+                    {copy.projects.webhookDeliveryMeta(
+                      delivery.attemptCount,
+                      delivery.responseCode ?? undefined,
+                    )}
+                  </small>
+                )}
                 {delivery.status === "failed" && (
                   <button
                     className="text-button focus-visible-control project-webhook-history__retry"
                     type="button"
                     disabled={panelBusy}
-                    onClick={async () => {
-                      setRetryTarget(delivery.id);
-                      setError(undefined);
-                      setNotice(undefined);
-                      try {
-                        await onRetry(delivery);
-                        setNotice(copy.projects.webhookRetryQueued);
-                      } catch {
-                        setError(copy.projects.webhookRetryProblem);
-                      } finally {
-                        setRetryTarget(undefined);
-                      }
-                    }}
+                    onClick={onOpenDeliveryHistory}
                   >
-                    {retryTarget === delivery.id ? (
-                      <span className="button-spinner" aria-hidden="true" />
-                    ) : (
-                      <RotateCcw aria-hidden="true" />
-                    )}
-                    {retryTarget === delivery.id
-                      ? copy.projects.webhookRetrying
-                      : copy.projects.webhookRetry}
+                    {deliveryAttentionCopy.openHistory}
                   </button>
                 )}
               </li>

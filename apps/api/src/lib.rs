@@ -11,6 +11,7 @@ mod inflow_changes;
 pub mod korean_holidays;
 mod meetings;
 pub mod probe;
+mod project_completed_history;
 pub mod push;
 mod report_evidence;
 pub mod scheduled_chat_reply;
@@ -1765,6 +1766,7 @@ pub(crate) fn error_response(
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        project_completed_history::list,
         trusted_network_session,
         refresh_session,
         list_sync_changes,
@@ -1935,6 +1937,8 @@ pub(crate) fn error_response(
         ProjectInflowListQuery,
         TaskResponse,
         TaskListResponse,
+        project_completed_history::HistoryQuery,
+        project_completed_history::HistoryPage,
         WorkspaceResponse,
         WorkspaceListResponse,
         ProjectResponse,
@@ -2093,6 +2097,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/workspaces", get(list_workspaces))
         .merge(goal_router())
         .route("/v1/projects", get(list_projects).post(create_project))
+        .route(
+            "/v1/projects/{project_id}/completed-tasks",
+            get(project_completed_history::list),
+        )
         .route("/v1/reports/weekly", get(get_weekly_report))
         .route(
             "/v1/projects/{project_id}/weekly-evidence",
@@ -11525,6 +11533,7 @@ mod tests {
                 "/v1/projects",
                 "/v1/projects/{project_id}",
                 "/v1/projects/{project_id}/chat-task-routing",
+                "/v1/projects/{project_id}/completed-tasks",
                 "/v1/projects/{project_id}/google-chat-sources",
                 "/v1/projects/{project_id}/google-chat-sources/{source_id}",
                 "/v1/projects/{project_id}/google-chat-sources/{source_id}/purpose",
@@ -13016,6 +13025,24 @@ mod tests {
                 .expect("handler should respond");
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
+    }
+
+    #[tokio::test]
+    async fn project_completed_history_requires_a_live_signed_session() {
+        let (state, _, _) = signed_auth_state(true);
+        let project_id = Uuid::now_v7();
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/projects/{project_id}/completed-tasks?page=1&completedTo=2026-11-23"
+                    ))
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

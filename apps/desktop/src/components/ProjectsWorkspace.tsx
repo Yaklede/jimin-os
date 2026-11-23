@@ -78,6 +78,11 @@ import { ReportEvidencePanel } from "./ReportEvidencePanel";
 import { ProjectChatRoutingPanel } from "./ProjectChatRoutingPanel";
 import type { ChatAuthenticate } from "../api/chatRouting";
 import type { ReportEvidenceMetric, ReportEvidencePage } from "../api/projects";
+import type {
+  ProjectCompletedPage,
+  ProjectCompletedQuery,
+} from "../api/projects";
+import { ProjectCompletedHistory } from "./ProjectCompletedHistory";
 import "./weeklyReportDisclosure.css";
 
 type ProjectDetailTab =
@@ -121,6 +126,13 @@ type ProjectsWorkspaceProps = {
   selectedWorkspaceId: string | undefined;
   selectedProjectId: string | undefined;
   highlightedTaskId: string | undefined;
+  highlightedTaskCompleted: boolean;
+  completedHistoryRevision: number;
+  onLoadCompletedTasks(
+    projectId: string,
+    query: ProjectCompletedQuery,
+    signal: AbortSignal,
+  ): Promise<ProjectCompletedPage>;
   highlightedInflowId: string | undefined;
   loaded: boolean;
   loading: boolean;
@@ -224,7 +236,7 @@ type ProjectsWorkspaceProps = {
   ): Promise<void>;
   onTestWebhook(webhook: ProjectWebhook): Promise<void>;
   onDeleteWebhook(webhook: ProjectWebhook): Promise<void>;
-  onRetryWebhookDelivery(delivery: WebhookDelivery): Promise<void>;
+  onOpenDeliveryHistory(): void;
   onReloadItsmConnection(): Promise<void>;
   onConnectItsm(): Promise<void>;
   onConfirmItsm(connection: ProjectItsmConnection): Promise<void>;
@@ -254,7 +266,6 @@ type ProjectsWorkspaceProps = {
     input?: { reason?: string; replyToSource?: boolean; markSeen?: boolean },
   ): Promise<void>;
   onRetryInflowAnalysis(item: ProjectInflowItem): Promise<void>;
-  onRetryInflowCompletion(item: ProjectInflowItem): Promise<void>;
   onReviewInflowChange?(item: ProjectInflowItem): void;
 };
 
@@ -282,6 +293,9 @@ export function ProjectsWorkspace({
   selectedWorkspaceId,
   selectedProjectId,
   highlightedTaskId,
+  highlightedTaskCompleted,
+  completedHistoryRevision,
+  onLoadCompletedTasks,
   highlightedInflowId,
   loaded,
   loading,
@@ -314,7 +328,7 @@ export function ProjectsWorkspace({
   onUpdateWebhook,
   onTestWebhook,
   onDeleteWebhook,
-  onRetryWebhookDelivery,
+  onOpenDeliveryHistory,
   onReloadItsmConnection,
   onConnectItsm,
   onConfirmItsm,
@@ -328,7 +342,6 @@ export function ProjectsWorkspace({
   onPromoteInflow,
   onDismissInflow,
   onRetryInflowAnalysis,
-  onRetryInflowCompletion,
   onReviewInflowChange,
 }: ProjectsWorkspaceProps) {
   const mobile = useMobileLayout();
@@ -385,8 +398,6 @@ export function ProjectsWorkspace({
       (item) => item.snapshot.report.periodStart !== weeklyReport?.periodStart,
     );
   const openTasks = tasks.filter((task) => task.status === "open");
-  const completedTasks = tasks.filter((task) => task.status === "completed");
-  const rootTasks = tasks.filter((task) => !task.parentTaskId);
   const rootOpenTasks = openTasks.filter((task) => !task.parentTaskId);
   const openTaskRows = taskHierarchyRows(openTasks);
   const inflowAttentionTotal = projectInflowAttentionCount(projectInflowItems);
@@ -411,17 +422,10 @@ export function ProjectsWorkspace({
 
   useEffect(() => {
     if (highlightedTaskId) {
-      setActiveProjectTab(
-        tasks.some(
-          (task) =>
-            task.id === highlightedTaskId && task.status === "completed",
-        )
-          ? "activity"
-          : "tasks",
-      );
+      setActiveProjectTab(highlightedTaskCompleted ? "activity" : "tasks");
       setSelectedTaskId(highlightedTaskId);
     }
-  }, [highlightedTaskId, selectedProjectId, tasks]);
+  }, [highlightedTaskCompleted, highlightedTaskId, selectedProjectId]);
 
   useEffect(() => {
     if (!highlightedTaskId || activeProjectTab !== "tasks") return;
@@ -948,7 +952,7 @@ export function ProjectsWorkspace({
                   active={activeProjectTab === "activity"}
                   label={copy.projects.detailTabs.activity}
                   mobileLabel={copy.projects.detailTabsMobile.activity}
-                  count={completedTasks.length}
+                  count={selectedProject.completedTaskCount}
                   icon={<History aria-hidden="true" />}
                   onSelect={setActiveProjectTab}
                 />
@@ -1318,27 +1322,23 @@ export function ProjectsWorkspace({
                   role="tabpanel"
                   aria-label={copy.projects.detailTabs.activity}
                 >
-                  {completedTasks.length > 0 && (
-                    <section
-                      className="project-completed-tasks"
-                      aria-labelledby="completed-tasks-title"
-                    >
-                      <div className="projects-section-heading">
-                        <div>
-                          <Circle aria-hidden="true" />
-                          <h3 id="completed-tasks-title">
-                            {copy.projects.completedWorkItemsTitle}
-                          </h3>
-                        </div>
-                        <span>
-                          {copy.projects.completedTaskCount(
-                            completedTasks.length,
-                          )}
-                        </span>
-                      </div>
+                  <ProjectCompletedHistory
+                    key={`${selectedProject.id}:${highlightedTaskCompleted ? (highlightedTaskId ?? "") : ""}`}
+                    projectId={selectedProject.id}
+                    count={selectedProject.completedTaskCount}
+                    revision={completedHistoryRevision}
+                    anchorId={
+                      highlightedTaskCompleted ? highlightedTaskId : undefined
+                    }
+                    onLoad={onLoadCompletedTasks}
+                    renderRows={(completedTasks, refresh) => (
                       <ul className="project-task-list project-task-list--completed">
                         {completedTasks.map((task) => (
-                          <li key={task.id} data-task-status="completed">
+                          <li
+                            key={task.id}
+                            id={`project-completed-task-${task.id}`}
+                            data-task-status="completed"
+                          >
                             <button
                               className="project-task-list__complete focus-visible-control"
                               type="button"
@@ -1353,6 +1353,8 @@ export function ProjectsWorkspace({
                                   priority: task.priority,
                                   dueAt: task.dueAt ?? undefined,
                                 })
+                                  .then(refresh)
+                                  .catch(() => undefined)
                               }
                             >
                               <RotateCcw aria-hidden="true" />
@@ -1370,8 +1372,20 @@ export function ProjectsWorkspace({
                               <span className="project-task-list__details">
                                 <strong>{task.title} </strong>
                                 <span>
-                                  {copy.projects.completedTaskMeta(
-                                    taskMeta(task),
+                                  {task.completedAt ? (
+                                    <time dateTime={task.completedAt}>
+                                      {new Intl.DateTimeFormat("ko-KR", {
+                                        dateStyle: "medium",
+                                        timeZone: "Asia/Seoul",
+                                      }).format(
+                                        new Date(task.completedAt),
+                                      )}{" "}
+                                      완료
+                                    </time>
+                                  ) : (
+                                    copy.projects.completedTaskMeta(
+                                      taskMeta(task),
+                                    )
                                   )}
                                 </span>
                               </span>
@@ -1405,28 +1419,31 @@ export function ProjectsWorkspace({
                             {editingTaskId === task.id && (
                               <TaskEditForm
                                 task={task}
-                                parentCandidates={rootTasks.filter(
-                                  (item) => item.id !== task.id,
-                                )}
+                                parentCandidates={[
+                                  ...rootOpenTasks,
+                                  ...completedTasks.filter(
+                                    (item) =>
+                                      !item.parentTaskId && item.id !== task.id,
+                                  ),
+                                ]}
                                 saving={saving}
                                 onCancel={() => setEditingTaskId(undefined)}
                                 onSave={async (input) => {
                                   await onUpdateTask(task, input);
                                   setEditingTaskId(undefined);
+                                  refresh();
                                 }}
-                                onDelete={() => onDeleteTask(task)}
+                                onDelete={async () => {
+                                  await onDeleteTask(task);
+                                  refresh();
+                                }}
                               />
                             )}
                           </li>
                         ))}
                       </ul>
-                    </section>
-                  )}
-                  {completedTasks.length === 0 && (
-                    <p className="project-detail__empty">
-                      {copy.projects.completedWorkItemsEmpty}
-                    </p>
-                  )}
+                    )}
+                  />
                 </div>
               )}
               {activeProjectTab === "inflow" && (
@@ -1449,7 +1466,7 @@ export function ProjectsWorkspace({
                   onPromote={onPromoteInflow}
                   onDismiss={onDismissInflow}
                   onRetryAnalysis={onRetryInflowAnalysis}
-                  onRetryCompletion={onRetryInflowCompletion}
+                  onOpenDeliveryHistory={onOpenDeliveryHistory}
                   onReviewChange={onReviewInflowChange}
                   onOpenTask={(taskId) => {
                     setActiveProjectTab("tasks");
@@ -1512,7 +1529,7 @@ export function ProjectsWorkspace({
                       onUpdate={onUpdateWebhook}
                       onTest={onTestWebhook}
                       onDelete={onDeleteWebhook}
-                      onRetry={onRetryWebhookDelivery}
+                      onOpenDeliveryHistory={onOpenDeliveryHistory}
                     />
                   </section>
                 </div>
@@ -2838,6 +2855,10 @@ function TaskEditForm({
             onChange={(event) => setParentTaskId(event.target.value)}
           >
             <option value="">{copy.projects.parentTaskNone}</option>
+            {parentTaskId &&
+              !parentCandidates.some(
+                (candidate) => candidate.id === parentTaskId,
+              ) && <option value={parentTaskId}>현재 상위 일감 유지</option>}
             {parentCandidates.map((candidate) => (
               <option value={candidate.id} key={candidate.id}>
                 {candidate.title}

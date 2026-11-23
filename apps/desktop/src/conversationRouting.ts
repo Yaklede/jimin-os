@@ -6,6 +6,10 @@ export type ConversationSendOptions = {
   rememberForHome?: boolean;
 };
 
+export function freshHomeRequest(): ConversationSendOptions {
+  return { startFresh: true, rememberForHome: true };
+}
+
 export function conversationIdForRequest(
   selectedConversationId: string | undefined,
   options: ConversationSendOptions,

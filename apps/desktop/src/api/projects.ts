@@ -204,8 +204,61 @@ export async function fetchProjectTasks(
 ): Promise<Task[]> {
   const url = new URL(`${normalizeBaseUrl(baseUrl)}/v1/tasks`, browserOrigin());
   url.searchParams.set("projectId", projectId);
-  url.searchParams.set("status", "all");
+  url.searchParams.set("status", "open");
   return requestListFromUrl<Task>(url, access);
+}
+
+export const PROJECT_COMPLETED_PAGE_SIZE = 30;
+
+export type ProjectCompletedQuery = {
+  page: number;
+  query?: string;
+  assignee?: string;
+  completedFrom?: string;
+  completedTo?: string;
+  anchorTaskId?: string;
+};
+
+export type ProjectCompletedPage = {
+  items: Task[];
+  page: number;
+  pageSize: number;
+  totalCount: number;
+  filteredCount: number;
+  assignees: string[];
+};
+
+export async function fetchProjectCompletedTasks(
+  baseUrl: string,
+  access: string,
+  projectId: string,
+  query: ProjectCompletedQuery,
+  signal?: AbortSignal,
+): Promise<ProjectCompletedPage> {
+  const url = new URL(
+    `${normalizeBaseUrl(baseUrl)}/v1/projects/${encodeURIComponent(projectId)}/completed-tasks`,
+    browserOrigin(),
+  );
+  for (const [key, value] of Object.entries(query))
+    if (value !== undefined && value !== "")
+      url.searchParams.set(key, String(value));
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${access}` },
+    signal,
+  });
+  const body = await readJson(response);
+  if (
+    !response.ok ||
+    !isRecord(body) ||
+    !Array.isArray(body.items) ||
+    !Array.isArray(body.assignees) ||
+    typeof body.page !== "number" ||
+    typeof body.pageSize !== "number" ||
+    typeof body.totalCount !== "number" ||
+    typeof body.filteredCount !== "number"
+  )
+    throw errorFromStatus(response.status);
+  return body as ProjectCompletedPage;
 }
 
 export async function createProject(

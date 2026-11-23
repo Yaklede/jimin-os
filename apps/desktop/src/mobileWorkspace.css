@@ -132,7 +132,7 @@
     border: 1px solid var(--control-contrast);
     border-radius: 16px;
     background: var(--surface);
-    box-shadow: 0 8px 28px #0002;
+    box-shadow: var(--shadow-float);
   }
   .os-shell:not([data-platform="desktop"]) .os-topbar .os-mobile-more {
     display: block;
@@ -446,18 +446,22 @@
     display: grid;
     gap: 12px;
   }
+  .os-shell:not([data-platform="desktop"]) .project-detail {
+    --project-tab-target: 58px;
+    --project-tab-inset: 4px;
+  }
   .os-shell:not([data-platform="desktop"]) .project-detail-tabs {
     display: grid;
     grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 2px;
     overflow: visible;
-    padding: 4px;
+    padding: var(--project-tab-inset);
     border-radius: 12px;
   }
   .os-shell:not([data-platform="desktop"]) .project-detail-tabs__button {
     width: auto;
     min-width: 0;
-    min-height: 58px;
+    min-height: var(--project-tab-target);
     padding: 6px 2px;
     gap: 3px;
     flex-direction: column;
@@ -467,6 +471,16 @@
   }
   .os-shell:not([data-platform="desktop"]) .project-detail-tabs__button > svg {
     display: none;
+  }
+  /* Focus and deep links must land below the sticky tab strip. */
+  .os-shell:not([data-platform="desktop"]) .project-detail :is(
+    .project-completed-tasks,
+    .project-completed-tasks :focus-visible,
+    .project-task-list--completed > li
+  ) {
+    scroll-margin-block-start: calc(
+      var(--project-tab-target) + 2 * var(--project-tab-inset)
+    );
   }
   .os-shell:not([data-platform="desktop"])
     .project-detail-tabs__button
