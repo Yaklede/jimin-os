@@ -297,6 +297,7 @@
 .assistant-mobile-identity__history {
   display: block;
   width: 100%;
+  max-width: 100%;
   min-height: 44px;
   margin-top: 4px;
   border: 1px solid var(--border);
@@ -305,6 +306,71 @@
   background: var(--surface);
   color: var(--text);
   text-overflow: ellipsis;
+}
+
+.assistant-history__entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.assistant-history__delete {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--muted);
+}
+
+.assistant-history__delete:is(:hover, :focus-visible) {
+  background: var(--surface-hover);
+  color: var(--text-strong);
+}
+
+.assistant-history__delete svg {
+  width: 18px;
+  height: 18px;
+}
+
+.assistant-mobile-identity:has(.assistant-mobile-identity__actions) {
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+}
+
+.assistant-mobile-identity__actions {
+  display: flex;
+  align-items: center;
+}
+
+.work-dialog.conversation-delete-dialog[open] {
+  position: fixed;
+  inset: 0;
+  width: min(440px, calc(100% - 32px));
+  height: fit-content;
+  max-height: calc(var(--work-dialog-height) - 32px);
+  margin: auto;
+  border-radius: var(--radius-panel);
+}
+
+.conversation-delete-dialog .work-dialog__header {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.conversation-delete-dialog .work-dialog__body {
+  overflow-wrap: anywhere;
+}
+
+.conversation-delete-dialog .work-dialog__body > p {
+  margin: 8px 0 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conversation-delete-dialog button {
+    transition: none;
+  }
 }
 
 @media (max-width: 720px) {

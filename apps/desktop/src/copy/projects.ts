@@ -268,6 +268,19 @@ export const projectCopy = {
   inflowMarkSeen: "확인 처리",
   inflowMarkSeenSaving: "확인 처리 중…",
   inflowReviewMoved: "확인한 대화로 이동했어요.",
+  inflowBulkSelect: "여러 건 선택",
+  inflowBulkToolbar: "대화 여러 건 선택",
+  inflowBulkSelectAll: (count: number) => `전체 ${count}건 선택`,
+  inflowBulkClear: "전체 선택 해제",
+  inflowBulkCancel: "취소",
+  inflowBulkConfirm: (count: number) =>
+    count ? `${count}건 확인 완료` : "확인 완료",
+  inflowBulkSaving: (count: number) => `${count}건 확인 처리 중…`,
+  inflowBulkSaved: (count: number) => `대화 ${count}건을 확인 완료했어요.`,
+  inflowBulkRetry: (count: number) =>
+    `${count}건을 확인 완료하지 못했어요. 남은 대화를 확인하고 다시 시도해 주세요.`,
+  inflowBulkChanged:
+    "새 내용이 있는 대화는 선택에서 제외했어요. 내용을 확인한 뒤 다시 선택해 주세요.",
   inflowReviewProblem: "확인 상태를 저장하지 못했어요. 다시 시도해 주세요.",
   inflowDismissReason: "제외 사유",
   inflowDismissReasonLabel: "제외 사유 (선택)",

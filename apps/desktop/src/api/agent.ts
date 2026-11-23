@@ -238,11 +238,13 @@ export async function createConversation(
   clientConversationId: string,
   title: string | null,
   surface: Conversation["surface"],
+  preservePreviousHome = false,
 ): Promise<Conversation> {
   return request<Conversation>(baseUrl, access, "/v1/conversations", {
     clientConversationId,
     title,
     surface,
+    ...(preservePreviousHome ? { preservePreviousHome } : {}),
   });
 }
 
@@ -276,6 +278,19 @@ export async function fetchConversationMessages(
     throw new AgentRequestError("unavailable");
   }
   return body.items;
+}
+
+export async function deleteConversation(
+  baseUrl: string,
+  access: string,
+  conversationId: string,
+): Promise<void> {
+  const response = await fetch(
+    `${normalizeBaseUrl(baseUrl)}/v1/conversations/${encodeURIComponent(conversationId)}`,
+    { method: "DELETE", headers: authHeaders(access) },
+  );
+  if (!response.ok && response.status !== 404)
+    throw errorFromStatus(response.status);
 }
 
 export async function queueAgentTurn(

@@ -15,6 +15,54 @@ function setupPreview() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("design preview API isolation", () => {
+  it("keeps previous chat history separate from a new home draft and deletes only the requested conversation", async () => {
+    const originalFetch = setupPreview();
+    const before = await previewHome();
+    const draft = await window.fetch("/server/v1/conversations", {
+      method: "POST",
+      body: JSON.stringify({
+        clientConversationId: "preview-blank-draft",
+        title: null,
+        surface: "home",
+        preservePreviousHome: true,
+      }),
+    });
+    expect(draft.status).toBe(201);
+    const active = () =>
+      window
+        .fetch("/server/v1/conversations")
+        .then((response) => response.json());
+    expect((await active()).items).toEqual([
+      expect.objectContaining({ id: "preview-home", surface: "chat" }),
+      expect.objectContaining({
+        id: "preview-blank-draft",
+        surface: "home",
+        lastMessageAt: null,
+      }),
+    ]);
+    const messages = (id: string) =>
+      window.fetch(`/server/v1/conversations/${id}/messages`);
+    expect(
+      (await (await messages("preview-home")).json()).items.length,
+    ).toBeGreaterThan(0);
+    expect(
+      (await (await messages("preview-blank-draft")).json()).items,
+    ).toEqual([]);
+    expect(
+      (
+        await window.fetch("/server/v1/conversations/preview-home", {
+          method: "DELETE",
+        })
+      ).status,
+    ).toBe(204);
+    expect((await messages("preview-home")).status).toBe(404);
+    expect(
+      (await active()).items.map((item: { id: string }) => item.id),
+    ).toEqual(["preview-blank-draft"]);
+    expect((await previewHome()).tasks).toEqual(before.tasks);
+    expect(originalFetch).not.toHaveBeenCalled();
+  });
+
   it("archives the prior request and opens an empty conversation without a server", async () => {
     const originalFetch = setupPreview();
     expect(

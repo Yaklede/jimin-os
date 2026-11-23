@@ -1,4 +1,4 @@
-import { ArrowLeft, ChevronDown, X } from "lucide-react";
+import { ArrowLeft, CheckCircle2, ChevronDown, Circle, X } from "lucide-react";
 import {
   type ReactNode,
   useEffect,
@@ -14,6 +14,10 @@ import { registerMobileBackHandler } from "../mobileBack";
 import { copy } from "../copy";
 import { completionReviewCopy } from "../copy/completionReviews";
 import {
+  inflowReviewSnapshotKey,
+  type InflowBatchReviewResult,
+} from "../home-inflow-batch";
+import {
   homeInflowByReceivedDate,
   homeInflowOnDate,
 } from "../home-inflow-dates";
@@ -25,6 +29,11 @@ import {
   isProjectInflowAttentionItem,
   type PromoteInflowInput,
 } from "./ProjectInflowPanel";
+import "./homeInflowBulk.css";
+
+export type MarkInflowsSeen = (
+  items: readonly ProjectInflowItem[],
+) => Promise<InflowBatchReviewResult>;
 
 type HomeInflowReviewProps = {
   completionReviews?: ReactNode;
@@ -39,6 +48,7 @@ type HomeInflowReviewProps = {
     item: ProjectInflowItem,
     input?: { reason?: string; replyToSource?: boolean; markSeen?: boolean },
   ): Promise<void>;
+  onMarkSeenMany?: MarkInflowsSeen;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
   onRetryCompletion(item: ProjectInflowItem): Promise<void>;
   onReviewChange?(item: ProjectInflowItem): void;
@@ -115,6 +125,17 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
     await props.onPromote(item, input);
     showReceipt(copy.projects.inflowRegistrationSaved);
   };
+
+  const markSeenMany = props.onMarkSeenMany;
+  const handleMarkSeenMany: MarkInflowsSeen | undefined =
+    markSeenMany &&
+    (async (items) => {
+      const result = await markSeenMany(items);
+      if (result.updatedVersions.size) {
+        showReceipt(copy.projects.inflowBulkSaved(result.updatedVersions.size));
+      }
+      return result;
+    });
 
   useEffect(() => {
     if (!reviewReceipt) return;
@@ -262,6 +283,7 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
                 kind={kind}
                 onPromote={handlePromote}
                 onDismiss={handleDismiss}
+                onMarkSeenMany={kind !== "new" ? handleMarkSeenMany : undefined}
               />
             ) : (
               <p className="home-inflow-tabs__empty">
@@ -284,6 +306,7 @@ function HomeInflowGroup({
   saving,
   onPromote,
   onDismiss,
+  onMarkSeenMany,
   onRetryAnalysis,
   onRetryCompletion,
   onReviewChange,
@@ -310,7 +333,7 @@ function HomeInflowGroup({
     [items],
   );
   const preferenceKey = `home-inflow-view-${kind}`;
-  const [view, setView] = useState<"list" | "calendar">(() => {
+  const [preferredView, setView] = useState<"list" | "calendar">(() => {
     try {
       const stored = window.sessionStorage.getItem(preferenceKey);
       return stored === "calendar" || stored === "list" ? stored : initialView;
@@ -318,6 +341,84 @@ function HomeInflowGroup({
       return initialView;
     }
   });
+  const [selecting, setSelecting] = useState(false);
+  const [picked, setPicked] = useState<Set<string>>(() => new Set());
+  const [bulkSaving, setBulkSaving] = useState(0);
+  const [bulkFailed, setBulkFailed] = useState(0);
+  const batchInFlight = useRef(false);
+  const bulkTrigger = useRef<HTMLButtonElement>(null);
+  const bulkSelectAll = useRef<HTMLButtonElement>(null);
+  const bulkCancel = useRef<HTMLButtonElement>(null);
+  const bulkConfirm = useRef<HTMLButtonElement>(null);
+  const wasSelecting = useRef(false);
+  const selectedForBulk = allItems.filter((item) =>
+    picked.has(inflowReviewSnapshotKey(item)),
+  );
+  const allPicked = allItems.length === selectedForBulk.length;
+  const view = selecting ? "list" : preferredView;
+
+  function closeBulk() {
+    setSelecting(false);
+    setPicked(new Set());
+    setBulkFailed(0);
+  }
+
+  async function confirmBulk() {
+    if (
+      !onMarkSeenMany ||
+      saving ||
+      batchInFlight.current ||
+      !selectedForBulk.length
+    )
+      return;
+    batchInFlight.current = true;
+    setBulkSaving(selectedForBulk.length);
+    setBulkFailed(0);
+    try {
+      const result = await onMarkSeenMany(selectedForBulk);
+      if (!result.failed.length) {
+        closeBulk();
+      } else {
+        setPicked(new Set(result.failed.map(inflowReviewSnapshotKey)));
+        setBulkFailed(result.failed.length);
+      }
+    } catch {
+      setBulkFailed(selectedForBulk.length);
+    } finally {
+      batchInFlight.current = false;
+      setBulkSaving(0);
+    }
+  }
+
+  useLayoutEffect(() => {
+    const entered = wasSelecting.current !== selecting;
+    wasSelecting.current = selecting;
+    const target = selecting ? bulkSelectAll.current : bulkTrigger.current;
+    if (entered && target?.getClientRects().length) {
+      target.focus({ preventScroll: true });
+    }
+  }, [selecting]);
+
+  useLayoutEffect(() => {
+    if (!bulkFailed || bulkSaving || document.activeElement !== document.body)
+      return;
+    const target = bulkConfirm.current?.disabled
+      ? bulkCancel.current
+      : bulkConfirm.current;
+    if (target?.getClientRects().length) {
+      target.focus({ preventScroll: true });
+    }
+  }, [bulkFailed, bulkSaving]);
+
+  useEffect(() => {
+    if (!selecting) return;
+    return registerMobileBackHandler(() => {
+      if (!reviewRef.current?.getClientRects().length) return false;
+      if (!batchInFlight.current) closeBulk();
+      return true;
+    }, 60);
+  }, [selecting]);
+
   const previousDetailView = useRef(view);
   const [showAll, setShowAll] = useState(false);
   const [range, setRange] = useState(() => planningViewRange("month"));
@@ -350,7 +451,7 @@ function HomeInflowGroup({
     observer.observe(queue);
     for (const row of queue.children) observer.observe(row);
     return () => observer.disconnect();
-  }, [visibleItems, showDetail, showAll]);
+  }, [visibleItems, showDetail, showAll, selecting]);
   const [selectedConversationId, setSelectedConversationId] =
     useState<string>();
 
@@ -360,9 +461,10 @@ function HomeInflowGroup({
     ) ?? (view === "calendar" ? visibleItems[0] : undefined);
   const queueItems = visibleHomeInflowItems(
     visibleItems,
-    view === "calendar" || showAll,
+    selecting || view === "calendar" || showAll,
   );
-  const displayedItem = !mobile || mobileDetailOpen ? selectedItem : undefined;
+  const displayedItem =
+    !selecting && (!mobile || mobileDetailOpen) ? selectedItem : undefined;
   const activeConversation = displayedItem
     ? inflowConversationKey(displayedItem)
     : undefined;
@@ -450,6 +552,13 @@ function HomeInflowGroup({
       aria-labelledby={titleId}
       data-view={view}
       data-detail-open={showDetail}
+      data-bulk-selection={selecting || undefined}
+      onKeyDown={(event) => {
+        if (!selecting || event.key !== "Escape") return;
+        event.stopPropagation();
+        event.preventDefault();
+        if (!batchInFlight.current) closeBulk();
+      }}
     >
       <header className="home-inflow__heading">
         <div className="home-inflow__heading-copy">
@@ -482,36 +591,109 @@ function HomeInflowGroup({
         </strong>
       </header>
 
-      <div
-        className="home-inflow__view-controls"
-        role="group"
-        aria-label={copy.projects.inflowHomeViews}
-      >
-        {(["list", "calendar"] as const).map((mode) => (
+      {selecting ? (
+        <div
+          className="home-inflow-bulk__toolbar"
+          role="group"
+          aria-label={copy.projects.inflowBulkToolbar}
+        >
           <button
+            ref={bulkSelectAll}
+            className="secondary-button focus-visible-control"
             type="button"
-            key={mode}
-            className="focus-visible-control"
-            aria-pressed={view === mode}
-            data-active={view === mode}
-            onClick={() => {
-              if (view === mode) return;
-              setView(mode);
-              setSelectedConversationId(undefined);
-              setMobileDetailOpen(false);
-              try {
-                window.sessionStorage.setItem(preferenceKey, mode);
-              } catch {
-                // The current view remains usable when storage is unavailable.
-              }
-            }}
+            disabled={saving || !!bulkSaving}
+            onClick={() =>
+              setPicked(
+                new Set(allPicked ? [] : allItems.map(inflowReviewSnapshotKey)),
+              )
+            }
           >
-            {mode === "list"
-              ? copy.projects.inflowHomeListView
-              : copy.projects.inflowHomeCalendarView}
+            {allPicked
+              ? copy.projects.inflowBulkClear
+              : copy.projects.inflowBulkSelectAll(allItems.length)}
           </button>
-        ))}
-      </div>
+          <button
+            ref={bulkCancel}
+            className="secondary-button focus-visible-control"
+            type="button"
+            disabled={!!bulkSaving}
+            onClick={closeBulk}
+          >
+            {copy.projects.inflowBulkCancel}
+          </button>
+          <button
+            className="primary-button focus-visible-control home-inflow-bulk__confirm"
+            ref={bulkConfirm}
+            type="button"
+            disabled={saving || !!bulkSaving || !selectedForBulk.length}
+            onClick={() => void confirmBulk()}
+          >
+            {bulkSaving
+              ? copy.projects.inflowBulkSaving(bulkSaving)
+              : copy.projects.inflowBulkConfirm(selectedForBulk.length)}
+          </button>
+          {bulkSaving > 0 && (
+            <span className="sr-only" role="status">
+              {copy.projects.inflowBulkSaving(bulkSaving)}
+            </span>
+          )}
+          {bulkFailed > 0 && (
+            <p className="inline-alert home-inflow-bulk__notice" role="alert">
+              {copy.projects.inflowBulkRetry(bulkFailed)}
+            </p>
+          )}
+          {!bulkSaving && picked.size !== selectedForBulk.length && (
+            <p className="inline-alert home-inflow-bulk__notice" role="status">
+              {copy.projects.inflowBulkChanged}
+            </p>
+          )}
+        </div>
+      ) : (
+        <div
+          className="home-inflow__view-controls"
+          role="group"
+          aria-label={copy.projects.inflowHomeViews}
+        >
+          {(["list", "calendar"] as const).map((mode) => (
+            <button
+              type="button"
+              key={mode}
+              className="focus-visible-control"
+              aria-pressed={view === mode}
+              data-active={view === mode}
+              onClick={() => {
+                if (view === mode) return;
+                setView(mode);
+                setSelectedConversationId(undefined);
+                setMobileDetailOpen(false);
+                try {
+                  window.sessionStorage.setItem(preferenceKey, mode);
+                } catch {
+                  // The current view remains usable when storage is unavailable.
+                }
+              }}
+            >
+              {mode === "list"
+                ? copy.projects.inflowHomeListView
+                : copy.projects.inflowHomeCalendarView}
+            </button>
+          ))}
+          {onMarkSeenMany && (
+            <button
+              ref={bulkTrigger}
+              type="button"
+              className="focus-visible-control home-inflow-bulk__trigger"
+              disabled={saving}
+              onClick={() => {
+                setMobileDetailOpen(false);
+                setSelecting(true);
+              }}
+            >
+              {copy.projects.inflowBulkSelect}
+            </button>
+          )}
+        </div>
+      )}
       <div className="home-inflow-review" ref={reviewRef}>
         {view === "calendar" && (
           <HomeInflowCalendarView
@@ -595,19 +777,35 @@ function HomeInflowGroup({
               <ol ref={queueRef}>
                 {queueItems.map((item, rowIndex) => {
                   const conversationId = inflowConversationKey(item);
-                  const active =
-                    conversationId ===
-                    (selectedItem
-                      ? inflowConversationKey(selectedItem)
-                      : undefined);
+                  const snapshot = selecting
+                    ? inflowReviewSnapshotKey(item)
+                    : "";
+                  const active = selecting
+                    ? picked.has(snapshot)
+                    : conversationId ===
+                      (selectedItem
+                        ? inflowConversationKey(selectedItem)
+                        : undefined);
+                  const Mark = active ? CheckCircle2 : Circle;
                   return (
                     <li key={conversationId}>
                       <button
                         className="home-inflow-review__queue-item focus-visible-control"
                         type="button"
                         aria-pressed={active}
-                        data-active={active}
+                        data-active={!selecting && active}
+                        data-picked={selecting ? active : undefined}
+                        disabled={selecting && (saving || !!bulkSaving)}
                         onClick={() => {
+                          if (selecting) {
+                            setPicked((current) => {
+                              const next = new Set(current);
+                              if (next.has(snapshot)) next.delete(snapshot);
+                              else next.add(snapshot);
+                              return next;
+                            });
+                            return;
+                          }
                           returnQueue.current = {
                             scrollTop: queueRef.current?.scrollTop ?? 0,
                             rowIndex,
@@ -616,6 +814,12 @@ function HomeInflowGroup({
                           setMobileDetailOpen(true);
                         }}
                       >
+                        {selecting && (
+                          <Mark
+                            aria-hidden="true"
+                            className="home-inflow-bulk__mark"
+                          />
+                        )}
                         <span className="home-inflow-review__queue-summary">
                           <span className="home-inflow-review__queue-title">
                             {item.suggestedTaskTitle}
@@ -643,7 +847,8 @@ function HomeInflowGroup({
                   );
                 })}
               </ol>
-              {view === "list" &&
+              {!selecting &&
+                view === "list" &&
                 visibleItems.length > HOME_INFLOW_PREVIEW_SIZE && (
                   <button
                     type="button"

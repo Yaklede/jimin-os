@@ -57,7 +57,7 @@ import {
   useDelayedSkeleton,
 } from "./ContentSkeleton";
 import { AssistantInteractiveCanvas } from "./AssistantInteractiveCanvas";
-import { HomeInflowReview } from "./HomeInflowReview";
+import { HomeInflowReview, type MarkInflowsSeen } from "./HomeInflowReview";
 import {
   GmailInflowReview,
   type PromoteGmailInflowInput,
@@ -124,6 +124,7 @@ type HomeWorkspaceProps = {
     input?: { reason?: string; replyToSource?: boolean; markSeen?: boolean },
   ): Promise<void>;
   onRetryInflowAnalysis(item: ProjectInflowItem): Promise<void>;
+  onMarkInflowsSeen?: MarkInflowsSeen;
   onRetryInflowCompletion(item: ProjectInflowItem): Promise<void>;
   onReviewInflowChange?(item: ProjectInflowItem): void;
   gmailInflowItems: GmailInflowCandidate[];
@@ -185,6 +186,7 @@ export function HomeWorkspace({
   inflowSaving,
   onPromoteInflow,
   onDismissInflow,
+  onMarkInflowsSeen,
   onRetryInflowAnalysis,
   onRetryInflowCompletion,
   onReviewInflowChange,
@@ -394,6 +396,7 @@ export function HomeWorkspace({
             saving={inflowSaving}
             onPromote={onPromoteInflow}
             onDismiss={onDismissInflow}
+            onMarkSeenMany={onMarkInflowsSeen}
             onRetryAnalysis={onRetryInflowAnalysis}
             onRetryCompletion={onRetryInflowCompletion}
             onReviewChange={onReviewInflowChange}

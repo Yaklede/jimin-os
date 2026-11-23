@@ -11,6 +11,7 @@ import {
   Plus,
   SendHorizontal,
   Sparkles,
+  Trash2,
 } from "lucide-react";
 import {
   type FormEvent,
@@ -29,6 +30,8 @@ import {
   type ConversationMessage,
 } from "../api/agent";
 import { copy } from "../copy";
+import { conversationHistoryCopy as historyCopy } from "../copy/conversationHistory";
+import { ConversationDeleteDialog } from "./ConversationDeleteDialog";
 import { createUuidV7 } from "../uuid";
 import {
   SkeletonBlock,
@@ -69,6 +72,7 @@ type ConversationWorkspaceProps = {
   onShortcutFocusHandled?(): void;
   onInitialDraftApplied(): void;
   onStartConversation(): Promise<boolean>;
+  onDeleteConversation(conversationId: string): Promise<void>;
   onStartAuthentication(): Promise<void>;
   onSend(text: string, clientMessageId: string): Promise<boolean>;
   onResolveAction(decision: "approve" | "decline"): Promise<void>;
@@ -95,6 +99,7 @@ export function ConversationWorkspace({
   onShortcutFocusHandled,
   onInitialDraftApplied,
   onStartConversation,
+  onDeleteConversation,
   onStartAuthentication,
   onSend,
   onResolveAction,
@@ -102,6 +107,10 @@ export function ConversationWorkspace({
 }: ConversationWorkspaceProps) {
   const [draft, setDraft] = useState("");
   const [startingNew, setStartingNew] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Conversation>();
+  const [deleteReceipt, setDeleteReceipt] = useState(false);
+  const deleteTrigger = useRef<HTMLButtonElement | null>(null);
+  const workspace = useRef<HTMLElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const pendingMessageId = useRef<string | undefined>(undefined);
   const pendingMessageText = useRef<string | undefined>(undefined);
@@ -121,8 +130,11 @@ export function ConversationWorkspace({
   const canSend = authentication?.state === "ready";
 
   useEffect(() => {
-    if (canSend && composer.current &&
-      (shortcutFocus || window.matchMedia("(pointer: fine)").matches)) {
+    if (
+      canSend &&
+      composer.current &&
+      (shortcutFocus || window.matchMedia("(pointer: fine)").matches)
+    ) {
       composer.current.focus({ preventScroll: true });
       if (shortcutFocus) onShortcutFocusHandled?.();
     }
@@ -176,18 +188,29 @@ export function ConversationWorkspace({
   async function startConversation() {
     if (startingNew || isWaiting) return;
     setStartingNew(true);
-    const started = await onStartConversation();
-    setStartingNew(false);
-    if (!started) return;
     pendingMessageId.current = undefined;
     pendingMessageText.current = undefined;
     setDraft("");
     composer.current?.focus({ preventScroll: true });
+    try {
+      await onStartConversation();
+    } finally {
+      setStartingNew(false);
+    }
   }
 
   function chooseStarter(text: string) {
     setDraft(text);
     composer.current?.focus({ preventScroll: true });
+  }
+
+  function requestDelete(
+    conversation: Conversation,
+    trigger: HTMLButtonElement,
+  ) {
+    deleteTrigger.current = trigger;
+    setDeleteReceipt(false);
+    setDeleteTarget(conversation);
   }
 
   async function retryLastRequest(text: string) {
@@ -197,6 +220,7 @@ export function ConversationWorkspace({
 
   return (
     <section
+      ref={workspace}
       className="assistant-page assistant-page--conversation"
       data-view={isNewConversation ? "new" : "thread"}
       data-surface={onReturnHome ? "home" : undefined}
@@ -219,6 +243,9 @@ export function ConversationWorkspace({
           {error}
         </p>
       )}
+      <span className="sr-only" role="status">
+        {deleteReceipt ? historyCopy.deleted : ""}
+      </span>
 
       <div className="assistant-workbench">
         <ConversationHistory
@@ -227,6 +254,7 @@ export function ConversationWorkspace({
           selectedConversationId={selectedConversationId}
           disabled={isWaiting || startingNew}
           onSelect={onSelect}
+          onDelete={requestDelete}
           onStartConversation={() => void startConversation()}
         />
 
@@ -239,6 +267,7 @@ export function ConversationWorkspace({
             conversations={conversations}
             selectedConversationId={selectedConversationId}
             onSelect={onSelect}
+            onDelete={requestDelete}
             onStartConversation={() => void startConversation()}
           />
           {isNewConversation ? (
@@ -254,7 +283,7 @@ export function ConversationWorkspace({
               conversationId={selectedConversationId}
               messages={messages}
               job={job}
-              loading={loading}
+              loading={loading || startingNew}
               onStartConversation={() => void startConversation()}
               onResolveAction={onResolveAction}
               onRetry={retryLastRequest}
@@ -269,7 +298,7 @@ export function ConversationWorkspace({
             <AssistantComposer
               draft={draft}
               composer={composer}
-              loading={loading}
+              loading={loading || startingNew}
               waiting={isWaiting}
               isNewConversation={isNewConversation}
               onChange={setDraft}
@@ -284,6 +313,34 @@ export function ConversationWorkspace({
           ) : null}
         </section>
       </div>
+      {deleteTarget && (
+        <ConversationDeleteDialog
+          title={deleteTarget.title ?? copy.conversations.untitled}
+          onDelete={() => onDeleteConversation(deleteTarget.id)}
+          onClose={(deleted) => {
+            setDeleteTarget(undefined);
+            if (deleted) {
+              setDeleteReceipt(true);
+              if (selectedConversationId === deleteTarget.id) {
+                pendingMessageId.current = undefined;
+                pendingMessageText.current = undefined;
+                setDraft("");
+              }
+              const fallback =
+                composer.current ??
+                Array.from(
+                  workspace.current?.querySelectorAll<HTMLButtonElement>(
+                    ".assistant-history__new, .assistant-mobile-identity__new",
+                  ) ?? [],
+                ).find((element) => element.getClientRects().length > 0);
+              fallback?.focus({ preventScroll: true });
+            } else {
+              deleteTrigger.current?.focus({ preventScroll: true });
+            }
+            deleteTrigger.current = null;
+          }}
+        />
+      )}
     </section>
   );
 }
@@ -294,13 +351,18 @@ function MobileAssistantHeader({
   selectedConversationId,
   onSelect,
   onStartConversation,
+  onDelete,
 }: Pick<
   ConversationWorkspaceProps,
   "conversations" | "selectedConversationId" | "onSelect"
 > & {
   disabled: boolean;
   onStartConversation(): void;
+  onDelete(conversation: Conversation, trigger: HTMLButtonElement): void;
 }) {
+  const selected = conversations.find(
+    (item) => item.id === selectedConversationId,
+  );
   return (
     <header className="assistant-mobile-identity">
       <span aria-hidden="true">
@@ -328,15 +390,23 @@ function MobileAssistantHeader({
           <p>{copy.conversations.mobileDescription}</p>
         )}
       </div>
-      <button
-        className="assistant-mobile-identity__new focus-visible-control"
-        type="button"
-        aria-label={copy.conversations.newConversation}
-        onClick={onStartConversation}
-        disabled={disabled}
-      >
-        <Plus aria-hidden="true" />
-      </button>
+      <div className="assistant-mobile-identity__actions">
+        {selected && (
+          <ConversationDeleteButton
+            conversation={selected}
+            onDelete={onDelete}
+          />
+        )}
+        <button
+          className="assistant-mobile-identity__new focus-visible-control"
+          type="button"
+          aria-label={copy.conversations.newConversation}
+          onClick={onStartConversation}
+          disabled={disabled}
+        >
+          <Plus aria-hidden="true" />
+        </button>
+      </div>
     </header>
   );
 }
@@ -348,12 +418,14 @@ function ConversationHistory({
   disabled,
   onSelect,
   onStartConversation,
+  onDelete,
 }: Pick<
   ConversationWorkspaceProps,
   "conversations" | "loading" | "selectedConversationId" | "onSelect"
 > & {
   disabled: boolean;
   onStartConversation(): void;
+  onDelete(conversation: Conversation, trigger: HTMLButtonElement): void;
 }) {
   const skeletonVisible = useDelayedSkeleton(loading);
   const showingSkeleton = loading || skeletonVisible;
@@ -383,7 +455,7 @@ function ConversationHistory({
           {conversations.map((conversation) => {
             const selected = conversation.id === selectedConversationId;
             return (
-              <li key={conversation.id}>
+              <li key={conversation.id} className="assistant-history__entry">
                 <button
                   className="assistant-history__row focus-visible-control"
                   data-selected={selected}
@@ -400,6 +472,10 @@ function ConversationHistory({
                       : copy.conversations.noMessages}
                   </span>
                 </button>
+                <ConversationDeleteButton
+                  conversation={conversation}
+                  onDelete={onDelete}
+                />
               </li>
             );
           })}
@@ -410,6 +486,28 @@ function ConversationHistory({
         <p className="assistant-history__empty">{copy.conversations.empty}</p>
       )}
     </aside>
+  );
+}
+
+function ConversationDeleteButton({
+  conversation,
+  onDelete,
+}: {
+  conversation: Conversation;
+  onDelete(conversation: Conversation, trigger: HTMLButtonElement): void;
+}) {
+  return (
+    <button
+      type="button"
+      className="assistant-history__delete focus-visible-control"
+      aria-label={historyCopy.actionFor(
+        conversation.title ?? copy.conversations.untitled,
+      )}
+      title={historyCopy.deleteAction}
+      onClick={(event) => onDelete(conversation, event.currentTarget)}
+    >
+      <Trash2 aria-hidden="true" />
+    </button>
   );
 }
 

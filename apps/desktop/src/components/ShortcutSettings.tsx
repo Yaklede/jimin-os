@@ -86,7 +86,11 @@ export function ShortcutSettings({
                   recording === action ? `${id}-feedback` : undefined
                 }
                 data-shortcut-recorder={recording === action || undefined}
-                onClick={() => {
+                onClick={(event) => {
+                  // WebKit on macOS can activate a button without focusing it.
+                  if (recording !== action) {
+                    event.currentTarget.focus({ preventScroll: true });
+                  }
                   setError("");
                   setNote("");
                   setRecording(recording === action ? undefined : action);

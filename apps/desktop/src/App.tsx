@@ -15,6 +15,7 @@ import {
   saveShortcuts,
   type Shortcuts,
 } from "./keyboardShortcuts";
+import { conversationHistoryCopy } from "./copy/conversationHistory";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -177,7 +178,7 @@ import { LatestRequestGate } from "./latestRequestGate";
 import { SyncPullCoordinator } from "./syncPullCoordinator";
 import {
   AgentRequestError,
-  archiveConversation,
+  deleteConversation,
   createConversation,
   fetchAgentAuthentication,
   fetchAgentModelSettings,
@@ -217,6 +218,7 @@ import {
 } from "./device-signals";
 import {
   conversationIdForRequest,
+  mergeCreatedConversation,
   type ConversationSendOptions,
 } from "./conversationRouting";
 import {
@@ -268,6 +270,10 @@ import { WorkspaceRouteBoundary } from "./components/WorkspaceRouteBoundary";
 import { DeliveryRecoveryPanel } from "./components/DeliveryRecoveryPanel";
 import { InflowRecoveryPanel } from "./components/InflowRecoveryPanel";
 import { canRetryInflowDelivery } from "./inflowDeliveryState";
+import {
+  markInflowSeenBatch,
+  reconcileInflowSeenBatch,
+} from "./home-inflow-batch";
 import { AssistantInteractiveCanvas } from "./components/AssistantInteractiveCanvas";
 import { presentationForMessage } from "./assistantPresentation";
 
@@ -456,6 +462,7 @@ export default function App() {
     ConversationMessage[]
   >([]);
   const [conversationLoading, setConversationLoading] = useState(false);
+  const [homeConversationStarting, setHomeConversationStarting] = useState(false);
   const [conversationError, setConversationError] = useState<
     string | undefined
   >(undefined);
@@ -555,6 +562,25 @@ export default function App() {
     [],
   );
 
+  const acceptConversationList = useCallback(
+    (next: Conversation[]) => {
+      setConversations(next);
+      setHomeConversationId((current) =>
+        next.some((item) => item.id === current && item.surface === "home")
+          ? current
+          : undefined,
+      );
+      const selected = selectedConversationIdRef.current;
+      if (selected && !next.some((item) => item.id === selected)) {
+        setCurrentConversationId(undefined);
+        setConversationMessages([]);
+        setConversationError(undefined);
+        setAssistantDraft(undefined);
+      }
+    },
+    [setCurrentConversationId],
+  );
+
   const applyActiveSession = useCallback((session: SessionTokens) => {
     activeSessionRef.current = session;
     setTokens(session);
@@ -643,7 +669,7 @@ export default function App() {
         fetchConversations(apiBaseUrl, accessToken),
       );
       if (conversationListRequestGateRef.current.isCurrent(requestGeneration)) {
-        setConversations(nextConversations);
+        acceptConversationList(nextConversations);
       }
     } catch {
       if (conversationListRequestGateRef.current.isCurrent(requestGeneration)) {
@@ -654,7 +680,7 @@ export default function App() {
         setConversationLoading(false);
       }
     }
-  }, [apiBaseUrl, tokens, withAuthenticatedSession]);
+  }, [acceptConversationList, apiBaseUrl, tokens, withAuthenticatedSession]);
 
   const loadHomeSnapshot = useCallback(
     async (options?: { background?: boolean }) => {
@@ -1998,7 +2024,7 @@ export default function App() {
           conversationRequestGeneration,
         )
       ) {
-        setConversations(nextConversations);
+        acceptConversationList(nextConversations);
       }
       setAgentAuthentication(authentication);
       setMode("ready");
@@ -2010,7 +2036,7 @@ export default function App() {
       setMode("error");
       setMessage(copy.messages.conversationLoadNotice);
     }
-  }, [loadHomeSnapshot, sessionLoaded, tokens, withAuthenticatedSession]);
+  }, [acceptConversationList, loadHomeSnapshot, sessionLoaded, tokens, withAuthenticatedSession]);
 
   const refreshSynchronizedProjections = useCallback(
     async (changes: SyncChange[], forceFull = false): Promise<void> => {
@@ -2145,7 +2171,7 @@ export default function App() {
             conversationRequestGeneration,
           )
         ) {
-          setConversations(synchronizedConversations);
+          acceptConversationList(synchronizedConversations);
         }
         if (selectedConversationId) {
           await loadConversationMessages(selectedConversationId, true);
@@ -2188,6 +2214,7 @@ export default function App() {
       }
     },
     [
+      acceptConversationList,
       apiBaseUrl,
       planningRange.from,
       planningRange.to,
@@ -3081,6 +3108,7 @@ export default function App() {
       } catch (error) {
         if (
           current &&
+          job.conversationId === selectedConversationIdRef.current &&
           !(error instanceof DOMException && error.name === "AbortError")
         ) {
           setConversationError(copy.messages.conversationLoadNotice);
@@ -3130,14 +3158,15 @@ export default function App() {
       const job = await withAuthenticatedSession((accessToken) =>
         fetchLatestConversationJob(apiBaseUrl, accessToken, conversationId),
       );
-      if (job) {
+      if (job && selectedConversationIdRef.current === conversationId) {
         setConversationJobs((known) => ({
           ...known,
           [conversationId]: job,
         }));
       }
     } catch {
-      setConversationError(copy.messages.conversationLoadNotice);
+      if (selectedConversationIdRef.current === conversationId)
+        setConversationError(copy.messages.conversationLoadNotice);
     }
   }
 
@@ -3150,6 +3179,7 @@ export default function App() {
   }
 
   async function startChatConversation(): Promise<boolean> {
+    if (homeChatVisible) return startHomeConversation();
     setAssistantDraft(undefined);
     startConversation();
     return true;
@@ -3158,34 +3188,14 @@ export default function App() {
   async function startHomeConversation(): Promise<boolean> {
     if (!tokens || homeConversationStartingRef.current) return false;
     homeConversationStartingRef.current = true;
+    setHomeConversationStarting(true);
     homeConversationDetachedRef.current = true;
     conversationListRequestGateRef.current.invalidate();
-    conversationMessageRequestGateRef.current.invalidate();
-    setConversationLoading(true);
-    setConversationError(undefined);
-    const previousConversationId = homeConversationId;
-    let previousConversationArchived = false;
+    const entry = homeChatEntryGenerationRef.current;
+    setHomeConversationId(undefined);
+    setAssistantDraft(undefined);
+    startConversation();
     try {
-      if (previousConversationId) {
-        await withAuthenticatedSession((accessToken) =>
-          archiveConversation(apiBaseUrl, accessToken, previousConversationId),
-        );
-        previousConversationArchived = true;
-        conversationListRequestGateRef.current.invalidate();
-        setConversations((current) =>
-          current.filter(
-            (conversation) => conversation.id !== previousConversationId,
-          ),
-        );
-        setConversationJobs((current) => {
-          const next = { ...current };
-          delete next[previousConversationId];
-          return next;
-        });
-        setHomeConversationId(undefined);
-        startConversation();
-      }
-
       const clientConversationId = createUuidV7();
       const conversation = await withAuthenticatedSession((accessToken) =>
         createConversation(
@@ -3194,30 +3204,49 @@ export default function App() {
           clientConversationId,
           null,
           "home",
+          true,
         ),
       );
       conversationListRequestGateRef.current.invalidate();
-      conversationMessageRequestGateRef.current.invalidate();
-      setConversations((current) => [
-        conversation,
-        ...current.filter(
-          (known) => known.id !== conversation.id && known.surface !== "home",
-        ),
-      ]);
+      setConversations((current) => mergeCreatedConversation(current, conversation));
       setHomeConversationId(conversation.id);
-      setCurrentConversationId(conversation.id);
-      setConversationMessages([]);
-      setAssistantDraft(undefined);
-      pendingConversationId.current = undefined;
       homeConversationDetachedRef.current = false;
+      if (
+        homeChatEntryGenerationRef.current === entry &&
+        !selectedConversationIdRef.current
+      ) {
+        setCurrentConversationId(conversation.id);
+      }
       return true;
     } catch {
-      homeConversationDetachedRef.current = previousConversationArchived;
-      setConversationError(copy.messages.conversationArchiveNotice);
+      if (homeChatEntryGenerationRef.current === entry)
+        setConversationError(conversationHistoryCopy.newProblem);
       return false;
     } finally {
-      setConversationLoading(false);
       homeConversationStartingRef.current = false;
+      setHomeConversationStarting(false);
+    }
+  }
+
+  async function removeConversation(conversationId: string): Promise<void> {
+    await withAuthenticatedSession((accessToken) =>
+      deleteConversation(apiBaseUrl, accessToken, conversationId),
+    );
+    conversationListRequestGateRef.current.invalidate();
+    setConversations((current) =>
+      current.filter((item) => item.id !== conversationId),
+    );
+    setHomeConversationId((current) =>
+      current === conversationId ? undefined : current,
+    );
+    setConversationJobs((current) => {
+      const next = { ...current };
+      delete next[conversationId];
+      return next;
+    });
+    if (selectedConversationIdRef.current === conversationId) {
+      setAssistantDraft(undefined);
+      startConversation();
     }
   }
 
@@ -4756,6 +4785,39 @@ export default function App() {
     }
   }
 
+  async function markWorkspaceInflowsSeen(items: readonly ProjectInflowItem[]) {
+    setInflowSaving(true);
+    setInflowError(undefined);
+    try {
+      const result = await markInflowSeenBatch(items, (item) =>
+        withAuthenticatedSession((accessToken) =>
+          decideProjectInflow(apiBaseUrl, accessToken, item, {
+            decision: "mark_seen",
+          }),
+        ),
+      );
+      const projectId = selectedProjectIdRef.current;
+      const refreshProject =
+        projectId && items.some((item) => item.projectId === projectId);
+      if (result.updatedVersions.size) {
+        homeRequestGateRef.current.invalidate();
+        if (refreshProject) projectInflowRequestGateRef.current.invalidate();
+        const reconcile = (current: ProjectInflowItem[]) =>
+          reconcileInflowSeenBatch(current, result.updatedVersions);
+        setProjectInflowItems(reconcile);
+        setDecisionInflowItems(reconcile);
+        setHomeSnapshot((current) =>
+          current ? { ...current, inflow: reconcile(current.inflow) } : current,
+        );
+      }
+      void loadHomeSnapshot();
+      if (refreshProject) void loadProjectInflow(projectId);
+      return result;
+    } finally {
+      setInflowSaving(false);
+    }
+  }
+
   async function retryWorkspaceInflowCompletion(
     item: ProjectInflowItem,
   ): Promise<void> {
@@ -4996,6 +5058,7 @@ export default function App() {
     clientMessageId: string,
     options: ConversationSendOptions = {},
   ): Promise<boolean> {
+    if (homeConversationStartingRef.current) return false;
     if (!tokens || agentAuthentication?.state !== "ready") {
       setConversationError(copy.messages.authenticationRequired);
       return false;
@@ -5015,21 +5078,17 @@ export default function App() {
             apiBaseUrl,
             accessToken,
             clientConversationId,
-            conversationTitle(text),
+            options.rememberForHome ? null : conversationTitle(text),
             options.rememberForHome ? "home" : "chat",
+            options.rememberForHome === true,
           ),
         );
         pendingConversationId.current = undefined;
         conversationId = conversation.id;
         conversationListRequestGateRef.current.invalidate();
-        setConversations((current) => [
-          conversation,
-          ...current.filter(
-            (known) =>
-              known.id !== conversation.id &&
-              !(conversation.surface === "home" && known.surface === "home"),
-          ),
-        ]);
+        setConversations((current) =>
+          mergeCreatedConversation(current, conversation),
+        );
         setCurrentConversationId(conversation.id);
       }
       if (!conversationId) {
@@ -5595,6 +5654,7 @@ export default function App() {
                   inflowSaving={inflowSaving}
                   onPromoteInflow={promoteWorkspaceInflow}
                   onDismissInflow={dismissWorkspaceInflow}
+                  onMarkInflowsSeen={markWorkspaceInflowsSeen}
                   onRetryInflowAnalysis={retryWorkspaceInflowAnalysis}
                   onRetryInflowCompletion={retryWorkspaceInflowCompletion}
                   onReviewInflowChange={setInflowChangeItem}
@@ -5948,7 +6008,7 @@ export default function App() {
                 )}
                 authentication={agentAuthentication}
                 authenticationRequesting={authenticationRequesting}
-                loading={conversationLoading}
+                loading={conversationLoading || homeConversationStarting}
                 error={
                   conversationError ?? (mode === "error" ? message : undefined)
                 }
@@ -5961,8 +6021,21 @@ export default function App() {
                 onSelect={selectConversation}
                 onInitialDraftApplied={() => setAssistantDraft(undefined)}
                 onStartConversation={startChatConversation}
+                onDeleteConversation={removeConversation}
                 onStartAuthentication={beginAgentAuthentication}
-                onSend={sendConversationRequest}
+                onSend={(text, id) =>
+                  sendConversationRequest(
+                    text,
+                    id,
+                    homeChatVisible && !selectedConversationId
+                      ? {
+                          startFresh: true,
+                          targetConversationId: homeConversationId,
+                          rememberForHome: true,
+                        }
+                      : {},
+                  )
+                }
                 onResolveAction={resolveConversationAction}
                 renderResult={(reply, onContinue) => {
                   if (!reply.presentation) return null;
