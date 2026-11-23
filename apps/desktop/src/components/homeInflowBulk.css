@@ -6,6 +6,39 @@
   margin-inline-start: auto;
 }
 
+.home-inflow-review__queue-title-line {
+  display: flex;
+  min-width: 0;
+  align-items: start;
+  gap: 8px;
+}
+
+.home-inflow-review__queue-title-line > .home-inflow-review__queue-title {
+  min-width: 0;
+}
+
+.home-inflow-review__priority {
+  flex: none;
+  padding: 0 6px;
+  border-radius: var(--radius-control);
+  background: var(--control-contrast);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.home-inflow-review__priority[data-priority="2"] {
+  background: var(--accent-tint);
+  color: var(--accent-text);
+}
+
+.home-inflow-review__priority[data-priority="3"] {
+  background: var(--warning-tint);
+  color: var(--warning);
+}
+
 .home-inflow-bulk__toolbar {
   display: flex;
   flex-wrap: wrap;

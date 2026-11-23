@@ -34,6 +34,8 @@ describe("design preview API isolation", () => {
         .then((response) => response.json());
     expect((await active()).items).toEqual([
       expect.objectContaining({ id: "preview-home", surface: "chat" }),
+      expect.objectContaining({ id: "preview-history-0", surface: "chat" }),
+      expect.objectContaining({ id: "preview-history-1", surface: "chat" }),
       expect.objectContaining({
         id: "preview-blank-draft",
         surface: "home",
@@ -58,7 +60,7 @@ describe("design preview API isolation", () => {
     expect((await messages("preview-home")).status).toBe(404);
     expect(
       (await active()).items.map((item: { id: string }) => item.id),
-    ).toEqual(["preview-blank-draft"]);
+    ).toEqual(["preview-history-0", "preview-history-1", "preview-blank-draft"]);
     expect((await previewHome()).tasks).toEqual(before.tasks);
     expect(originalFetch).not.toHaveBeenCalled();
   });
@@ -88,8 +90,11 @@ describe("design preview API isolation", () => {
     const active = await window
       .fetch("/server/v1/conversations")
       .then((response) => response.json());
-    expect(active.items).toHaveLength(1);
-    expect(active.items[0].id).toBe("preview-new-home");
+    expect(active.items.map((item: { id: string }) => item.id)).toEqual([
+      "preview-history-0",
+      "preview-history-1",
+      "preview-new-home",
+    ]);
     expect(
       await window
         .fetch("/server/v1/conversations/preview-new-home/messages")
@@ -147,7 +152,7 @@ describe("design preview API isolation", () => {
     expect(response.status).toBe(200);
     const after = await previewHome();
     expect(after.inflow).toHaveLength(25);
-    expect(after.tasks).toHaveLength(8);
+    expect(after.tasks).toEqual(before.tasks);
     const history = await window
       .fetch("/server/v1/projects/preview-project/inflow?status=all")
       .then((response) => response.json());
@@ -163,8 +168,8 @@ describe("design preview API isolation", () => {
 
   it("registers a candidate only on submission with the chosen task fields", async () => {
     const originalFetch = setupPreview();
-    const candidate = (await previewHome()).inflow[0];
-    expect((await previewHome()).tasks).toHaveLength(8);
+    const before = await previewHome();
+    const candidate = before.inflow[0];
     const response = await decideCandidate(candidate, {
       decision: "promote",
       title: "담당자가 확인한 할 일",
@@ -179,7 +184,7 @@ describe("design preview API isolation", () => {
     const promoted = await response.json();
     const after = await previewHome();
     expect(after.inflow).toHaveLength(25);
-    expect(after.tasks).toHaveLength(9);
+    expect(after.tasks).toHaveLength(before.tasks.length + 1);
     expect(
       after.tasks.find(
         (task: { id: string }) => task.id === promoted.promotedTaskId,
@@ -202,13 +207,14 @@ describe("design preview API isolation", () => {
       withoutDeadline: true,
     });
     expect(duplicate.status).toBe(409);
-    expect((await previewHome()).tasks).toHaveLength(9);
+    expect((await previewHome()).tasks).toHaveLength(before.tasks.length + 1);
     expect(originalFetch).not.toHaveBeenCalled();
   });
 
   it("requires either a valid deadline or the explicit no-deadline choice", async () => {
     setupPreview();
-    const candidate = (await previewHome()).inflow[0];
+    const before = await previewHome();
+    const candidate = before.inflow[0];
     const fields = {
       decision: "promote",
       title: "새 할 일",
@@ -219,7 +225,7 @@ describe("design preview API isolation", () => {
     };
     expect((await decideCandidate(candidate, fields)).status).toBe(400);
     expect((await previewHome()).inflow).toHaveLength(26);
-    expect((await previewHome()).tasks).toHaveLength(8);
+    expect((await previewHome()).tasks).toEqual(before.tasks);
     expect(
       (await decideCandidate(candidate, { ...fields, withoutDeadline: true }))
         .status,
@@ -232,7 +238,8 @@ describe("design preview API isolation", () => {
 
   it("rejects changed analysis and invalid assignees without changing review or tasks", async () => {
     setupPreview();
-    const candidate = (await previewHome()).inflow[0];
+    const before = await previewHome();
+    const candidate = before.inflow[0];
     const fields = {
       decision: "promote",
       title: "새 할 일",
@@ -264,7 +271,7 @@ describe("design preview API isolation", () => {
       },
     );
     expect(changed.status).toBe(409);
-    expect((await previewHome()).tasks).toHaveLength(8);
+    expect((await previewHome()).tasks).toEqual(before.tasks);
     expect((await previewHome()).inflow).toHaveLength(26);
   });
 
@@ -272,7 +279,7 @@ describe("design preview API isolation", () => {
     const originalFetch = setupPreview();
     const response = await window.fetch("/server/v1/tasks");
     const result = await response.json();
-    expect(result.items).toHaveLength(8);
+    expect(result.items).toHaveLength(10);
     expect(result.items[0].id).toBe("preview-task-0");
     expect(originalFetch).not.toHaveBeenCalled();
   });

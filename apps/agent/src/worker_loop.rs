@@ -1,5 +1,6 @@
 use std::{collections::HashSet, fmt::Write as _, path::Path, time::Duration};
 
+use crate::work_inbox::WorkInbox;
 use jimin_codex_client::{AppServerClient, Error as CodexError};
 use jimin_storage::{
     Database, StorageError,
@@ -517,9 +518,18 @@ where
         return Err(WorkerError::LostLease);
     }
 
-    let context = contextualized_turn_context(database, &job).await?;
+    let (context, inbox_answer) = contextualized_turn_context(database, &job).await?;
 
     let assistant_message_id = Uuid::now_v7();
+    if let Some(answer) = inbox_answer {
+        if !database
+            .complete_agent_job(job.id, runner_id, assistant_message_id, &answer, None)
+            .await?
+        {
+            return Err(WorkerError::LostLease);
+        }
+        return Ok(());
+    }
     let (delta_sender, mut delta_receiver) = mpsc::unbounded_channel();
     let output_schema = assistant_output_schema();
     let turn = client.run_structured_turn_with_response_streaming_with_options(
@@ -1017,7 +1027,7 @@ fn korean_schedule_time(value: OffsetDateTime) -> String {
 async fn contextualized_turn_context(
     database: &Database,
     job: &ClaimedAgentJob,
-) -> Result<TurnContext, StorageError> {
+) -> Result<(TurnContext, Option<String>), StorageError> {
     let now = OffsetDateTime::now_utc();
     let daily_task_cutoff = korea_day_end(now)?;
     let (
@@ -1033,6 +1043,7 @@ async fn contextualized_turn_context(
         missed_calls,
         device_signal_states,
         conversation_messages,
+        work_inbox,
     ) = tokio::try_join!(
         database.schedule_entries_with_linkage_in_range(
             job.user_id,
@@ -1054,6 +1065,7 @@ async fn contextualized_turn_context(
         ),
         database.device_signal_states_for_user(job.user_id),
         database.conversation_messages_for_user(job.user_id, job.conversation_id),
+        async { Ok(WorkInbox::load(database, job.user_id).await) },
     )?;
     let schedule = linked_schedule
         .iter()
@@ -1079,6 +1091,8 @@ async fn contextualized_turn_context(
     sort_tasks_for_execution(&mut daily_tasks, &goals, now);
     let bulk_schedule_cancellation_ids =
         requested_bulk_schedule_cancellation_ids(&job.input_content, &schedule, now);
+    let inbox_answer =
+        work_inbox.priority_answer(&job.input_content, &conversation_messages, &projects);
     let prompt = render_contextualized_turn(
         &job.input_content,
         &linked_schedule,
@@ -1095,19 +1109,23 @@ async fn contextualized_turn_context(
         &conversation_messages,
         now,
         daily_task_cutoff,
+        &work_inbox,
     );
     tasks.extend(completed_tasks);
-    Ok(TurnContext {
-        prompt,
-        schedule,
-        tasks,
-        daily_tasks,
-        workspaces,
-        projects,
-        recommendations,
-        requires_daily_task_coverage: is_daily_overview_request(&job.input_content),
-        bulk_schedule_cancellation_ids,
-    })
+    Ok((
+        TurnContext {
+            prompt,
+            schedule,
+            tasks,
+            daily_tasks,
+            workspaces,
+            projects,
+            recommendations,
+            requires_daily_task_coverage: is_daily_overview_request(&job.input_content),
+            bulk_schedule_cancellation_ids,
+        },
+        inbox_answer,
+    ))
 }
 
 fn sort_tasks_for_execution(tasks: &mut [Task], goals: &[GoalOverview], now: OffsetDateTime) {
@@ -1158,6 +1176,7 @@ fn render_contextualized_turn(
     conversation_messages: &[ConversationMessage],
     now: OffsetDateTime,
     daily_task_cutoff: OffsetDateTime,
+    work_inbox: &WorkInbox,
 ) -> String {
     let korea_offset = UtcOffset::from_hms(9, 0, 0).unwrap_or(UtcOffset::UTC);
     let korea_now = now.to_offset(korea_offset);
@@ -1173,6 +1192,10 @@ fn render_contextualized_turn(
          Build an interactive result by selecting at most three useful sections from tasks, schedule, and projects. \
          Use only exact entity IDs from server context and never invent an ID. For broad requests such as today's work, \
          include every relevant record across the useful sections. open_tasks contains all open work, including future work. \
+         It contains registered work only. When asked about new arrivals, 새 업무 요청 or 미배정 신규 요청, use unassigned_new_work_requests, not open_tasks. \
+         A suggested assignee is not an assignment. Separate other_chat_requests_for_review, gmail_work_requests, and completion_reports_awaiting_review. \
+         Keep the requested project or workspace and distinguish unavailable sections from empty ones. In request reviews use priority 3 가장 먼저, 2 중요, 1 보통, 0 낮음, highest first. \
+         Never emit task mutations or task cards for unregistered requests and never ask the user to paste a list already in server_context. \
          For a broad Korean request about 오늘 일정, 오늘 할 일, or 오늘 계획, treat it as a daily briefing and cover \
          today's schedule plus tasks with no due date or a due date before daily_task_cutoff. Exclude future-dated tasks \
          unless the user asks for them, and respect an explicit request for only schedule or only tasks. goals contains \
@@ -1551,7 +1574,9 @@ fn render_contextualized_turn(
             let _ = writeln!(prompt, "- [{state} | {received_at}] {sender} | {subject}");
         }
     }
-    prompt.push_str("</inbox>\n<recent_conversation>\n");
+    prompt.push_str("</inbox>\n");
+    work_inbox.write_prompt(&mut prompt);
+    prompt.push_str("<recent_conversation>\n");
     let history_start = conversation_messages.len().saturating_sub(8);
     if conversation_messages.is_empty() {
         prompt.push_str("(no earlier confirmed messages)\n");
@@ -4217,12 +4242,12 @@ mod tests {
     use super::{
         ProposedScheduleMutation, ScheduleConflict, StructuredAnswerStream,
         StructuredAssistantAction, StructuredAssistantActionKind, StructuredTurnIntent,
-        StructuredTurnMode, TurnContext, agent_action_results, is_daily_completion_request,
-        is_daily_overview_request, korea_day_end, nearest_available_schedule_starts,
-        render_contextualized_turn, requested_bulk_schedule_cancellation_ids,
-        requires_process_restart, schedule_conflict_result, schedule_windows_overlap,
-        sort_tasks_for_execution, validate_turn_intent, validated_agent_action,
-        validated_assistant_response,
+        StructuredTurnMode, TurnContext, WorkInbox, agent_action_results,
+        is_daily_completion_request, is_daily_overview_request, korea_day_end,
+        nearest_available_schedule_starts, render_contextualized_turn,
+        requested_bulk_schedule_cancellation_ids, requires_process_restart,
+        schedule_conflict_result, schedule_windows_overlap, sort_tasks_for_execution,
+        validate_turn_intent, validated_agent_action, validated_assistant_response,
     };
 
     #[test]
@@ -4450,6 +4475,7 @@ mod tests {
             &[confirmed_conflict],
             now,
             korea_day_end(now).expect("Korea day boundary"),
+            &WorkInbox::default(),
         );
 
         assert!(prompt.contains("read-only personal data"));
@@ -4458,6 +4484,7 @@ mod tests {
         assert!(prompt.contains("장보기"));
         assert!(prompt.contains(&task_id.to_string()));
         assert!(prompt.contains("<completed_tasks>"));
+        assert!(prompt.contains("<unassigned_new_work_requests>"));
         assert!(prompt.contains("배포 완료"));
         assert!(prompt.contains(&completed_task_id.to_string()));
         assert!(prompt.contains("개인 운영체제"));
@@ -4491,6 +4518,7 @@ mod tests {
             &[],
             now,
             korea_day_end(now).expect("Korea day boundary"),
+            &WorkInbox::default(),
         );
         assert!(crowded_prompt.len() > 160 * 1024);
         assert!(crowded_prompt.ends_with(&format!("<user_request>\n{follow_up}\n</user_request>")));
@@ -4534,6 +4562,7 @@ mod tests {
             &[],
             now,
             korea_day_end(now).expect("Korea day boundary"),
+            &WorkInbox::default(),
         );
 
         assert!(prompt.contains("<device_signal_states>"));
@@ -4584,6 +4613,7 @@ mod tests {
             &[],
             now,
             korea_day_end(now).expect("Korea day boundary"),
+            &WorkInbox::default(),
         );
 
         assert!(prompt.contains("time_zone=\"Asia/Seoul\""));
@@ -4635,6 +4665,7 @@ mod tests {
             &[],
             now,
             korea_day_end(now).expect("Korea day boundary"),
+            &WorkInbox::default(),
         );
 
         assert!(prompt.contains(r#"mention_names ["김개발","홍길동"]"#));
@@ -4663,6 +4694,7 @@ mod tests {
             &[],
             now,
             korea_day_end(now).expect("Korea day boundary"),
+            &WorkInbox::default(),
         );
 
         assert!(prompt.contains("<active_recommendations>"));
@@ -5785,6 +5817,7 @@ mod tests {
             &[],
             now,
             korea_day_end(now).expect("Korea day boundary"),
+            &WorkInbox::default(),
         );
 
         assert!(prompt.contains(&format!(

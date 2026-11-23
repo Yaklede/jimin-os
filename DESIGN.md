@@ -466,3 +466,16 @@ Task registration, planning edits and scheduled work share fixed header and
 footer regions with a single scrolling body. Phone dialogs fill the usable
 viewport above the keyboard. Preserve focus return, distinct draft and activate
 actions, existing tokens, and deliberate dirty-close confirmations.
+
+## Light inbox boundaries and priority
+
+Light mode keeps component-owned separators and focus outlines. Its neutral
+divider is #c8d0db and its strong control edge is #7d8796. The new work queue
+uses readable accent ink on the selected tab and text priority badges; use
+warning only for the most urgent priority. Preserve quiet borderless
+controls where the existing surface already communicates its boundary.
+
+Calendar quick previews belong to the date, not an individual task chip.
+Show the date and full count above a compact list of due tasks. Keep the
+calendar's existing date and edit actions; let longer previews scroll within
+the available space rather than cutting off the list.

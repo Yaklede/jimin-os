@@ -428,11 +428,10 @@ function HomeInflowGroup({
   const [calendarDetailOpen, setCalendarDetailOpen] = useState(false);
   const [calendarReveal, setCalendarReveal] = useState(0);
   const handledCalendarReveal = useRef(0);
-  const visibleItems = useMemo(
-    () =>
-      view === "calendar" ? homeInflowOnDate(allItems, range.anchor) : allItems,
-    [allItems, view, range.anchor],
-  );
+  const visibleItems = useMemo(() => {
+    if (view === "calendar") return homeInflowOnDate(allItems, range.anchor);
+    return kind === "new" ? sortNewWorkByPriority(allItems) : allItems;
+  }, [allItems, kind, view, range.anchor]);
   const showDetail = view === "list" || calendarDetailOpen;
   const calendarDay = view === "calendar" ? range.anchor.getTime() : undefined;
 
@@ -790,6 +789,8 @@ function HomeInflowGroup({
                         ? inflowConversationKey(selectedItem)
                         : undefined);
                   const Mark = active ? CheckCircle2 : Circle;
+                  const priority =
+                    kind === "new" ? newWorkPriority(item) : undefined;
                   return (
                     <li key={conversationId}>
                       <button
@@ -824,8 +825,21 @@ function HomeInflowGroup({
                           />
                         )}
                         <span className="home-inflow-review__queue-summary">
-                          <span className="home-inflow-review__queue-title">
-                            {item.suggestedTaskTitle}
+                          <span className="home-inflow-review__queue-title-line">
+                            <span className="home-inflow-review__queue-title">
+                              {item.suggestedTaskTitle}
+                            </span>
+                            {priority !== undefined && (
+                              <span
+                                className="home-inflow-review__priority"
+                                data-priority={priority}
+                              >
+                                <span className="sr-only">
+                                  {copy.projects.inflowPriorityLabel}{" "}
+                                </span>
+                                {copy.projects.inflowPriorityLevels[priority]}
+                              </span>
+                            )}
                           </span>
                           <span className="home-inflow-review__queue-origin">
                             {kind === "existing" && (
@@ -965,6 +979,24 @@ export function visibleHomeInflowItems(
   showAll: boolean,
 ): ProjectInflowItem[] {
   return showAll ? items : items.slice(0, HOME_INFLOW_PREVIEW_SIZE);
+}
+
+function newWorkPriority(item: ProjectInflowItem): 0 | 1 | 2 | 3 | undefined {
+  if (
+    item.analysisClassification !== "new_task" ||
+    item.analysisStatus !== "ready"
+  )
+    return undefined;
+  const value = item.suggestedPriority;
+  return value === 0 || value === 1 || value === 2 || value === 3
+    ? value
+    : undefined;
+}
+
+export function sortNewWorkByPriority(items: readonly ProjectInflowItem[]) {
+  return [...items].sort(
+    (a, b) => (newWorkPriority(b) ?? -1) - (newWorkPriority(a) ?? -1),
+  );
 }
 
 export function resolveHomeInflowSelection(

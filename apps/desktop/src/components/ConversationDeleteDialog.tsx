@@ -6,13 +6,13 @@ import { registerMobileBackHandler } from "../mobileBack";
 
 export function ConversationDeleteDialog({
   title,
+  count,
   onDelete,
   onClose,
 }: {
-  title: string;
   onDelete(): Promise<void>;
   onClose(deleted: boolean): void;
-}) {
+} & ({ title: string; count?: never } | { title?: never; count: number })) {
   const id = useId();
   const dialog = useRef<HTMLDialogElement>(null);
   const cancel = useRef<HTMLButtonElement>(null);
@@ -83,11 +83,15 @@ export function ConversationDeleteDialog({
         }}
       >
         <header className="work-dialog__header">
-          <h2 id={`${id}-title`}>{c.deleteTitle}</h2>
+          <h2 id={`${id}-title`}>
+            {count === undefined ? c.deleteTitle : c.bulkTitle(count)}
+          </h2>
         </header>
         <div className="work-dialog__body">
-          <strong>{title}</strong>
-          <p id={`${id}-description`}>{c.deleteDescription}</p>
+          {title && <strong>{title}</strong>}
+          <p id={`${id}-description`}>
+            {count === undefined ? c.deleteDescription : c.bulkDescription}
+          </p>
           {error && (
             <p className="inline-alert" role="alert">
               {error}

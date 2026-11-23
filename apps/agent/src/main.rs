@@ -20,6 +20,7 @@ mod inflow_analysis;
 mod itsm;
 mod meeting_analysis;
 mod meeting_transcription;
+mod work_inbox;
 mod worker_loop;
 
 use config::{AgentConfig, ConfigError};

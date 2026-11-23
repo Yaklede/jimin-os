@@ -2,7 +2,10 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { PlanningSnapshot, ScheduleEntry } from "./api/planning";
-import { calendarTaskStatus } from "./components/CalendarTaskPreview";
+import {
+  calendarTaskStatus,
+  calendarTasksForDay,
+} from "./components/CalendarTaskPreview";
 import { PlanningCalendar } from "./components/planning-calendar";
 import { planningViewRange } from "./planningRange";
 const day = new Date(2026, 9, 5);
@@ -105,6 +108,29 @@ describe("weekly calendar content", () => {
 });
 
 describe("calendar task preview status", () => {
+  it("returns every open task due on the hovered date, even beyond three entries", () => {
+    const task = snapshot.tasks[0];
+    const tasks = [
+      ...[8, 10, 12, 15, 18].map((hour) => ({
+        ...task,
+        id: `same-${hour}`,
+        dueAt: at(hour),
+      })),
+      { ...task, id: "next-day", dueAt: at(8, 1) },
+      { ...task, id: "no-deadline", dueAt: null },
+      { ...task, id: "finished", status: "completed" as const },
+    ];
+    expect(calendarTasksForDay(tasks, day).map(({ id }) => id)).toEqual([
+      "same-8",
+      "same-10",
+      "same-12",
+      "same-15",
+      "same-18",
+    ]);
+    expect(
+      calendarTasksForDay(tasks, new Date(2026, 9, 6)).map(({ id }) => id),
+    ).toEqual(["next-day"]);
+  });
   it("uses the task workflow and gives terminal statuses precedence", () => {
     expect(calendarTaskStatus({ status: "open" })).toBe("진행 전");
     expect(

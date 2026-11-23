@@ -58,6 +58,7 @@ it("renders the dedicated conversation list without a composer or previous trans
   );
   expect(markup).toContain('data-view="history"');
   expect(markup).toContain(">대화 목록</h1>");
+  expect(markup).toContain('aria-expanded="false">선택</button>');
   expect(markup).toContain("남겨둔 대화");
   expect(markup).toContain("승인이 필요해요.");
   expect(markup).not.toContain("이름 없는 대화");

@@ -79,6 +79,7 @@ use jimin_storage::{
         InflowAnalysisState, InflowClassification, ProjectInflowAnalysis,
         classification_value as inflow_classification_value,
     },
+    inflow_queue::{ProjectInflowCandidate, group_project_inflow_candidates},
     intelligence::{
         DecideRecommendation, DecideRecommendationOutcome, Recommendation, RecommendationDecision,
         RecommendationStatus, SuggestedActionKind,
@@ -8886,13 +8887,6 @@ fn project_google_chat_source_response(
     })
 }
 
-struct ProjectInflowCandidate {
-    representative: ProjectInflowItem,
-    focus: ProjectInflowItem,
-    messages: Vec<ProjectInflowItem>,
-    analysis: Option<ProjectInflowAnalysis>,
-}
-
 #[cfg(test)]
 mod inflow_visibility_tests;
 
@@ -8981,79 +8975,6 @@ fn single_project_inflow_candidate(item: ProjectInflowItem) -> ProjectInflowCand
     }
 }
 
-fn group_project_inflow_candidates(
-    items: Vec<ProjectInflowItem>,
-    analysis_rows: Vec<ProjectInflowAnalysis>,
-) -> Vec<ProjectInflowCandidate> {
-    let mut analyses_by_conversation = BTreeMap::new();
-    let mut analyses_by_representative = BTreeMap::new();
-    for analysis in analysis_rows {
-        analyses_by_representative.insert(analysis.representative_item_id, analysis.clone());
-        analyses_by_conversation.insert(
-            (analysis.source_id, analysis.conversation_key.clone()),
-            analysis,
-        );
-    }
-    let mut groups =
-        BTreeMap::<(uuid::Uuid, String, &'static str, Option<uuid::Uuid>), Vec<_>>::new();
-    for item in items {
-        let group = item.provider_thread_name.clone().map_or_else(
-            || format!("message:{}", item.id),
-            |thread| format!("thread:{thread}"),
-        );
-        let status = project_inflow_status_name(item.status);
-        groups
-            .entry((item.source_id, group, status, item.promoted_task_id))
-            .or_default()
-            .push(item);
-    }
-
-    let mut candidates = groups
-        .into_iter()
-        .filter_map(|((source_id, conversation_key, _, _), mut messages)| {
-            messages.sort_by_key(|item| (item.received_at, item.id));
-            let focus = messages
-                .iter()
-                .rfind(|item| !item.sent_by_owner)
-                .cloned()
-                .or_else(|| messages.last().cloned())?;
-            let representative = messages.last()?.clone();
-            let analysis = analyses_by_conversation
-                .get(&(source_id, conversation_key))
-                .cloned()
-                .or_else(|| analyses_by_representative.get(&representative.id).cloned());
-            let linked_attention_is_visible = representative.promoted_task_id.is_some()
-                && !focus.sent_by_owner
-                && focus.sender_provider_name.as_deref() != Some("users/app")
-                && analysis.as_ref().is_some_and(|analysis| {
-                    matches!(
-                        analysis.classification,
-                        Some(InflowClassification::FollowUp | InflowClassification::Question)
-                    )
-                });
-            if representative.status == ProjectInflowStatus::Pending
-                && analysis.as_ref().is_some_and(|analysis| {
-                    analysis.state == InflowAnalysisState::Ready
-                        && analysis.classification != Some(InflowClassification::NewTask)
-                        && !linked_attention_is_visible
-                        && (representative.promoted_task_id.is_some()
-                            || focus.sender_provider_name.as_deref() == Some("users/app"))
-                })
-            {
-                return None;
-            }
-            Some(ProjectInflowCandidate {
-                representative,
-                focus,
-                messages,
-                analysis,
-            })
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.representative.received_at));
-    candidates
-}
-
 fn project_inflow_status_name(status: ProjectInflowStatus) -> &'static str {
     match status {
         ProjectInflowStatus::Pending => "pending",
@@ -9069,6 +8990,8 @@ fn project_inflow_status_name(status: ProjectInflowStatus) -> &'static str {
 fn project_inflow_item_response(
     candidate: ProjectInflowCandidate,
 ) -> Result<ProjectInflowItemResponse, ()> {
+    let reviewed = candidate.reviewed();
+    let suggested_priority = candidate.suggested_priority();
     let ProjectInflowCandidate {
         representative,
         focus,
@@ -9077,14 +9000,6 @@ fn project_inflow_item_response(
     } = candidate;
     let first_received_at = messages.first().ok_or(())?.received_at;
     let acknowledged = messages.iter().all(|item| item.acknowledged_at.is_some());
-    // Own replies should not reopen an external request, but an owner-only
-    // request still needs an explicit review. `all` on an empty filtered
-    // iterator would otherwise mark every owner-authored request as reviewed.
-    let has_external_messages = messages.iter().any(|item| !item.sent_by_owner);
-    let reviewed = messages
-        .iter()
-        .filter(|item| !has_external_messages || !item.sent_by_owner)
-        .all(|item| item.reviewed_at.is_some());
     let dismissal_reason = messages
         .iter()
         .rev()
@@ -9180,9 +9095,6 @@ fn project_inflow_item_response(
         .map(|value| value.format(&Rfc3339))
         .transpose()
         .map_err(|_| ())?;
-    let suggested_priority = analysis
-        .as_ref()
-        .and_then(|analysis| analysis.suggested_priority);
     let messages = messages
         .into_iter()
         .map(|item| {

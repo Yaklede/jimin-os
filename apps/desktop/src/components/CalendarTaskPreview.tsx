@@ -5,6 +5,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
@@ -12,22 +13,25 @@ import type { Task } from "../api/planning";
 import { copy } from "../copy";
 import { calendarTaskPreviewCopy as text } from "../copy/calendarTaskPreview";
 import { registerMobileBackHandler } from "../mobileBack";
+import { samePlanningDay } from "../planningRange";
 import "./calendar-task-preview.css";
 
 type PreviewSource = "pointer" | "focus" | "touch";
 type Preview = {
   anchor: HTMLButtonElement;
-  ids: string[];
+  date: Date;
   source: PreviewSource;
   period: number;
 };
 
 const gutter = 8;
 const gap = 4;
-const previewLimit = 3;
-const dueFormat = new Intl.DateTimeFormat("ko-KR", {
+const previewDateFormat = new Intl.DateTimeFormat("ko-KR", {
   month: "long",
   day: "numeric",
+  weekday: "short",
+});
+const dueFormat = new Intl.DateTimeFormat("ko-KR", {
   hour: "numeric",
   minute: "2-digit",
 });
@@ -48,13 +52,11 @@ export function useCalendarTaskPreview(
   }
   const dismissTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const panel = useRef<HTMLDivElement>(null);
+  const pointerPosition = useRef<string>(undefined);
+  const dismissedAt = useRef<string>(undefined);
   const active = preview;
   const pinned = active?.source === "touch";
-  const items = active
-    ? active.ids
-        .slice(0, previewLimit)
-        .flatMap((id) => tasks?.find((task) => task.id === id) ?? [])
-    : [];
+  const items = active ? calendarTasksForDay(tasks, active.date) : [];
   const visible = items.length > 0;
   const anchor = visible ? active?.anchor : undefined;
 
@@ -72,29 +74,37 @@ export function useCalendarTaskPreview(
     if (pinned && anchor?.isConnected) anchor.focus({ preventScroll: true });
   }, [anchor, close, pinned]);
 
-  function open(
-    anchor: HTMLButtonElement,
-    source: PreviewSource,
-    candidates: readonly Task[],
-  ) {
-    if (loading || !candidates.length) return;
+  function open(anchor: HTMLButtonElement, source: PreviewSource, date: Date) {
+    if (loading) return;
     keep();
-    const ids = candidates.map(({ id }) => id);
     setPreview((previous) => {
       const sameAnchor =
-        previous?.anchor === anchor && previous.period === period;
+        previous?.anchor === anchor &&
+        previous.period === period &&
+        samePlanningDay(previous.date, date);
       if (source === "touch" && sameAnchor && previous.source === "touch")
         return undefined;
       if (
         sameAnchor &&
-        (previous.source === "touch" ||
-          (previous.source === source &&
-            previous.ids.length === ids.length &&
-            previous.ids.every((id, index) => id === ids[index])))
+        (previous.source === "touch" || previous.source === source)
       )
         return previous;
-      return { anchor, source, ids, period };
+      return { anchor, source, date, period };
     });
+  }
+
+  function openFromPointer(
+    event: ReactPointerEvent<HTMLButtonElement>,
+    date: Date,
+  ) {
+    if (event.pointerType !== "mouse") return;
+    const position = `${event.clientX}:${event.clientY}`;
+    // Removing a tooltip can expose a trigger under a stationary pointer.
+    // Escape should keep it closed until the pointer actually moves.
+    if (dismissedAt.current === position) return;
+    dismissedAt.current = undefined;
+    pointerPosition.current = position;
+    open(event.currentTarget, "pointer", date);
   }
 
   function leave() {
@@ -110,13 +120,18 @@ export function useCalendarTaskPreview(
 
   useEffect(() => () => clearTimeout(dismissTimer.current), []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!anchor) return;
     function onDismissKey(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
       event.preventDefault();
       event.stopPropagation();
+      dismissedAt.current = pointerPosition.current;
       closeAndRestore();
+    }
+    function trackPointer(event: PointerEvent) {
+      if (event.pointerType === "mouse")
+        pointerPosition.current = `${event.clientX}:${event.clientY}`;
     }
     function onOutsidePress(event: PointerEvent) {
       if (
@@ -133,10 +148,12 @@ export function useCalendarTaskPreview(
     }
     document.addEventListener("keydown", onDismissKey, true);
     document.addEventListener("pointerdown", onOutsidePress, true);
+    document.addEventListener("pointermove", trackPointer, true);
     window.addEventListener("scroll", onScroll, true);
     return () => {
       document.removeEventListener("keydown", onDismissKey, true);
       document.removeEventListener("pointerdown", onOutsidePress, true);
+      document.removeEventListener("pointermove", trackPointer, true);
       window.removeEventListener("scroll", onScroll, true);
     };
   }, [anchor, close, closeAndRestore]);
@@ -175,8 +192,13 @@ export function useCalendarTaskPreview(
     return () => window.removeEventListener("resize", place);
   }, [anchor, itemVersions, pinned]);
 
+  const heading = active
+    ? text.title(previewDateFormat.format(active.date), items.length)
+    : undefined;
+
   return {
     open,
+    openFromPointer,
     leave,
     blur,
     close,
@@ -190,7 +212,7 @@ export function useCalendarTaskPreview(
               ref={panel}
               id={id}
               role={pinned ? "dialog" : "tooltip"}
-              aria-label={pinned ? text.title : undefined}
+              aria-label={pinned ? heading : undefined}
               className="calendar-task-preview"
               data-pinned={pinned}
               onPointerEnter={keep}
@@ -198,7 +220,7 @@ export function useCalendarTaskPreview(
             >
               {pinned && (
                 <header className="calendar-task-preview__header">
-                  <strong>{text.title}</strong>
+                  <strong>{heading}</strong>
                   <button
                     className="icon-button focus-visible-control"
                     type="button"
@@ -209,20 +231,18 @@ export function useCalendarTaskPreview(
                   </button>
                 </header>
               )}
-              {!pinned && active.ids.length > 1 && (
-                <strong>{copy.home.taskGroupCount(active.ids.length)}</strong>
-              )}
+              {!pinned && <strong>{heading}</strong>}
               <ul>
                 {items.map((task) => (
                   <li key={task.id}>
                     <strong>{task.title}</strong>
                     <dl>
-                      <dt>{copy.forms.assignee}</dt>
+                      <dt className="sr-only">{copy.forms.assignee}</dt>
                       <dd>
                         {task.assigneeName?.trim() ||
                           copy.home.unassignedTaskGroup}
                       </dd>
-                      <dt>{text.deadline}</dt>
+                      <dt className="sr-only">{text.deadline}</dt>
                       <dd>
                         {task.dueAt &&
                         Number.isFinite(Date.parse(task.dueAt)) ? (
@@ -233,7 +253,7 @@ export function useCalendarTaskPreview(
                           copy.home.noDueDateTaskGroup
                         )}
                       </dd>
-                      <dt>{text.status}</dt>
+                      <dt className="sr-only">{text.status}</dt>
                       <dd>{calendarTaskStatus(task)}</dd>
                     </dl>
                     {pinned && onEditTask && (
@@ -252,16 +272,23 @@ export function useCalendarTaskPreview(
                   </li>
                 ))}
               </ul>
-              {active.ids.length > previewLimit && (
-                <span>
-                  {copy.schedule.calendarMore(active.ids.length - previewLimit)}
-                </span>
-              )}
             </div>,
             document.body,
           )
         : null,
   };
+}
+
+export function calendarTasksForDay(
+  tasks: readonly Task[] | undefined,
+  date: Date,
+): Task[] {
+  return (tasks ?? []).filter(
+    (task) =>
+      task.status === "open" &&
+      task.dueAt &&
+      samePlanningDay(new Date(task.dueAt), date),
+  );
 }
 
 export function shouldPinCalendarPreview(
