@@ -11568,6 +11568,119 @@ async fn chat_attention_keeps_unread_conversations_despite_history_and_automatio
         .unwrap();
     assert_eq!(untouched.promoted_task_id, Some(closed));
     assert_eq!(untouched.status, ProjectInflowStatus::Pending);
+
+    let hidden_old_reply = Uuid::now_v7();
+    let legacy_reply = Uuid::now_v7();
+    for (id, marker, thread, received, status, updated) in [
+        (
+            hidden_old_reply,
+            "hidden-old",
+            "dismissed",
+            "2026-10-02",
+            "pending",
+            "2026-10-02",
+        ),
+        (
+            Uuid::now_v7(),
+            "legacy-decision",
+            "legacy",
+            "2026-01-01",
+            "dismissed",
+            "2026-01-01",
+        ),
+        (
+            legacy_reply,
+            "legacy-reply",
+            "legacy",
+            "2026-10-03",
+            "pending",
+            "2026-10-03",
+        ),
+    ] {
+        sqlx::query("INSERT INTO project_inflow_items(id,user_id,project_id,source_id,provider_message_name,provider_thread_name,content_text,received_at,status,updated_at) VALUES($1,$2,$3,$4,$5,$6,'이전 대화',$7::text::timestamptz,$8,$9::text::timestamptz)")
+            .bind(id).bind(user).bind(project.id).bind(source)
+            .bind(format!("spaces/attention/messages/{marker}"))
+            .bind(format!("spaces/attention/threads/{thread}")).bind(received).bind(status).bind(updated)
+            .execute(&pool).await.unwrap();
+    }
+    let visible = db.pending_project_inflow_for_user(user).await.unwrap();
+    assert!(
+        !visible
+            .iter()
+            .any(|row| row.id == hidden_old_reply || row.id == legacy_reply)
+    );
+    let new = visible
+        .iter()
+        .find(|row| row.id == new_after_dismissal)
+        .unwrap();
+    let analysis = db
+        .project_inflow_analyses_for_items(user, &[new.id])
+        .await
+        .unwrap()
+        .remove(0);
+    let linked = Uuid::now_v7();
+    let promoted = db
+        .promote_project_inflow_item(&PromoteProjectInflowItem {
+            user_id: user,
+            project_id: project.id,
+            item_id: new.id,
+            expected_version: new.version,
+            analysis_id: analysis.id,
+            expected_representative_item_id: new.id,
+            expected_source_revision: 1,
+            expected_analyzed_revision: 1,
+            task_id: linked,
+            title: "이전 제외와 별개인 새 업무".to_owned(),
+            notes: None,
+            assignee_name: None,
+            priority: 1,
+            due_at: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        promoted.completion_requested_at.is_some(),
+        "the reaction must target the actual new request"
+    );
+    let hidden = db
+        .project_inflow_item(user, project.id, hidden_old_reply)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(hidden.promoted_task_id.is_none());
+    assert!(hidden.completion_requested_at.is_none());
+
+    let follow_up = Uuid::now_v7();
+    sqlx::query("INSERT INTO project_inflow_items(id,user_id,project_id,source_id,provider_message_name,provider_thread_name,content_text,received_at,promoted_task_id) VALUES($1,$2,$3,$4,'spaces/attention/messages/follow-up','spaces/attention/threads/dismissed','새 일감 관련 요청',TIMESTAMPTZ '2026-10-04',$5)")
+        .bind(follow_up).bind(user).bind(project.id).bind(source).bind(linked)
+        .execute(&pool).await.unwrap();
+    assert!(
+        db.pending_project_inflow_for_user(user)
+            .await
+            .unwrap()
+            .iter()
+            .any(|row| row.id == follow_up)
+    );
+
+    // A retry that waits for the row lock must observe the new review decision.
+    let mut review = pool.begin().await.unwrap();
+    sqlx::query(
+        "UPDATE project_inflow_items SET status='dismissed', reviewed_at=NOW() WHERE id=$1",
+    )
+    .bind(old)
+    .execute(&mut *review)
+    .await
+    .unwrap();
+    let retry = db.retry_project_inflow_analysis(user, project.id, old, 1);
+    tokio::pin!(retry);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(35), retry.as_mut())
+            .await
+            .is_err()
+    );
+    review.commit().await.unwrap();
+    assert!(!retry.await.unwrap());
 }
 
 #[tokio::test]

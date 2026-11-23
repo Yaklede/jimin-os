@@ -30,6 +30,19 @@ macro_rules! independent_inflow_candidate {
 }
 pub(crate) use independent_inflow_candidate;
 
+// Before migration 57 the manual dismiss action had no reviewed_at column.
+// Automatic single-message exclusion was introduced in a later schema.
+macro_rules! manual_inflow_dismissal {
+    () => {
+        "decision.status = 'dismissed' AND decision.promoted_task_id IS NULL
+          AND (decision.reviewed_at IS NOT NULL OR decision.updated_at <= (
+              SELECT migration.installed_on FROM _sqlx_migrations AS migration
+              WHERE migration.version = 57 AND migration.success
+          ))"
+    };
+}
+pub(crate) use manual_inflow_dismissal;
+
 // Shared by Home, project review and delivery. The caller's row is named item.
 macro_rules! google_chat_attention_query {
     ($before:expr, $after:expr $(,)?) => {
@@ -39,9 +52,17 @@ macro_rules! google_chat_attention_query {
         SELECT 1 FROM project_inflow_items AS decision
         WHERE decision.user_id = item.user_id AND decision.source_id = item.source_id
           AND decision.provider_thread_name = item.provider_thread_name
-          AND decision.status = 'dismissed' AND decision.reviewed_at IS NOT NULL
-          AND decision.promoted_task_id IS NULL
-          AND NOT (item.received_at > decision.reviewed_at AND ",
+          AND ",
+            $crate::google_chat::manual_inflow_dismissal!(),
+            "
+          AND NOT EXISTS (
+              SELECT 1 FROM project_inflow_items AS accepted
+              WHERE accepted.user_id = item.user_id AND accepted.source_id = item.source_id
+                AND accepted.provider_thread_name = item.provider_thread_name
+                AND accepted.status = 'promoted' AND accepted.promoted_task_id = item.promoted_task_id
+                AND accepted.received_at > COALESCE(decision.reviewed_at, decision.updated_at)
+          )
+          AND NOT (item.received_at > COALESCE(decision.reviewed_at, decision.updated_at) AND ",
             $crate::google_chat::independent_inflow_candidate!(),
             ")
     ) AND NOT EXISTS (
@@ -104,7 +125,7 @@ const PROJECT_INFLOW_REVIEW_QUERY: &str = google_chat_attention_query!(
         FROM conversation_state
      ), page AS (
         SELECT id, ROW_NUMBER() OVER (
-            PARTITION BY status, needs_review
+        PARTITION BY needs_review
             ORDER BY message_position, latest DESC, id DESC
         ) AS page_position
         FROM message_order
@@ -1189,7 +1210,7 @@ impl Database {
                      FROM project_inflow_items
                      WHERE source_id = $1 AND provider_thread_name = $2
                        AND status = 'promoted' AND promoted_task_id IS NOT NULL
-                     ORDER BY updated_at DESC, received_at DESC, id DESC
+                     ORDER BY received_at DESC, id DESC
                      LIMIT 1",
                 )
                 .bind(connection.source_id)
@@ -2571,11 +2592,16 @@ struct PromotionGroup {
     source_id: Uuid,
     provider_thread_name: Option<String>,
     conversation_key: String,
+    isolate_message: bool,
 }
 
 impl PromotionGroup {
     fn thread_name(&self) -> Option<&str> {
-        self.provider_thread_name.as_deref()
+        if self.isolate_message {
+            None
+        } else {
+            self.provider_thread_name.as_deref()
+        }
     }
 }
 
@@ -2592,8 +2618,16 @@ async fn lock_promotion_group(
     command: &PromoteProjectInflowItem,
 ) -> Result<Option<PromotionGroup>, StorageError> {
     let query = google_chat_attention_query!(
-        "SELECT item.source_id, item.provider_thread_name,
-            item.provider_message_name
+        concat!(
+            "SELECT item.source_id, item.provider_thread_name,
+            item.provider_message_name,
+            item.promoted_task_id IS NOT NULL OR EXISTS (
+                SELECT 1 FROM project_inflow_items AS decision
+                WHERE decision.user_id = item.user_id AND decision.source_id = item.source_id
+                  AND decision.provider_thread_name = item.provider_thread_name AND ",
+            manual_inflow_dismissal!(),
+            "
+            ) AS isolate_message
          FROM project_inflow_items AS item
          JOIN project_google_chat_sources AS source
            ON source.id = item.source_id
@@ -2606,11 +2640,12 @@ async fn lock_promotion_group(
              WHERE previous.id = item.promoted_task_id AND previous.user_id = item.user_id
                AND previous.status = 'completed' AND previous.completed_at < item.received_at
            ))
-           AND (",
+           AND ("
+        ),
         ")
          FOR UPDATE OF source, item",
     );
-    let locked = sqlx::query_as::<_, (Uuid, Option<String>, String)>(query)
+    let locked = sqlx::query_as::<_, (Uuid, Option<String>, String, bool)>(query)
         .bind(command.item_id)
         .bind(command.user_id)
         .bind(command.project_id)
@@ -2619,13 +2654,16 @@ async fn lock_promotion_group(
         .await
         .map_err(classify)?;
     Ok(locked.map(
-        |(source_id, provider_thread_name, provider_message_name)| PromotionGroup {
-            source_id,
-            conversation_key: provider_thread_name.as_ref().map_or_else(
-                || format!("message:{provider_message_name}"),
-                |thread| format!("thread:{thread}"),
-            ),
-            provider_thread_name,
+        |(source_id, provider_thread_name, provider_message_name, isolate_message)| {
+            PromotionGroup {
+                source_id,
+                conversation_key: provider_thread_name.as_ref().map_or_else(
+                    || format!("message:{provider_message_name}"),
+                    |thread| format!("thread:{thread}"),
+                ),
+                provider_thread_name,
+                isolate_message,
+            }
         },
     ))
 }

@@ -1161,7 +1161,7 @@ export function InflowItemRow({
           </ol>
         </details>
       )}
-      {dismissEditing ? null : existingTaskFollowUp ? (
+      {dismissEditing ? null : existingTaskFollowUp && !analysisFailed ? (
         <div className="project-inflow-item__follow-up" role="group">
           <div>
             <strong>{copy.projects.inflowFollowUpTitle}</strong>

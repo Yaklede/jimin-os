@@ -8020,13 +8020,23 @@ async fn project_inflow_decision_response(
     request_id: RequestId,
 ) -> Response {
     let mut candidate = single_project_inflow_candidate(item);
-    if let Ok(mut analyses) = planning
+    let read_failed = match planning
         .project_inflow_analyses_for_items(user_id, &[candidate.representative.id])
         .await
     {
-        candidate.analysis = analyses.pop();
-    }
+        Ok(mut analyses) => {
+            candidate.analysis = analyses.pop();
+            false
+        }
+        Err(_) => true,
+    };
     match project_inflow_item_response(candidate) {
+        Ok(mut response) if read_failed => {
+            // The decision already committed. Do not claim the analysis is absent
+            // or invite the client to submit the decision again.
+            response.analysis_error_code = Some("inflow.analysis_unavailable".to_owned());
+            no_store_json(response)
+        }
         Ok(response) => no_store_json(response),
         Err(()) => unavailable_response(request_id),
     }

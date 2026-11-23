@@ -437,7 +437,7 @@ impl Database {
                 SELECT task.id, task.title, task.notes, task.assignee_name
                 FROM project_inflow_items AS item
                 JOIN tasks AS task ON task.id = item.promoted_task_id
-                WHERE item.source_id = claimed.source_id
+                WHERE item.source_id = claimed.source_id AND item.status = 'promoted'
                   AND (
                     (claimed.conversation_key LIKE 'thread:%'
                         AND item.provider_thread_name =
@@ -447,7 +447,7 @@ impl Database {
                         AND item.provider_message_name =
                             substr(claimed.conversation_key, 9))
                   )
-                ORDER BY item.updated_at DESC, item.id DESC
+                ORDER BY item.received_at DESC, item.id DESC
                 LIMIT 1
              ) AS linked_task ON TRUE
              LEFT JOIN LATERAL (
@@ -742,6 +742,7 @@ impl Database {
                AND item.version = $4 AND item.status = 'pending'
                AND (",
             ")
+             FOR UPDATE OF item
              ON CONFLICT (source_id, conversation_key) DO UPDATE
              SET state = 'queued', attempt_count = 0, error_code = NULL
              WHERE project_inflow_analyses.user_id = $1 AND project_inflow_analyses.project_id = $2
