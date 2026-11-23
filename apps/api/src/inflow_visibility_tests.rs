@@ -1,7 +1,9 @@
 use super::{group_project_inflow_candidates, project_inflow_item_response};
 use jimin_storage::{
     google_chat::{ProjectInflowItem, ProjectInflowStatus},
-    inflow_analysis::{InflowAnalysisState, InflowClassification, ProjectInflowAnalysis},
+    inflow_analysis::{
+        InflowAnalysisState, InflowClassification, InflowReferenceDocument, ProjectInflowAnalysis,
+    },
 };
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -80,6 +82,29 @@ fn owner_new_task_is_unread_without_any_external_reply() {
     assert!(response.sent_by_owner);
     assert!(!response.reviewed, "posting a request is not reviewing it");
     assert_eq!(response.message_count, 1);
+}
+
+#[test]
+fn a_deferred_itsm_ticket_overrides_a_previously_saved_urgent_suggestion() {
+    let (mut item, mut analysis) = owner_request(InflowClassification::NewTask);
+    item.content_text = "https://itsm.example.test/issues/42 검토 부탁드립니다.".to_owned();
+    analysis.suggested_task_title = Some("신규 거래 필터 개선".to_owned());
+    analysis.summary = Some("다른 신규 설치 건을 처리한 뒤 진행하는 요청입니다.".to_owned());
+    analysis.suggested_priority = Some(3);
+    analysis.reference_documents = vec![InflowReferenceDocument {
+        provider: "itsm".to_owned(),
+        url: "https://itsm.example.test/issues/42".to_owned(),
+        external_id: "42".to_owned(),
+        title: Some("거래 필터 개선".to_owned()),
+        original_content: Some(
+            "ITSM #42\n제목: 거래 필터 개선\n\nITSM 프로젝트: 예시 (1)\n\n우선순위: 후순위\n\n원문 설명\n거래 필터를 추가합니다."
+                .to_owned(),
+        ),
+        error_code: None,
+    }];
+    let candidates = group_project_inflow_candidates(vec![item], vec![analysis]);
+    let response = project_inflow_item_response(candidates.into_iter().next().unwrap()).unwrap();
+    assert_eq!(response.suggested_priority, Some(0));
 }
 
 #[test]

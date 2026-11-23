@@ -5,7 +5,7 @@ use tokio::process::Command;
 
 use crate::error::{Error, Result};
 
-pub const SUPPORTED_CODEX_VERSION: &str = "0.159.0";
+pub const SUPPORTED_CODEX_VERSION: &str = "0.171.0";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn parses_the_pinned_codex_version() {
         assert_eq!(
-            parse_version_output(b"codex-cli 0.159.0\n").expect("valid version"),
+            parse_version_output(b"codex-cli 0.171.0\n").expect("valid version"),
             SUPPORTED_CODEX_VERSION
         );
     }
@@ -102,7 +102,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(docker_versions, vec![SUPPORTED_CODEX_VERSION; 2]);
         let metadata: serde_json::Value =
-            serde_json::from_str(include_str!("../../../schemas/codex/0.159.0/metadata.json"))
+            serde_json::from_str(include_str!("../../../schemas/codex/0.171.0/metadata.json"))
                 .expect("runtime schema metadata");
         assert_eq!(metadata["codexVersion"], SUPPORTED_CODEX_VERSION);
         let integrity = versions
