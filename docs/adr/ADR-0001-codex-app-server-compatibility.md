@@ -83,9 +83,16 @@ initialize
 - 기존 Codex 관리 로그인과 인증 volume을 유지한다. API key 기반 provider로 변경하지 않는다.
 - 이번 검증은 개발 환경이다. Linux 운영 이미지 및 운영 계정의 검증은 이후 배포 시 별도로 수행한다.
 
+## 2026-11-23 GPT-6.2 모델 카탈로그 갱신
+
+- 지원 런타임을 stable `@openai/codex@0.171.0`으로 올렸다. 버전, integrity 및 stable schema는 `schemas/codex/0.171.0/metadata.json`을 기준으로 검증한다.
+- macOS에서 실제 App Server의 `model/list`를 어댑터로 호출해 `gpt-6.2-sol`, `gpt-6.2-astra`와 각 모델의 추론 강도 6개를 확인했다. 사용자 저장 모델과 인증 방식을 바꾸지 않는다.
+- `model/list`에 표시되는 것과 실제 운영 계정에서 모델을 실행할 수 있는 것은 별개다. 운영 Agent 이미지 및 인증된 turn은 배포 검수에서 별도로 확인한다.
+
 ## 근거
 
 - [Codex App Server](https://developers.openai.com/codex/app-server/)
 - [Codex authentication](https://developers.openai.com/codex/auth/)
 - [GPT-6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol)
+- [GPT-6.2 Astra and Sol](https://openai.com/index/introducing-gpt-6-2-astra-sol/)
 - [Models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)

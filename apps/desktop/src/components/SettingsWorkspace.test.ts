@@ -289,6 +289,36 @@ function buttonOpeningTag(markup: string, label: string): string {
 }
 
 describe("runtime model catalog presentation", () => {
+  it.each(["gpt-6.2-sol", "gpt-6.2-astra"])(
+    "can select %s from the runtime catalog",
+    (selectedModelId) => {
+      const markup = renderSettings({
+        modelSettings: {
+          items: [
+            { id: "gpt-6.2-sol", displayName: "GPT-6.2-Sol" },
+            { id: "gpt-6.2-astra", displayName: "GPT-6.2-Astra" },
+          ].map((model, index) => ({
+            ...model,
+            description: "Runtime model description",
+            isDefault: index === 0,
+            defaultReasoningEffort: "low",
+            supportedReasoningEfforts: [
+              { id: "low", description: "Fast" },
+              { id: "max", description: "Maximum reasoning" },
+            ],
+          })),
+          selectedModelId,
+          selectedReasoningEffort: "max",
+        },
+      });
+
+      expect(markup).toContain('value="gpt-6.2-sol"');
+      expect(markup).toContain('value="gpt-6.2-astra"');
+      expect(markup).toContain(`<option value="${selectedModelId}" selected="">`);
+      expect(markup).toContain('<option value="max" selected="">');
+    },
+  );
+
   it("renders GPT-6.1 Sol and reasoning options supplied by the runtime", () => {
     const markup = renderSettings({
       modelSettings: {

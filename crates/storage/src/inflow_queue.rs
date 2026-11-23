@@ -6,7 +6,9 @@ use uuid::Uuid;
 use crate::{
     Database, StorageError,
     google_chat::{ProjectInflowItem, ProjectInflowStatus},
-    inflow_analysis::{InflowAnalysisState, InflowClassification, ProjectInflowAnalysis},
+    inflow_analysis::{
+        InflowAnalysisState, InflowClassification, InflowReferenceDocument, ProjectInflowAnalysis,
+    },
 };
 
 pub struct ProjectInflowCandidate {
@@ -32,12 +34,18 @@ impl ProjectInflowCandidate {
     pub fn suggested_priority(&self) -> Option<i16> {
         let analysis = self.analysis.as_ref()?;
         if analysis.classification != Some(InflowClassification::NewTask)
+            || self.representative.status != ProjectInflowStatus::Pending
             || self.representative.promoted_task_id.is_some()
         {
             return analysis.suggested_priority;
         }
         let title = analysis.suggested_task_title.as_deref()?;
-        Some(incoming_work_priority(title, analysis.suggested_priority))
+        Some(incoming_work_priority(
+            title,
+            analysis.suggested_priority,
+            analysis.summary.as_deref().unwrap_or_default(),
+            &analysis.reference_documents,
+        ))
     }
 }
 
@@ -60,9 +68,26 @@ impl Database {
 }
 
 /// Policy for a suggested value, not for a registered or manually edited task.
-/// A recorded urgent recommendation is preserved.
+/// Explicit deferral takes precedence over inferred urgency.
 #[must_use]
-pub fn incoming_work_priority(title: &str, proposed: Option<i16>) -> i16 {
+pub fn incoming_work_priority(
+    title: &str,
+    proposed: Option<i16>,
+    summary: &str,
+    references: &[InflowReferenceDocument],
+) -> i16 {
+    let mut itsm_tickets = references
+        .iter()
+        .filter(|doc| doc.provider == "itsm" && doc.error_code.is_none())
+        .filter_map(|doc| doc.original_content.as_deref())
+        .peekable();
+    // A low-priority related ticket alone must not downgrade a multi-ticket request.
+    let deferred_tickets =
+        itsm_tickets.peek().is_some() && itsm_tickets.all(itsm_ticket_is_deferred);
+    if deferred_tickets || explicitly_deferred(title) || explicitly_deferred(summary) {
+        return 0;
+    }
+
     let title = title.to_lowercase();
     let improvement = [
         "개선",
@@ -108,6 +133,63 @@ pub fn incoming_work_priority(title: &str, proposed: Option<i16>) -> i16 {
     } else {
         proposed.unwrap_or(1)
     }
+}
+
+fn itsm_ticket_is_deferred(content: &str) -> bool {
+    // The ITSM snapshot renders metadata first, then separate sections for
+    // description, attachments and journals. A quoted field in a comment is not metadata.
+    let mut sections = content.split("\n\n");
+    let Some(header) = sections.next() else {
+        return false;
+    };
+    if !header.starts_with("ITSM #") {
+        return false;
+    }
+    let mut in_description = false;
+    for section in sections {
+        if let Some(description) = section.strip_prefix("원문 설명\n") {
+            in_description = true;
+            if explicitly_deferred(description) {
+                return true;
+            }
+            continue;
+        }
+        if section.starts_with("첨부 파일\n") || section.starts_with("원문 업데이트\n") {
+            break;
+        }
+        if in_description {
+            if explicitly_deferred(section) {
+                return true;
+            }
+        } else if section.strip_prefix("우선순위:").is_some_and(|priority| {
+            matches!(
+                priority.trim().to_ascii_lowercase().as_str(),
+                "후순위" | "낮음" | "low"
+            )
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+fn explicitly_deferred(text: &str) -> bool {
+    text.split(['\n', '.', '!', '?', ';']).any(|sentence| {
+        let normalized = sentence
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        matches!(
+            normalized.trim_matches(['-', '*', '(', ')', '[', ']']),
+            "후순위"
+                | "후순위로진행"
+                | "후순위로진행해주세요"
+                | "후순위로진행부탁드립니다"
+                | "후순위로진행합니다"
+                | "후순위로진행하는요청입니다"
+                | "우선순위:후순위"
+        )
+    })
 }
 
 pub fn group_project_inflow_candidates(
@@ -188,14 +270,86 @@ pub fn group_project_inflow_candidates(
 
 #[cfg(test)]
 mod tests {
-    use super::incoming_work_priority;
+    use super::{InflowReferenceDocument, incoming_work_priority};
 
     #[test]
     fn suggests_important_for_defects_normal_for_improvements_and_preserves_urgent() {
-        assert_eq!(incoming_work_priority("결제 화면 오류 수정", Some(1)), 2);
-        assert_eq!(incoming_work_priority("오류 알림 개선", Some(2)), 1);
-        assert_eq!(incoming_work_priority("정산 화면 필터 추가", None), 1);
-        assert_eq!(incoming_work_priority("긴급: 앱 로그인 불가", Some(1)), 3);
-        assert_eq!(incoming_work_priority("일반 개선", Some(3)), 3);
+        assert_eq!(
+            incoming_work_priority("결제 화면 오류 수정", Some(1), "", &[]),
+            2
+        );
+        assert_eq!(
+            incoming_work_priority("오류 알림 개선", Some(2), "", &[]),
+            1
+        );
+        assert_eq!(
+            incoming_work_priority("정산 화면 필터 추가", None, "", &[]),
+            1
+        );
+        assert_eq!(
+            incoming_work_priority("긴급: 앱 로그인 불가", Some(1), "", &[]),
+            3
+        );
+        assert_eq!(incoming_work_priority("일반 개선", Some(3), "", &[]), 3);
+    }
+
+    fn ticket(id: &str, content: &str) -> InflowReferenceDocument {
+        InflowReferenceDocument {
+            provider: "itsm".to_owned(),
+            url: format!("https://itsm.example.test/issues/{id}"),
+            external_id: id.to_owned(),
+            title: None,
+            original_content: Some(format!("ITSM #{id}\n제목: 정산 오류\n\n{content}")),
+            error_code: None,
+        }
+    }
+
+    #[test]
+    fn explicit_deferral_in_ticket_metadata_or_description_beats_model_urgency() {
+        for content in [
+            "우선순위: 후순위\n\n원문 설명\n정산 오류 수정",
+            "우선순위: 보통\n\n원문 설명\n정산 오류입니다.\n\n후순위로진행",
+        ] {
+            assert_eq!(
+                incoming_work_priority("정산 오류", Some(3), "", &[ticket("42", content)]),
+                0
+            );
+        }
+        assert_eq!(
+            incoming_work_priority(
+                "정산 오류",
+                Some(3),
+                "정산 오류입니다. 후순위로 진행해 주세요.",
+                &[]
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn negation_comments_failed_references_and_mixed_tickets_do_not_defer_urgency() {
+        let mut failed = ticket("42", "우선순위: 후순위");
+        failed.error_code = Some("itsm.unavailable".to_owned());
+        for refs in [
+            vec![failed],
+            vec![ticket(
+                "42",
+                "원문 설명\n후순위로 진행하지 않습니다.\n\n원문 업데이트\n우선순위: 후순위",
+            )],
+            vec![
+                ticket("42", "우선순위: 후순위"),
+                ticket("43", "우선순위: 긴급"),
+            ],
+        ] {
+            assert_eq!(
+                incoming_work_priority(
+                    "긴급: 정산 오류",
+                    Some(3),
+                    "후순위로 진행하지 않습니다.",
+                    &refs
+                ),
+                3
+            );
+        }
     }
 }

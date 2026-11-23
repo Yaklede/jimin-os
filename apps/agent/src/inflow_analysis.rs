@@ -107,17 +107,7 @@ where
             return Ok(true);
         }
     };
-    let Some(mut result) = validated_analysis(&completed.response) else {
-        fail(
-            database,
-            &job,
-            runner_id,
-            "inflow.invalid_structured_response",
-        )
-        .await?;
-        return Ok(true);
-    };
-    result.reference_documents = itsm_references
+    let reference_documents = itsm_references
         .into_iter()
         .map(|reference| InflowReferenceDocument {
             provider: "itsm".to_owned(),
@@ -128,6 +118,16 @@ where
             error_code: reference.error_code.map(str::to_owned),
         })
         .collect();
+    let Some(result) = validated_analysis(&completed.response, reference_documents) else {
+        fail(
+            database,
+            &job,
+            runner_id,
+            "inflow.invalid_structured_response",
+        )
+        .await?;
+        return Ok(true);
+    };
     if !database
         .complete_inflow_analysis(&job, runner_id, &result)
         .await?
@@ -294,7 +294,7 @@ fn append_analysis_instructions(prompt: &mut String) {
         "URL은 제목에 넣지 않되 삭제하거나 무시하지 마세요. 관련 문서·이슈·가이드의 근거이므로 주변 문맥을 업무 판단에 반영하세요. 원문 URL은 앱이 별도 관련 링크로 보존합니다.",
         "조회한 ITSM 원문은 실제 요구사항과 상세 범위를 정리하는 근거로 사용하세요. ITSM 프로젝트명은 원문 메타데이터이며, 현재 앱 프로젝트와 달라도 제공된 링크를 분석하세요. 프로젝트 불일치를 이유로 내용을 제외하거나 연결 확인을 요청하지 마세요. 할 일은 현재 앱 프로젝트에서 정리하며 프로젝트를 임의로 변경하지 마세요.",
         "new_task에서는 taskTitle, actionItems, completionCriteria, assigneeName, dueAt, priority를 채우세요. 기존 연결 일감의 follow_up에서는 명시적으로 추가·변경된 행동만 actionItems에, 명시된 변경 마감만 dueAt에 넣으세요. 단순 재촉이나 진행 공유에는 변경 제안을 만들지 마세요. 그 외 필드는 빈 문자열·빈 배열·0으로 반환하세요. 변경 제안은 사용자 승인 전에는 적용하지 않습니다.",
-        "신규 요청 우선순위: 보통 개선·기능 추가는 1, 기존 기능의 오류·회귀 수정은 2, 실제 서비스 중단·거래 불가·데이터 유실 또는 명시적으로 긴급한 요청은 3입니다. 단순 개선을 장애로 높이지 마세요.",
+        "신규 요청 우선순위: ITSM 우선순위가 후순위·낮음이거나 요청에 후순위로 진행한다고 명시되면 0입니다. 명시적 후순위는 업무 유형에서 추정한 우선순위보다 우선합니다. 별도 지정이 없으면 보통 개선·기능 추가는 1, 기존 기능의 오류·회귀 수정은 2, 실제 서비스 중단·거래 불가·데이터 유실 또는 명시적으로 긴급한 요청은 3입니다. 단순 개선을 장애로 높이지 마세요.",
         "담당자는 등록된 후보에 명확히 포함된 이름만 사용하고, 마감일은 대화에 명시된 경우에만 RFC3339로 반환하세요. 기본 시간대는 Asia/Seoul이며 추측하지 마세요.",
         "기존 연결 할 일이 있으면 단순 재촉, 확인 요청, 진행 공유는 follow_up으로 분류하세요. 별개의 결과물이 명확히 추가된 경우에만 new_task입니다.",
     ] {
@@ -350,7 +350,10 @@ fn analysis_schema() -> Value {
     })
 }
 
-fn validated_analysis(response: &str) -> Option<InflowAnalysisResult> {
+fn validated_analysis(
+    response: &str,
+    reference_documents: Vec<InflowReferenceDocument>,
+) -> Option<InflowAnalysisResult> {
     let structured: StructuredInflowAnalysis = serde_json::from_str(response).ok()?;
     if !(0..=3).contains(&structured.priority) {
         return None;
@@ -366,9 +369,14 @@ fn validated_analysis(response: &str) -> Option<InflowAnalysisResult> {
     let new_task = classification == InflowClassification::NewTask;
     let task_change = classification == InflowClassification::FollowUp;
     let task_title = new_task.then(|| structured.task_title.trim().to_owned());
-    let priority = task_title
-        .as_deref()
-        .map(|title| incoming_work_priority(title, Some(structured.priority)));
+    let priority = task_title.as_deref().map(|title| {
+        incoming_work_priority(
+            title,
+            Some(structured.priority),
+            &structured.summary,
+            &reference_documents,
+        )
+    });
     if task_title
         .as_deref()
         .is_some_and(contains_raw_transport_text)
@@ -401,7 +409,7 @@ fn validated_analysis(response: &str) -> Option<InflowAnalysisResult> {
             None
         },
         suggested_priority: priority,
-        reference_documents: Vec::new(),
+        reference_documents,
     };
     result.validate().ok()?;
     Some(result)
@@ -525,7 +533,8 @@ mod tests {
         .await;
         process.shutdown().await.expect("smoke cleanup");
         let completed = result.expect("smoke timeout").expect("structured turn");
-        let analysis = validated_analysis(&completed.response).expect("valid structured result");
+        let analysis =
+            validated_analysis(&completed.response, vec![]).expect("valid structured result");
         assert_eq!(analysis.classification, InflowClassification::NewTask);
         assert_eq!(analysis.suggested_assignee_name.as_deref(), Some("김경주"));
         assert!(!analysis.suggested_action_items.is_empty());
@@ -610,7 +619,8 @@ mod tests {
         .await;
         process.shutdown().await.expect("smoke cleanup");
         let completed = result.expect("smoke timeout").expect("structured turn");
-        let analysis = validated_analysis(&completed.response).expect("valid structured result");
+        let analysis =
+            validated_analysis(&completed.response, vec![]).expect("valid structured result");
         assert_eq!(analysis.classification, InflowClassification::NewTask);
         assert!(
             analysis
@@ -691,12 +701,38 @@ mod tests {
           "dueAt":"",
           "priority":1
         }"#;
-        let result = validated_analysis(response).expect("valid analysis");
+        let result = validated_analysis(response, vec![]).expect("valid analysis");
         assert_eq!(result.classification, InflowClassification::NewTask);
         assert_eq!(
             result.suggested_task_title.as_deref(),
             Some("거래내역 정산방식 표시 추가")
         );
+    }
+
+    #[test]
+    fn structured_new_task_persists_explicit_itsm_deferral_over_model_urgency() {
+        let response = r#"{
+          "classification":"new_task",
+          "confidence":94,
+          "summary":"결제 알림 문구를 보완해야 한다.",
+          "taskTitle":"결제 알림 오류 수정",
+          "actionItems":["결제 알림의 원인을 확인한다."],
+          "completionCriteria":"결제 알림이 올바르게 보인다.",
+          "assigneeName":"",
+          "dueAt":"",
+          "priority":3
+        }"#;
+        let refs = vec![jimin_storage::inflow_analysis::InflowReferenceDocument {
+            provider: "itsm".to_owned(),
+            url: "https://itsm.example.test/issues/42".to_owned(),
+            external_id: "42".to_owned(),
+            title: None,
+            original_content: Some("ITSM #42\n제목: 결제 알림 오류\n\n우선순위: 후순위".to_owned()),
+            error_code: None,
+        }];
+        let result = validated_analysis(response, refs).expect("valid analysis");
+        assert_eq!(result.suggested_priority, Some(0));
+        assert_eq!(result.reference_documents.len(), 1);
     }
 
     #[test]
@@ -712,7 +748,7 @@ mod tests {
           "dueAt":"",
           "priority":1
         }"#;
-        assert!(validated_analysis(response).is_none());
+        assert!(validated_analysis(response, vec![]).is_none());
     }
 
     #[test]
@@ -728,14 +764,14 @@ mod tests {
           "dueAt":"",
           "priority":0
         }"#;
-        let result = validated_analysis(response).expect("valid follow-up");
+        let result = validated_analysis(response, vec![]).expect("valid follow-up");
         assert_eq!(result.classification, InflowClassification::FollowUp);
         assert!(result.suggested_task_title.is_none());
     }
 
     #[test]
     fn explicit_follow_up_retains_changes_without_creating_a_new_task() {
-        let result=validated_analysis(r#"{"classification":"follow_up","confidence":95,"summary":"기존 요청에 결과 공유와 마감 변경이 추가됐어요.","taskTitle":"","actionItems":["점검 결과 문서를 공유한다."],"completionCriteria":"","assigneeName":"","dueAt":"2026-10-09T09:00:00+09:00","priority":0}"#).unwrap();
+        let result=validated_analysis(r#"{"classification":"follow_up","confidence":95,"summary":"기존 요청에 결과 공유와 마감 변경이 추가됐어요.","taskTitle":"","actionItems":["점검 결과 문서를 공유한다."],"completionCriteria":"","assigneeName":"","dueAt":"2026-10-09T09:00:00+09:00","priority":0}"#, vec![]).unwrap();
         assert_eq!(
             result.suggested_action_items,
             vec!["점검 결과 문서를 공유한다."]
