@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   archiveConversation,
   createConversation,
+  deleteConversation,
   fetchAgentAuthentication,
   fetchAgentJob,
   fetchLatestConversationJob,
@@ -19,6 +20,33 @@ afterEach(() => {
 });
 
 describe("agent API", () => {
+  it("sends an authenticated deletion, tolerates absent history and reports a running job", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(new Response(null, { status: 409 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const remove = () =>
+      deleteConversation(
+        "https://jimin-os.example",
+        "session-access",
+        "thread-1",
+      );
+    await expect(remove()).resolves.toBeUndefined();
+    await expect(remove()).resolves.toBeUndefined();
+    await expect(remove()).rejects.toMatchObject({ code: "conflict" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://jimin-os.example/v1/conversations/thread-1",
+      expect.objectContaining({
+        method: "DELETE",
+        headers: expect.objectContaining({
+          Authorization: "Bearer session-access",
+        }),
+      }),
+    );
+  });
+
   it("creates version-seven IDs for retry-safe client turns", () => {
     vi.stubGlobal("crypto", {
       getRandomValues: (value: Uint8Array) => value.fill(0),

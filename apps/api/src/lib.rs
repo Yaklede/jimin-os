@@ -51,8 +51,8 @@ use jimin_storage::{
         AssistantPresentationKind, AssistantPresentationLayout, AssistantPresentationSection,
         AssistantPresentationSectionKind, AssistantPresentationView, Conversation,
         ConversationMessage, ConversationMessageRole, ConversationMessageStatus,
-        ConversationStatus, ConversationSurface, NewAgentTurn, NewConversation, PendingAgentAction,
-        PendingAgentActionDecision, QueuedAgentTurn,
+        ConversationStatus, ConversationSurface, DeleteConversationOutcome, NewAgentTurn,
+        NewConversation, PendingAgentAction, PendingAgentActionDecision, QueuedAgentTurn,
     },
     auth::{Device, DeviceStatus, Profile},
     calendar::{
@@ -1674,6 +1674,8 @@ struct CreateConversationRequest {
     title: Option<String>,
     #[serde(default = "default_conversation_surface")]
     surface: String,
+    #[serde(default)]
+    preserve_previous_home: bool,
 }
 
 fn default_conversation_surface() -> String {
@@ -1836,6 +1838,7 @@ pub(crate) fn error_response(
         list_conversations,
         create_conversation,
         archive_conversation,
+        delete_conversation,
         list_conversation_messages,
         stream_conversation_updates,
         get_latest_conversation_job,
@@ -2135,6 +2138,10 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/v1/conversations/{conversation_id}/archive",
             post(archive_conversation),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}",
+            axum::routing::delete(delete_conversation),
         )
         .route(
             "/v1/conversations/{conversation_id}/turns",
@@ -5836,19 +5843,27 @@ async fn create_conversation(
     let Some(agent) = state.agent() else {
         return unavailable_response(request_id);
     };
-    match agent
-        .create_conversation(&NewConversation {
-            id: body.client_conversation_id,
-            user_id: principal.identity().user_id(),
-            title: body.title,
-            surface: match body.surface.as_str() {
-                "home" => ConversationSurface::Home,
-                "chat" => ConversationSurface::Chat,
-                _ => return invalid_request_response(request_id),
-            },
-        })
-        .await
-    {
+    let conversation = NewConversation {
+        id: body.client_conversation_id,
+        user_id: principal.identity().user_id(),
+        title: body.title,
+        surface: match body.surface.as_str() {
+            "home" => ConversationSurface::Home,
+            "chat" => ConversationSurface::Chat,
+            _ => return invalid_request_response(request_id),
+        },
+    };
+    let result = if body.preserve_previous_home {
+        if conversation.surface != ConversationSurface::Home || conversation.title.is_some() {
+            return invalid_request_response(request_id);
+        }
+        agent
+            .create_home_draft_preserving_history(&conversation)
+            .await
+    } else {
+        agent.create_conversation(&conversation).await
+    };
+    match result {
         Ok(conversation) => match conversation_response(conversation) {
             Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
             Err(()) => unavailable_response(request_id),
@@ -5892,6 +5907,43 @@ async fn archive_conversation(
             false,
         ),
         Ok(ArchiveConversationOutcome::NotFound) => agent_not_found_response(request_id),
+        Err(error) => storage_error_response(&error, request_id),
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/conversations/{conversation_id}",
+    tag = "agent",
+    params(("conversation_id" = String, Path)),
+    responses((status = 204), (status = 401), (status = 404), (status = 409), (status = 503))
+)]
+async fn delete_conversation(
+    State(state): State<ApiState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    Path(conversation_id): Path<uuid::Uuid>,
+) -> Response {
+    let principal = match auth::authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(failure) => return failure.into_response(request_id),
+    };
+    let Some(agent) = state.agent() else {
+        return unavailable_response(request_id);
+    };
+    match agent
+        .delete_conversation_for_user(principal.identity().user_id(), conversation_id)
+        .await
+    {
+        Ok(DeleteConversationOutcome::Deleted) => StatusCode::NO_CONTENT.into_response(),
+        Ok(DeleteConversationOutcome::Busy) => error_response(
+            StatusCode::CONFLICT,
+            "conversation.busy",
+            "답변 처리가 끝난 뒤 대화를 삭제해 주세요.",
+            request_id,
+            false,
+        ),
+        Ok(DeleteConversationOutcome::NotFound) => agent_not_found_response(request_id),
         Err(error) => storage_error_response(&error, request_id),
     }
 }
@@ -11434,6 +11486,7 @@ mod tests {
                 "/v1/calendar/connections/google/authorizations",
                 "/v1/calendar/connections/google/sync",
                 "/v1/conversations",
+                "/v1/conversations/{conversation_id}",
                 "/v1/conversations/{conversation_id}/archive",
                 "/v1/conversations/{conversation_id}/jobs/latest",
                 "/v1/conversations/{conversation_id}/messages",
@@ -11745,6 +11798,19 @@ mod tests {
             .await
             .expect("handler should respond");
 
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let (state, _, _) = signed_auth_state(true);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/conversations/019f68cb-9400-7000-8000-000000000000")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("handler should respond");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 

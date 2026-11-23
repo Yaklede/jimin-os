@@ -5972,6 +5972,132 @@ async fn project_and_task_deletions_are_scoped_versioned_and_idempotent() {
 }
 
 #[tokio::test]
+async fn new_home_draft_preserves_history_and_delete_purges_only_the_owned_chat() {
+    let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
+        return;
+    };
+    let database = Database::connect_lazy(
+        &SecretString::from(database_url.clone()),
+        1,
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    database.migrate().await.unwrap();
+    let fixture_pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+    let owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .unwrap()
+        .profile
+        .id;
+    let other_owner = database
+        .provision_login(&provision_login_command(Uuid::now_v7(), Uuid::now_v7()))
+        .await
+        .unwrap()
+        .profile
+        .id;
+    let old = database
+        .create_conversation(&NewConversation {
+            id: Uuid::now_v7(),
+            user_id: owner,
+            title: Some("이전 대화".into()),
+            surface: ConversationSurface::Home,
+        })
+        .await
+        .unwrap();
+    let turn = database
+        .enqueue_agent_turn(&NewAgentTurn {
+            job_id: Uuid::now_v7(),
+            message_id: Uuid::now_v7(),
+            client_message_id: Uuid::now_v7(),
+            user_id: owner,
+            conversation_id: old.id,
+            content: "이전 메시지".into(),
+        })
+        .await
+        .unwrap();
+    let new = database
+        .create_home_draft_preserving_history(&NewConversation {
+            id: Uuid::now_v7(),
+            user_id: owner,
+            title: None,
+            surface: ConversationSurface::Home,
+        })
+        .await
+        .unwrap();
+    let list = database.active_conversations_for_user(owner).await.unwrap();
+    assert!(
+        list.iter()
+            .any(|it| it.id == new.id && it.surface == ConversationSurface::Home)
+    );
+    assert!(
+        list.iter()
+            .any(|it| it.id == old.id && it.surface == ConversationSurface::Chat)
+    );
+    use jimin_storage::agent::DeleteConversationOutcome as Outcome;
+    assert_eq!(
+        database
+            .delete_conversation_for_user(other_owner, old.id)
+            .await
+            .unwrap(),
+        Outcome::NotFound
+    );
+    assert_eq!(
+        database
+            .delete_conversation_for_user(owner, old.id)
+            .await
+            .unwrap(),
+        Outcome::Busy
+    );
+    sqlx::query("UPDATE agent_jobs SET state = 'completed' WHERE id = $1")
+        .bind(turn.job_id)
+        .execute(&fixture_pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        database
+            .delete_conversation_for_user(owner, old.id)
+            .await
+            .unwrap(),
+        Outcome::Deleted
+    );
+    assert_eq!(
+        database
+            .delete_conversation_for_user(owner, old.id)
+            .await
+            .unwrap(),
+        Outcome::NotFound
+    );
+    for query in [
+        "SELECT count(*) FROM messages WHERE conversation_id = $1",
+        "SELECT count(*) FROM agent_jobs WHERE conversation_id = $1",
+    ] {
+        let count: i64 = sqlx::query_scalar(query)
+            .bind(old.id)
+            .fetch_one(&fixture_pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+    assert!(
+        database
+            .sync_changes_for_user(owner, 0, 100)
+            .await
+            .unwrap()
+            .items
+            .iter()
+            .any(|change| change.entity_id == old.id && change.operation == "delete")
+    );
+    let list = database.active_conversations_for_user(owner).await.unwrap();
+    assert_eq!(
+        list.into_iter().map(|it| it.id).collect::<Vec<_>>(),
+        [new.id]
+    );
+    fixture_pool.close().await;
+    database.close().await;
+}
+
+#[tokio::test]
 async fn a_new_home_conversation_replaces_the_previous_home_across_devices() {
     let Ok(database_url) = std::env::var("JIMIN_TEST_DATABASE_URL") else {
         return;

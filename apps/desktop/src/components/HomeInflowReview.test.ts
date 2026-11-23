@@ -6,6 +6,11 @@ import { describe, expect, it } from "vitest";
 import type { ProjectInflowItem } from "../api/googleChat";
 import { copy } from "../copy";
 import {
+  inflowReviewSnapshotKey,
+  markInflowSeenBatch,
+  reconcileInflowSeenBatch,
+} from "../home-inflow-batch";
+import {
   HomeInflowReview,
   homeInflowPendingItems,
   resolveHomeInflowSelection,
@@ -43,6 +48,58 @@ function inflow(
 }
 
 describe("home inflow review", () => {
+  it("offers batch review only for existing updates and uncertain conversations", () => {
+    const markup = renderReview([
+      inflow("new"),
+      inflow("update", { promotedTaskId: "task" }),
+      inflow("question", { analysisClassification: "question" }),
+    ]);
+    const panels = markup.split('role="tabpanel"').slice(1);
+    expect(panels[0]).not.toContain(copy.projects.inflowBulkSelect);
+    expect(panels[1]).toContain(copy.projects.inflowBulkSelect);
+    expect(panels[2]).toContain(copy.projects.inflowBulkSelect);
+  });
+
+  it("reviews each distinct selected snapshot, retaining failures and newer revisions", async () => {
+    const selected = Array.from({ length: 7 }, (_, index) =>
+      inflow(`item-${index}`),
+    );
+    const requests: string[] = [];
+    let inFlight = 0;
+    let peak = 0;
+    const result = await markInflowSeenBatch(
+      [...selected, selected[0]],
+      async (item) => {
+        requests.push(item.id);
+        peak = Math.max(peak, ++inFlight);
+        await Promise.resolve();
+        inFlight--;
+        if (item === selected[1]) throw new Error("conflict");
+        return { ...item, reviewed: true, version: item.version + 1 };
+      },
+    );
+    expect(requests).toEqual(selected.map((item) => item.id));
+    expect(peak).toBe(3);
+    expect(result.failed).toEqual([selected[1]]);
+    expect(result.updatedVersions.size).toBe(6);
+    const newer = { ...selected[0], sourceRevision: 2 };
+    const unselected = inflow("unselected");
+    expect(inflowReviewSnapshotKey(newer)).not.toBe(
+      inflowReviewSnapshotKey(selected[0]),
+    );
+    expect(
+      reconcileInflowSeenBatch(
+        [newer, selected[1], selected[2], unselected],
+        result.updatedVersions,
+      ),
+    ).toEqual([
+      newer,
+      selected[1],
+      { ...selected[2], reviewed: true, version: 2 },
+      unselected,
+    ]);
+  });
+
   it("fills selected queue rows without an unused scrollbar strip or inset accent", () => {
     const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
     expect(css).toMatch(
@@ -231,6 +288,7 @@ function renderReview(
     saving: false,
     onPromote: async () => undefined,
     onDismiss: async () => undefined,
+    onMarkSeenMany: async () => ({ failed: [], updatedVersions: new Map() }),
     onRetryAnalysis: async () => undefined,
     onRetryCompletion: async () => undefined,
     onOpenTask: async () => undefined,

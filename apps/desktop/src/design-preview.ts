@@ -143,6 +143,20 @@ export function installDesignPreview(): void {
     analysisSummary:
       "예시: 등록한 일감에 공유 문서 작성과 마감 변경 요청이 추가됐어요.",
   };
+  if (new URLSearchParams(window.location?.search).get("bulkReview") === "1") {
+    for (const [index, item] of inflow.slice(0, 12).entries()) {
+      const id = `preview-bulk-inflow-${index}`;
+      inflow.push({
+        ...item,
+        id,
+        conversationId: id,
+        representativeItemId: id,
+        promotedTaskId: index < 6 ? tasks[index].id : null,
+        analysisClassification: index < 6 ? "follow_up" : "question",
+        suggestedTaskTitle: `예시 ${index % 6 + 1} · ${item.suggestedTaskTitle}`,
+      });
+    }
+  }
   const deliveryRecovery: DeliveryRecovery[] = [
     {
       id: "preview-itsm-failed",
@@ -937,6 +951,14 @@ export function installDesignPreview(): void {
             lastMessageAt: null,
             version: 1,
           };
+          if (next.surface === "home") {
+            for (const existing of conversations) {
+              if (existing.surface !== "home" || existing.status !== "active") continue;
+              if (body.preservePreviousHome && (existing.lastMessageAt || existing.title))
+                existing.surface = "chat";
+              else existing.status = "archived";
+            }
+          }
           conversations.push(next);
           return json(next, 201);
         } catch {
@@ -945,6 +967,19 @@ export function installDesignPreview(): void {
       }
     }
     const archiveRoute = /^\/v1\/conversations\/([^/]+)\/archive$/.exec(path);
+    const singleConversationRoute = /^\/v1\/conversations\/([^/]+)$/.exec(path);
+    if (singleConversationRoute && method === "DELETE") {
+      const id = decodeURIComponent(singleConversationRoute[1]);
+      const index = conversations.findIndex((item) => item.id === id);
+      if (index < 0) return json({ error: "preview_item_missing" }, 404);
+      const job = previewSnapshot(id).job;
+      if (previewTurns.has(id) && job?.state !== "completed")
+        return json({ error: "conversation.busy" }, 409);
+      conversations.splice(index, 1);
+      transcriptById.delete(id);
+      previewTurns.delete(id);
+      return new Response(null, { status: 204 });
+    }
     if (archiveRoute && method === "POST") {
       const item = conversations.find(
         (item) => item.id === decodeURIComponent(archiveRoute[1]),
@@ -954,6 +989,9 @@ export function installDesignPreview(): void {
       item.version += 1;
       return new Response(null, { status: 204 });
     }
+    if (conversationRoute?.[2] === "messages" &&
+        !conversations.some((item) => item.id === conversationRoute[1] && item.status === "active"))
+      return json({ error: "preview_item_missing" }, 404);
     if (conversationRoute?.[2] === "messages")
       return json(list(previewSnapshot(conversationRoute[1]).messages));
     if (

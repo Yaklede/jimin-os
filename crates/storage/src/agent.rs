@@ -668,6 +668,13 @@ pub enum ArchiveConversationOutcome {
     NotFound,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteConversationOutcome {
+    Deleted,
+    Busy,
+    NotFound,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedAgentTurn {
     pub job_id: Uuid,
@@ -1874,6 +1881,31 @@ impl Database {
         &self,
         conversation: &NewConversation,
     ) -> Result<Conversation, StorageError> {
+        self.create_conversation_with_home_history(conversation, false)
+            .await
+    }
+
+    /// Starts an empty Home conversation without removing non-empty history.
+    ///
+    /// # Errors
+    ///
+    /// Rejects requests other than an untitled Home draft or if storage fails.
+    pub async fn create_home_draft_preserving_history(
+        &self,
+        conversation: &NewConversation,
+    ) -> Result<Conversation, StorageError> {
+        if conversation.surface != ConversationSurface::Home || conversation.title.is_some() {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        self.create_conversation_with_home_history(conversation, true)
+            .await
+    }
+
+    async fn create_conversation_with_home_history(
+        &self,
+        conversation: &NewConversation,
+        preserve_history: bool,
+    ) -> Result<Conversation, StorageError> {
         conversation.validate()?;
         let user_id = conversation.user_id;
         let mut transaction = self
@@ -1920,18 +1952,22 @@ impl Database {
             if locked.is_none() {
                 return Err(StorageError::IdentityConflict);
             }
-            let archived = sqlx::query_as::<_, (Uuid, i64)>(
+            let replaced = sqlx::query_as::<_, (Uuid, i64)>(
                 "\
                 UPDATE conversations
-                SET status = 'archived'
+                SET surface = CASE WHEN $2 AND (last_message_at IS NOT NULL OR title IS NOT NULL)
+                                   THEN 'chat' ELSE surface END,
+                    status = CASE WHEN $2 AND (last_message_at IS NOT NULL OR title IS NOT NULL)
+                                  THEN 'active' ELSE 'archived' END
                 WHERE user_id = $1 AND status = 'active' AND surface = 'home'
                 RETURNING id, version",
             )
             .bind(user_id)
+            .bind(preserve_history)
             .fetch_all(&mut *transaction)
             .await
             .map_err(|error| classify(&error))?;
-            for (id, version) in archived {
+            for (id, version) in replaced {
                 append_change(&mut transaction, user_id, "conversation", id, version).await?;
             }
         }
@@ -2082,6 +2118,74 @@ impl Database {
             .await
             .map_err(|error| classify(&error))?;
         Ok(ArchiveConversationOutcome::Archived)
+    }
+
+    /// Deletes the owned conversation and its messages, but never active work.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed IDs and returns a classified persistence error on failure.
+    pub async fn delete_conversation_for_user(
+        &self,
+        user_id: Uuid,
+        conversation_id: Uuid,
+    ) -> Result<DeleteConversationOutcome, StorageError> {
+        if !is_v7(user_id) || !is_v7(conversation_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| classify(&error))?;
+        let version = sqlx::query_scalar::<_, i64>(
+            "SELECT version FROM conversations WHERE id = $1 AND user_id = $2 FOR UPDATE",
+        )
+        .bind(conversation_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        let Some(version) = version else {
+            return Ok(DeleteConversationOutcome::NotFound);
+        };
+        let busy = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM agent_jobs WHERE conversation_id = $1 AND
+                            state IN ('queued', 'claimed', 'running', 'waiting_approval', 'retry_wait'))",
+        )
+        .bind(conversation_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| classify(&error))?;
+        if busy {
+            return Ok(DeleteConversationOutcome::Busy);
+        }
+        // Jobs restrict deletion of their input messages. Remove terminal jobs first.
+        sqlx::query("DELETE FROM agent_jobs WHERE conversation_id = $1 AND user_id = $2")
+            .bind(conversation_id)
+            .bind(user_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| classify(&error))?;
+        sqlx::query("DELETE FROM conversations WHERE id = $1 AND user_id = $2")
+            .bind(conversation_id)
+            .bind(user_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| classify(&error))?;
+        append_delete_change(
+            &mut transaction,
+            user_id,
+            "conversation",
+            conversation_id,
+            version,
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| classify(&error))?;
+        Ok(DeleteConversationOutcome::Deleted)
     }
 
     /// Returns the ordered message history only when the conversation belongs
@@ -3958,11 +4062,13 @@ async fn owns_active_conversation(
     user_id: Uuid,
     conversation_id: Uuid,
 ) -> Result<bool, StorageError> {
+    // Keep the conversation alive through enqueue without blocking ordinary metadata updates.
     sqlx::query_scalar::<_, bool>(
         "\
         SELECT EXISTS(
             SELECT 1 FROM conversations
             WHERE id = $1 AND user_id = $2 AND status = 'active'
+            FOR KEY SHARE
         )",
     )
     .bind(conversation_id)
