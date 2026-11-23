@@ -713,7 +713,7 @@ impl Database {
         Ok(true)
     }
 
-    /// Requeues one failed analysis or creates a missing job for one explicit retry.
+    /// Enqueues an explicit retry of a missing, failed, or non-actionable review.
     ///
     /// # Errors
     ///
@@ -746,7 +746,9 @@ impl Database {
              ON CONFLICT (source_id, conversation_key) DO UPDATE
              SET state = 'queued', attempt_count = 0, error_code = NULL
              WHERE project_inflow_analyses.user_id = $1 AND project_inflow_analyses.project_id = $2
-               AND project_inflow_analyses.state = 'failed'
+               AND (project_inflow_analyses.state = 'failed'
+                    OR (project_inflow_analyses.state = 'ready'
+                        AND project_inflow_analyses.classification <> 'new_task'))
              RETURNING id, version",
         );
         let row = sqlx::query_as::<_, (Uuid, i64)>(query)

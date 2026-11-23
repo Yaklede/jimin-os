@@ -11539,6 +11539,26 @@ async fn chat_attention_keeps_unread_conversations_despite_history_and_automatio
     assert!(visible.iter().any(|item| item.id == new_after_dismissal));
     let new = visible.iter().find(|item| item.id == new_request).unwrap();
     assert!(new.promoted_task_id.is_none());
+    let refreshing_reply = Uuid::now_v7();
+    sqlx::query("INSERT INTO project_inflow_items(id,user_id,project_id,source_id,provider_message_name,provider_thread_name,content_text,received_at,promoted_task_id) VALUES($1,$2,$3,$4,'spaces/attention/messages/refreshing','spaces/attention/threads/completed','추가 문맥',TIMESTAMPTZ '2026-10-03',$5)")
+        .bind(refreshing_reply).bind(user).bind(project.id).bind(source).bind(closed)
+        .execute(&pool).await.unwrap();
+    sqlx::query("UPDATE project_inflow_analyses SET representative_item_id=$2,source_revision=2,state='queued' WHERE id=$1")
+        .bind(ready_id).bind(refreshing_reply).execute(&pool).await.unwrap();
+    let refreshing = db.pending_project_inflow_for_user(user).await.unwrap();
+    assert!(
+        refreshing
+            .iter()
+            .any(|row| row.id == refreshing_reply && row.promoted_task_id.is_none())
+    );
+    let retained = db
+        .project_inflow_analyses_for_items(user, &[refreshing_reply])
+        .await
+        .unwrap();
+    assert_eq!(retained[0].summary.as_deref(), Some("독립 업무"));
+    assert_eq!(retained[0].state, InflowAnalysisState::Queued);
+    sqlx::query("UPDATE project_inflow_analyses SET representative_item_id=$2,analyzed_revision=2,state='ready' WHERE id=$1")
+        .bind(ready_id).bind(new.id).execute(&pool).await.unwrap();
     let created = db
         .promote_project_inflow_item(&PromoteProjectInflowItem {
             user_id: user,
@@ -11547,8 +11567,8 @@ async fn chat_attention_keeps_unread_conversations_despite_history_and_automatio
             expected_version: new.version,
             analysis_id: ready_id,
             expected_representative_item_id: new.id,
-            expected_source_revision: 1,
-            expected_analyzed_revision: 1,
+            expected_source_revision: 2,
+            expected_analyzed_revision: 2,
             task_id: Uuid::now_v7(),
             title: "별개 신규 업무".to_owned(),
             notes: None,

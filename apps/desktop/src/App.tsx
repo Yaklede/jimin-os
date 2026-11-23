@@ -1698,11 +1698,13 @@ export default function App() {
         const items = await withAuthenticatedSession((accessToken) =>
           fetchProjectTasks(apiBaseUrl, accessToken, projectId),
         );
-        setProjectTasks(items);
+        if (selectedProjectIdRef.current === projectId) setProjectTasks(items);
         return items;
       } catch {
-        setProjectTasks([]);
-        setProjectsError(copy.messages.projectsLoadNotice);
+        if (selectedProjectIdRef.current === projectId) {
+          setProjectTasks([]);
+          setProjectsError(copy.messages.projectsLoadNotice);
+        }
         return undefined;
       } finally {
         setProjectsLoading(false);
@@ -4686,13 +4688,10 @@ export default function App() {
           : current,
       );
       await loadHomeSnapshot();
-      if (selectedProjectId === item.projectId) {
+      if (selectedProjectIdRef.current === item.projectId) {
         await Promise.all([
           loadProjectTasks(item.projectId),
           loadProjectInflow(item.projectId),
-          selectedWorkspaceId
-            ? loadProjectsForWorkspace(selectedWorkspaceId, item.projectId)
-            : Promise.resolve(false),
         ]);
       }
     } catch (error) {

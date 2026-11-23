@@ -1161,7 +1161,9 @@ export function InflowItemRow({
           </ol>
         </details>
       )}
-      {dismissEditing ? null : existingTaskFollowUp && !analysisFailed ? (
+      {dismissEditing ? null : existingTaskFollowUp &&
+        !analysisFailed &&
+        !analysisStale ? (
         <div className="project-inflow-item__follow-up" role="group">
           <div>
             <strong>{copy.projects.inflowFollowUpTitle}</strong>
@@ -1317,15 +1319,19 @@ export function InflowItemRow({
         <div className="project-inflow-item__analysis-state" role="status">
           <p>{promotionProblem}</p>
           <div className="project-inflow-item__actions">
-            <button
-              className="primary-button focus-visible-control"
-              type="button"
-              disabled={saving}
-              onClick={() => void onRetryAnalysis(item)}
-            >
-              <RefreshCw aria-hidden="true" />
-              {copy.projects.inflowAnalysisRetry}
-            </button>
+            {(analysisStale ||
+              (analysisReady &&
+                item.analysisClassification !== "new_task")) && (
+              <button
+                className="primary-button focus-visible-control"
+                type="button"
+                disabled={saving}
+                onClick={() => void onRetryAnalysis(item)}
+              >
+                <RefreshCw aria-hidden="true" />
+                {copy.projects.inflowAnalysisRetry}
+              </button>
+            )}
             <button
               className="secondary-button focus-visible-control"
               type="button"

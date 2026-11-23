@@ -9,10 +9,12 @@ use sqlx::types::Json;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-// The current revision must explicitly classify this message as new work.
+// Preserve the last independent result across a refresh. Promotion and
+// notification separately require a ready and current revision.
 macro_rules! independent_inflow_candidate {
-    () => {
-        "EXISTS (
+    ($after:literal) => {
+        concat!(
+            "EXISTS (
             SELECT 1 FROM project_inflow_analyses AS current_analysis
             WHERE current_analysis.user_id = item.user_id
               AND current_analysis.project_id = item.project_id
@@ -22,10 +24,15 @@ macro_rules! independent_inflow_candidate {
                   'message:' || item.provider_message_name
               )
               AND current_analysis.representative_item_id = item.id
-              AND current_analysis.state = 'ready'
-              AND current_analysis.analyzed_revision = current_analysis.source_revision
               AND current_analysis.classification = 'new_task'
+              AND ((current_analysis.state = 'ready'
+                    AND current_analysis.analyzed_revision = current_analysis.source_revision)
+                OR (current_analysis.analyzed_revision < current_analysis.source_revision
+                    AND current_analysis.analyzed_at > ",
+            $after,
+            "))
         )"
+        )
     };
 }
 pub(crate) use independent_inflow_candidate;
@@ -63,7 +70,7 @@ macro_rules! google_chat_attention_query {
                 AND accepted.received_at > COALESCE(decision.reviewed_at, decision.updated_at)
           )
           AND NOT (item.received_at > COALESCE(decision.reviewed_at, decision.updated_at) AND ",
-            $crate::google_chat::independent_inflow_candidate!(),
+            $crate::google_chat::independent_inflow_candidate!("COALESCE(decision.reviewed_at, decision.updated_at)"),
             ")
     ) AND NOT EXISTS (
         SELECT 1 FROM tasks AS task
@@ -77,7 +84,7 @@ macro_rules! google_chat_attention_query {
           ))
           AND NOT (task.status = 'completed' AND task.completed_at IS NOT NULL
               AND item.received_at > task.completed_at AND ",
-            $crate::google_chat::independent_inflow_candidate!(),
+            $crate::google_chat::independent_inflow_candidate!("task.completed_at"),
             ")
     ) ",
             $after
@@ -125,7 +132,7 @@ const PROJECT_INFLOW_REVIEW_QUERY: &str = google_chat_attention_query!(
         FROM conversation_state
      ), page AS (
         SELECT id, ROW_NUMBER() OVER (
-        PARTITION BY needs_review
+            PARTITION BY needs_review
             ORDER BY message_position, latest DESC, id DESC
         ) AS page_position
         FROM message_order
@@ -155,9 +162,9 @@ const PROJECT_INFLOW_REVIEW_QUERY: &str = google_chat_attention_query!(
             SELECT 1 FROM tasks AS previous
             WHERE previous.id = item.promoted_task_id AND previous.user_id = item.user_id
               AND previous.status = 'completed' AND previous.completed_at < item.received_at
-        ) AND ",
-        independent_inflow_candidate!(),
-        " THEN NULL ELSE item.promoted_task_id END AS promoted_task_id,
+              AND ",
+        independent_inflow_candidate!("previous.completed_at"),
+        ") THEN NULL ELSE item.promoted_task_id END AS promoted_task_id,
         item.acknowledged_at, item.reviewed_at, item.dismissal_reason,
         (SELECT CASE WHEN reply.sent_at IS NOT NULL THEN 'sent'
             WHEN reply.error_code IS NOT NULL THEN 'failed' ELSE 'pending' END
@@ -1270,15 +1277,19 @@ impl Database {
                     provider_message_name: message.provider_message_name.clone(),
                 });
             } else if message.sender_provider_name.is_some() || message.sender_name.is_some() {
-                let repaired = sqlx::query_as::<_, (Uuid, i64)>(
-                    "UPDATE project_inflow_items
+                let repaired = sqlx::query_as::<_, (Uuid, i64, bool)>(concat!(
+                    "UPDATE project_inflow_items AS decision
                      SET sender_provider_name = COALESCE(sender_provider_name, $3),
-                         sender_name = COALESCE(sender_name, $4)
+                         sender_name = COALESCE(sender_name, $4),
+                         reviewed_at = CASE WHEN ",
+                    manual_inflow_dismissal!(),
+                    "
+                           THEN COALESCE(reviewed_at, updated_at) ELSE reviewed_at END
                      WHERE source_id = $1 AND provider_message_name = $2
                        AND ((sender_provider_name IS NULL AND $3::TEXT IS NOT NULL)
                          OR (sender_name IS NULL AND $4::TEXT IS NOT NULL))
-                     RETURNING id, version",
-                )
+                     RETURNING id, version, status = 'pending'"
+                ))
                 .bind(connection.source_id)
                 .bind(&message.provider_message_name)
                 .bind(&message.sender_provider_name)
@@ -1286,7 +1297,7 @@ impl Database {
                 .fetch_optional(&mut *transaction)
                 .await
                 .map_err(classify)?;
-                if let Some((inflow_id, version)) = repaired {
+                if let Some((inflow_id, version, reanalyze)) = repaired {
                     append_change(
                         &mut transaction,
                         connection.user_id,
@@ -1295,15 +1306,17 @@ impl Database {
                         version,
                     )
                     .await?;
-                    queue_inflow_analysis_in_transaction(
-                        &mut transaction,
-                        connection.user_id,
-                        connection.project_id,
-                        connection.source_id,
-                        &inflow_conversation_key(message),
-                        inflow_id,
-                    )
-                    .await?;
+                    if reanalyze {
+                        queue_inflow_analysis_in_transaction(
+                            &mut transaction,
+                            connection.user_id,
+                            connection.project_id,
+                            connection.source_id,
+                            &inflow_conversation_key(message),
+                            inflow_id,
+                        )
+                        .await?;
+                    }
                 }
             }
         }
