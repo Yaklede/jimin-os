@@ -2117,7 +2117,10 @@ export default function App() {
             setProjectTasks(synchronized.synchronizedProjectTasks);
           }
         }
-        await homeRefresh;
+        if (!(await homeRefresh)) {
+          // Keep the sync cursor replayable when Home could not load.
+          throw new Error("Home projection could not be refreshed");
+        }
       }
 
       if (affectsDecisions) {
