@@ -142,6 +142,9 @@ export function useCalendarTaskPreview(
         close();
     }
     function onScroll(event: Event) {
+      // Selecting a date can reposition the calendar on Android. A fixed
+      // touch preview stays open without depending on its trigger's position.
+      if (pinned) return;
       if (event.target instanceof Node && panel.current?.contains(event.target))
         return;
       close();
@@ -156,7 +159,7 @@ export function useCalendarTaskPreview(
       document.removeEventListener("pointermove", trackPointer, true);
       window.removeEventListener("scroll", onScroll, true);
     };
-  }, [anchor, close, closeAndRestore]);
+  }, [anchor, close, closeAndRestore, pinned]);
 
   useLayoutEffect(() => {
     if (!anchor || !pinned) return;
