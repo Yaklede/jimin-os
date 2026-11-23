@@ -28,9 +28,17 @@ macro_rules! independent_inflow_candidate {
               AND ((current_analysis.state = 'ready'
                     AND current_analysis.analyzed_revision = current_analysis.source_revision)
                 OR (current_analysis.analyzed_revision < current_analysis.source_revision
-                    AND current_analysis.analyzed_at > ",
+                    AND EXISTS (
+                        SELECT 1 FROM project_inflow_items AS evidence
+                        WHERE evidence.user_id = item.user_id AND evidence.project_id = item.project_id
+                          AND evidence.source_id = item.source_id
+                          AND evidence.provider_thread_name = item.provider_thread_name
+                          AND evidence.status = 'pending' AND evidence.reviewed_at IS NULL
+                          AND evidence.created_at <= current_analysis.analyzed_at
+                          AND (evidence.received_at, evidence.id) < (item.received_at, item.id)
+                          AND evidence.received_at > ",
             $after,
-            "))
+            ")))
         )"
         )
     };

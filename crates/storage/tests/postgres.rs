@@ -11683,6 +11683,41 @@ async fn chat_attention_keeps_unread_conversations_despite_history_and_automatio
             .any(|row| row.id == follow_up)
     );
 
+    let closed_while_running = Uuid::now_v7();
+    let only_routine_reply = Uuid::now_v7();
+    for (id, marker, status, received, reviewed) in [
+        (
+            closed_while_running,
+            "dismissed-while-running",
+            "dismissed",
+            "2026-10-01",
+            Some("2026-10-02"),
+        ),
+        (
+            only_routine_reply,
+            "routine-only",
+            "pending",
+            "2026-10-03",
+            None,
+        ),
+    ] {
+        sqlx::query("INSERT INTO project_inflow_items(id,user_id,project_id,source_id,provider_message_name,provider_thread_name,content_text,status,received_at,reviewed_at) VALUES($1,$2,$3,$4,$5,'spaces/attention/threads/late-result','테스트 대화',$6,$7::text::timestamptz,$8::text::timestamptz)")
+            .bind(id).bind(user).bind(project.id).bind(source)
+            .bind(format!("spaces/attention/messages/{marker}")).bind(status).bind(received).bind(reviewed)
+            .execute(&pool).await.unwrap();
+    }
+    sqlx::query("INSERT INTO project_inflow_analyses (id,user_id,project_id,source_id,conversation_key,representative_item_id,state,classification,confidence,summary,suggested_task_title,suggested_action_items,suggested_completion_criteria,suggested_priority,source_revision,analyzed_revision,analyzed_at)
+        VALUES ($1,$2,$3,$4,'thread:spaces/attention/threads/late-result',$5,'queued','new_task',90,'제외된 분석','이전 업무',ARRAY['이전 검증을 진행한다'],'결과 전달',1,2,1,TIMESTAMPTZ '2026-10-02 21:00:00Z')")
+        .bind(Uuid::now_v7()).bind(user).bind(project.id).bind(source).bind(only_routine_reply)
+        .execute(&pool).await.unwrap();
+    assert!(
+        !db.pending_project_inflow_for_user(user)
+            .await
+            .unwrap()
+            .iter()
+            .any(|row| row.id == only_routine_reply)
+    );
+
     // A retry that waits for the row lock must observe the new review decision.
     let mut review = pool.begin().await.unwrap();
     sqlx::query(

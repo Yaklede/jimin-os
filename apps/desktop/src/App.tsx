@@ -673,6 +673,8 @@ export default function App() {
         if (homeRequestGateRef.current.isCurrent(requestGeneration)) {
           setHomeSnapshot(snapshot);
           setDecisionInflowItems(snapshot.inflow);
+        } else if (options?.background) {
+          return undefined;
         }
         return snapshot;
       } catch {

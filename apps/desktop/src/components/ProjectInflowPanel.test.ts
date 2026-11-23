@@ -239,6 +239,7 @@ describe("project inflow deadline", () => {
     const markup = renderPanel({
       items: [
         inflowItem("stale", {
+          analysisStatus: "stale",
           sourceRevision: 3,
           analyzedRevision: 2,
         }),
@@ -251,6 +252,21 @@ describe("project inflow deadline", () => {
     expect(projectInflowPromotionProblem("missing_context")).toBe(
       copy.projects.inflowPromotionContextMissing,
     );
+  });
+
+  it("keeps the previous summary without offering a duplicate retry during refresh", () => {
+    const markup = renderPanel({
+      items: [
+        inflowItem("refresh", {
+          analysisStatus: "refreshing",
+          analysisSummary: "기존 분석 결과",
+          sourceRevision: 3,
+          analyzedRevision: 2,
+        }),
+      ],
+    });
+    expect(markup).toContain("기존 분석 결과");
+    expect(markup).not.toContain(copy.projects.inflowAnalysisRetry);
   });
 
   it("keeps fetched reference evidence collapsed and read-only", () => {
