@@ -14,11 +14,13 @@ export function InflowRecoveryPanel({
   saving,
   onRetry,
   onOpenTask,
+  defaultExpanded = false,
 }: {
   items: ProjectInflowItem[];
   saving: boolean;
   onRetry(item: ProjectInflowItem): Promise<void>;
   onOpenTask?(id: string): Promise<void>;
+  defaultExpanded?: boolean;
 }) {
   const recovery = inflowRecoveryItems(items);
   const [busyId, setBusyId] = useState<string>();
@@ -44,7 +46,7 @@ export function InflowRecoveryPanel({
     }
   }
   return (
-    <details className="inflow-recovery">
+    <details className="inflow-recovery" open={defaultExpanded || undefined}>
       <summary ref={summaryRef} className="focus-visible-control">
         <span>
           <strong>{text.title}</strong>

@@ -32,12 +32,8 @@ import type { TaskWorkKind } from "../api/planning";
 import { copy } from "../copy";
 import { chatRoutingCopy as routingCopy } from "../copy/chatRouting";
 import "./chatRouting.css";
-import { inflowRecoveryCopy } from "../copy/inflowRecovery";
-import {
-  canRetryInflowDelivery,
-  inflowDeliveryHelp,
-} from "../inflowDeliveryState";
-import { InflowDeliveryStatus } from "./InflowDeliveryStatus";
+import { deliveryAttentionCopy } from "../copy/deliveryAttention";
+import { inflowNeedsDeliveryAttention } from "../inflowDeliveryState";
 import { reviewedAssignmentPreview } from "../assignmentPreview";
 import { itsmSyncCandidates } from "../itsmSync";
 import "./assignmentPreview.css";
@@ -93,7 +89,7 @@ type ProjectInflowPanelProps = {
     input?: { reason?: string; replyToSource?: boolean; markSeen?: boolean },
   ): Promise<void>;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
-  onRetryCompletion(item: ProjectInflowItem): Promise<void>;
+  onOpenDeliveryHistory?(): void;
   onReviewChange?(item: ProjectInflowItem): void;
   onOpenTask(taskId: string): void;
 };
@@ -159,7 +155,7 @@ export function ProjectInflowPanel({
   onPromote,
   onDismiss,
   onRetryAnalysis,
-  onRetryCompletion,
+  onOpenDeliveryHistory,
   onReviewChange,
   onOpenTask,
 }: ProjectInflowPanelProps) {
@@ -460,7 +456,7 @@ export function ProjectInflowPanel({
                 onPromote={onPromote}
                 onDismiss={onDismiss}
                 onRetryAnalysis={onRetryAnalysis}
-                onRetryCompletion={onRetryCompletion}
+                onOpenDeliveryHistory={onOpenDeliveryHistory}
                 onReviewChange={onReviewChange}
                 onOpenTask={onOpenTask}
               />
@@ -471,7 +467,7 @@ export function ProjectInflowPanel({
                 onPromote={onPromote}
                 onDismiss={onDismiss}
                 onRetryAnalysis={onRetryAnalysis}
-                onRetryCompletion={onRetryCompletion}
+                onOpenDeliveryHistory={onOpenDeliveryHistory}
                 onReviewChange={onReviewChange}
                 onOpenTask={onOpenTask}
               />
@@ -488,7 +484,7 @@ export function ProjectInflowPanel({
                     onPromote={onPromote}
                     onDismiss={onDismiss}
                     onRetryAnalysis={onRetryAnalysis}
-                    onRetryCompletion={onRetryCompletion}
+                    onOpenDeliveryHistory={onOpenDeliveryHistory}
                     onReviewChange={onReviewChange}
                     onOpenTask={onOpenTask}
                   />
@@ -515,7 +511,7 @@ export function ProjectInflowPanel({
                     onPromote={onPromote}
                     onDismiss={onDismiss}
                     onRetryAnalysis={onRetryAnalysis}
-                    onRetryCompletion={onRetryCompletion}
+                    onOpenDeliveryHistory={onOpenDeliveryHistory}
                     onReviewChange={onReviewChange}
                     onOpenTask={onOpenTask}
                     hideHeading
@@ -582,7 +578,7 @@ export function InflowItemList({
   onPromote,
   onDismiss,
   onRetryAnalysis,
-  onRetryCompletion,
+  onOpenDeliveryHistory,
   onReviewChange,
   onOpenTask,
   hideHeading = false,
@@ -596,7 +592,7 @@ export function InflowItemList({
     input?: { reason?: string; replyToSource?: boolean; markSeen?: boolean },
   ): Promise<void>;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
-  onRetryCompletion(item: ProjectInflowItem): Promise<void>;
+  onOpenDeliveryHistory?(): void;
   onReviewChange?(item: ProjectInflowItem): void;
   onOpenTask(taskId: string): void;
   hideHeading?: boolean;
@@ -619,7 +615,7 @@ export function InflowItemList({
             onPromote={onPromote}
             onDismiss={onDismiss}
             onRetryAnalysis={onRetryAnalysis}
-            onRetryCompletion={onRetryCompletion}
+            onOpenDeliveryHistory={onOpenDeliveryHistory}
             onReviewChange={onReviewChange}
             onOpenTask={onOpenTask}
           />
@@ -635,7 +631,7 @@ export function InflowItemRow({
   onPromote,
   onDismiss,
   onRetryAnalysis,
-  onRetryCompletion,
+  onOpenDeliveryHistory,
   onReviewChange,
   onOpenTask,
   inlinePromotion = false,
@@ -648,7 +644,7 @@ export function InflowItemRow({
     input?: { reason?: string; replyToSource?: boolean; markSeen?: boolean },
   ): Promise<void>;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
-  onRetryCompletion(item: ProjectInflowItem): Promise<void>;
+  onOpenDeliveryHistory?(): void;
   onReviewChange?(item: ProjectInflowItem): void;
   onOpenTask?(taskId: string): void;
   inlinePromotion?: boolean;
@@ -670,20 +666,6 @@ export function InflowItemRow({
   const [replyToSource, setReplyToSource] = useState(false);
   const [dismissing, setDismissing] = useState(false);
   const [dismissError, setDismissError] = useState<string>();
-  const [retryingDelivery, setRetryingDelivery] = useState(false);
-  const [deliveryError, setDeliveryError] = useState<string>();
-  async function retryDelivery() {
-    if (saving || retryingDelivery) return;
-    setRetryingDelivery(true);
-    setDeliveryError(undefined);
-    try {
-      await onRetryCompletion(item);
-    } catch {
-      setDeliveryError(inflowRecoveryCopy.requestFailed);
-    } finally {
-      setRetryingDelivery(false);
-    }
-  }
   const messages = item.messages ?? [
     {
       senderName: item.senderName,
@@ -1218,55 +1200,19 @@ export function InflowItemRow({
               ? copy.projects.inflowPromoted
               : copy.projects.inflowDismissed}
           </strong>
-          {item.status === "promoted" && (
-            <>
-              <p>
-                {item.completionStatus === "sent"
-                  ? copy.projects.inflowCompletionSent
-                  : item.completionStatus === "failed"
-                    ? copy.projects.inflowCompletionRetrying
-                    : copy.projects.inflowCompletionPending}
-              </p>
-              <InflowDeliveryStatus item={item} />
-              {canRetryInflowDelivery(item) && (
-                <button
-                  className="secondary-button focus-visible-control"
-                  type="button"
-                  disabled={saving || retryingDelivery}
-                  onClick={() => void retryDelivery()}
-                >
-                  <RefreshCw aria-hidden="true" />
-                  {retryingDelivery
-                    ? inflowRecoveryCopy.retrying
-                    : inflowRecoveryCopy.retry}
-                </button>
-              )}
-            </>
-          )}
           {item.dismissalReason && (
             <p>
               {copy.projects.inflowDismissReason}: {item.dismissalReason}
             </p>
           )}
-          {item.dismissalReplyStatus && <InflowDeliveryStatus item={item} />}
-          {item.dismissalReplyStatus === "failed" && (
+          {onOpenDeliveryHistory && inflowNeedsDeliveryAttention(item) && (
             <button
-              className="secondary-button focus-visible-control"
+              className="text-button focus-visible-control"
               type="button"
-              disabled={saving || retryingDelivery}
-              onClick={() => void retryDelivery()}
+              onClick={onOpenDeliveryHistory}
             >
-              <RefreshCw aria-hidden="true" />{" "}
-              {retryingDelivery
-                ? inflowRecoveryCopy.retrying
-                : inflowRecoveryCopy.retryDismissal}
+              {deliveryAttentionCopy.openHistory}
             </button>
-          )}
-          {canRetryInflowDelivery(item) && <p>{inflowDeliveryHelp(item)}</p>}
-          {deliveryError && (
-            <p className="inline-alert" role="alert">
-              {deliveryError}
-            </p>
           )}
         </div>
       ) : analysisFailed && !editing ? (

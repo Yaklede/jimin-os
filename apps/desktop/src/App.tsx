@@ -15,7 +15,6 @@ import {
   saveShortcuts,
   type Shortcuts,
 } from "./keyboardShortcuts";
-import { conversationHistoryCopy } from "./copy/conversationHistory";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -89,6 +88,8 @@ import {
   deleteProject,
   fetchProjects,
   fetchProjectTasks,
+  fetchProjectCompletedTasks,
+  type ProjectCompletedQuery,
   fetchWeeklyReport,
   fetchReportEvidence,
   fetchWeeklyReportHistory,
@@ -132,7 +133,6 @@ import {
   deleteProjectWebhook,
   fetchProjectWebhooks,
   fetchWebhookDeliveries,
-  retryWebhookDelivery,
   testProjectWebhook,
   updateProjectWebhook,
   type ManagedWebhookProvider,
@@ -198,6 +198,7 @@ import {
 } from "./api/agent";
 import { assistantResponseAfterLatestRequest } from "./components/conversationResponse";
 import { HomeWorkspace } from "./components/HomeWorkspace";
+import type { HomeChatDraft } from "./components/HomeChatEntry";
 import { CompletionReviewPanel } from "./components/CompletionReviewPanel";
 import { type PromoteGmailInflowInput } from "./components/GmailInflowReview";
 import { OsShell, type OsDestination } from "./components/OsShell";
@@ -218,6 +219,7 @@ import {
 } from "./device-signals";
 import {
   conversationIdForRequest,
+  freshHomeRequest,
   mergeCreatedConversation,
   type ConversationSendOptions,
 } from "./conversationRouting";
@@ -267,9 +269,12 @@ import {
   type ReminderSyncStatus,
 } from "./local-notifications";
 import { WorkspaceRouteBoundary } from "./components/WorkspaceRouteBoundary";
-import { DeliveryRecoveryPanel } from "./components/DeliveryRecoveryPanel";
-import { InflowRecoveryPanel } from "./components/InflowRecoveryPanel";
-import { canRetryInflowDelivery } from "./inflowDeliveryState";
+import {
+  DeliveryFeedback,
+  type DeliveryNotice,
+} from "./components/DeliveryAttention";
+import { inflowFailureKey, manualDeliveryFailures } from "./deliveryAttention";
+import { deliveryAttentionCopy } from "./copy/deliveryAttention";
 import {
   markInflowSeenBatch,
   reconcileInflowSeenBatch,
@@ -346,9 +351,21 @@ export default function App() {
     [],
   );
   const [homeChatOpen, setHomeChatOpen] = useState(false);
+  const [deliveryNotice, setDeliveryNotice] = useState<DeliveryNotice>();
+  const [deliveryWatchStarted, setDeliveryWatchStarted] = useState<number>();
+  const [recoveryEntry, setRecoveryEntry] = useState(0);
+  const knownDeliveryFailures = useRef<ReadonlySet<string> | undefined>(
+    undefined,
+  );
+  const reportedInflowFailures = useRef(new Set<string>());
   const homeChatVisible = destination === "home" && homeChatOpen;
+  const [homeChatDraft, setHomeChatDraft] = useState<HomeChatDraft>({ text: "" });
+  const [chatHistoryView, setChatHistoryView] = useState<"list" | "thread">();
+  const [chatHistoryJobs, setChatHistoryJobs] = useState<ConversationJobs>({});
   const homeChatEntryGenerationRef = useRef(0);
-  const restoreHomeFocusRef = useRef(false);
+  const restoreHomeFocusRef = useRef<"overview" | "history" | undefined>(
+    undefined,
+  );
   const navigationHistoryRef = useRef<OsDestination[]>([]);
   const calendarNavigationIntentRef = useRef<
     CalendarNavigationIntent | undefined
@@ -414,8 +431,9 @@ export default function App() {
   selectedWorkspaceIdRef.current = selectedWorkspaceId;
   const selectedProjectIdRef = useRef(selectedProjectId);
   selectedProjectIdRef.current = selectedProjectId;
-  const [highlightedProjectTaskId, setHighlightedProjectTaskId] =
-    useState<string>();
+  const [highlightedProjectTask, setHighlightedProjectTaskId] =
+    useState<Pick<Task, "id" | "status">>();
+  const [completedHistoryRevision, setCompletedHistoryRevision] = useState(0);
   const [highlightedProjectInflowId, setHighlightedProjectInflowId] =
     useState<string>();
   const [highlightedScheduleId, setHighlightedScheduleId] = useState<string>();
@@ -452,9 +470,6 @@ export default function App() {
   const [selectedConversationId, setSelectedConversationId] = useState<
     string | undefined
   >(undefined);
-  const [homeConversationId, setHomeConversationId] = useState<
-    string | undefined
-  >(undefined);
   const [assistantDraft, setAssistantDraft] = useState<
     AssistantDraft | undefined
   >(undefined);
@@ -462,7 +477,6 @@ export default function App() {
     ConversationMessage[]
   >([]);
   const [conversationLoading, setConversationLoading] = useState(false);
-  const [homeConversationStarting, setHomeConversationStarting] = useState(false);
   const [conversationError, setConversationError] = useState<
     string | undefined
   >(undefined);
@@ -523,9 +537,12 @@ export default function App() {
     useState<NativeCallLogPermission>();
   const [deviceSignalsLoading, setDeviceSignalsLoading] = useState(false);
   const [deviceSignalsError, setDeviceSignalsError] = useState<string>();
-  const pendingConversationId = useRef<string | undefined>(undefined);
-  const homeConversationDetachedRef = useRef(false);
-  const homeConversationStartingRef = useRef(false);
+  const pendingFirstConversation = useRef<{
+    messageId: string;
+    id: string;
+    created: boolean;
+  } | undefined>(undefined);
+  const historyJobRequestsRef = useRef(new Set<string>());
   const selectedConversationIdRef = useRef<string | undefined>(undefined);
   const conversationListRequestGateRef = useRef(new LatestRequestGate());
   const conversationMessageRequestGateRef = useRef(new LatestRequestGate());
@@ -565,11 +582,6 @@ export default function App() {
   const acceptConversationList = useCallback(
     (next: Conversation[]) => {
       setConversations(next);
-      setHomeConversationId((current) =>
-        next.some((item) => item.id === current && item.surface === "home")
-          ? current
-          : undefined,
-      );
       const selected = selectedConversationIdRef.current;
       if (selected && !next.some((item) => item.id === selected)) {
         setCurrentConversationId(undefined);
@@ -683,16 +695,18 @@ export default function App() {
   }, [acceptConversationList, apiBaseUrl, tokens, withAuthenticatedSession]);
 
   const loadHomeSnapshot = useCallback(
-    async (options?: { background?: boolean }) => {
+    async (options?: { background?: boolean; quiet?: boolean }) => {
       if (!tokens) return undefined;
       const requestGeneration = homeRequestGateRef.current.begin();
       if (!options?.background) setHomeLoading(true);
-      setHomeError(undefined);
+      if (!options?.quiet) setHomeError(undefined);
       try {
         const [from, to] = currentLocalDayRange();
-        await withAuthenticatedSession((accessToken) =>
-          refreshWorkBrief(apiBaseUrl, accessToken),
-        ).catch(() => undefined);
+        if (!options?.quiet) {
+          await withAuthenticatedSession((accessToken) =>
+            refreshWorkBrief(apiBaseUrl, accessToken),
+          ).catch(() => undefined);
+        }
         const snapshot = await withAuthenticatedSession((accessToken) =>
           fetchHomeSnapshot(apiBaseUrl, accessToken, from, to),
         );
@@ -704,7 +718,10 @@ export default function App() {
         }
         return snapshot;
       } catch {
-        if (homeRequestGateRef.current.isCurrent(requestGeneration))
+        if (
+          !options?.quiet &&
+          homeRequestGateRef.current.isCurrent(requestGeneration)
+        )
           setHomeError(copy.messages.homeLoadNotice);
         return undefined;
       } finally {
@@ -714,6 +731,74 @@ export default function App() {
     },
     [apiBaseUrl, tokens, withAuthenticatedSession],
   );
+
+  const manualFailures = useMemo(
+    () => manualDeliveryFailures(homeSnapshot),
+    [homeSnapshot],
+  );
+  useEffect(() => {
+    if (!homeSnapshot) return;
+    const prior = knownDeliveryFailures.current;
+    knownDeliveryFailures.current = manualFailures;
+    const newlyFailed =
+      prior &&
+      [...manualFailures].some(
+        (key) => !prior.has(key) && !reportedInflowFailures.current.has(key),
+      );
+    for (const key of manualFailures) reportedInflowFailures.current.delete(key);
+    if (
+      newlyFailed &&
+      deliveryWatchStarted !== undefined &&
+      Date.now() - deliveryWatchStarted <= 90_000 &&
+      document.visibilityState === "visible" &&
+      destination !== "decisions"
+    ) {
+      setDeliveryNotice({
+        message: deliveryAttentionCopy.recentNotice,
+        failed: true,
+      });
+    }
+  }, [deliveryWatchStarted, destination, homeSnapshot, manualFailures]);
+
+  useEffect(() => {
+    if (!tokens || deliveryWatchStarted === undefined) return;
+    // Delivery workers finish independently of the save response and may not emit a sync event.
+    const timers = [3_000, 12_000, 35_000, 85_000].map((delay) =>
+      window.setTimeout(() => {
+        if (document.visibilityState === "visible")
+          void loadHomeSnapshot({ background: true, quiet: true });
+      }, delay),
+    );
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [deliveryWatchStarted, loadHomeSnapshot, tokens]);
+
+  useEffect(() => {
+    if (!deliveryNotice) return;
+    const timer = window.setTimeout(
+      () => setDeliveryNotice(undefined),
+      deliveryNotice.failed ? 12_000 : 6_000,
+    );
+    return () => window.clearTimeout(timer);
+  }, [deliveryNotice]);
+
+  function openDeliveryHistory() {
+    setDeliveryNotice(undefined);
+    navigate("decisions", { openDeliveryRecovery: true });
+  }
+
+  function showInflowDeliveryFailure(item: ProjectInflowItem): boolean {
+    const key = inflowFailureKey(item);
+    if (!key) return false;
+    reportedInflowFailures.current.add(key);
+    setDeliveryNotice({
+      message:
+        item.status === "dismissed"
+          ? deliveryAttentionCopy.dismissedNotice
+          : deliveryAttentionCopy.promotedNotice,
+      failed: true,
+    });
+    return true;
+  }
 
   const loadDecisionItsmCandidates = useCallback(async () => {
     if (!tokens) return { items: [], partialFailure: false };
@@ -1741,6 +1826,14 @@ export default function App() {
     [apiBaseUrl, tokens, withAuthenticatedSession],
   );
 
+  const loadProjectCompletedTasks = useCallback(
+    (projectId: string, query: ProjectCompletedQuery, signal: AbortSignal) =>
+      withAuthenticatedSession((accessToken) =>
+        fetchProjectCompletedTasks(apiBaseUrl, accessToken, projectId, query, signal),
+      ),
+    [apiBaseUrl, withAuthenticatedSession],
+  );
+
   const loadProjectReports = useCallback(
     async (workspaceId: string, projectId: string) => {
       if (!tokens) return undefined;
@@ -2041,6 +2134,8 @@ export default function App() {
   const refreshSynchronizedProjections = useCallback(
     async (changes: SyncChange[], forceFull = false): Promise<void> => {
       const entityTypes = new Set(changes.map((change) => change.entityType));
+      if (forceFull || entityTypes.has("task"))
+        setCompletedHistoryRevision((current) => current + 1);
       if (forceFull || entityTypes.has("task_completion_review"))
         window.dispatchEvent(new Event("completion-reviews-changed"));
       const affectsWork =
@@ -2270,6 +2365,14 @@ export default function App() {
       activeSessionRef.current = undefined;
       setTokens(undefined);
       setHomeChatOpen(false);
+      setDeliveryNotice(undefined);
+      setDeliveryWatchStarted(undefined);
+      setRecoveryEntry(0);
+      knownDeliveryFailures.current = undefined;
+      reportedInflowFailures.current.clear();
+      setHomeChatDraft({ text: "" });
+      setChatHistoryView(undefined);
+      setChatHistoryJobs({});
       homeChatEntryGenerationRef.current += 1;
       setConversations([]);
       setHomeSnapshot(undefined);
@@ -2304,7 +2407,6 @@ export default function App() {
       setGoalsError(undefined);
       setConversationMessages([]);
       setCurrentConversationId(undefined);
-      setHomeConversationId(undefined);
       setAssistantDraft(undefined);
       setConversationJobs({});
       setAgentAuthentication(undefined);
@@ -2329,9 +2431,8 @@ export default function App() {
       setReminderSyncStatus("idle");
       setReminderSyncError(undefined);
       setRemoteReminderStatus("idle");
-      pendingConversationId.current = undefined;
-      homeConversationDetachedRef.current = false;
-      homeConversationStartingRef.current = false;
+      pendingFirstConversation.current = undefined;
+      historyJobRequestsRef.current.clear();
       conversationListRequestGateRef.current.invalidate();
       conversationMessageRequestGateRef.current.invalidate();
       gmailInflowRequestGateRef.current.invalidate();
@@ -2384,33 +2485,6 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
-
-  useEffect(() => {
-    if (!tokens || homeConversationDetachedRef.current) return;
-    const durableHome = conversations.find(
-      (conversation) => conversation.surface === "home",
-    );
-    if (!durableHome) return;
-    if (durableHome.id !== homeConversationId) {
-      setHomeConversationId(durableHome.id);
-    }
-    if (destination !== "home" || homeChatVisible) return;
-    if (selectedConversationId === durableHome.id) return;
-    setCurrentConversationId(durableHome.id);
-    setConversationMessages([]);
-    void Promise.all([
-      loadConversationMessages(durableHome.id),
-      restoreConversationJob(durableHome.id),
-    ]);
-  }, [
-    conversations,
-    destination,
-    homeChatVisible,
-    homeConversationId,
-    loadConversationMessages,
-    selectedConversationId,
-    tokens,
-  ]);
 
   useEffect(() => {
     if (!tokens || mode !== "ready") return;
@@ -3139,17 +3213,68 @@ export default function App() {
 
   function selectConversation(conversationId: string) {
     if (destination === "home") {
-      homeChatEntryGenerationRef.current += 1;
       setHomeChatOpen(true);
     } else if (destination !== "chat") {
       navigate("chat");
+    } else if (chatHistoryView === "list") {
+      setChatHistoryView("thread");
     }
     if (selectedConversationIdRef.current === conversationId) return;
+    homeChatEntryGenerationRef.current += 1;
     setAssistantDraft(undefined);
     setCurrentConversationId(conversationId);
     setConversationMessages([]);
     void loadConversationMessages(conversationId);
     void restoreConversationJob(conversationId);
+  }
+
+  function hydrateConversationHistory() {
+    if (!tokens) return;
+    // Keep list metadata separate from jobs subscribed to transcript updates.
+    const recent = conversations
+      .filter((item) => item.title || item.lastMessageAt)
+      .slice(0, 8);
+    for (const item of recent) {
+      if (conversationJobs[item.id] || historyJobRequestsRef.current.has(item.id))
+        continue;
+      historyJobRequestsRef.current.add(item.id);
+      void withAuthenticatedSession((accessToken) =>
+        fetchLatestConversationJob(apiBaseUrl, accessToken, item.id),
+      )
+        .then((job) => {
+          if (job && activeSessionRef.current) {
+            setChatHistoryJobs((current) => ({ ...current, [item.id]: job }));
+          }
+        })
+        .catch(() => {
+          // A status lookup must not make the history list unavailable.
+        })
+        .finally(() => historyJobRequestsRef.current.delete(item.id));
+    }
+  }
+
+  function openConversationHistory() {
+    navigate("chat", { openChatHistory: true });
+    setAssistantDraft(undefined);
+    startConversation();
+    hydrateConversationHistory();
+  }
+
+  function backFromConversationHistory() {
+    homeChatEntryGenerationRef.current += 1;
+    setShortcutComposerFocus(false);
+    setAssistantDraft(undefined);
+    startConversation();
+    if (chatHistoryView === "thread") {
+      setChatHistoryView("list");
+      hydrateConversationHistory();
+      return;
+    }
+    setChatHistoryView(undefined);
+    if (navigationHistoryRef.current.at(-1) === "home")
+      navigationHistoryRef.current.pop();
+    restoreHomeFocusRef.current = "history";
+    setDestination("home");
   }
 
   async function restoreConversationJob(conversationId: string) {
@@ -3175,57 +3300,14 @@ export default function App() {
     setConversationMessages([]);
     setConversationLoading(false);
     setConversationError(undefined);
-    pendingConversationId.current = undefined;
   }
 
   async function startChatConversation(): Promise<boolean> {
-    if (homeChatVisible) return startHomeConversation();
+    homeChatEntryGenerationRef.current += 1;
+    if (chatHistoryView === "list") setChatHistoryView("thread");
     setAssistantDraft(undefined);
     startConversation();
     return true;
-  }
-
-  async function startHomeConversation(): Promise<boolean> {
-    if (!tokens || homeConversationStartingRef.current) return false;
-    homeConversationStartingRef.current = true;
-    setHomeConversationStarting(true);
-    homeConversationDetachedRef.current = true;
-    conversationListRequestGateRef.current.invalidate();
-    const entry = homeChatEntryGenerationRef.current;
-    setHomeConversationId(undefined);
-    setAssistantDraft(undefined);
-    startConversation();
-    try {
-      const clientConversationId = createUuidV7();
-      const conversation = await withAuthenticatedSession((accessToken) =>
-        createConversation(
-          apiBaseUrl,
-          accessToken,
-          clientConversationId,
-          null,
-          "home",
-          true,
-        ),
-      );
-      conversationListRequestGateRef.current.invalidate();
-      setConversations((current) => mergeCreatedConversation(current, conversation));
-      setHomeConversationId(conversation.id);
-      homeConversationDetachedRef.current = false;
-      if (
-        homeChatEntryGenerationRef.current === entry &&
-        !selectedConversationIdRef.current
-      ) {
-        setCurrentConversationId(conversation.id);
-      }
-      return true;
-    } catch {
-      if (homeChatEntryGenerationRef.current === entry)
-        setConversationError(conversationHistoryCopy.newProblem);
-      return false;
-    } finally {
-      homeConversationStartingRef.current = false;
-      setHomeConversationStarting(false);
-    }
   }
 
   async function removeConversation(conversationId: string): Promise<void> {
@@ -3235,9 +3317,6 @@ export default function App() {
     conversationListRequestGateRef.current.invalidate();
     setConversations((current) =>
       current.filter((item) => item.id !== conversationId),
-    );
-    setHomeConversationId((current) =>
-      current === conversationId ? undefined : current,
     );
     setConversationJobs((current) => {
       const next = { ...current };
@@ -3258,22 +3337,14 @@ export default function App() {
     homeChatEntryGenerationRef.current += 1;
     setHomeChatOpen(true);
     setAssistantDraft(undefined);
-    if (!homeConversationId) {
-      startConversation();
-      return;
-    }
-    if (selectedConversationId !== homeConversationId) {
-      setCurrentConversationId(homeConversationId);
-      setConversationMessages([]);
-      void loadConversationMessages(homeConversationId);
-    }
-    void restoreConversationJob(homeConversationId);
+    startConversation();
   }
 
   function returnToHomeOverview() {
     homeChatEntryGenerationRef.current += 1;
-    restoreHomeFocusRef.current = true;
+    restoreHomeFocusRef.current = "overview";
     setAssistantDraft(undefined);
+    startConversation();
     setHomeChatOpen(false);
   }
 
@@ -3282,6 +3353,7 @@ export default function App() {
       openHomeAssistant();
       setShortcutComposerFocus(true);
     } else if (destination === "chat") {
+      if (chatHistoryView === "list") setChatHistoryView("thread");
       setShortcutComposerFocus(true);
     } else {
       navigate("chat", { focusAssistant: true });
@@ -3347,11 +3419,7 @@ export default function App() {
         recommendation.rationale,
       ),
       createUuidV7(),
-      {
-        startFresh: !homeConversationId,
-        targetConversationId: homeConversationId,
-        rememberForHome: true,
-      },
+      { startFresh: true },
     );
     if (!queued) return false;
 
@@ -3367,10 +3435,14 @@ export default function App() {
   }
 
   const { requestCompletion, completionDialog } = useTaskCompletion(
-    (task, note) =>
-      withAuthenticatedSession((accessToken) =>
+    async (task, note) => {
+      const completed = await withAuthenticatedSession((accessToken) =>
         completeTask(apiBaseUrl, accessToken, task, note),
-      ),
+      );
+      if (completed.status === "completed" && task.projectId)
+        setDeliveryWatchStarted(Date.now());
+      return completed;
+    },
   );
 
   async function completeHomeTask(task: Task): Promise<void> {
@@ -3419,9 +3491,7 @@ export default function App() {
           }
         : current,
     );
-    setProjectTasks((current) =>
-      current.map((item) => (item.id === completed.id ? completed : item)),
-    );
+    setProjectTasks((current) => current.filter((item) => item.id !== completed.id));
     setProjectInflowItems((current) =>
       current.filter(
         (item) => item.status !== "pending" || item.promotedTaskId !== task.id,
@@ -3694,7 +3764,7 @@ export default function App() {
           throw error;
         }
         const latestTasks = task.projectId
-          ? await fetchProjectTasks(apiBaseUrl, accessToken, task.projectId)
+          ? [await fetchTask(apiBaseUrl, accessToken, task.id)]
           : (
               await fetchPlanning(
                 apiBaseUrl,
@@ -3719,8 +3789,11 @@ export default function App() {
         : current,
     );
     setProjectTasks((current) =>
-      current.map((item) => (item.id === updated.id ? updated : item)),
+      updated.status === "open"
+        ? current.map((item) => (item.id === updated.id ? updated : item))
+        : current.filter((item) => item.id !== updated.id),
     );
+    if (task.projectId) setCompletedHistoryRevision((current) => current + 1);
     void Promise.all([
       loadHomeSnapshot(),
       loadPlanningSnapshot(),
@@ -3892,10 +3965,11 @@ export default function App() {
       );
       if (!loaded) throw new Error("task destination unavailable");
       const tasks = await loadProjectTasks(currentProject.id);
-      if (!tasks?.some((item) => item.id === task.id)) {
+      const target = await availableProjectTask(tasks, task);
+      if (!target) {
         throw new Error("task destination unavailable");
       }
-      setHighlightedProjectTaskId(task.id);
+      setHighlightedProjectTaskId(target);
       setHighlightedProjectInflowId(undefined);
       setSelectedProjectId(currentProject.id);
       navigate("projects", { projectDataReady: true });
@@ -3912,11 +3986,12 @@ export default function App() {
         );
         if (!project) continue;
         const tasks = await loadProjectTasks(project.id);
-        if (!tasks?.some((item) => item.id === task.id)) continue;
+        const target = await availableProjectTask(tasks, task);
+        if (!target) continue;
         setProjects(workspaceProjects);
         setSelectedWorkspaceId(workspace.id);
         setSelectedProjectId(project.id);
-        setHighlightedProjectTaskId(task.id);
+        setHighlightedProjectTaskId(target);
         setHighlightedProjectInflowId(undefined);
         navigate("projects", { projectDataReady: true });
         return;
@@ -3927,6 +4002,19 @@ export default function App() {
 
     setHomeError(copy.home.taskDestinationNotice);
     throw new Error("task destination unavailable");
+  }
+
+  async function availableProjectTask(
+    opened: readonly Task[] | undefined,
+    target: Pick<Task, "id" | "projectId">,
+  ): Promise<Task | undefined> {
+    if (!opened) return undefined;
+    const open = opened.find((item) => item.id === target.id);
+    if (open) return open;
+    const task = await loadTaskFromAssistant(target).catch(() => undefined);
+    return task?.projectId === target.projectId && task?.status === "completed"
+      ? task
+      : undefined;
   }
 
   async function openScheduleFromAssistant(
@@ -4162,9 +4250,7 @@ export default function App() {
       const completed = await requestCompletion(task);
       if (completed.status !== "completed") return;
       await cancelLocalReminder("task", task.id).catch(() => false);
-      setProjectTasks((current) =>
-        current.map((item) => (item.id === completed.id ? completed : item)),
-      );
+      setProjectTasks((current) => current.filter((item) => item.id !== completed.id));
       setPlanningSnapshot((current) =>
         current
           ? {
@@ -4235,18 +4321,21 @@ export default function App() {
           ) {
             throw error;
           }
-          const latest = (
-            await fetchProjectTasks(apiBaseUrl, accessToken, task.projectId)
-          ).find((item) => item.id === task.id);
-          if (!latest) throw error;
+          const latest = await fetchTask(apiBaseUrl, accessToken, task.id);
+          if (latest.projectId !== task.projectId || latest.status === "cancelled")
+            throw error;
           return updateTask(apiBaseUrl, accessToken, latest, input);
         }
       });
-      setProjectTasks((current) =>
-        updated.status === "cancelled"
-          ? current.filter((item) => item.id !== updated.id)
-          : current.map((item) => (item.id === updated.id ? updated : item)),
-      );
+      setProjectTasks((current) => {
+        if (updated.status !== "open")
+          return current.filter((item) => item.id !== updated.id);
+        if (current.some((item) => item.id === updated.id))
+          return current.map((item) => (item.id === updated.id ? updated : item));
+        return updated.projectId === selectedProjectIdRef.current
+          ? [updated, ...current]
+          : current;
+      });
       const openDelta =
         Number(updated.status === "open") - Number(task.status === "open");
       if (openDelta && task.projectId) {
@@ -4411,31 +4500,6 @@ export default function App() {
       }
     } catch (error) {
       setProjectsError(copy.projects.webhookTestProblem);
-      throw error;
-    } finally {
-      setProjectsSaving(false);
-    }
-  }
-
-  async function retryWorkspaceWebhookDelivery(
-    delivery: WebhookDelivery,
-  ): Promise<void> {
-    if (!selectedProjectId) throw new Error("project unavailable");
-    setProjectsSaving(true);
-    setProjectsError(undefined);
-    try {
-      await withAuthenticatedSession((accessToken) =>
-        retryWebhookDelivery(
-          apiBaseUrl,
-          accessToken,
-          selectedProjectId,
-          delivery.id,
-        ),
-      );
-      await loadProjectWebhooks(selectedProjectId);
-    } catch (error) {
-      setProjectsError(copy.projects.webhookRetryProblem);
-      void loadProjectWebhooks(selectedProjectId);
       throw error;
     } finally {
       setProjectsSaving(false);
@@ -4685,12 +4749,19 @@ export default function App() {
     setInflowSaving(true);
     setInflowError(undefined);
     try {
-      await withAuthenticatedSession((accessToken) =>
+      const updated = await withAuthenticatedSession((accessToken) =>
         decideProjectInflow(apiBaseUrl, accessToken, item, {
           decision: "promote",
           ...input,
         }),
       );
+      setDeliveryWatchStarted(Date.now());
+      const reflectionFailed = showInflowDeliveryFailure(updated);
+      if (!reflectionFailed && destination === "home")
+        setDeliveryNotice({
+          message: copy.projects.inflowRegistrationSaved,
+          failed: false,
+        });
       homeRequestGateRef.current.invalidate();
       if (selectedProjectIdRef.current === item.projectId)
         projectInflowRequestGateRef.current.invalidate();
@@ -4715,10 +4786,20 @@ export default function App() {
                   inflowConversationKey(currentItem) !==
                   inflowConversationKey(item),
               ),
+              recentInflow: reflectionFailed
+                ? [
+                    updated,
+                    ...current.recentInflow.filter(
+                      (entry) =>
+                        inflowConversationKey(entry) !==
+                        inflowConversationKey(updated),
+                    ),
+                  ]
+                : current.recentInflow,
             }
           : current,
       );
-      await loadHomeSnapshot();
+      await loadHomeSnapshot({ background: true });
       if (selectedProjectIdRef.current === item.projectId) {
         await Promise.all([
           loadProjectTasks(item.projectId),
@@ -4752,6 +4833,11 @@ export default function App() {
               }),
         }),
       );
+      let reflectionFailed = false;
+      if (!input?.markSeen && input?.replyToSource) {
+        setDeliveryWatchStarted(Date.now());
+        reflectionFailed = showInflowDeliveryFailure(updated);
+      }
       homeRequestGateRef.current.invalidate();
       if (selectedProjectIdRef.current === item.projectId)
         projectInflowRequestGateRef.current.invalidate();
@@ -4770,10 +4856,20 @@ export default function App() {
           ? {
               ...current,
               inflow: reconcile(current.inflow),
+              recentInflow: reflectionFailed
+                ? [
+                    updated,
+                    ...current.recentInflow.filter(
+                      (entry) =>
+                        inflowConversationKey(entry) !==
+                        inflowConversationKey(updated),
+                    ),
+                  ]
+                : current.recentInflow,
             }
           : current,
       );
-      await loadHomeSnapshot();
+      await loadHomeSnapshot({ background: true });
       if (selectedProjectId === item.projectId) {
         await loadProjectInflow(item.projectId);
       }
@@ -5058,11 +5154,11 @@ export default function App() {
     clientMessageId: string,
     options: ConversationSendOptions = {},
   ): Promise<boolean> {
-    if (homeConversationStartingRef.current) return false;
     if (!tokens || agentAuthentication?.state !== "ready") {
       setConversationError(copy.messages.authenticationRequired);
       return false;
     }
+    const entry = homeChatEntryGenerationRef.current;
     let conversationId = conversationIdForRequest(
       selectedConversationId,
       options,
@@ -5070,40 +5166,37 @@ export default function App() {
     setConversationError(undefined);
     try {
       if (!conversationId) {
-        const clientConversationId =
-          pendingConversationId.current ?? createUuidV7();
-        pendingConversationId.current = clientConversationId;
-        const conversation = await withAuthenticatedSession((accessToken) =>
-          createConversation(
-            apiBaseUrl,
-            accessToken,
-            clientConversationId,
-            options.rememberForHome ? null : conversationTitle(text),
-            options.rememberForHome ? "home" : "chat",
-            options.rememberForHome === true,
-          ),
-        );
-        pendingConversationId.current = undefined;
-        conversationId = conversation.id;
-        conversationListRequestGateRef.current.invalidate();
-        setConversations((current) =>
-          mergeCreatedConversation(current, conversation),
-        );
-        setCurrentConversationId(conversation.id);
+        // Keep the same conversation and message IDs if the first send needs a retry.
+        const pending =
+          pendingFirstConversation.current?.messageId === clientMessageId
+            ? pendingFirstConversation.current
+            : { messageId: clientMessageId, id: createUuidV7(), created: false };
+        pendingFirstConversation.current = pending;
+        if (!pending.created) {
+          const conversation = await withAuthenticatedSession((accessToken) =>
+            createConversation(
+              apiBaseUrl,
+              accessToken,
+              pending.id,
+              options.rememberForHome ? null : conversationTitle(text),
+              options.rememberForHome ? "home" : "chat",
+              options.rememberForHome === true,
+            ),
+          );
+          pending.created = true;
+          pending.id = conversation.id;
+          conversationListRequestGateRef.current.invalidate();
+          setConversations((current) =>
+            mergeCreatedConversation(current, conversation),
+          );
+        }
+        conversationId = pending.id;
       }
       if (!conversationId) {
         setConversationError(copy.messages.conversationSendNotice);
         return false;
       }
       const targetConversationId = conversationId;
-      if (selectedConversationId !== targetConversationId) {
-        setCurrentConversationId(targetConversationId);
-        setConversationMessages([]);
-      }
-      if (options.rememberForHome) {
-        homeConversationDetachedRef.current = false;
-        setHomeConversationId(targetConversationId);
-      }
       const queued = await withAuthenticatedSession((accessToken) =>
         queueAgentTurn(
           apiBaseUrl,
@@ -5113,6 +5206,8 @@ export default function App() {
           clientMessageId,
         ),
       );
+      if (pendingFirstConversation.current?.messageId === clientMessageId)
+        pendingFirstConversation.current = undefined;
       setConversationJobs((known) => ({
         ...known,
         [queued.conversationId]: {
@@ -5125,7 +5220,11 @@ export default function App() {
           pendingAction: null,
         },
       }));
-      if (selectedConversationIdRef.current === queued.conversationId) {
+      if (homeChatEntryGenerationRef.current === entry) {
+        if (selectedConversationIdRef.current !== queued.conversationId) {
+          setCurrentConversationId(queued.conversationId);
+          setConversationMessages([]);
+        }
         const acceptedAt = new Date().toISOString();
         setConversationMessages((current) =>
           current.some((message) => message.id === queued.messageId)
@@ -5152,11 +5251,13 @@ export default function App() {
       }
       return true;
     } catch (error) {
-      setConversationError(
-        error instanceof AgentRequestError && error.code === "conflict"
-          ? copy.messages.conversationBusy
-          : copy.messages.conversationSendNotice,
-      );
+      if (homeChatEntryGenerationRef.current === entry) {
+        setConversationError(
+          error instanceof AgentRequestError && error.code === "conflict"
+            ? copy.messages.conversationBusy
+            : copy.messages.conversationSendNotice,
+        );
+      }
       return false;
     }
   }
@@ -5197,9 +5298,6 @@ export default function App() {
       conversations.length === 0);
   const latestAssistantMessage =
     assistantResponseAfterLatestRequest(conversationMessages);
-  const latestUserRequest = [...conversationMessages]
-    .reverse()
-    .find((message) => message.role === "user")?.content;
 
   async function refreshCurrentDestination(): Promise<void> {
     if (destination === "decisions") {
@@ -5255,6 +5353,8 @@ export default function App() {
       calendarDataReady?: boolean;
       focusAssistant?: boolean;
       openScheduledWork?: boolean;
+      openChatHistory?: boolean;
+      openDeliveryRecovery?: boolean;
     } = {},
   ): void {
     if (
@@ -5272,22 +5372,16 @@ export default function App() {
     }
     homeChatEntryGenerationRef.current += 1;
     setHomeChatOpen(false);
+    setChatHistoryView(options.openChatHistory ? "list" : undefined);
+    setRecoveryEntry((current) =>
+      options.openDeliveryRecovery ? current + 1 : 0,
+    );
     setShortcutComposerFocus(options.focusAssistant === true);
     if (options.openScheduledWork)
       setDeckIntent({ id: Date.now(), view: "scheduled" });
     if (mobileLayout) startTransition(() => setDestination(nextDestination));
     else setDestination(nextDestination);
-    if (
-      nextDestination === "home" &&
-      homeConversationId &&
-      selectedConversationId !== homeConversationId
-    ) {
-      setCurrentConversationId(homeConversationId);
-      setConversationMessages([]);
-      void loadConversationMessages(homeConversationId);
-      void restoreConversationJob(homeConversationId);
-      return;
-    }
+    if (nextDestination === "home") startConversation();
     if (nextDestination === "calendar") {
       const latestSchedule = [
         ...(latestAssistantMessage?.presentation?.items ?? []),
@@ -5416,9 +5510,12 @@ export default function App() {
       !restoreHomeFocusRef.current
     )
       return;
-    restoreHomeFocusRef.current = false;
+    const target = restoreHomeFocusRef.current;
+    restoreHomeFocusRef.current = undefined;
     document
-      .getElementById("home-overview-title")
+      .getElementById(
+        target === "history" ? "home-chat-history" : "home-overview-title",
+      )
       ?.focus({ preventScroll: true });
   }, [destination, homeChatVisible]);
   useEffect(() => {
@@ -5435,6 +5532,10 @@ export default function App() {
         }
         if (homeChatVisible) {
           returnToHomeOverview();
+          return true;
+        }
+        if (destination === "chat" && chatHistoryView) {
+          backFromConversationHistory();
           return true;
         }
         if (destination === "projects" && selectedProjectId) {
@@ -5460,7 +5561,13 @@ export default function App() {
         }
         return false;
       }, 10),
-    [destination, homeChatVisible, planningEditTarget, selectedProjectId],
+    [
+      destination,
+      homeChatVisible,
+      chatHistoryView,
+      planningEditTarget,
+      selectedProjectId,
+    ],
   );
 
   return (
@@ -5512,46 +5619,15 @@ export default function App() {
             {destination === "home" && (
               <div className="home-overview-frame" hidden={homeChatVisible}>
                 <HomeWorkspace
-                  actionNeeded={
-                    <>
-                      <DeliveryRecoveryPanel
-                        items={(homeSnapshot?.deliveryRecovery ?? []).filter(
-                          (item) => item.status === "failed",
-                        )}
-                        onRetry={async (item) => {
-                          await withAuthenticatedSession((accessToken) =>
-                            retryDeliveryRecovery(
-                              apiBaseUrl,
-                              accessToken,
-                              item,
-                            ),
-                          );
-                          await loadHomeSnapshot();
-                        }}
-                      />
-                      <InflowRecoveryPanel
-                        items={(homeSnapshot?.recentInflow ?? []).filter(
-                          canRetryInflowDelivery,
-                        )}
-                        saving={inflowSaving}
-                        onRetry={retryWorkspaceInflowCompletion}
-                        onOpenTask={async (id) => {
-                          const task = await loadTaskFromAssistant({
-                            id,
-                            projectId: null,
-                          });
-                          await openTaskFromAssistant(task);
-                          if (!task.projectId) await openPlanningTask(task);
-                        }}
-                      />
-                    </>
-                  }
+                  deliveryFailureCount={manualFailures.size}
+                  onOpenDeliveryHistory={openDeliveryHistory}
                   completionReviews={
                     <CompletionReviewPanel
                       baseUrl={apiBaseUrl}
                       authenticate={withAuthenticatedSession}
                       highlightedId={highlightedCompletionReviewId}
-                      onChanged={async () => {
+                      onChanged={async (approved) => {
+                        if (approved) setDeliveryWatchStarted(Date.now());
                         await loadHomeSnapshot();
                       }}
                     />
@@ -5582,45 +5658,17 @@ export default function App() {
                   loading={homeLoading || mode === "loading"}
                   error={homeError ?? (mode === "error" ? message : undefined)}
                   assistantReady={agentAuthentication?.state === "ready"}
-                  assistantJob={
-                    homeConversationId
-                      ? conversationJobs[homeConversationId]
-                      : undefined
-                  }
-                  assistantConversationId={homeConversationId}
-                  assistantRequest={
-                    selectedConversationId === homeConversationId
-                      ? latestUserRequest
-                      : undefined
-                  }
-                  assistantMessage={
-                    selectedConversationId === homeConversationId
-                      ? latestAssistantMessage
-                      : undefined
-                  }
+                  homeChatDraft={homeChatDraft}
+                  setHomeChatDraft={setHomeChatDraft}
+                  onOpenConversationHistory={openConversationHistory}
                   onOpenAssistant={openHomeAssistant}
                   onOpenPlanning={() => navigate("calendar")}
-                  onStartNewAssistant={async () => {
-                    const entry = homeChatEntryGenerationRef.current;
-                    const started = await startHomeConversation();
-                    if (
-                      started &&
-                      homeChatEntryGenerationRef.current === entry
-                    ) {
-                      setHomeChatOpen(true);
-                    }
-                    return started;
-                  }}
                   onSendAssistant={async (text, clientMessageId) => {
                     const entry = homeChatEntryGenerationRef.current;
                     const accepted = await sendConversationRequest(
                       text,
                       clientMessageId,
-                      {
-                        startFresh: !homeConversationId,
-                        targetConversationId: homeConversationId,
-                        rememberForHome: true,
-                      },
+                      freshHomeRequest(),
                     );
                     if (
                       accepted &&
@@ -5632,10 +5680,6 @@ export default function App() {
                   }}
                   onCompleteTask={completeHomeTask}
                   onLoadAssistantTask={loadTaskFromAssistant}
-                  onCompleteAssistantTask={completeTaskFromAssistant}
-                  onRestoreAssistantTask={restoreTaskFromAssistant}
-                  onEditAssistantTask={editTaskFromAssistant}
-                  onEditAssistantSchedule={editScheduleFromAssistant}
                   onEditTask={(task) =>
                     setPlanningEditTarget({ kind: "task", item: task })
                   }
@@ -5656,7 +5700,6 @@ export default function App() {
                   onDismissInflow={dismissWorkspaceInflow}
                   onMarkInflowsSeen={markWorkspaceInflowsSeen}
                   onRetryInflowAnalysis={retryWorkspaceInflowAnalysis}
-                  onRetryInflowCompletion={retryWorkspaceInflowCompletion}
                   onReviewInflowChange={setInflowChangeItem}
                   gmailInflowItems={gmailInflowItems}
                   gmailInflowProjects={gmailInflowProjects}
@@ -5770,7 +5813,10 @@ export default function App() {
                 projectInflowItems={projectInflowItems}
                 selectedWorkspaceId={selectedWorkspaceId}
                 selectedProjectId={selectedProjectId}
-                highlightedTaskId={highlightedProjectTaskId}
+                highlightedTaskId={highlightedProjectTask?.id}
+                highlightedTaskCompleted={highlightedProjectTask?.status === "completed"}
+                completedHistoryRevision={completedHistoryRevision}
+                onLoadCompletedTasks={loadProjectCompletedTasks}
                 highlightedInflowId={highlightedProjectInflowId}
                 loaded={workspacesReady}
                 loading={projectsLoading || goalsLoading || mode === "loading"}
@@ -5832,7 +5878,7 @@ export default function App() {
                 onUpdateWebhook={updateWorkspaceWebhook}
                 onTestWebhook={testWorkspaceWebhook}
                 onDeleteWebhook={deleteWorkspaceWebhook}
-                onRetryWebhookDelivery={retryWorkspaceWebhookDelivery}
+                onOpenDeliveryHistory={openDeliveryHistory}
                 onReloadItsmConnection={reloadWorkspaceItsm}
                 onConnectItsm={connectWorkspaceItsm}
                 onConfirmItsm={confirmWorkspaceItsm}
@@ -5846,13 +5892,13 @@ export default function App() {
                 onPromoteInflow={promoteWorkspaceInflow}
                 onDismissInflow={dismissWorkspaceInflow}
                 onRetryInflowAnalysis={retryWorkspaceInflowAnalysis}
-                onRetryInflowCompletion={retryWorkspaceInflowCompletion}
                 onReviewInflowChange={setInflowChangeItem}
               />
             )}
             {destination === "decisions" && (
               <DecisionInboxWorkspace
                 mode="history"
+                recoveryEntry={recoveryEntry}
                 recovery={{
                   deliveryItems: homeSnapshot?.deliveryRecovery ?? [],
                   sourceItems: homeSnapshot?.recentInflow ?? [],
@@ -6008,7 +6054,7 @@ export default function App() {
                 )}
                 authentication={agentAuthentication}
                 authenticationRequesting={authenticationRequesting}
-                loading={conversationLoading || homeConversationStarting}
+                loading={conversationLoading}
                 error={
                   conversationError ?? (mode === "error" ? message : undefined)
                 }
@@ -6016,7 +6062,22 @@ export default function App() {
                 shortcutFocus={shortcutComposerFocus}
                 onShortcutFocusHandled={consumeShortcutComposerFocus}
                 onReturnHome={
-                  homeChatVisible ? returnToHomeOverview : undefined
+                  homeChatVisible
+                    ? returnToHomeOverview
+                    : chatHistoryView === "list"
+                      ? backFromConversationHistory
+                      : undefined
+                }
+                historyOnly={chatHistoryView === "list"}
+                historyJobs={
+                  chatHistoryView === "list"
+                    ? { ...chatHistoryJobs, ...conversationJobs }
+                    : undefined
+                }
+                onReturnToHistory={
+                  chatHistoryView === "thread"
+                    ? backFromConversationHistory
+                    : undefined
                 }
                 onSelect={selectConversation}
                 onInitialDraftApplied={() => setAssistantDraft(undefined)}
@@ -6027,12 +6088,8 @@ export default function App() {
                   sendConversationRequest(
                     text,
                     id,
-                    homeChatVisible && !selectedConversationId
-                      ? {
-                          startFresh: true,
-                          targetConversationId: homeConversationId,
-                          rememberForHome: true,
-                        }
+                    homeChatVisible && !selectedConversationIdRef.current
+                      ? freshHomeRequest()
                       : {},
                   )
                 }
@@ -6060,6 +6117,11 @@ export default function App() {
               />
             )}
           </WorkspaceRouteBoundary>
+          <DeliveryFeedback
+            notice={deliveryNotice}
+            onOpen={openDeliveryHistory}
+            onClose={() => setDeliveryNotice(undefined)}
+          />
           {completionDialog}
           {inflowChangeItem && (
             <InflowChangeDialog

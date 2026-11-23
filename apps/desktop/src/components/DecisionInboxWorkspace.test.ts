@@ -108,7 +108,7 @@ function gmailCandidate(): GmailInflowCandidate {
 }
 
 describe("decision inbox actions", () => {
-  it("contains delivery and source recovery in one closed home section with accurate attention counts", () => {
+  it("shows delivery details and retries in the record view", () => {
     const source: ProjectInflowItem = {
       ...promotableInflow(),
       status: "promoted",
@@ -118,7 +118,8 @@ describe("decision inbox actions", () => {
       completionReplyCompleted: false,
     };
     const markup = renderDecisionInbox({
-      mode: "home",
+      mode: "history",
+      recoveryEntry: 1,
       recommendations: [recommendation("review", null)],
       recovery: {
         sourceItems: [
@@ -163,17 +164,14 @@ describe("decision inbox actions", () => {
         onRetryDelivery: async () => {},
       },
     });
-    expect(markup).toMatch(
-      /^<details id="home-review-actions" class="home-review-actions">/,
-    );
-    expect(markup).toContain("3건 확인 필요 · 2건 처리 중");
+    expect(markup).toContain("알림·외부 반영 처리 기록");
     expect(markup).toContain('class="home-review-actions__recoveries"');
     expect(markup).toContain("알림·ITSM 반영 확인하기 · 2개");
     expect(markup).toContain("Chat 반영 확인하기");
     expect(markup).toContain("이 알림만 다시 보내기");
     expect(markup).toContain("남은 Chat 반영 다시 시도");
     expect(markup).not.toContain("성공한 원문 예시");
-    expect(markup.match(/class="home-review-actions"/g)).toHaveLength(1);
+    expect(markup.match(/class="inflow-recovery" open=""/g)).toHaveLength(2);
   });
 
   it("keeps approvals and history on a separate page without repeating Chat or Gmail inflow", () => {

@@ -31,6 +31,44 @@ const MAX_WEBHOOK_SECTION_CHARS: usize = 400;
 const MAX_WEBHOOK_REFERENCE_CHARS: usize = 420;
 const MAX_WEBHOOK_MESSAGE_CHARS: usize = 1_600;
 const MAX_WEBHOOK_ACTION_ITEMS: usize = 20;
+/// Number of completed task records returned in a project history page.
+pub const PROJECT_HISTORY_PAGE_SIZE: i64 = 30;
+
+/// Completed history query, scoped to one owned project.
+pub struct ProjectHistoryQuery {
+    pub page: u32,
+    pub title: Option<String>,
+    pub issue_id: Option<i64>,
+    pub assignee: Option<String>,
+    pub completed_from: Option<OffsetDateTime>,
+    pub completed_before: Option<OffsetDateTime>,
+    pub anchor_task_id: Option<Uuid>,
+}
+
+/// Complete counts and a bounded page of matching tasks.
+pub struct ProjectHistoryPage {
+    pub tasks: Vec<Task>,
+    pub page: u32,
+    pub total_count: i64,
+    pub filtered_count: i64,
+    pub assignees: Vec<String>,
+}
+
+// The same matching predicate drives the count and the bounded page.
+macro_rules! project_history_filter {
+    () => {r"
+    ($3::text IS NULL OR strpos(lower(t.title), lower($3)) > 0)
+    AND ($4::bigint IS NULL
+      OR EXISTS (SELECT 1 FROM task_itsm_links l
+                WHERE l.task_id=t.id AND l.user_id=t.user_id AND l.enabled AND l.issue_id=$4)
+      OR t.title ~ ('(^|[^0-9])#' || $4::text || '([^0-9]|$)')
+      OR concat_ws(' ', t.title, t.notes) ~ ('/issues/' || $4::text || '([^0-9]|$)'))
+    AND ($5::text IS NULL OR EXISTS (
+      SELECT 1 FROM regexp_split_to_table(coalesce(t.assignee_name, ''), '[,，]') AS members(name)
+      WHERE lower(btrim(name))=lower($5)))
+    AND ($6::timestamptz IS NULL OR t.completed_at >= $6)
+    AND ($7::timestamptz IS NULL OR t.completed_at < $7)"};
+}
 
 /// Structured task context shared by webhook payloads and provider replies.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1457,6 +1495,106 @@ impl Database {
         .await
         .map_err(classify)?;
         rows.into_iter().map(Task::try_from).collect()
+    }
+
+    /// Lists completed tasks in stable completion order and applies filters before pagination.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid configuration for an unknown project, or a persistence error.
+    pub async fn project_completed_history(
+        &self,
+        user_id: Uuid,
+        project_id: Uuid,
+        query: &ProjectHistoryQuery,
+    ) -> Result<ProjectHistoryPage, StorageError> {
+        if !self.project_exists_for_user(user_id, project_id).await? || query.page == 0 {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut transaction = self.pool().begin().await.map_err(classify)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *transaction)
+            .await
+            .map_err(classify)?;
+        let counts_sql = concat!(
+            "SELECT count(*), count(*) FILTER (WHERE ",
+            project_history_filter!(),
+            ")
+             FROM tasks t WHERE t.user_id=$1 AND t.project_id=$2 AND t.status='completed'"
+        );
+        let (total_count, filtered_count): (i64, i64) = sqlx::query_as(counts_sql)
+            .bind(user_id)
+            .bind(project_id)
+            .bind(query.title.as_deref())
+            .bind(query.issue_id)
+            .bind(query.assignee.as_deref())
+            .bind(query.completed_from)
+            .bind(query.completed_before)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(classify)?;
+        let last_page =
+            ((filtered_count + PROJECT_HISTORY_PAGE_SIZE - 1) / PROJECT_HISTORY_PAGE_SIZE).max(1);
+        let mut page = i64::from(query.page).min(last_page);
+        if let Some(anchor) = query.anchor_task_id {
+            let index: Option<i64> = sqlx::query_scalar(
+                "SELECT position FROM (
+                    SELECT id, row_number() OVER (ORDER BY completed_at DESC NULLS LAST, id DESC) AS position
+                    FROM tasks WHERE user_id=$1 AND project_id=$2 AND status='completed'
+                 ) ordered WHERE id=$3",
+            )
+            .bind(user_id)
+            .bind(project_id)
+            .bind(anchor)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(classify)?;
+            if let Some(index) = index {
+                page = (index - 1) / PROJECT_HISTORY_PAGE_SIZE + 1;
+            }
+        }
+        let items_sql = concat!(
+            "SELECT t.id, t.project_id, t.parent_task_id, t.title, t.notes, t.assignee_name,
+                t.status, t.priority, t.due_at, t.completed_at, t.work_kind, t.completion_note, t.workflow_state, t.waiting_reason, t.version
+             FROM tasks t
+             WHERE t.user_id=$1 AND t.project_id=$2 AND t.status='completed' AND ", project_history_filter!(), "
+             ORDER BY t.completed_at DESC NULLS LAST, t.id DESC LIMIT $8 OFFSET $9"
+        );
+        let rows = sqlx::query_as::<_, TaskRow>(items_sql)
+            .bind(user_id)
+            .bind(project_id)
+            .bind(query.title.as_deref())
+            .bind(query.issue_id)
+            .bind(query.assignee.as_deref())
+            .bind(query.completed_from)
+            .bind(query.completed_before)
+            .bind(PROJECT_HISTORY_PAGE_SIZE)
+            .bind((page - 1) * PROJECT_HISTORY_PAGE_SIZE)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(classify)?;
+        let assignees = sqlx::query_scalar(
+            "SELECT DISTINCT btrim(name) AS assignee
+             FROM tasks t CROSS JOIN LATERAL regexp_split_to_table(t.assignee_name, '[,，]') AS members(name)
+             WHERE t.user_id=$1 AND t.project_id=$2 AND t.status='completed' AND btrim(name)<>''
+             ORDER BY assignee",
+        )
+        .bind(user_id)
+        .bind(project_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        transaction.commit().await.map_err(classify)?;
+        Ok(ProjectHistoryPage {
+            tasks: rows
+                .into_iter()
+                .map(Task::try_from)
+                .collect::<Result<_, _>>()?,
+            page: u32::try_from(page).map_err(|_| StorageError::InvalidConfiguration)?,
+            total_count,
+            filtered_count,
+            assignees,
+        })
     }
 
     /// Replaces the mutable fields of one owned task when its version still

@@ -50,7 +50,7 @@ type HomeInflowReviewProps = {
   ): Promise<void>;
   onMarkSeenMany?: MarkInflowsSeen;
   onRetryAnalysis(item: ProjectInflowItem): Promise<void>;
-  onRetryCompletion(item: ProjectInflowItem): Promise<void>;
+  onOpenDeliveryHistory?(): void;
   onReviewChange?(item: ProjectInflowItem): void;
   onOpenTask(taskId: string): Promise<void>;
 };
@@ -104,6 +104,7 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
     setActiveTab("completion");
   }, [highlightedCompletionId, hasCompletion]);
   const receiptCount = useRef(0);
+  const [decisionFinished, setDecisionFinished] = useState(false);
   const [reviewReceipt, setReviewReceipt] = useState<{
     id: number;
     message: string;
@@ -116,14 +117,14 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
   ) => {
     await props.onDismiss(item, input);
     if (input?.markSeen) showReceipt(copy.projects.inflowReviewMoved);
+    else setDecisionFinished(true);
   };
-
   const handlePromote: HomeInflowReviewProps["onPromote"] = async (
     item,
     input,
   ) => {
     await props.onPromote(item, input);
-    showReceipt(copy.projects.inflowRegistrationSaved);
+    setDecisionFinished(true);
   };
 
   const markSeenMany = props.onMarkSeenMany;
@@ -138,7 +139,7 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
     });
 
   useEffect(() => {
-    if (!reviewReceipt) return;
+    if (!reviewReceipt && !decisionFinished) return;
     if (document.activeElement === document.body) {
       const fallback =
         focusTarget.current?.querySelector<HTMLButtonElement>(
@@ -146,9 +147,11 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
         ) ?? emptyRequestRef.current;
       fallback?.focus({ preventScroll: true });
     }
+    if (decisionFinished) setDecisionFinished(false);
+    if (!reviewReceipt) return;
     const timer = window.setTimeout(() => setReviewReceipt(undefined), 6_000);
     return () => window.clearTimeout(timer);
-  }, [reviewReceipt]);
+  }, [decisionFinished, reviewReceipt]);
   const receipt =
     typeof document === "undefined"
       ? null
@@ -308,7 +311,7 @@ function HomeInflowGroup({
   onDismiss,
   onMarkSeenMany,
   onRetryAnalysis,
-  onRetryCompletion,
+  onOpenDeliveryHistory,
   onReviewChange,
   onOpenTask,
   kind,
@@ -920,7 +923,7 @@ function HomeInflowGroup({
                     onPromote={onPromote}
                     onDismiss={onDismiss}
                     onRetryAnalysis={onRetryAnalysis}
-                    onRetryCompletion={onRetryCompletion}
+                    onOpenDeliveryHistory={onOpenDeliveryHistory}
                     onReviewChange={onReviewChange}
                     onOpenTask={(taskId) => void onOpenTask(taskId)}
                   />

@@ -11,23 +11,21 @@ import {
   Cloud,
   Clock3,
   ListTodo,
-  MessageCircleMore,
   Mic,
   Pencil,
-  Plus,
-  Send,
   Sparkles,
 } from "lucide-react";
 import {
-  FormEvent,
+  type Dispatch,
   type ReactNode,
+  type SetStateAction,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 
-import { type AgentJob, type ConversationMessage } from "../api/agent";
+import type { AgentJob, ConversationMessage } from "../api/agent";
 import { type HomeSnapshot, type Recommendation } from "../api/home";
 import { type ScheduleEntry, type Task } from "../api/planning";
 import {
@@ -37,7 +35,6 @@ import {
 } from "../api/projects";
 import { type ProjectInflowItem } from "../api/googleChat";
 import { type GmailInflowCandidate } from "../api/gmailInflow";
-import { presentationForMessage } from "../assistantPresentation";
 import { copy } from "../copy";
 import { workspaceActionCopy } from "../copy/workspaceActions";
 import {
@@ -45,7 +42,6 @@ import {
   type HomeBriefPeriod,
 } from "../homeBriefPeriod";
 import { upcomingHomeSchedules } from "../homeSchedule";
-import { createUuidV7 } from "../uuid";
 import {
   deadlineAttentionTasks,
   taskDueState,
@@ -56,15 +52,15 @@ import {
   SkeletonGroup,
   useDelayedSkeleton,
 } from "./ContentSkeleton";
-import { AssistantInteractiveCanvas } from "./AssistantInteractiveCanvas";
+import { HomeChatEntry, type HomeChatDraft } from "./HomeChatEntry";
 import { HomeInflowReview, type MarkInflowsSeen } from "./HomeInflowReview";
 import {
   GmailInflowReview,
   type PromoteGmailInflowInput,
 } from "./GmailInflowReview";
 import { type PromoteInflowInput } from "./ProjectInflowPanel";
-import { assistantTurnFeedback } from "./conversationResponse";
 import { filterMobileTasks } from "../mobileTaskView";
+import { DeliveryAttention } from "./DeliveryAttention";
 
 type HomeWorkspaceProps = {
   onRequestOpenHandled?(id: number): void;
@@ -72,31 +68,22 @@ type HomeWorkspaceProps = {
   scheduledWork?: ReactNode;
   completionReviews?: ReactNode;
   highlightedCompletionReviewId?: string;
-  actionNeeded?: ReactNode;
+  deliveryFailureCount: number;
+  onOpenDeliveryHistory(): void;
   suppressDecisionSuggestions?: boolean;
   onLoadAllTasks?(): Promise<Task[]>;
   snapshot: HomeSnapshot | undefined;
   loading: boolean;
   error: string | undefined;
   assistantReady: boolean;
-  assistantConversationId: string | undefined;
-  assistantRequest: string | undefined;
-  assistantJob: AgentJob | undefined;
-  assistantMessage: ConversationMessage | undefined;
+  homeChatDraft: HomeChatDraft;
+  setHomeChatDraft: Dispatch<SetStateAction<HomeChatDraft>>;
+  onOpenConversationHistory(): void;
   onOpenAssistant(): void;
   onOpenPlanning(): void;
-  onStartNewAssistant(): Promise<boolean>;
   onSendAssistant(text: string, clientMessageId: string): Promise<boolean>;
   onCompleteTask(task: Task): Promise<void>;
   onLoadAssistantTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
-  onCompleteAssistantTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
-  onRestoreAssistantTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
-  onEditAssistantTask(
-    task: Pick<Task, "id" | "projectId">,
-  ): void | Promise<void>;
-  onEditAssistantSchedule(
-    entry: Pick<ScheduleEntry, "id" | "startsAt">,
-  ): void | Promise<void>;
   onEditTask(task: Task): void;
   onEditSchedule(entry: ScheduleEntry): void;
   onOpenPlanningTask(task: Task): void | Promise<void>;
@@ -125,7 +112,6 @@ type HomeWorkspaceProps = {
   ): Promise<void>;
   onRetryInflowAnalysis(item: ProjectInflowItem): Promise<void>;
   onMarkInflowsSeen?: MarkInflowsSeen;
-  onRetryInflowCompletion(item: ProjectInflowItem): Promise<void>;
   onReviewInflowChange?(item: ProjectInflowItem): void;
   gmailInflowItems: GmailInflowCandidate[];
   gmailInflowProjects: Project[];
@@ -155,27 +141,22 @@ export function HomeWorkspace({
   scheduledWork,
   completionReviews,
   highlightedCompletionReviewId,
-  actionNeeded,
+  deliveryFailureCount,
+  onOpenDeliveryHistory,
   suppressDecisionSuggestions = false,
   onLoadAllTasks,
   snapshot,
   loading,
   error,
   assistantReady,
-  assistantConversationId,
-  assistantRequest,
-  assistantJob,
-  assistantMessage,
+  homeChatDraft,
+  setHomeChatDraft,
+  onOpenConversationHistory,
   onOpenAssistant,
   onOpenPlanning,
-  onStartNewAssistant,
   onSendAssistant,
   onCompleteTask,
   onLoadAssistantTask,
-  onCompleteAssistantTask,
-  onRestoreAssistantTask,
-  onEditAssistantTask,
-  onEditAssistantSchedule,
   onEditTask,
   onEditSchedule,
   onOpenPlanningTask,
@@ -188,7 +169,6 @@ export function HomeWorkspace({
   onDismissInflow,
   onMarkInflowsSeen,
   onRetryInflowAnalysis,
-  onRetryInflowCompletion,
   onReviewInflowChange,
   gmailInflowItems,
   gmailInflowProjects,
@@ -208,7 +188,6 @@ export function HomeWorkspace({
   const mobile = useMobileLayout();
   const [completingTaskId, setCompletingTaskId] = useState<string>();
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
-  const [assistantFocused, setAssistantFocused] = useState(false);
   const [highlightedHomeTaskId, setHighlightedHomeTaskId] = useState<string>();
   const [overviewFocusTarget, setOverviewFocusTarget] = useState<
     "schedule" | "tasks"
@@ -259,11 +238,6 @@ export function HomeWorkspace({
     const priorityTaskIds = new Set(weeklyPriorityTasks.map((task) => task.id));
     return dueTasks.filter((task) => !priorityTaskIds.has(task.id));
   }, [dueTasks, weeklyPriorityTasks]);
-  const assistantState = homeAssistantState(
-    assistantFocused,
-    assistantJob,
-    assistantMessage,
-  );
   const showSchedulePanel = showingSkeleton || Boolean(nextSchedule);
   const showTaskPanel = showingSkeleton || taskCount > 0;
   const overviewPanelCount = Number(showSchedulePanel) + Number(showTaskPanel);
@@ -290,7 +264,7 @@ export function HomeWorkspace({
   }, [scheduleNow, upcomingSchedule]);
 
   useEffect(() => {
-    if (!overviewFocusTarget || assistantFocused) return;
+    if (!overviewFocusTarget) return;
     const element =
       overviewFocusTarget === "tasks"
         ? (highlightedHomeTaskRef.current ?? taskSectionRef.current)
@@ -299,7 +273,7 @@ export function HomeWorkspace({
     element.scrollIntoView({ block: "start" });
     element.focus({ preventScroll: true });
     setOverviewFocusTarget(undefined);
-  }, [assistantFocused, overviewFocusTarget]);
+  }, [overviewFocusTarget]);
 
   useEffect(() => {
     const available = new Set(snapshot?.tasks.map((task) => task.id) ?? []);
@@ -333,7 +307,7 @@ export function HomeWorkspace({
   return (
     <section
       className="home-page"
-      data-assistant-state={assistantState}
+      data-assistant-state="overview"
       data-overview-panels={overviewPanelCount}
       aria-busy={loading}
     >
@@ -355,7 +329,6 @@ export function HomeWorkspace({
               aria-controls="home-today-task-list"
               onClick={() => {
                 setTodayRequest((previous) => previous + 1);
-                setAssistantFocused(false);
                 setHighlightedHomeTaskId(undefined);
                 setOverviewFocusTarget(undefined);
               }}
@@ -398,7 +371,7 @@ export function HomeWorkspace({
             onDismiss={onDismissInflow}
             onMarkSeenMany={onMarkInflowsSeen}
             onRetryAnalysis={onRetryInflowAnalysis}
-            onRetryCompletion={onRetryInflowCompletion}
+            onOpenDeliveryHistory={onOpenDeliveryHistory}
             onReviewChange={onReviewInflowChange}
             onOpenTask={async (taskId) => {
               const task = await onLoadAssistantTask({
@@ -409,62 +382,10 @@ export function HomeWorkspace({
               if (!task.projectId) {
                 setHighlightedHomeTaskId(task.id);
                 setOverviewFocusTarget("tasks");
-                setAssistantFocused(false);
               }
             }}
           />
         </div>
-      )}
-
-      {!mobile && assistantFocused && (
-        <nav
-          className="home-context-strip"
-          aria-labelledby="home-context-strip-title"
-        >
-          <div className="home-context-strip__heading">
-            <div>
-              <strong id="home-context-strip-title">
-                {copy.home.verifiedContextLabel}
-              </strong>
-              <span aria-live="polite">
-                {copy.home.verifiedContextSummary(taskCount, scheduleCount)}
-              </span>
-            </div>
-          </div>
-          <div className="home-context-strip__actions">
-            <button
-              className="focus-visible-control"
-              type="button"
-              aria-label={copy.home.openTaskContext(taskCount)}
-              onClick={() => {
-                setHighlightedHomeTaskId(snapshot?.tasks[0]?.id);
-                setOverviewFocusTarget("tasks");
-                setAssistantFocused(false);
-              }}
-            >
-              <ListTodo aria-hidden="true" />
-              <span>{copy.home.taskTitle}</span>
-              <strong>{taskCount}</strong>
-            </button>
-            <button
-              className="focus-visible-control"
-              type="button"
-              aria-label={copy.home.openScheduleContext(scheduleCount)}
-              onClick={() => {
-                if (nextSchedule) {
-                  onOpenSchedule(nextSchedule);
-                  return;
-                }
-                setOverviewFocusTarget("schedule");
-                setAssistantFocused(false);
-              }}
-            >
-              <CalendarDays aria-hidden="true" />
-              <span>{copy.home.scheduleTitle}</span>
-              <strong>{scheduleCount}</strong>
-            </button>
-          </div>
-        </nav>
       )}
 
       {onLoadAllTasks && (
@@ -480,39 +401,19 @@ export function HomeWorkspace({
       )}
 
       <div className="home-assistant-entry">
-        <HomeAssistantCommand
-          compact
+        <HomeChatEntry
           ready={assistantReady}
-          conversationId={assistantConversationId}
-          request={assistantRequest}
-          job={assistantJob}
-          message={assistantMessage}
-          focused={assistantFocused}
-          onFocusChange={setAssistantFocused}
-          onOpenAssistant={onOpenAssistant}
-          onStartNew={onStartNewAssistant}
+          draft={homeChatDraft}
+          setDraft={setHomeChatDraft}
+          onOpenHistory={onOpenConversationHistory}
           onSend={onSendAssistant}
-          onLoadTask={onLoadAssistantTask}
-          onCompleteTask={onCompleteAssistantTask}
-          onRestoreTask={onRestoreAssistantTask}
-          onEditTask={onEditAssistantTask}
-          onEditSchedule={onEditAssistantSchedule}
-          onOpenTask={async (task) => {
-            if (task.projectId) {
-              await onOpenTask(task);
-              return;
-            }
-            await onOpenTask(task);
-            setHighlightedHomeTaskId(task.id);
-            setOverviewFocusTarget("tasks");
-            setAssistantFocused(false);
-          }}
-          onOpenProject={onOpenProject}
-          onOpenSchedule={onOpenSchedule}
         />
       </div>
 
-      {actionNeeded}
+      <DeliveryAttention
+        count={deliveryFailureCount}
+        onOpen={onOpenDeliveryHistory}
+      />
 
       {mobile && nextSchedule && (
         <section className="mobile-home-next" aria-label="다음 일정">
@@ -529,296 +430,290 @@ export function HomeWorkspace({
         </section>
       )}
 
-      {!assistantFocused && (
-        <>
-          <MobileDisclosure
-            mobile
-            title={`들어온 메일 · ${gmailInflowItems.length}개`}
-          >
-            <GmailInflowReview
-              items={gmailInflowItems}
-              projects={gmailInflowProjects}
-              loading={gmailInflowLoading}
-              loadingMore={gmailInflowLoadingMore}
-              loadMoreError={gmailInflowLoadMoreError}
-              hasMore={gmailInflowHasMore}
-              error={gmailInflowError}
-              savingId={gmailInflowSavingId}
-              onReload={onReloadGmailInflow}
-              onLoadMore={onLoadMoreGmailInflow}
-              onPromote={onPromoteGmailInflow}
-              onDismiss={onDismissGmailInflow}
-              onDefer={onDeferGmailInflow}
-              onRetryAnalysis={onRetryGmailInflowAnalysis}
-              onOpenTask={async (taskId) => {
-                const task = await onLoadAssistantTask({
-                  id: taskId,
-                  projectId: null,
-                });
-                await onOpenTask(task);
-                if (!task.projectId) {
-                  setHighlightedHomeTaskId(task.id);
-                  setOverviewFocusTarget("tasks");
-                  setAssistantFocused(false);
-                }
-              }}
+      <>
+        <MobileDisclosure
+          mobile
+          title={`들어온 메일 · ${gmailInflowItems.length}개`}
+        >
+          <GmailInflowReview
+            items={gmailInflowItems}
+            projects={gmailInflowProjects}
+            loading={gmailInflowLoading}
+            loadingMore={gmailInflowLoadingMore}
+            loadMoreError={gmailInflowLoadMoreError}
+            hasMore={gmailInflowHasMore}
+            error={gmailInflowError}
+            savingId={gmailInflowSavingId}
+            onReload={onReloadGmailInflow}
+            onLoadMore={onLoadMoreGmailInflow}
+            onPromote={onPromoteGmailInflow}
+            onDismiss={onDismissGmailInflow}
+            onDefer={onDeferGmailInflow}
+            onRetryAnalysis={onRetryGmailInflowAnalysis}
+            onOpenTask={async (taskId) => {
+              const task = await onLoadAssistantTask({
+                id: taskId,
+                projectId: null,
+              });
+              await onOpenTask(task);
+              if (!task.projectId) {
+                setHighlightedHomeTaskId(task.id);
+                setOverviewFocusTarget("tasks");
+              }
+            }}
+          />
+        </MobileDisclosure>
+
+        {!showingSkeleton && Boolean(snapshot?.weeklyReports.length) && (
+          <MobileDisclosure mobile title="이번 주 운영 리포트">
+            <WeeklyOperationsBrief
+              reports={snapshot?.weeklyReports ?? []}
+              priorityTasks={weeklyPriorityTasks}
+              completingTaskId={completingTaskId}
+              onCompleteTask={complete}
+              onEditTask={onEditTask}
+              onOpenTask={onOpenPlanningTask}
+              onOpenProject={onOpenProject}
             />
           </MobileDisclosure>
+        )}
 
-          {!showingSkeleton && Boolean(snapshot?.weeklyReports.length) && (
-            <MobileDisclosure mobile title="이번 주 운영 리포트">
-              <WeeklyOperationsBrief
-                reports={snapshot?.weeklyReports ?? []}
-                priorityTasks={weeklyPriorityTasks}
-                completingTaskId={completingTaskId}
-                onCompleteTask={complete}
-                onEditTask={onEditTask}
-                onOpenTask={onOpenPlanningTask}
+        {!mobile &&
+          !onLoadAllTasks &&
+          !showingSkeleton &&
+          remainingDueTasks.length > 0 && (
+            <DeadlineBrief
+              tasks={remainingDueTasks}
+              completingTaskId={completingTaskId}
+              onCompleteTask={complete}
+              onEditTask={onEditTask}
+              onOpenTask={onOpenPlanningTask}
+            />
+          )}
+
+        {!suppressDecisionSuggestions &&
+          !showingSkeleton &&
+          Boolean(snapshot?.recommendations.length) && (
+            <MobileDisclosure mobile={mobile} title="결정할 일">
+              <NowBrief
+                recommendations={snapshot?.recommendations ?? []}
+                period={briefPeriod}
+                onDecide={onDecideRecommendation}
+                onOpenTask={onOpenTask}
                 onOpenProject={onOpenProject}
+                onAnnounce={setRecommendationAnnouncement}
               />
             </MobileDisclosure>
           )}
 
-          {!mobile &&
-            !onLoadAllTasks &&
-            !showingSkeleton &&
-            remainingDueTasks.length > 0 && (
-              <DeadlineBrief
-                tasks={remainingDueTasks}
-                completingTaskId={completingTaskId}
-                onCompleteTask={complete}
-                onEditTask={onEditTask}
-                onOpenTask={onOpenPlanningTask}
-              />
-            )}
-
-          {!suppressDecisionSuggestions &&
-            !showingSkeleton &&
-            Boolean(snapshot?.recommendations.length) && (
-              <MobileDisclosure mobile={mobile} title="결정할 일">
-                <NowBrief
-                  recommendations={snapshot?.recommendations ?? []}
-                  period={briefPeriod}
-                  onDecide={onDecideRecommendation}
-                  onOpenTask={onOpenTask}
-                  onOpenProject={onOpenProject}
-                  onAnnounce={setRecommendationAnnouncement}
-                />
-              </MobileDisclosure>
-            )}
-
-          {!mobile && !onLoadAllTasks && (
-            <button
-              className="home-briefing focus-visible-control"
-              type="button"
-              onClick={onOpenPlanning}
-              aria-label={copy.home.openPlanning}
-            >
-              {showingSkeleton ? (
-                <HomeBriefingSkeleton visible={skeletonVisible} />
-              ) : (
-                <>
-                  <span className="home-briefing__symbol" aria-hidden="true">
-                    <Sparkles />
-                  </span>
-                  <span className="home-briefing__copy">
-                    <strong>
-                      {briefingHeading(nextSchedule, scheduleCount)}
-                    </strong>
-                    <span>{briefingSummary(scheduleCount, taskCount)}</span>
-                  </span>
-                  <ChevronRight aria-hidden="true" />
-                </>
-              )}
-            </button>
-          )}
-
-          {!mobile && !onLoadAllTasks && (
-            <button
-              className="home-voice-callout focus-visible-control"
-              type="button"
-              onClick={onOpenAssistant}
-            >
-              <span className="home-voice-callout__icon" aria-hidden="true">
-                <Mic />
-              </span>
-              <span>
-                <strong>{copy.home.askAssistant}</strong>
-                <span>{copy.home.description}</span>
-              </span>
-              <ChevronRight aria-hidden="true" />
-            </button>
-          )}
-
-          {!mobile && showSchedulePanel && (
-            <section
-              className="home-next-schedule"
-              aria-labelledby="next-schedule-title"
-              ref={scheduleSectionRef}
-              tabIndex={-1}
-            >
-              <div className="home-section-heading">
-                <h2 id="next-schedule-title">
-                  {nextSchedule ? "다음 일정" : copy.home.scheduleTitle}
-                </h2>
-                {nextSchedule && (
-                  <span>{relativeScheduleTime(nextSchedule.startsAt)}</span>
-                )}
-              </div>
-              <div className="home-schedule-surface">
-                {showingSkeleton ? (
-                  <ScheduleSkeleton visible={skeletonVisible} />
-                ) : nextSchedule ? (
-                  <ScheduleHighlight
-                    entry={nextSchedule}
-                    onOpen={() => void onOpenSchedule(nextSchedule)}
-                    onEdit={
-                      nextSchedule.source === "manual"
-                        ? () => onEditSchedule(nextSchedule)
-                        : undefined
-                    }
-                  />
-                ) : null}
-              </div>
-            </section>
-          )}
-
-          {!mobile && !onLoadAllTasks && showTaskPanel && (
-            <section
-              className="home-tasks"
-              aria-labelledby="today-task-title"
-              ref={taskSectionRef}
-              tabIndex={-1}
-            >
-              <div className="home-section-heading">
-                <h2 id="today-task-title">{copy.home.taskTitle}</h2>
-                <span>
-                  {showingSkeleton ? (
-                    <SkeletonGroup
-                      className="skeleton-count"
-                      label={copy.home.loadingShort}
-                      visible={skeletonVisible}
-                    >
-                      <SkeletonBlock />
-                    </SkeletonGroup>
-                  ) : (
-                    copy.home.taskCount(taskCount)
-                  )}
+        {!mobile && !onLoadAllTasks && (
+          <button
+            className="home-briefing focus-visible-control"
+            type="button"
+            onClick={onOpenPlanning}
+            aria-label={copy.home.openPlanning}
+          >
+            {showingSkeleton ? (
+              <HomeBriefingSkeleton visible={skeletonVisible} />
+            ) : (
+              <>
+                <span className="home-briefing__symbol" aria-hidden="true">
+                  <Sparkles />
                 </span>
-              </div>
-              <div className="home-task-surface">
+                <span className="home-briefing__copy">
+                  <strong>
+                    {briefingHeading(nextSchedule, scheduleCount)}
+                  </strong>
+                  <span>{briefingSummary(scheduleCount, taskCount)}</span>
+                </span>
+                <ChevronRight aria-hidden="true" />
+              </>
+            )}
+          </button>
+        )}
+
+        {!mobile && !onLoadAllTasks && (
+          <button
+            className="home-voice-callout focus-visible-control"
+            type="button"
+            onClick={onOpenAssistant}
+          >
+            <span className="home-voice-callout__icon" aria-hidden="true">
+              <Mic />
+            </span>
+            <span>
+              <strong>{copy.home.askAssistant}</strong>
+              <span>{copy.home.description}</span>
+            </span>
+            <ChevronRight aria-hidden="true" />
+          </button>
+        )}
+
+        {!mobile && showSchedulePanel && (
+          <section
+            className="home-next-schedule"
+            aria-labelledby="next-schedule-title"
+            ref={scheduleSectionRef}
+            tabIndex={-1}
+          >
+            <div className="home-section-heading">
+              <h2 id="next-schedule-title">
+                {nextSchedule ? "다음 일정" : copy.home.scheduleTitle}
+              </h2>
+              {nextSchedule && (
+                <span>{relativeScheduleTime(nextSchedule.startsAt)}</span>
+              )}
+            </div>
+            <div className="home-schedule-surface">
+              {showingSkeleton ? (
+                <ScheduleSkeleton visible={skeletonVisible} />
+              ) : nextSchedule ? (
+                <ScheduleHighlight
+                  entry={nextSchedule}
+                  onOpen={() => void onOpenSchedule(nextSchedule)}
+                  onEdit={
+                    nextSchedule.source === "manual"
+                      ? () => onEditSchedule(nextSchedule)
+                      : undefined
+                  }
+                />
+              ) : null}
+            </div>
+          </section>
+        )}
+
+        {!mobile && !onLoadAllTasks && showTaskPanel && (
+          <section
+            className="home-tasks"
+            aria-labelledby="today-task-title"
+            ref={taskSectionRef}
+            tabIndex={-1}
+          >
+            <div className="home-section-heading">
+              <h2 id="today-task-title">{copy.home.taskTitle}</h2>
+              <span>
                 {showingSkeleton ? (
-                  <TaskListSkeleton rows={4} visible={skeletonVisible} />
-                ) : snapshot?.tasks.length ? (
-                  <ul className="home-task-list">
-                    {snapshot.tasks.map((task, index) => (
-                      <li
-                        key={task.id}
-                        data-mobile-overflow={index >= 3}
-                        ref={
-                          highlightedHomeTaskId === task.id
-                            ? highlightedHomeTaskRef
-                            : undefined
-                        }
-                        data-highlighted={highlightedHomeTaskId === task.id}
-                        data-selected={selectedTaskIds.includes(task.id)}
-                        tabIndex={
-                          highlightedHomeTaskId === task.id ? -1 : undefined
-                        }
-                      >
-                        <button
-                          className="home-task-list__complete focus-visible-control"
-                          type="button"
-                          role="checkbox"
-                          aria-checked={selectedTaskIds.includes(task.id)}
-                          onClick={() =>
-                            setSelectedTaskIds((ids) =>
-                              ids.includes(task.id)
-                                ? ids.filter((id) => id !== task.id)
-                                : [...ids, task.id],
-                            )
-                          }
-                          disabled={Boolean(completingTaskId)}
-                          aria-label={`${task.title} 선택`}
-                        >
-                          {completingTaskId === task.id ? (
-                            <span
-                              className="button-spinner"
-                              aria-hidden="true"
-                            />
-                          ) : selectedTaskIds.includes(task.id) ? (
-                            <CheckCircle2 aria-hidden="true" />
-                          ) : (
-                            <Circle aria-hidden="true" />
-                          )}
-                        </button>
-                        <button
-                          className="home-task-list__open focus-visible-control"
-                          type="button"
-                          onClick={() => void onOpenPlanningTask(task)}
-                          disabled={Boolean(completingTaskId)}
-                          aria-label={copy.home.openTaskInSchedule(task.title)}
-                        >
-                          <span className="home-task-list__content">
-                            <strong>{task.title} </strong>
-                            <small data-assigned={Boolean(task.assigneeName)}>
-                              {copy.projects.taskAssignee(
-                                task.assigneeName ?? undefined,
-                              )}
-                            </small>
-                          </span>
-                          {task.dueAt && (
-                            <time
-                              dateTime={task.dueAt}
-                              data-due-state={taskDueState(task)}
-                            >
-                              {taskDueLabel(task)}
-                            </time>
-                          )}
-                        </button>
-                        <button
-                          className="home-task-list__edit focus-visible-control"
-                          type="button"
-                          onClick={() => onEditTask(task)}
-                          disabled={Boolean(completingTaskId)}
-                          aria-label={copy.home.editTask(task.title)}
-                        >
-                          <Pencil aria-hidden="true" />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-                {selectedTaskIds.length > 0 && (
-                  <div className="home-task-selection">
-                    <span role="status">{selectedTaskIds.length}개 선택됨</span>
-                    <button
-                      className="primary-button focus-visible-control"
-                      type="button"
-                      disabled={Boolean(completingTaskId)}
-                      onClick={() => void completeSelectedTasks()}
-                    >
-                      {completingTaskId
-                        ? "완료 처리 중…"
-                        : "선택한 할 일 완료하기"}
-                    </button>
-                  </div>
-                )}
-                {!showingSkeleton && taskCount > 3 && (
-                  <button
-                    className="home-tasks__mobile-more focus-visible-control"
-                    type="button"
-                    onClick={onOpenPlanning}
+                  <SkeletonGroup
+                    className="skeleton-count"
+                    label={copy.home.loadingShort}
+                    visible={skeletonVisible}
                   >
-                    {copy.home.showMoreTasks(taskCount - 3)}
-                    <ChevronRight aria-hidden="true" />
-                  </button>
+                    <SkeletonBlock />
+                  </SkeletonGroup>
+                ) : (
+                  copy.home.taskCount(taskCount)
                 )}
-              </div>
-            </section>
-          )}
-        </>
-      )}
+              </span>
+            </div>
+            <div className="home-task-surface">
+              {showingSkeleton ? (
+                <TaskListSkeleton rows={4} visible={skeletonVisible} />
+              ) : snapshot?.tasks.length ? (
+                <ul className="home-task-list">
+                  {snapshot.tasks.map((task, index) => (
+                    <li
+                      key={task.id}
+                      data-mobile-overflow={index >= 3}
+                      ref={
+                        highlightedHomeTaskId === task.id
+                          ? highlightedHomeTaskRef
+                          : undefined
+                      }
+                      data-highlighted={highlightedHomeTaskId === task.id}
+                      data-selected={selectedTaskIds.includes(task.id)}
+                      tabIndex={
+                        highlightedHomeTaskId === task.id ? -1 : undefined
+                      }
+                    >
+                      <button
+                        className="home-task-list__complete focus-visible-control"
+                        type="button"
+                        role="checkbox"
+                        aria-checked={selectedTaskIds.includes(task.id)}
+                        onClick={() =>
+                          setSelectedTaskIds((ids) =>
+                            ids.includes(task.id)
+                              ? ids.filter((id) => id !== task.id)
+                              : [...ids, task.id],
+                          )
+                        }
+                        disabled={Boolean(completingTaskId)}
+                        aria-label={`${task.title} 선택`}
+                      >
+                        {completingTaskId === task.id ? (
+                          <span className="button-spinner" aria-hidden="true" />
+                        ) : selectedTaskIds.includes(task.id) ? (
+                          <CheckCircle2 aria-hidden="true" />
+                        ) : (
+                          <Circle aria-hidden="true" />
+                        )}
+                      </button>
+                      <button
+                        className="home-task-list__open focus-visible-control"
+                        type="button"
+                        onClick={() => void onOpenPlanningTask(task)}
+                        disabled={Boolean(completingTaskId)}
+                        aria-label={copy.home.openTaskInSchedule(task.title)}
+                      >
+                        <span className="home-task-list__content">
+                          <strong>{task.title} </strong>
+                          <small data-assigned={Boolean(task.assigneeName)}>
+                            {copy.projects.taskAssignee(
+                              task.assigneeName ?? undefined,
+                            )}
+                          </small>
+                        </span>
+                        {task.dueAt && (
+                          <time
+                            dateTime={task.dueAt}
+                            data-due-state={taskDueState(task)}
+                          >
+                            {taskDueLabel(task)}
+                          </time>
+                        )}
+                      </button>
+                      <button
+                        className="home-task-list__edit focus-visible-control"
+                        type="button"
+                        onClick={() => onEditTask(task)}
+                        disabled={Boolean(completingTaskId)}
+                        aria-label={copy.home.editTask(task.title)}
+                      >
+                        <Pencil aria-hidden="true" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              {selectedTaskIds.length > 0 && (
+                <div className="home-task-selection">
+                  <span role="status">{selectedTaskIds.length}개 선택됨</span>
+                  <button
+                    className="primary-button focus-visible-control"
+                    type="button"
+                    disabled={Boolean(completingTaskId)}
+                    onClick={() => void completeSelectedTasks()}
+                  >
+                    {completingTaskId
+                      ? "완료 처리 중…"
+                      : "선택한 할 일 완료하기"}
+                  </button>
+                </div>
+              )}
+              {!showingSkeleton && taskCount > 3 && (
+                <button
+                  className="home-tasks__mobile-more focus-visible-control"
+                  type="button"
+                  onClick={onOpenPlanning}
+                >
+                  {copy.home.showMoreTasks(taskCount - 3)}
+                  <ChevronRight aria-hidden="true" />
+                </button>
+              )}
+            </div>
+          </section>
+        )}
+      </>
     </section>
   );
 }
@@ -973,364 +868,6 @@ function NowBrief({
             ? copy.home.collapseRecommendations
             : copy.home.showMoreRecommendations(recommendations.length - 2)}
         </button>
-      )}
-    </section>
-  );
-}
-
-export function HomeAssistantCommand({
-  compact = false,
-  ready,
-  conversationId,
-  request,
-  job,
-  message,
-  focused,
-  onFocusChange,
-  onOpenAssistant,
-  onStartNew,
-  onSend,
-  onLoadTask,
-  onCompleteTask,
-  onRestoreTask,
-  onEditTask,
-  onEditSchedule,
-  onOpenTask,
-  onOpenProject,
-  onOpenSchedule,
-}: {
-  compact?: boolean;
-  ready: boolean;
-  conversationId: string | undefined;
-  request: string | undefined;
-  job: AgentJob | undefined;
-  message: ConversationMessage | undefined;
-  focused: boolean;
-  onFocusChange(focused: boolean): void;
-  onOpenAssistant(): void;
-  onStartNew(): Promise<boolean>;
-  onSend(text: string, clientMessageId: string): Promise<boolean>;
-  onLoadTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
-  onCompleteTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
-  onRestoreTask(task: Pick<Task, "id" | "projectId">): Promise<Task>;
-  onEditTask(task: Pick<Task, "id" | "projectId">): void | Promise<void>;
-  onEditSchedule(
-    entry: Pick<ScheduleEntry, "id" | "startsAt">,
-  ): void | Promise<void>;
-  onOpenTask(task: Pick<Task, "id" | "projectId">): void | Promise<void>;
-  onOpenProject(
-    project: Pick<Project, "id" | "workspaceId">,
-  ): void | Promise<void>;
-  onOpenSchedule(
-    entry: Pick<ScheduleEntry, "id" | "startsAt">,
-  ): void | Promise<void>;
-}) {
-  const [draft, setDraft] = useState("");
-  const [submitted, setSubmitted] = useState(
-    Boolean(conversationId && request),
-  );
-  const [submittedRequest, setSubmittedRequest] = useState(request ?? "");
-  const [sending, setSending] = useState(false);
-  const [startingNew, setStartingNew] = useState(false);
-  const [error, setError] = useState<string>();
-  const inputRef = useRef<HTMLInputElement>(null);
-  const focusFrameRef = useRef<number | undefined>(undefined);
-  const active = Boolean(job && !isTerminalJob(job.state));
-
-  useEffect(
-    () => () => {
-      if (focusFrameRef.current !== undefined) {
-        cancelAnimationFrame(focusFrameRef.current);
-      }
-    },
-    [],
-  );
-
-  useEffect(() => {
-    if (!conversationId || !request) return;
-    setSubmitted(true);
-    setSubmittedRequest(request);
-    if (!compact) onFocusChange(true);
-  }, [compact, conversationId, onFocusChange, request]);
-
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const request = draft.trim();
-    if (!request || sending || active || !ready) return;
-    setSubmittedRequest(request);
-    setSubmitted(true);
-    setSending(true);
-    setError(undefined);
-    if (!compact) onFocusChange(true);
-    const sent = await onSend(request, createUuidV7());
-    if (sent) {
-      setDraft("");
-    } else {
-      setError(copy.home.commandFailed);
-    }
-    setSending(false);
-  }
-
-  const status =
-    submitted && focused && !sending && !error
-      ? commandStatus(job, message)
-      : undefined;
-  const presentation =
-    focused &&
-    submitted &&
-    !sending &&
-    !error &&
-    job?.state === "completed" &&
-    message
-      ? presentationForMessage(message)
-      : undefined;
-  const stage = presentation
-    ? "result"
-    : active || sending
-      ? "working"
-      : status
-        ? "attention"
-        : "idle";
-  const continuing = Boolean(conversationId && submitted);
-  const composer = (
-    <form
-      className="home-command__form"
-      data-mode={continuing ? "follow-up" : "initial"}
-      aria-busy={sending || active}
-      onSubmit={(event) => void submit(event)}
-    >
-      <label className="sr-only" htmlFor="home-assistant-command">
-        {continuing ? copy.home.followUpLabel : copy.home.commandLabel}
-      </label>
-      <input
-        ref={inputRef}
-        id="home-assistant-command"
-        value={draft}
-        maxLength={24_000}
-        placeholder={
-          ready
-            ? continuing
-              ? copy.home.followUpPlaceholder
-              : copy.home.commandInputPlaceholder
-            : copy.home.commandNeedsConnection
-        }
-        disabled={!ready || sending || active}
-        onChange={(event) => {
-          setDraft(event.target.value);
-          setError(undefined);
-        }}
-      />
-      <button
-        className="primary-button focus-visible-control"
-        type="submit"
-        disabled={!ready || sending || active || !draft.trim()}
-        aria-label={continuing ? copy.home.followUpSend : copy.home.commandSend}
-      >
-        {sending || active ? (
-          <span className="button-spinner" aria-hidden="true" />
-        ) : (
-          <Send aria-hidden="true" />
-        )}
-      </button>
-    </form>
-  );
-
-  async function startNewRequest() {
-    if (startingNew || active || sending || !ready) return;
-    setStartingNew(true);
-    setError(undefined);
-    try {
-      const started = await onStartNew();
-      if (!started) {
-        setError(copy.home.startNewRequestProblem);
-        return;
-      }
-      setDraft("");
-      setSubmitted(false);
-      setSubmittedRequest("");
-      onFocusChange(false);
-      if (focusFrameRef.current !== undefined) {
-        cancelAnimationFrame(focusFrameRef.current);
-      }
-      focusFrameRef.current = requestAnimationFrame(() => {
-        focusFrameRef.current = undefined;
-        inputRef.current?.focus();
-      });
-    } catch {
-      setError(copy.home.startNewRequestProblem);
-    } finally {
-      setStartingNew(false);
-    }
-  }
-
-  if (compact) {
-    const feedback =
-      !sending && !error ? assistantTurnFeedback(job, message) : undefined;
-    return (
-      <section
-        className="home-command home-command--compact"
-        aria-label={copy.home.commandLabel}
-      >
-        {composer}
-        {error ? (
-          <p className="inline-alert" role="alert">
-            {error}
-          </p>
-        ) : sending ? (
-          <p className="assistant-turn-feedback" data-tone="busy" role="status">
-            {copy.home.requestSending}
-          </p>
-        ) : feedback && conversationId ? (
-          <div className="home-request-receipt">
-            <div
-              role={feedback.tone === "error" ? "alert" : "status"}
-              className="assistant-turn-feedback"
-              data-tone={feedback.tone}
-            >
-              <strong>{feedback.label}</strong>
-              {request && <span>{request}</span>}
-            </div>
-            <button
-              type="button"
-              className="secondary-button focus-visible-control"
-              onClick={onOpenAssistant}
-            >
-              {feedback.tone === "warning"
-                ? copy.home.requestApproval
-                : active
-                  ? copy.home.requestView
-                  : copy.home.requestResult}
-            </button>
-          </div>
-        ) : null}
-      </section>
-    );
-  }
-
-  return (
-    <section
-      className="home-command"
-      data-stage={stage}
-      aria-labelledby="home-command-title"
-    >
-      <div className="home-command__heading">
-        <div>
-          <h2 id="home-command-title">
-            {continuing ? copy.home.followUpTitle : copy.home.commandTitle}
-          </h2>
-          <p>
-            {continuing
-              ? copy.home.followUpDescription
-              : copy.home.commandDescription}
-          </p>
-        </div>
-        <div className="home-command__heading-actions">
-          {focused && continuing && !active && (
-            <button
-              className="text-button focus-visible-control"
-              type="button"
-              onClick={() => onFocusChange(false)}
-            >
-              {copy.home.collapseResult}
-            </button>
-          )}
-          <span aria-hidden="true">
-            <Sparkles />
-          </span>
-        </div>
-      </div>
-      {!continuing && composer}
-      {focused && submittedRequest && (
-        <div
-          className="home-command__request"
-          role="group"
-          aria-label={copy.home.commandRequestLabel}
-        >
-          <span>{copy.home.commandRequestLabel}</span>
-          <p>{submittedRequest}</p>
-        </div>
-      )}
-      {error && (
-        <p className="assistant-inline-alert" role="alert">
-          {error}
-        </p>
-      )}
-      {presentation ? (
-        <AssistantInteractiveCanvas
-          key={message?.id}
-          presentation={presentation}
-          onContinue={() => inputRef.current?.focus()}
-          onLoadTask={onLoadTask}
-          onCompleteTask={onCompleteTask}
-          onRestoreTask={onRestoreTask}
-          onEditTask={onEditTask}
-          onEditSchedule={onEditSchedule}
-          onOpenTask={onOpenTask}
-          onOpenProject={onOpenProject}
-          onOpenSchedule={onOpenSchedule}
-        />
-      ) : status ? (
-        <div className="home-command__result" role="status" aria-live="polite">
-          <div>
-            <strong>{status.title}</strong>
-            <p>{status.description}</p>
-          </div>
-          {status.needsReview && (
-            <button
-              className="secondary-button focus-visible-control"
-              type="button"
-              onClick={() => {
-                if (job?.state === "waiting_approval") {
-                  onOpenAssistant();
-                  return;
-                }
-                inputRef.current?.focus();
-              }}
-            >
-              {job?.state === "waiting_approval"
-                ? copy.home.commandReview
-                : copy.home.followUpAction}
-            </button>
-          )}
-        </div>
-      ) : null}
-      {continuing && (
-        <section
-          className="home-command__continuation"
-          aria-labelledby="home-command-continuation-title"
-        >
-          <div className="home-command__continuation-heading">
-            <span aria-hidden="true">
-              <MessageCircleMore />
-            </span>
-            <div>
-              <h3 id="home-command-continuation-title">
-                {copy.home.followUpAction}
-              </h3>
-              <p>{copy.home.followUpContext}</p>
-            </div>
-            <button
-              type="button"
-              className="secondary-button home-command__new-request focus-visible-control"
-              disabled={!ready || active || sending || startingNew}
-              aria-busy={startingNew}
-              title={
-                active ? copy.home.commandProcessingDescription : undefined
-              }
-              onClick={() => void startNewRequest()}
-            >
-              {startingNew ? (
-                <span className="button-spinner" aria-hidden="true" />
-              ) : (
-                <Plus aria-hidden="true" />
-              )}
-              {startingNew
-                ? copy.home.startingNewRequest
-                : copy.home.startNewRequest}
-            </button>
-          </div>
-          {composer}
-        </section>
       )}
     </section>
   );
@@ -1899,25 +1436,6 @@ function nowBriefHeading(period: HomeBriefPeriod): {
   };
 }
 
-function homeAssistantState(
-  focused: boolean,
-  job: AgentJob | undefined,
-  message: ConversationMessage | undefined,
-): "overview" | "working" | "result" | "attention" {
-  if (!focused) return "overview";
-  if (job?.state === "completed" && message?.status === "completed") {
-    return "result";
-  }
-  if (
-    job?.state === "failed" ||
-    job?.state === "cancelled" ||
-    job?.state === "declined"
-  ) {
-    return "attention";
-  }
-  return "working";
-}
-
 function briefingHeading(
   nextSchedule: ScheduleEntry | undefined,
   scheduleCount: number,
@@ -1978,10 +1496,6 @@ function formatDueTime(value: string): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value));
-}
-
-function isTerminalJob(state: AgentJob["state"]): boolean {
-  return ["completed", "failed", "cancelled", "declined"].includes(state);
 }
 
 export function commandStatus(

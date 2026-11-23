@@ -19,7 +19,7 @@ import "./completionReviews.css";
 interface Props {
   baseUrl: string;
   authenticate<T>(request: (token: string) => Promise<T>): Promise<T>;
-  onChanged(): void | Promise<void>;
+  onChanged(approved: boolean): void | Promise<void>;
   highlightedId?: string;
 }
 
@@ -203,7 +203,7 @@ export function CompletionReviewPanel({
       await submitDecision(review, approve, note);
       forgetDecisions(new Set([review.id]));
       setNotice(approve ? c.approved : c.rejected);
-      await onChanged();
+      await onChanged(approve);
     } catch (e) {
       if (e instanceof PlanningRequestError && e.code === "conflict") {
         await load();
@@ -253,7 +253,7 @@ export function CompletionReviewPanel({
       setNotice(c.batchResult(approved.size, targets.length - approved.size));
       if (approved.size) {
         try {
-          await onChanged();
+          await onChanged(true);
         } catch {
           // Confirmed reports are already saved; a later refresh can reconcile the home list.
         }

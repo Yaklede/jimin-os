@@ -448,6 +448,12 @@ writing, approval, completion and failure from actual request state, not from
 a simulated progress estimate. Keep review history in More, retain actionable
 failures on home, and do not conflate saved work with delivery.
 
+Home shows at most one delivery-failure line, and only while an unresolved
+failure needs the user's action. Show a new failure where the user is working.
+Detailed notification, Chat and ITSM recovery and retries live in
+확인·처리 기록. Automatic retries do not add a Home item. Today tasks and
+reported completion approval remain part of the home work queue.
+
 ## Work dialogs and daily shortcuts — 2026-11-20
 
 Keep the unread queue first in the home workspace and keep a compact scheduled

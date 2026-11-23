@@ -1,6 +1,10 @@
 import { designPreviewInflow } from "./design-preview-inflow";
 import { applyDesignPreviewInflowDecision } from "./design-preview-inflow-decision";
 import {
+  appendPreviewProjectHistory,
+  previewProjectCompletedPage,
+} from "./design-preview-project-history";
+import {
   PLANNING_TIME_ZONE,
   type ScheduleEntry,
   type Task,
@@ -21,6 +25,9 @@ import type { CompletionReview } from "./api/completionReviews";
 // Fixtures for local preview or an explicit design-preview build only.
 export function installDesignPreview(): void {
   const originalFetch = window.fetch.bind(window);
+  const deliveryPreview = new URLSearchParams(window.location?.search).get(
+    "delivery",
+  );
   const now = new Date().toISOString();
   const schedules: ScheduleEntry[] = [
     {
@@ -133,6 +140,8 @@ export function installDesignPreview(): void {
     status: "completed",
     completedAt: new Date(Date.now() - 2 * 86400000).toISOString(),
   });
+  if (new URLSearchParams(window.location?.search).get("projectHistory") === "1")
+    appendPreviewProjectHistory(tasks, Date.parse(now));
   inflow[24] = {
     ...inflow[24],
     analysisClassification: "follow_up",
@@ -263,6 +272,21 @@ export function installDesignPreview(): void {
     dismissalReason: "이미 처리한 요청이에요.",
     dismissalReplyStatus: "failed",
   });
+  if (deliveryPreview === "clear") {
+    const pending = deliveryRecovery.filter(
+      (item) => item.status !== "failed" || !item.canRetry,
+    );
+    deliveryRecovery.splice(0, deliveryRecovery.length, ...pending);
+    for (const item of inflow) {
+      if (item.completionStatus === "failed") {
+        item.completionStatus = "sent";
+        item.completionReactionCompleted = true;
+        item.completionReplyCompleted = true;
+      }
+      if (item.dismissalReplyStatus === "failed")
+        item.dismissalReplyStatus = "sent";
+    }
+  }
   inflow[1] = {
     ...inflow[1],
     analysisClassification: "question",
@@ -866,13 +890,37 @@ export function installDesignPreview(): void {
           ) {
             return json({ error: "preview_retry_unavailable" }, 503);
           }
-          return applyDesignPreviewInflowDecision(item, tasks, body);
+          const result = applyDesignPreviewInflowDecision(item, tasks, body);
+          if (result.ok && deliveryPreview === "fail") {
+            if (body?.decision === "promote") {
+              item.completionStatus = "failed";
+              item.completionReactionCompleted = true;
+              item.completionErrorCode =
+                "google_chat.completion_reply_provider_unavailable";
+              return json(item);
+            }
+            if (body?.decision === "dismiss" && body.replyToSource === true) {
+              item.dismissalReplyStatus = "failed";
+              return json(item);
+            }
+          }
+          return result;
         } catch {
           return json({ error: "preview_invalid_decision" }, 400);
         }
       }
       return json({ error: "design_preview_only" }, 400);
     }
+    const projectHistory =
+      /^\/v1\/projects\/([^/]+)\/completed-tasks$/u.exec(path);
+    if (projectHistory && method === "GET")
+      return json(
+        previewProjectCompletedPage(
+          tasks,
+          decodeURIComponent(projectHistory[1]),
+          url.searchParams,
+        ),
+      );
     if (path === "/v1/tasks" && method === "POST") {
       const body = JSON.parse(String(init?.body ?? "{}"));
       const task: Task = {
@@ -921,6 +969,12 @@ export function installDesignPreview(): void {
         if (body.workflowState === "waiting" && !body.waitingReason?.trim())
           return json({ error: "preview_waiting_reason_required" }, 400);
         Object.assign(task, body, { version: task.version + 1 });
+        if (task.status === "open") task.completedAt = null;
+      }
+      if (method === "DELETE") {
+        task.status = "cancelled";
+        task.completedAt = null;
+        return new Response(null, { status: 204 });
       }
       return json(task);
     }
