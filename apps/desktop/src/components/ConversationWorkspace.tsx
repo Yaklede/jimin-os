@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   ArrowUpRight,
   ArrowDown,
+  Check,
   CircleAlert,
   Clipboard,
   ExternalLink,
@@ -33,6 +34,11 @@ import { copy } from "../copy";
 import { conversationHistoryCopy as historyCopy } from "../copy/conversationHistory";
 import { homeChatEntryCopy } from "../copy/homeChatEntry";
 import { ConversationDeleteDialog } from "./ConversationDeleteDialog";
+import {
+  deleteSelectedConversations,
+  type ConversationBulkDeleteResult,
+} from "./conversationBulkDelete";
+import { registerMobileBackHandler } from "../mobileBack";
 import { createUuidV7 } from "../uuid";
 import {
   SkeletonBlock,
@@ -272,6 +278,7 @@ export function ConversationWorkspace({
           disabled={isWaiting || startingNew}
           onSelect={onSelect}
           onDelete={requestDelete}
+          onDeleteConversation={onDeleteConversation}
           onStartConversation={() => void startConversation()}
         />
 
@@ -440,9 +447,14 @@ function ConversationHistory({
   onSelect,
   onStartConversation,
   onDelete,
+  onDeleteConversation,
 }: Pick<
   ConversationWorkspaceProps,
-  "conversations" | "loading" | "selectedConversationId" | "onSelect"
+  | "conversations"
+  | "loading"
+  | "selectedConversationId"
+  | "onSelect"
+  | "onDeleteConversation"
 > & {
   disabled: boolean;
   standalone: boolean;
@@ -455,20 +467,78 @@ function ConversationHistory({
   const title = useRef<HTMLHeadingElement>(null);
   const list = useRef<HTMLUListElement>(null);
   const standaloneScroll = useRef(0);
+  const [picked, setPicked] = useState<Set<string>>();
+  const [confirmIds, setConfirmIds] = useState<string[]>();
+  const [receipt, setReceipt] = useState<ConversationBulkDeleteResult>();
+  const outcome = useRef<ConversationBulkDeleteResult | undefined>(undefined);
+  const selectControl = useRef<HTMLButtonElement>(null);
+  const deleteControl = useRef<HTMLButtonElement>(null);
+  const restoreSelectionFocus = useRef<"delete" | "select" | undefined>(
+    undefined,
+  );
+  const selecting = standalone && picked !== undefined;
+  const selectedIds = conversations
+    .filter((conversation) => picked?.has(conversation.id))
+    .map((conversation) => conversation.id);
+  const allSelected = selectedIds.length === conversations.length;
   useLayoutEffect(() => {
-    if (!standalone) return;
+    if (!standalone) {
+      setPicked(undefined);
+      setConfirmIds(undefined);
+      setReceipt(undefined);
+      return;
+    }
     if (list.current) list.current.scrollTop = standaloneScroll.current;
     title.current?.focus({ preventScroll: true });
   }, [standalone]);
+
+  useLayoutEffect(() => {
+    const target = restoreSelectionFocus.current;
+    if (!target) return;
+    restoreSelectionFocus.current = undefined;
+    const preferred =
+      target === "delete" ? deleteControl.current : selectControl.current;
+    (preferred && !preferred.disabled ? preferred : title.current)?.focus({
+      preventScroll: true,
+    });
+  });
+
+  useEffect(() => {
+    if (!selecting || confirmIds) return;
+    return registerMobileBackHandler(() => {
+      setPicked(undefined);
+      setReceipt(undefined);
+      selectControl.current?.focus({ preventScroll: true });
+      return true;
+    }, 85);
+  }, [selecting, confirmIds]);
+
+  function toggleSelection(id: string) {
+    setReceipt(undefined);
+    setPicked((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   return (
     <aside
       className="assistant-history"
       aria-labelledby="conversation-list-title"
       aria-busy={showingSkeleton}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || !selecting || confirmIds) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setPicked(undefined);
+        setReceipt(undefined);
+        selectControl.current?.focus({ preventScroll: true });
+      }}
     >
-      <div className="assistant-history__header">
-        <div>
+      <div className="assistant-history__top">
+        <div className="assistant-history__header">
           {standalone ? (
             <h1 id="conversation-list-title" tabIndex={-1} ref={title}>
               {homeChatEntryCopy.history}
@@ -476,16 +546,84 @@ function ConversationHistory({
           ) : (
             <h2 id="conversation-list-title">{copy.conversations.listTitle}</h2>
           )}
+          <div className="assistant-history__header-actions">
+            {standalone && (conversations.length > 0 || selecting) && (
+              <button
+                ref={selectControl}
+                className="secondary-button assistant-history__select focus-visible-control"
+                type="button"
+                aria-expanded={selecting}
+                disabled={loading && !selecting}
+                onClick={() => {
+                  setReceipt(undefined);
+                  setPicked(selecting ? undefined : new Set());
+                }}
+              >
+                {selecting ? historyCopy.stopSelecting : historyCopy.select}
+              </button>
+            )}
+            {!selecting && (
+              <button
+                className="assistant-history__new focus-visible-control"
+                type="button"
+                aria-label={copy.conversations.newConversation}
+                onClick={onStartConversation}
+                disabled={loading || disabled}
+              >
+                <Plus aria-hidden="true" />
+              </button>
+            )}
+          </div>
         </div>
-        <button
-          className="assistant-history__new focus-visible-control"
-          type="button"
-          aria-label={copy.conversations.newConversation}
-          onClick={onStartConversation}
-          disabled={loading || disabled}
-        >
-          <Plus aria-hidden="true" />
-        </button>
+        {selecting && (
+          <div className="assistant-history__bulk-tools">
+            <button
+              type="button"
+              className="secondary-button focus-visible-control"
+              disabled={!conversations.length || loading}
+              onClick={() => {
+                setReceipt(undefined);
+                setPicked(
+                  new Set(allSelected ? [] : conversations.map(({ id }) => id)),
+                );
+              }}
+            >
+              {allSelected ? historyCopy.clearSelection : historyCopy.selectAll}
+            </button>
+            <span className="assistant-history__selection-count" role="status">
+              {historyCopy.selected(selectedIds.length)}
+            </span>
+            <button
+              ref={deleteControl}
+              type="button"
+              className="destructive-button focus-visible-control"
+              disabled={!selectedIds.length || loading}
+              onClick={() => setConfirmIds(selectedIds)}
+            >
+              {historyCopy.deleteSelected(selectedIds.length)}
+            </button>
+          </div>
+        )}
+        {receipt && (
+          <p
+            className={
+              receipt.failed.length
+                ? "inline-alert"
+                : "assistant-history__receipt"
+            }
+            role={receipt.failed.length ? "alert" : "status"}
+          >
+            {[
+              receipt.deleted.length > 0 &&
+                historyCopy.bulkDeleted(receipt.deleted.length),
+              receipt.failed.length > 0 &&
+                historyCopy.bulkRemaining(receipt.failed.length),
+              receipt.busy > 0 && historyCopy.bulkBusy(receipt.busy),
+            ]
+              .filter(Boolean)
+              .join(" ")}
+          </p>
+        )}
       </div>
       {conversations.length ? (
         <ul
@@ -504,32 +642,61 @@ function ConversationHistory({
                 ? assistantTurnFeedback(job, undefined)
                 : undefined;
             return (
-              <li key={conversation.id} className="assistant-history__entry">
+              <li
+                key={conversation.id}
+                className="assistant-history__entry"
+                data-selecting={selecting}
+              >
                 <button
                   className="assistant-history__row focus-visible-control"
-                  data-selected={selected}
+                  data-selected={
+                    selecting ? picked.has(conversation.id) : selected
+                  }
+                  data-picking={selecting}
                   type="button"
+                  role={selecting ? "checkbox" : undefined}
+                  aria-checked={
+                    selecting ? picked.has(conversation.id) : undefined
+                  }
                   onClick={() => {
+                    if (selecting) {
+                      toggleSelection(conversation.id);
+                      return;
+                    }
                     if (standalone)
                       standaloneScroll.current = list.current?.scrollTop ?? 0;
                     onSelect(conversation.id);
                   }}
-                  aria-current={selected ? "page" : undefined}
+                  aria-current={selected && !selecting ? "page" : undefined}
                 >
-                  <strong>
-                    {conversation.title ?? copy.conversations.untitled}
-                  </strong>
-                  <span>
-                    {feedback?.label ??
-                      (conversation.lastMessageAt
-                        ? formatConversationTime(conversation.lastMessageAt)
-                        : copy.conversations.noMessages)}
+                  {selecting && (
+                    <span
+                      className="assistant-history__pick"
+                      aria-hidden="true"
+                    >
+                      {picked.has(conversation.id) && (
+                        <Check aria-hidden="true" />
+                      )}
+                    </span>
+                  )}
+                  <span className="assistant-history__row-content">
+                    <strong>
+                      {conversation.title ?? copy.conversations.untitled}
+                    </strong>
+                    <span>
+                      {feedback?.label ??
+                        (conversation.lastMessageAt
+                          ? formatConversationTime(conversation.lastMessageAt)
+                          : copy.conversations.noMessages)}
+                    </span>
                   </span>
                 </button>
-                <ConversationDeleteButton
-                  conversation={conversation}
-                  onDelete={onDelete}
-                />
+                {!selecting && (
+                  <ConversationDeleteButton
+                    conversation={conversation}
+                    onDelete={onDelete}
+                  />
+                )}
               </li>
             );
           })}
@@ -538,6 +705,31 @@ function ConversationHistory({
         <LoadingConversationRows visible={skeletonVisible} />
       ) : (
         <p className="assistant-history__empty">{copy.conversations.empty}</p>
+      )}
+      {standalone && confirmIds && (
+        <ConversationDeleteDialog
+          count={confirmIds.length}
+          onDelete={async () => {
+            outcome.current = await deleteSelectedConversations(
+              confirmIds,
+              onDeleteConversation,
+            );
+          }}
+          onClose={(completed) => {
+            const result = outcome.current;
+            outcome.current = undefined;
+            setConfirmIds(undefined);
+            restoreSelectionFocus.current = "delete";
+            if (completed && result) {
+              setReceipt(result);
+              setPicked(
+                result.failed.length > 0 ? new Set(result.failed) : undefined,
+              );
+              if (!result.failed.length)
+                restoreSelectionFocus.current = "select";
+            }
+          }}
+        />
       )}
     </aside>
   );

@@ -9,6 +9,7 @@
   padding: 12px;
   overflow: auto;
   overscroll-behavior: contain;
+  border: 1px solid var(--border);
   border-radius: var(--radius-panel);
   background: var(--surface-subtle);
   color: var(--text);
@@ -37,14 +38,10 @@
 }
 
 .calendar-task-preview dl {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: 4px 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 10px;
   margin: 4px 0 0;
-}
-
-.calendar-task-preview dt,
-.calendar-task-preview > span {
   color: var(--muted);
 }
 

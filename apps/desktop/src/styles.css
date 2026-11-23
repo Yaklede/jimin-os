@@ -15254,7 +15254,6 @@ svg {
     width: 100%;
     justify-content: center;
   }
-
 }
 
 @media (max-width: 390px) {
@@ -18383,15 +18382,25 @@ body {
   }
 }
 
-/* Light surfaces use background hierarchy instead of static perimeter lines. */
+/* Keep component-owned dividers and control boundaries visible in light mode. */
 :root[data-preview-theme="light"] {
-  --border: transparent;
-  --border-strong: transparent;
+  --border: #c8d0db;
+  --border-strong: #7d8796;
 }
 :root[data-preview-theme="light"]
-  #root
-  :not(input[type="checkbox"]):not(input[type="radio"]) {
-  border: 0;
+  .home-inflow-tabs
+  > button[aria-selected="true"] {
+  color: var(--accent-text);
+}
+:root[data-preview-theme="light"] .home-inflow-review__queue li + li {
+  border-top: 1px solid var(--border);
+}
+:root[data-preview-theme="light"]
+  :is(.home-direct-tasks ul, .home-command__form) {
+  border: 1px solid var(--border);
+}
+:root[data-preview-theme="light"] .home-direct-tasks .mobile-task-row__circle {
+  border-color: var(--border-strong);
 }
 :root[data-preview-theme="light"] :is(input, textarea, select):focus-visible {
   outline: 2px solid var(--focus);

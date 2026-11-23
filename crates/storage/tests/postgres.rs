@@ -10678,6 +10678,21 @@ async fn gmail_inflow_attention_moves_replied_threads_to_a_fresh_first_page() {
             .map(|candidate| candidate.provider_thread_id.as_str()),
         Some(oldest_thread.as_str())
     );
+    let assistant = database
+        .gmail_inflow_attention_for_user(owner.profile.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        assistant.first().map(|candidate| candidate.id),
+        refreshed.items.first().map(|candidate| candidate.id)
+    );
+    assert!(
+        database
+            .gmail_inflow_attention_for_user(Uuid::now_v7())
+            .await
+            .unwrap()
+            .is_empty()
+    );
     database.close().await;
     pool.close().await;
 }
@@ -11516,8 +11531,8 @@ async fn chat_attention_keeps_unread_conversations_despite_history_and_automatio
     );
     assert!(project_items.iter().any(|item| item.id == actual));
 
-    sqlx::query("INSERT INTO project_inflow_analyses (id,user_id,project_id,source_id,conversation_key,representative_item_id,state,classification,confidence,summary,analyzed_revision,analyzed_at,updated_at)
-        VALUES ($1,$2,$3,$4,'thread:spaces/attention/threads/old',$5,'ready','question',90,'보존된 분석',1,TIMESTAMPTZ '2026-07-01',TIMESTAMPTZ '2026-07-01')")
+    sqlx::query("INSERT INTO project_inflow_analyses (id,user_id,project_id,source_id,conversation_key,representative_item_id,state,classification,confidence,summary,suggested_task_title,suggested_priority,suggested_action_items,suggested_completion_criteria,analyzed_revision,analyzed_at,updated_at)
+        VALUES ($1,$2,$3,$4,'thread:spaces/attention/threads/old',$5,'ready','new_task',90,'보존된 분석','결제 조회 오류 수정',1,ARRAY['오류 확인'],'오류 해결',1,TIMESTAMPTZ '2026-07-01',TIMESTAMPTZ '2026-07-01')")
         .bind(Uuid::now_v7()).bind(user).bind(project.id).bind(source).bind(old).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO project_inflow_analyses (id,user_id,project_id,source_id,conversation_key,representative_item_id,state)
         SELECT gen_random_uuid(),$1,$2,$3,'thread:spaces/attention/threads/filler-' || n,$4,'failed' FROM generate_series(1,301) n")
@@ -11528,6 +11543,17 @@ async fn chat_attention_keeps_unread_conversations_despite_history_and_automatio
         .unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].summary.as_deref(), Some("보존된 분석"));
+    let inbox = db.project_inflow_queue_for_user(user).await.unwrap();
+    assert!(inbox.iter().any(|row| {
+        row.representative.id == old && !row.reviewed() && row.suggested_priority() == Some(2)
+    }));
+    assert!(inbox.iter().any(|row| row.representative.id == actual));
+    assert!(
+        db.project_inflow_queue_for_user(Uuid::now_v7())
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(
         db.project_inflow_analyses_for_items(Uuid::now_v7(), &[old])
             .await

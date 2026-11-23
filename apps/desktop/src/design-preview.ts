@@ -74,6 +74,8 @@ export function installDesignPreview(): void {
     "거래내역 조회 화면 검토",
     "결제 오류 수정",
     "시스템 전산 구축",
+    "거래 확인 결과 공유",
+    "정산 요약 검토",
   ];
   const tasks: Task[] = titles.map((title, index) => ({
     id: `preview-task-${index}`,
@@ -91,7 +93,7 @@ export function installDesignPreview(): void {
         ? null
         : new Date(
             Date.now() +
-              (index < 3
+              (index < 3 || index > 7
                 ? 2 * 3600000
                 : index < 5
                   ? -86400000
@@ -385,8 +387,35 @@ export function installDesignPreview(): void {
     lastMessageAt: now,
     version: 1,
   };
-  const conversations = [conversation];
-  const transcriptById = new Map([[conversation.id, messages]]);
+  const history: Conversation[] = [
+    "예시: 주간 일정 확인",
+    "예시: 예약 업무 확인",
+  ].map((title, index) => ({
+    ...conversation,
+    id: `preview-history-${index}`,
+    title,
+    surface: "chat",
+    lastMessageAt: new Date(Date.now() - (index + 1) * 86400000).toISOString(),
+  }));
+  const conversations = [conversation, ...history];
+  const transcriptById = new Map([
+    [conversation.id, messages],
+    ...history.map((item): [string, ConversationMessage[]] => [
+      item.id,
+      [
+        {
+          id: `${item.id}-message`,
+          role: "user",
+          content: item.title ?? "",
+          presentation: null,
+          status: "completed",
+          createdAt: item.lastMessageAt ?? now,
+          completedAt: item.lastMessageAt,
+          version: 1,
+        },
+      ],
+    ]),
+  ]);
   const previewTurns = new Map<
     string,
     {

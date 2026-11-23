@@ -338,6 +338,35 @@ impl Database {
         .map_err(classify)
     }
 
+    /// Reads current Gmail attention items for the assistant without releasing
+    /// deferrals or changing their status.
+    ///
+    /// # Errors
+    /// Returns a persistence error if the owner-scoped read fails.
+    pub async fn gmail_inflow_attention_for_user(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<GmailInflowCandidate>, StorageError> {
+        if !is_v7(user_id) {
+            return Err(StorageError::InvalidConfiguration);
+        }
+        let mut query = QueryBuilder::<Postgres>::new(candidate_select());
+        query
+            .push(" WHERE candidate.user_id = ")
+            .push_bind(user_id)
+            .push(" AND ")
+            .push(status_predicate(GmailInflowStatus::Attention))
+            .push(" ORDER BY candidate.attention_at DESC, candidate.id DESC LIMIT 101");
+        query
+            .build_query_as::<GmailInflowCandidateRow>()
+            .fetch_all(self.pool())
+            .await
+            .map_err(classify)?
+            .into_iter()
+            .map(GmailInflowCandidate::try_from)
+            .collect()
+    }
+
     /// Lists candidates inside one explicit owned workspace. Attention returns
     /// only ready new-task analyses that have not been decided.
     ///

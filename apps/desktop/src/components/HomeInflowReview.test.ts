@@ -14,6 +14,7 @@ import {
   HomeInflowReview,
   homeInflowPendingItems,
   resolveHomeInflowSelection,
+  sortNewWorkByPriority,
   visibleHomeInflowItems,
 } from "./HomeInflowReview";
 
@@ -48,6 +49,27 @@ function inflow(
 }
 
 describe("home inflow review", () => {
+  it("shows the shared priority before opening a new request, highest first", () => {
+    const rows = [
+      inflow("improvement", { suggestedPriority: 1 }),
+      inflow("bug-fix", { suggestedPriority: 2 }),
+      inflow("urgent", { suggestedPriority: 3 }),
+      inflow("refreshing", {
+        suggestedPriority: 3,
+        analysisStatus: "refreshing",
+      }),
+    ];
+    expect(sortNewWorkByPriority(rows).map((row) => row.id)).toEqual([
+      "urgent",
+      "bug-fix",
+      "improvement",
+      "refreshing",
+    ]);
+    const markup = renderReview(rows);
+    expect(markup).toContain('data-priority="3"');
+    expect(markup).toContain(copy.projects.inflowPriorityLevels[2]);
+    expect(markup).toContain(copy.projects.inflowPriorityLevels[1]);
+  });
   it("offers batch review only for existing updates and uncertain conversations", () => {
     const markup = renderReview([
       inflow("new"),

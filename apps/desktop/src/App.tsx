@@ -3318,14 +3318,20 @@ export default function App() {
     setConversations((current) =>
       current.filter((item) => item.id !== conversationId),
     );
-    setConversationJobs((current) => {
+    const dropJob = (current: ConversationJobs) => {
+      if (!(conversationId in current)) return current;
       const next = { ...current };
       delete next[conversationId];
       return next;
-    });
+    };
+    setConversationJobs(dropJob);
+    setChatHistoryJobs(dropJob);
     if (selectedConversationIdRef.current === conversationId) {
       setAssistantDraft(undefined);
       startConversation();
+    } else if (!selectedConversationIdRef.current) {
+      // The invalidated list request will not clear its pending state.
+      setConversationLoading(false);
     }
   }
 

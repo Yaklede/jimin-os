@@ -2,6 +2,7 @@ import {
   useEffect,
   useId,
   useRef,
+  type ComponentPropsWithoutRef,
   type CSSProperties,
   type KeyboardEvent,
 } from "react";
@@ -21,6 +22,7 @@ import {
 } from "../planning-week-layout";
 import type { CalendarReport } from "./planning-calendar";
 import {
+  calendarTasksForDay,
   shouldPinCalendarPreview,
   useCalendarTaskPreview,
 } from "./CalendarTaskPreview";
@@ -84,6 +86,9 @@ export function PlanningWeekCalendar({
         .filter((entry) => !isAllDaySchedule(entry))
         .map((entry) => ({ ...entry, kind: "schedule", entry }));
   const columns = days.map((day) => layoutWeekDay(timed, day));
+  const tasksByDay = days.map((day) =>
+    calendarTasksForDay(snapshot?.tasks, day),
+  );
   const { startHour, endHour } = weekTimeWindow(columns.flat());
   const height = (endHour - startHour) * HOUR_HEIGHT;
   const hours = Array.from(
@@ -119,6 +124,29 @@ export function PlanningWeekCalendar({
     event.preventDefault();
     dateButtons.current[Math.min(6, Math.max(0, next))]?.focus();
   }
+  function previewTrigger(
+    day: Date,
+    anchor: HTMLButtonElement | null | undefined,
+  ): ComponentPropsWithoutRef<"button"> {
+    return {
+      "aria-describedby":
+        preview.anchor === anchor ? preview.descriptionId : undefined,
+      onPointerEnter: (event) => preview.openFromPointer(event, day),
+      onPointerLeave: preview.leave,
+      onFocus: (event) => {
+        if (event.currentTarget.matches(":focus-visible"))
+          preview.open(event.currentTarget, "focus", day);
+      },
+      onBlur: (event) => preview.blur(event.currentTarget),
+      onPointerDown: (event) => {
+        pressedWithTouch.current =
+          event.pointerType === "touch" ? event.currentTarget : null;
+      },
+      onPointerCancel: () => {
+        pressedWithTouch.current = null;
+      },
+    };
+  }
   return (
     <section
       className="planning-calendar planning-week"
@@ -142,12 +170,8 @@ export function PlanningWeekCalendar({
               {copy.schedule.calendarTime}
             </span>
             {days.map((day, index) => {
-              const tasks = (snapshot?.tasks ?? []).filter(
-                (task) =>
-                  task.status === "open" &&
-                  task.dueAt &&
-                  samePlanningDay(new Date(task.dueAt), day),
-              );
+              const tasks = tasksByDay[index];
+              const canPreview = !reports && tasks.length > 0;
               const daySchedule = schedule.filter((entry) =>
                 scheduleOverlapsPlanningDay(entry, day),
               );
@@ -170,6 +194,8 @@ export function PlanningWeekCalendar({
                   }
                   tabIndex={index === selectedIndex ? 0 : -1}
                   disabled={loading}
+                  {...(canPreview &&
+                    previewTrigger(day, dateButtons.current[index]))}
                   aria-label={
                     reports
                       ? copy.projects.inflowHomeCalendarDate(
@@ -183,7 +209,21 @@ export function PlanningWeekCalendar({
                         )
                   }
                   onKeyDown={(event) => move(event, index)}
-                  onClick={() => select(day)}
+                  onClick={(event) => {
+                    const touched =
+                      pressedWithTouch.current === event.currentTarget;
+                    pressedWithTouch.current = null;
+                    if (
+                      canPreview &&
+                      shouldPinCalendarPreview(event.nativeEvent, touched)
+                    ) {
+                      preview.open(event.currentTarget, "touch", day);
+                      onSelectDate(day);
+                    } else {
+                      preview.close();
+                      select(day);
+                    }
+                  }}
                 >
                   <span>{weekday.format(day)}</span>
                   <span className="planning-calendar__number">
@@ -198,72 +238,45 @@ export function PlanningWeekCalendar({
               <span className="planning-week__axis-title">
                 {copy.schedule.calendarAllDay}
               </span>
-              {days.map((day) => (
+              {days.map((day, index) => (
                 <div
                   className="planning-week__all-day-column"
                   key={day.getTime()}
                 >
-                  {(snapshot?.tasks ?? [])
-                    .filter(
-                      (task) =>
-                        task.status === "open" &&
-                        task.dueAt &&
-                        samePlanningDay(new Date(task.dueAt), day),
-                    )
-                    .map((task) => (
-                      <button
-                        className="planning-week__chip focus-visible-control"
-                        data-kind="task"
-                        data-task-id={task.id}
-                        type="button"
-                        key={task.id}
-                        disabled={loading}
-                        aria-label={previewCopy.openTask(task.title)}
-                        aria-haspopup="dialog"
-                        aria-describedby={
-                          preview.anchor?.dataset.taskId === task.id
-                            ? preview.descriptionId
-                            : undefined
+                  {tasksByDay[index].map((task) => (
+                    <button
+                      className="planning-week__chip focus-visible-control"
+                      data-kind="task"
+                      data-task-id={task.id}
+                      type="button"
+                      key={task.id}
+                      disabled={loading}
+                      aria-label={previewCopy.openTask(task.title)}
+                      aria-haspopup="dialog"
+                      {...previewTrigger(
+                        day,
+                        preview.anchor?.dataset.taskId === task.id
+                          ? preview.anchor
+                          : undefined,
+                      )}
+                      onClick={(event) => {
+                        const touched =
+                          pressedWithTouch.current === event.currentTarget;
+                        pressedWithTouch.current = null;
+                        if (
+                          shouldPinCalendarPreview(event.nativeEvent, touched)
+                        ) {
+                          preview.open(event.currentTarget, "touch", day);
+                          return;
                         }
-                        onPointerEnter={(event) => {
-                          if (event.pointerType === "mouse")
-                            preview.open(event.currentTarget, "pointer", [
-                              task,
-                            ]);
-                        }}
-                        onPointerLeave={preview.leave}
-                        onFocus={(event) => {
-                          if (event.currentTarget.matches(":focus-visible"))
-                            preview.open(event.currentTarget, "focus", [task]);
-                        }}
-                        onBlur={(event) => preview.blur(event.currentTarget)}
-                        onPointerDown={(event) => {
-                          pressedWithTouch.current =
-                            event.pointerType === "touch"
-                              ? event.currentTarget
-                              : null;
-                        }}
-                        onPointerCancel={() => {
-                          pressedWithTouch.current = null;
-                        }}
-                        onClick={(event) => {
-                          const touched =
-                            pressedWithTouch.current === event.currentTarget;
-                          pressedWithTouch.current = null;
-                          if (
-                            shouldPinCalendarPreview(event.nativeEvent, touched)
-                          ) {
-                            preview.open(event.currentTarget, "touch", [task]);
-                            return;
-                          }
-                          preview.close();
-                          if (onOpenTask) onOpenTask(task);
-                          else select(day);
-                        }}
-                      >
-                        {task.title}
-                      </button>
-                    ))}
+                        preview.close();
+                        if (onOpenTask) onOpenTask(task);
+                        else select(day);
+                      }}
+                    >
+                      {task.title}
+                    </button>
+                  ))}
                   {schedule
                     .filter(
                       (entry) =>

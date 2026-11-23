@@ -19,6 +19,7 @@ pub mod holidays;
 pub mod inflow_analysis;
 pub mod inflow_changes;
 pub mod inflow_notifications;
+pub mod inflow_queue;
 pub mod intelligence;
 pub mod itsm;
 pub mod itsm_sync;

@@ -419,6 +419,7 @@ export const projectCopy = {
   inflowDueAtProblem: "마감일을 선택하거나 ‘기한 없이 등록’을 선택해 주세요.",
   inflowWithoutDeadline: "기한 없이 등록",
   inflowPriorityLabel: "우선순위",
+  inflowPriorityLevels: ["낮음", "보통", "중요", "가장 먼저"] as const,
   inflowSenderPending: "보낸 사람 확인 중",
   inflowAssigneeWillBeNotified: (name: string) =>
     `등록하면 ${name}님을 Google Chat에서 멘션해 알려드려요.`,

@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, type KeyboardEvent } from "react";
 import { PlanningWeekCalendar } from "./planning-week-calendar";
 import {
+  calendarTasksForDay,
   shouldPinCalendarPreview,
   useCalendarTaskPreview,
 } from "./CalendarTaskPreview";
@@ -144,11 +145,7 @@ export function PlanningCalendar({
           const selected = samePlanningDay(date, range.anchor);
           const current = samePlanningDay(date, today);
           const outside = !inRange(date);
-          const tasks =
-            snapshot?.tasks.filter(
-              (task) =>
-                task.dueAt && samePlanningDay(new Date(task.dueAt), date),
-            ) ?? [];
+          const tasks = calendarTasksForDay(snapshot?.tasks, date);
           const schedule =
             snapshot?.schedule.filter(
               (entry) =>
@@ -208,24 +205,9 @@ export function PlanningCalendar({
                       schedule.length,
                     )
               }
-              onPointerOver={
+              onPointerEnter={
                 canPreview
-                  ? (event) => {
-                      if (event.pointerType !== "mouse") return;
-                      const taskId =
-                        event.target instanceof Element
-                          ? event.target.closest<HTMLElement>("[data-task-id]")
-                              ?.dataset.taskId
-                          : undefined;
-                      const hoveredTask = tasks.find(
-                        (task) => task.id === taskId,
-                      );
-                      preview.open(
-                        event.currentTarget,
-                        "pointer",
-                        hoveredTask ? [hoveredTask] : tasks,
-                      );
-                    }
+                  ? (event) => preview.openFromPointer(event, date)
                   : undefined
               }
               onPointerLeave={canPreview ? preview.leave : undefined}
@@ -247,7 +229,7 @@ export function PlanningCalendar({
                 canPreview
                   ? (event) => {
                       if (event.currentTarget.matches(":focus-visible"))
-                        preview.open(event.currentTarget, "focus", tasks);
+                        preview.open(event.currentTarget, "focus", date);
                     }
                   : undefined
               }
@@ -263,7 +245,7 @@ export function PlanningCalendar({
                     event.nativeEvent,
                     pressedWithTouch.current,
                   );
-                if (pin) preview.open(event.currentTarget, "touch", tasks);
+                if (pin) preview.open(event.currentTarget, "touch", date);
                 else preview.close();
                 pressedWithTouch.current = false;
                 restoreDateFocus.current = !pin;

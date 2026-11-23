@@ -3,10 +3,10 @@ import type { ProjectInflowItem } from "./api/googleChat";
 // Synthetic reports are used only by the explicit, isolated design preview.
 export function designPreviewInflow(now = new Date()): ProjectInflowItem[] {
   const titles = [
-    "거래내역 조회 화면 검토",
+    "거래내역 조회 오류 수정",
     "월별 정산 내역 확인",
-    "로그인 안내 문구 수정",
-    "결제 결과 표시 검토",
+    "로그인 안내 문구 개선",
+    "긴급: 결제 결과 조회 불가",
     "보고서 다운로드 확인",
     "알림 발송 시간 조정",
     "담당자별 요청 정리",
@@ -42,7 +42,7 @@ export function designPreviewInflow(now = new Date()): ProjectInflowItem[] {
       referenceDocuments: [],
       suggestedAssigneeName: senderName,
       suggestedDueAt: null,
-      suggestedPriority: 1,
+      suggestedPriority: index === 3 ? 3 : index === 0 ? 2 : 1,
       analysisStatus: "ready",
       analysisClassification: "new_task",
       analysisConfidence: null,
