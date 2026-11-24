@@ -30,6 +30,7 @@ import {
 } from "../api/googleChat";
 import type { TaskWorkKind } from "../api/planning";
 import { copy } from "../copy";
+import { chatAccountsCopy } from "../copy/chatAccounts";
 import { chatRoutingCopy as routingCopy } from "../copy/chatRouting";
 import "./chatRouting.css";
 import { deliveryAttentionCopy } from "../copy/deliveryAttention";
@@ -44,6 +45,7 @@ import {
   seoulLocalDateTimeToIso,
 } from "./DeadlinePicker";
 import { LinkifiedText, SafeExternalLink } from "./ExternalTextLink";
+import { ProjectChatAccounts } from "./ProjectChatAccounts";
 import {
   InflowPromotionDialog,
   inflowPromotionDialogCopy,
@@ -67,6 +69,7 @@ type ProjectInflowPanelProps = {
   saving: boolean;
   problemMessage?: string;
   onConnectAccount(): Promise<void>;
+  onDisconnectAccount?(account: GoogleChatAccount): Promise<void>;
   onLoadSpaces(accountId: string): Promise<void>;
   onCreateSource(input: {
     accountId: string;
@@ -146,6 +149,7 @@ export function ProjectInflowPanel({
   saving,
   problemMessage,
   onConnectAccount,
+  onDisconnectAccount,
   onLoadSpaces,
   onCreateSource,
   onUpdateSourcePurpose,
@@ -163,7 +167,20 @@ export function ProjectInflowPanel({
     () => accounts.filter((account) => account.status === "active"),
     [accounts],
   );
-  const [accountId, setAccountId] = useState("");
+  const connectedHere = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const source of sources)
+      counts.set(source.accountId, (counts.get(source.accountId) ?? 0) + 1);
+    return counts;
+  }, [sources]);
+  const [selectedAccountId, setSelectedAccountId] = useState("");
+  const accountId = activeAccounts.some(
+    (account) => account.id === selectedAccountId,
+  )
+    ? selectedAccountId
+    : (activeAccounts.find((account) => connectedHere.has(account.id))?.id ??
+      (connectedHere.size === 0 ? activeAccounts[0]?.id : undefined) ??
+      "");
   const [spaceName, setSpaceName] = useState("");
   const [acknowledge, setAcknowledge] = useState(true);
   const [importHistory, setImportHistory] = useState(false);
@@ -179,18 +196,15 @@ export function ProjectInflowPanel({
   const handledItems = items
     .filter((item) => item.status !== "pending")
     .slice(0, 12);
-  const reconnectRequired =
-    sources.length > 0 &&
-    accounts.some((account) => account.status === "reauth_required") &&
-    activeAccounts.length === 0;
+  const reconnectAccount = accounts.find(
+    (account) => account.reauthRequired && connectedHere.has(account.id),
+  );
+  const reconnectRequired = reconnectAccount !== undefined;
 
   useEffect(() => {
-    const next = activeAccounts.some((account) => account.id === accountId)
-      ? accountId
-      : (activeAccounts[0]?.id ?? "");
-    if (next !== accountId) setAccountId(next);
-    if (next) void onLoadSpaces(next);
-  }, [accountId, activeAccounts, onLoadSpaces]);
+    setSpaceName("");
+    if (accountId) void onLoadSpaces(accountId);
+  }, [accountId, onLoadSpaces]);
 
   useEffect(() => {
     if (!spaces.some((space) => space.name === spaceName)) setSpaceName("");
@@ -227,6 +241,30 @@ export function ProjectInflowPanel({
         <p className="inline-alert" role="alert">
           {problemMessage}
         </p>
+      )}
+
+      {onDisconnectAccount && (accountsAvailable || accounts.length > 0) && (
+        <ProjectChatAccounts
+          accounts={accounts}
+          available={accountsAvailable}
+          busy={saving}
+          connectedHere={connectedHere}
+          onDisconnect={onDisconnectAccount}
+        />
+      )}
+
+      {reconnectAccount && activeAccounts.length > 0 && (
+        <div className="project-inflow__connect" role="alert">
+          <p>{chatAccountsCopy.reconnectAccount(reconnectAccount.email)}</p>
+          <button
+            className="secondary-button focus-visible-control"
+            type="button"
+            disabled={!accountsAvailable || saving}
+            onClick={() => void onConnectAccount()}
+          >
+            {copy.projects.inflowReconnectAction}
+          </button>
+        </div>
       )}
 
       {activeAccounts.length === 0 ? (
@@ -271,10 +309,13 @@ export function ProjectInflowPanel({
               value={accountId}
               disabled={saving}
               onChange={(event) => {
-                setAccountId(event.target.value);
+                setSelectedAccountId(event.target.value);
                 setSpaceName("");
               }}
             >
+              <option value="" disabled>
+                {copy.projects.inflowChooseAccount}
+              </option>
               {activeAccounts.map((account) => (
                 <option key={account.id} value={account.id}>
                   {account.email}
@@ -295,7 +336,7 @@ export function ProjectInflowPanel({
                   : copy.projects.inflowSpaceLabel
               }
               value={spaceName}
-              disabled={loading || saving}
+              disabled={!accountId || loading || saving}
               onChange={(event) => setSpaceName(event.target.value)}
             >
               <option value="">{copy.projects.inflowChooseSpace}</option>
@@ -350,7 +391,7 @@ export function ProjectInflowPanel({
             <button
               className="secondary-button focus-visible-control"
               type="submit"
-              disabled={!spaceName || saving}
+              disabled={!accountId || !spaceName || saving}
             >
               {saving ? (
                 <LoaderCircle className="spin" aria-hidden="true" />

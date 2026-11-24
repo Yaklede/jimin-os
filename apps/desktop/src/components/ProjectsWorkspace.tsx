@@ -242,6 +242,7 @@ type ProjectsWorkspaceProps = {
   onConfirmItsm(connection: ProjectItsmConnection): Promise<void>;
   onDisconnectItsm(connection: ProjectItsmConnection): Promise<void>;
   onConnectGoogleChatAccount(): Promise<void>;
+  onDisconnectGoogleChatAccount?(account: GoogleChatAccount): Promise<void>;
   onLoadGoogleChatSpaces(accountId: string): Promise<void>;
   onCreateGoogleChatSource(input: {
     accountId: string;
@@ -334,6 +335,7 @@ export function ProjectsWorkspace({
   onConfirmItsm,
   onDisconnectItsm,
   onConnectGoogleChatAccount,
+  onDisconnectGoogleChatAccount,
   onLoadGoogleChatSpaces,
   onCreateGoogleChatSource,
   onUpdateGoogleChatSourcePurpose,
@@ -1448,6 +1450,7 @@ export function ProjectsWorkspace({
               )}
               {activeProjectTab === "inflow" && (
                 <ProjectInflowPanel
+                  key={selectedProject.id}
                   accountsAvailable={googleChatAccountsAvailable}
                   accounts={googleChatAccounts}
                   spaces={googleChatSpaces}
@@ -1457,6 +1460,7 @@ export function ProjectsWorkspace({
                   saving={saving}
                   problemMessage={inflowError}
                   onConnectAccount={onConnectGoogleChatAccount}
+                  onDisconnectAccount={onDisconnectGoogleChatAccount}
                   onLoadSpaces={onLoadGoogleChatSpaces}
                   onCreateSource={onCreateGoogleChatSource}
                   onUpdateSourcePurpose={onUpdateGoogleChatSourcePurpose}

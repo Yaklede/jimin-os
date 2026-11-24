@@ -266,7 +266,15 @@ pub struct GoogleChatAccount {
     pub granted_scopes: Vec<String>,
     pub last_successful_sync_at: Option<OffsetDateTime>,
     pub last_error_code: Option<String>,
+    pub connected_space_count: i64,
     pub version: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteGoogleChatAccountOutcome {
+    Deleted,
+    InUse,
+    Changed,
 }
 
 #[derive(sqlx::FromRow)]
@@ -277,6 +285,7 @@ struct GoogleChatAccountRow {
     granted_scopes: Vec<String>,
     last_successful_sync_at: Option<OffsetDateTime>,
     last_error_code: Option<String>,
+    connected_space_count: i64,
     version: i64,
 }
 
@@ -291,6 +300,7 @@ impl TryFrom<GoogleChatAccountRow> for GoogleChatAccount {
             granted_scopes: row.granted_scopes,
             last_successful_sync_at: row.last_successful_sync_at,
             last_error_code: row.last_error_code,
+            connected_space_count: row.connected_space_count,
             version: row.version,
         })
     }
@@ -725,10 +735,13 @@ impl Database {
         user_id: Uuid,
     ) -> Result<Vec<GoogleChatAccount>, StorageError> {
         let rows = sqlx::query_as::<_, GoogleChatAccountRow>(
-            "SELECT id, email, status, granted_scopes, last_successful_sync_at, last_error_code, version
-             FROM google_chat_accounts
-             WHERE user_id = $1 AND status <> 'revoked'
-             ORDER BY email, id",
+            "SELECT a.id, a.email, a.status, a.granted_scopes, a.last_successful_sync_at,
+                    a.last_error_code, a.version,
+                    (SELECT count(*) FROM project_google_chat_sources s WHERE s.account_id = a.id)
+                        AS connected_space_count
+             FROM google_chat_accounts a
+             WHERE a.user_id = $1 AND a.status <> 'revoked'
+             ORDER BY a.email, a.id",
         )
         .bind(user_id)
         .fetch_all(self.pool())
@@ -883,7 +896,9 @@ impl Database {
                  refresh_token_nonce = COALESCE(EXCLUDED.refresh_token_nonce, google_chat_accounts.refresh_token_nonce),
                  encryption_key_version = COALESCE(EXCLUDED.encryption_key_version, google_chat_accounts.encryption_key_version),
                  last_error_code = NULL
-             RETURNING id, email, status, granted_scopes, last_successful_sync_at, last_error_code, version",
+             RETURNING id, email, status, granted_scopes, last_successful_sync_at, last_error_code, version,
+                (SELECT count(*) FROM project_google_chat_sources s WHERE s.account_id = google_chat_accounts.id)
+                    AS connected_space_count",
         )
         .bind(account_id)
         .bind(command.user_id)
@@ -945,7 +960,7 @@ impl Database {
         row.map(account_connection).transpose()
     }
 
-    /// Deletes one version-matched company account and its project sources locally.
+    /// Deletes an unused version-matched Chat account locally, without removing any spaces.
     ///
     /// # Errors
     ///
@@ -955,15 +970,15 @@ impl Database {
         user_id: Uuid,
         account_id: Uuid,
         expected_version: i64,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<DeleteGoogleChatAccountOutcome, StorageError> {
         if !is_v7(user_id) || !is_v7(account_id) || expected_version <= 0 {
             return Err(StorageError::InvalidConfiguration);
         }
         let mut transaction = self.pool().begin().await.map_err(classify)?;
-        let deleted = sqlx::query_scalar::<_, i64>(
-            "DELETE FROM google_chat_accounts
-             WHERE id = $1 AND user_id = $2 AND version = $3
-             RETURNING version",
+        // Serialize with the foreign-key check on a concurrent space connection.
+        let locked = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM google_chat_accounts
+             WHERE id = $1 AND user_id = $2 AND version = $3 FOR UPDATE",
         )
         .bind(account_id)
         .bind(user_id)
@@ -971,18 +986,31 @@ impl Database {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(classify)?;
-        if let Some(version) = deleted {
-            append_delete_change(
-                &mut transaction,
-                user_id,
-                "google_chat_account",
-                account_id,
-                version,
-            )
-            .await?;
+        if locked.is_none() {
+            return Ok(DeleteGoogleChatAccountOutcome::Changed);
         }
+        let result = sqlx::query(
+            "DELETE FROM google_chat_accounts a WHERE a.id = $1 AND NOT EXISTS (
+                SELECT 1 FROM project_google_chat_sources s WHERE s.account_id = a.id
+             )",
+        )
+        .bind(account_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(classify)?;
+        if result.rows_affected() == 0 {
+            return Ok(DeleteGoogleChatAccountOutcome::InUse);
+        }
+        append_delete_change(
+            &mut transaction,
+            user_id,
+            "google_chat_account",
+            account_id,
+            expected_version,
+        )
+        .await?;
         transaction.commit().await.map_err(classify)?;
-        Ok(deleted.is_some())
+        Ok(DeleteGoogleChatAccountOutcome::Deleted)
     }
 
     /// Lists Chat spaces monitored by one owned project.

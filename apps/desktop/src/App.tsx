@@ -112,12 +112,14 @@ import { createGoal, fetchGoals, updateGoal, type Goal } from "./api/goals";
 import {
   createProjectGoogleChatSource,
   decideProjectInflow,
+  deleteGoogleChatConnection,
   deleteProjectGoogleChatSource,
   fetchGoogleChatConnections,
   fetchGoogleChatSpaces,
   fetchProjectGoogleChatSources,
   fetchProjectInflow,
   GoogleChatRequestError,
+  hasNewGoogleChatAuthorization,
   startGoogleChatAuthorization,
   syncProjectGoogleChatSource,
   type GoogleChatAccount,
@@ -413,9 +415,13 @@ export default function App() {
   const [googleChatAccounts, setGoogleChatAccounts] = useState<
     GoogleChatAccount[]
   >([]);
+  const chatAuthorizationBaseline = useRef<ReadonlyMap<string, number>>(
+    new Map(),
+  );
   const [googleChatSpaces, setGoogleChatSpaces] = useState<GoogleChatSpace[]>(
     [],
   );
+  const chatSpacesRequestGateRef = useRef(new LatestRequestGate());
   const [projectGoogleChatSources, setProjectGoogleChatSources] = useState<
     ProjectGoogleChatSource[]
   >([]);
@@ -1425,9 +1431,6 @@ export default function App() {
         return undefined;
       setGoogleChatAccountsAvailable(connection.available);
       setGoogleChatAccounts(connection.items);
-      if (connection.items.some((account) => account.status === "active")) {
-        setGoogleChatAuthorizationExpiresAt(undefined);
-      }
       return connection.items;
     } catch {
       if (chatAccountsRequestGateRef.current.isCurrent(generation))
@@ -1440,6 +1443,9 @@ export default function App() {
     if (!tokens || inflowSaving) return;
     setInflowSaving(true);
     setInflowError(undefined);
+    chatAuthorizationBaseline.current = new Map(
+      googleChatAccounts.map((account) => [account.id, account.version]),
+    );
     try {
       const authorization = await withAuthenticatedSession((accessToken) =>
         startGoogleChatAuthorization(apiBaseUrl, accessToken),
@@ -1451,7 +1457,31 @@ export default function App() {
     } finally {
       setInflowSaving(false);
     }
-  }, [apiBaseUrl, inflowSaving, tokens, withAuthenticatedSession]);
+  }, [
+    apiBaseUrl,
+    googleChatAccounts,
+    inflowSaving,
+    tokens,
+    withAuthenticatedSession,
+  ]);
+
+  async function disconnectWorkspaceGoogleChatAccount(
+    account: GoogleChatAccount,
+  ) {
+    try {
+      await withAuthenticatedSession((accessToken) =>
+        deleteGoogleChatConnection(apiBaseUrl, accessToken, account),
+      );
+      chatAccountsRequestGateRef.current.invalidate();
+      setGoogleChatAccounts((current) =>
+        current.filter((item) => item.id !== account.id),
+      );
+    } catch (error) {
+      if (error instanceof GoogleChatRequestError && error.code === "conflict")
+        await loadGoogleChatAccounts();
+      throw error;
+    }
+  }
 
   const loadWorkspaces = useCallback(async () => {
     if (!tokens) return;
@@ -2025,19 +2055,22 @@ export default function App() {
   const loadGoogleChatSpaces = useCallback(
     async (accountId: string): Promise<void> => {
       if (!tokens || !accountId) return;
+      const generation = chatSpacesRequestGateRef.current.begin();
+      setGoogleChatSpaces([]);
       setInflowLoading(true);
       setInflowError(undefined);
       try {
-        setGoogleChatSpaces(
-          await withAuthenticatedSession((accessToken) =>
-            fetchGoogleChatSpaces(apiBaseUrl, accessToken, accountId),
-          ),
+        const spaces = await withAuthenticatedSession((accessToken) =>
+          fetchGoogleChatSpaces(apiBaseUrl, accessToken, accountId),
         );
+        if (chatSpacesRequestGateRef.current.isCurrent(generation))
+          setGoogleChatSpaces(spaces);
       } catch {
-        setGoogleChatSpaces([]);
-        setInflowError(copy.projects.inflowLoadProblem);
+        if (chatSpacesRequestGateRef.current.isCurrent(generation))
+          setInflowError(copy.projects.inflowLoadProblem);
       } finally {
-        setInflowLoading(false);
+        if (chatSpacesRequestGateRef.current.isCurrent(generation))
+          setInflowLoading(false);
       }
     },
     [apiBaseUrl, tokens, withAuthenticatedSession],
@@ -3031,14 +3064,26 @@ export default function App() {
 
   useEffect(() => {
     if (!tokens || !googleChatAuthorizationExpiresAt) return;
-    if (new Date(googleChatAuthorizationExpiresAt).getTime() <= Date.now()) {
+    const expiresAt = new Date(googleChatAuthorizationExpiresAt).getTime();
+    if (expiresAt <= Date.now()) {
       setGoogleChatAuthorizationExpiresAt(undefined);
       return;
     }
     let current = true;
     const poll = async () => {
+      if (expiresAt <= Date.now()) {
+        if (current) setGoogleChatAuthorizationExpiresAt(undefined);
+        return;
+      }
       const accounts = await loadGoogleChatAccounts();
-      if (current && accounts?.some((account) => account.status === "active")) {
+      if (
+        current &&
+        accounts &&
+        hasNewGoogleChatAuthorization(
+          accounts,
+          chatAuthorizationBaseline.current,
+        )
+      ) {
         setGoogleChatAuthorizationExpiresAt(undefined);
       }
     };
@@ -5890,6 +5935,9 @@ export default function App() {
                 onConfirmItsm={confirmWorkspaceItsm}
                 onDisconnectItsm={disconnectWorkspaceItsm}
                 onConnectGoogleChatAccount={beginGoogleChatConnection}
+                onDisconnectGoogleChatAccount={
+                  disconnectWorkspaceGoogleChatAccount
+                }
                 onLoadGoogleChatSpaces={loadGoogleChatSpaces}
                 onCreateGoogleChatSource={createWorkspaceGoogleChatSource}
                 onUpdateGoogleChatSourcePurpose={updateWorkspaceChatPurpose}

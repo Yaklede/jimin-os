@@ -1296,6 +1296,8 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
         "fresh-only linking should start its provider cursor at connection time"
     );
     assert!(fresh_only_connection.last_successful_sync_at.is_none());
+    assert_unused_chat_account_cleanup(&database, owner.profile.id, account_ids[0], account_ids[1])
+        .await;
     let long_message = format!(
         "확인이 필요한 회사 요청입니다.\n\t{}",
         "후속 내용 ".repeat(600)
@@ -2808,6 +2810,57 @@ async fn company_chat_accounts_ingest_once_and_keep_project_decisions_scoped() {
     );
     pool.close().await;
     database.close().await;
+}
+
+async fn assert_unused_chat_account_cleanup(
+    database: &Database,
+    user_id: Uuid,
+    unused_id: Uuid,
+    in_use_id: Uuid,
+) {
+    use jimin_storage::google_chat::DeleteGoogleChatAccountOutcome as Outcome;
+
+    let accounts = database
+        .google_chat_accounts_for_user(user_id)
+        .await
+        .unwrap();
+    let unused = accounts
+        .iter()
+        .find(|account| account.id == unused_id)
+        .unwrap();
+    let in_use = accounts
+        .iter()
+        .find(|account| account.id == in_use_id)
+        .unwrap();
+    assert_eq!(unused.connected_space_count, 0);
+    assert_eq!(in_use.connected_space_count, 2);
+    for (owner, version, expected) in [
+        (Uuid::now_v7(), unused.version, Outcome::Changed),
+        (user_id, unused.version + 1, Outcome::Changed),
+        (user_id, unused.version, Outcome::Deleted),
+    ] {
+        assert_eq!(
+            database
+                .delete_google_chat_account(owner, unused.id, version)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        database
+            .delete_google_chat_account(user_id, in_use.id, in_use.version)
+            .await
+            .unwrap(),
+        Outcome::InUse
+    );
+    let remaining = database
+        .google_chat_accounts_for_user(user_id)
+        .await
+        .unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, in_use_id);
+    assert_eq!(remaining[0].connected_space_count, 2);
 }
 
 fn assert_automatic_webhook_delivery(

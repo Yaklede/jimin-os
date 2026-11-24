@@ -70,8 +70,8 @@ use jimin_storage::{
     },
     goals::{GoalHealth, GoalNextActionKind, GoalOverview, GoalStatus, GoalUpdate, NewGoal},
     google_chat::{
-        CreateGoogleChatOAuthAuthorization, GoogleChatAccount, GoogleChatAccountStatus,
-        GoogleChatCompletionDelivery, GoogleChatSourceSyncConnection,
+        CreateGoogleChatOAuthAuthorization, DeleteGoogleChatAccountOutcome, GoogleChatAccount,
+        GoogleChatAccountStatus, GoogleChatCompletionDelivery, GoogleChatSourceSyncConnection,
         GoogleChatTaskCompletionDelivery, NewProjectGoogleChatSource, ProjectGoogleChatSource,
         ProjectInflowItem, ProjectInflowStatus, PromoteProjectInflowItem, ReviewProjectInflowItem,
     },
@@ -905,6 +905,7 @@ pub struct GoogleChatAccountResponse {
     last_successful_sync_at: Option<String>,
     last_error_code: Option<String>,
     reauth_required: bool,
+    connected_space_count: i64,
     version: i64,
 }
 
@@ -7644,26 +7645,19 @@ async fn delete_google_chat_connection(
         return unavailable_response(request_id);
     };
     let user_id = principal.identity().user_id();
-    let revocation_connection = match planning
-        .google_chat_account_connection(user_id, account_id)
-        .await
-    {
-        Ok(connection) => connection,
-        Err(error) => return storage_error_response(&error, request_id),
-    };
     match planning
         .delete_google_chat_account(user_id, account_id, query.expected_version)
         .await
     {
-        Ok(true) => {
-            if let (Some(runtime), Some(connection)) =
-                (state.google_chat_oauth(), revocation_connection.as_ref())
-            {
-                let _ = runtime.revoke_account(connection).await;
-            }
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Ok(false) => error_response(
+        Ok(DeleteGoogleChatAccountOutcome::Deleted) => StatusCode::NO_CONTENT.into_response(),
+        Ok(DeleteGoogleChatAccountOutcome::InUse) => error_response(
+            StatusCode::CONFLICT,
+            "google_chat.connection_in_use",
+            "이 계정에 연결된 Chat 공간이 있어요. 공간 연결을 먼저 확인해 주세요.",
+            request_id,
+            false,
+        ),
+        Ok(DeleteGoogleChatAccountOutcome::Changed) => error_response(
             StatusCode::CONFLICT,
             "google_chat.connection_changed",
             "회사 Google 계정 상태가 달라졌어요. 다시 확인한 뒤 연결을 해제해 주세요.",
@@ -8860,6 +8854,7 @@ fn google_chat_account_response(account: GoogleChatAccount) -> GoogleChatAccount
         },
         reauth_required: account.status == GoogleChatAccountStatus::ReauthRequired
             || write_scope_missing,
+        connected_space_count: account.connected_space_count,
         version: account.version,
     }
 }
