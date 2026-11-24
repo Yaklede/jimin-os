@@ -60,6 +60,7 @@ export function installDesignPreview(): void {
     lastErrorCode: null,
     version: 1,
   }));
+  let previewUnusedChatAccount = true;
   let chatRoute: TaskChatRoute | null = null;
   let chatRouteVersion = 0;
   const previewPeople = {
@@ -618,10 +619,40 @@ export function installDesignPreview(): void {
             lastSuccessfulSyncAt: now,
             lastErrorCode: null,
             reauthRequired: false,
+            connectedSpaceCount: chatSources.filter(
+              (s) => s.accountId === "preview-company-account",
+            ).length,
             version: 1,
           },
+          ...(previewUnusedChatAccount
+            ? [
+                {
+                  id: "preview-unused-chat-account",
+                  email: "unused@example.test",
+                  status: "active",
+                  lastSuccessfulSyncAt: null,
+                  lastErrorCode: null,
+                  reauthRequired: false,
+                  connectedSpaceCount: 0,
+                  version: 1,
+                },
+              ]
+            : []),
         ],
       });
+    if (
+      method === "DELETE" &&
+      path === "/v1/google-chat/connections/preview-unused-chat-account"
+    ) {
+      previewUnusedChatAccount = false;
+      return new Response(null, { status: 204 });
+    }
+    if (
+      method === "DELETE" &&
+      path === "/v1/google-chat/connections/preview-company-account"
+    ) {
+      return json({ error: { code: "google_chat.connection_in_use" } }, 409);
+    }
     if (/^\/v1\/google-chat\/connections\/[^/]+\/spaces$/.test(path))
       return json(
         list(

@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  hasNewGoogleChatAuthorization,
   type GoogleChatAccount,
   type ProjectGoogleChatSource,
   type ProjectInflowItem,
@@ -359,6 +360,77 @@ describe("project inflow attention", () => {
     expect(markup).toContain(copy.projects.inflowReconnectProblem);
     expect(markup).toContain(copy.projects.inflowReconnectAction);
     expect(markup).not.toContain(copy.projects.inflowLoadProblem);
+  });
+
+  it("offers cleanup for a known-unused account only and keeps recovery visible", () => {
+    const company = {
+      ...googleChatAccount("reauth_required"),
+      connectedSpaceCount: 2,
+    };
+    const unused = {
+      ...googleChatAccount("active"),
+      id: "unused",
+      email: "unused@example.test",
+      connectedSpaceCount: 0,
+    };
+    const elsewhere = {
+      ...unused,
+      id: "elsewhere",
+      email: "elsewhere@example.test",
+      connectedSpaceCount: 1,
+    };
+    const unknown = {
+      ...unused,
+      id: "unknown",
+      email: "unknown@example.test",
+      connectedSpaceCount: undefined,
+    };
+    const markup = renderPanel({
+      accounts: [unused, company, elsewhere, unknown],
+      onDisconnectAccount: async () => undefined,
+    });
+    expect(markup).toContain('aria-label="unused@example.test 계정 해제"');
+    expect(markup).not.toMatch(
+      /aria-label="(?:company@example.com|elsewhere@example.test|unknown@example.test) 계정 해제"/,
+    );
+    expect(markup).toContain(
+      "company@example.com 계정으로 다시 연결해 주세요.",
+    );
+    expect(markup).toContain(copy.projects.inflowReconnectAction);
+    expect(markup).toContain('<option value="" disabled="" selected="">');
+  });
+
+  it("prefers the active account used by the current project over list order", () => {
+    const company = googleChatAccount("active");
+    const personal = {
+      ...company,
+      id: "personal",
+      email: "wrong@example.test",
+    };
+    const markup = renderPanel({ accounts: [personal, company] });
+    expect(markup).toContain('<option value="account-1" selected="">');
+  });
+
+  it("does not finish a reconnect poll just because another account was already active", () => {
+    const company = googleChatAccount("reauth_required");
+    const unrelated = {
+      ...company,
+      id: "unrelated",
+      status: "active" as const,
+    };
+    const versions = new Map([
+      [company.id, company.version],
+      [unrelated.id, unrelated.version],
+    ]);
+    expect(hasNewGoogleChatAuthorization([company, unrelated], versions)).toBe(
+      false,
+    );
+    expect(
+      hasNewGoogleChatAuthorization(
+        [{ ...company, status: "active", version: 2 }, unrelated],
+        versions,
+      ),
+    ).toBe(true);
   });
 });
 

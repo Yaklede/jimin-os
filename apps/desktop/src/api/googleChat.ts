@@ -13,6 +13,7 @@ export interface GoogleChatAccount {
   lastSuccessfulSyncAt: string | null;
   lastErrorCode: string | null;
   reauthRequired: boolean;
+  connectedSpaceCount?: number;
   version: number;
 }
 
@@ -197,6 +198,17 @@ export async function deleteGoogleChatConnection(
 ): Promise<void> {
   const path = `/v1/google-chat/connections/${encodeURIComponent(account.id)}?expectedVersion=${account.version}`;
   await request<void>(baseUrl, access, path, { method: "DELETE" }, true);
+}
+
+export function hasNewGoogleChatAuthorization(
+  accounts: readonly GoogleChatAccount[],
+  previousVersions: ReadonlyMap<string, number>,
+): boolean {
+  return accounts.some(
+    (account) =>
+      account.status === "active" &&
+      account.version > (previousVersions.get(account.id) ?? 0),
+  );
 }
 
 export async function fetchGoogleChatSpaces(

@@ -211,22 +211,6 @@ impl GoogleChatOAuthRuntime {
             .map_err(GoogleChatOAuthError::from_google)
     }
 
-    /// Best-effort revokes one decrypted company refresh credential at Google.
-    ///
-    /// # Errors
-    ///
-    /// Returns a sanitized credential or provider error.
-    pub async fn revoke_account(
-        &self,
-        connection: &GoogleChatAccountConnection,
-    ) -> Result<(), GoogleChatOAuthError> {
-        let refresh_token = self.decrypt_account_refresh_token(connection)?;
-        self.chat
-            .revoke_refresh_token(&refresh_token)
-            .await
-            .map_err(GoogleChatOAuthError::from_google)
-    }
-
     /// Loads a bounded window of new messages for one persisted project source.
     ///
     /// # Errors
