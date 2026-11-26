@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { designPreviewInflow } from "./design-preview-inflow";
 import {
+  formatHomeInflowAge,
   homeInflowByReceivedDate,
   homeInflowOnDate,
 } from "./home-inflow-dates";
@@ -49,5 +50,26 @@ describe("home incoming report dates", () => {
     const reports = designPreviewInflow(day).slice(0, 2);
     reports[0].receivedAt = "unknown";
     expect(homeInflowByReceivedDate(reports)[1].id).toBe(reports[0].id);
+  });
+});
+
+describe("home incoming report age", () => {
+  const nowMs = Date.parse("2026-11-26T05:00:00Z");
+
+  it.each([
+    [0, "방금"],
+    [35, "35분 전"],
+    [60, "1시간 전"],
+    [23 * 60 + 59, "23시간 전"],
+    [24 * 60, "1일 전"],
+    [7 * 24 * 60 + 59, "7일 전"],
+    [30 * 24 * 60, "30일 전"],
+  ])("formats %s elapsed minutes as %s", (minutes, expected) => {
+    expect(formatHomeInflowAge(nowMs - minutes * 60_000, nowMs)).toBe(expected);
+  });
+
+  it("does not invent an age for unknown or future timestamps", () => {
+    expect(formatHomeInflowAge(NaN, nowMs)).toBeUndefined();
+    expect(formatHomeInflowAge(nowMs + 1, nowMs)).toBeUndefined();
   });
 });

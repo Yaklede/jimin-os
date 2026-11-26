@@ -315,6 +315,7 @@ export const projectCopy = {
   inflowHomeDateEmptyHelp:
     "표시가 있는 날짜를 선택하거나 목록에서 전체 요청을 확인해 보세요.",
   inflowHomeDatePending: "받은 날짜 확인 필요",
+  inflowHomeJustNow: "방금",
   inflowHomeCloseDetail: "상세 닫기",
   inflowHomeScrollHint: "목록 안에서 스크롤해 더 볼 수 있어요.",
   inflowHomeReceivedOn: (label: string) => `${label} 받은 요청`,
