@@ -478,6 +478,7 @@
 
 .home-inflow-review__queue-meta time {
   min-inline-size: 8ch;
+  color: var(--muted);
   font-variant-numeric: tabular-nums;
   text-align: end;
 }
@@ -580,7 +581,7 @@
   height: 16px;
 }
 
-@container home-request-queue (max-width: 420px) {
+@container home-request-queue (max-width: 560px) {
   .home-inflow-primary
     .home-inflow[data-view="list"]
     .home-inflow-review__queue-item {
