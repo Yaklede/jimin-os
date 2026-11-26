@@ -444,7 +444,7 @@
   .home-inflow[data-view="list"]
   .home-inflow-review__queue-item {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) min(42%, 208px);
+  grid-template-columns: minmax(0, 1fr) min(48%, 280px);
   align-items: center;
   align-content: center;
   gap: 4px 16px;
@@ -465,7 +465,7 @@
   .home-inflow[data-view="list"]
   .home-inflow-review__queue-meta {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) max-content;
+  grid-template-columns: minmax(0, 1fr) fit-content(76%);
   justify-items: end;
   gap: 8px;
   min-width: 0;
@@ -476,11 +476,23 @@
   max-width: 100%;
 }
 
-.home-inflow-review__queue-meta time {
-  min-inline-size: 8ch;
-  color: var(--muted);
+.home-inflow-review__received {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  justify-self: end;
+  gap: 0 8px;
+  min-inline-size: 0;
   font-variant-numeric: tabular-nums;
-  text-align: end;
+}
+
+.home-inflow-review__elapsed {
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.home-inflow-review__queue-meta time {
+  color: var(--muted);
 }
 
 .home-inflow-primary .home-inflow-review__expand {

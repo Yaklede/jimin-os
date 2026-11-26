@@ -18,6 +18,7 @@ import {
   type InflowBatchReviewResult,
 } from "../home-inflow-batch";
 import {
+  formatHomeInflowAge,
   homeInflowByReceivedDate,
   homeInflowOnDate,
 } from "../home-inflow-dates";
@@ -81,16 +82,40 @@ function useSinglePaneInflow() {
   return singlePane;
 }
 
+function useHomeInflowClock(enabled: boolean) {
+  const [nowMs, setNowMs] = useState(Date.now);
+  useEffect(() => {
+    if (!enabled) return;
+    const refresh = () => {
+      if (document.visibilityState !== "hidden") setNowMs(Date.now());
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 60_000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [enabled]);
+  return nowMs;
+}
+
 export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
-  const pending = homeInflowPendingItems(props.items);
-  const unread = pending.filter((item) => !item.reviewed);
-  const groups = {
-    new: unread.filter(
-      (item) => !item.promotedTaskId && !isUncertainInflow(item),
-    ),
-    existing: unread.filter((item) => item.promotedTaskId),
-    uncertain: unread.filter(isUncertainInflow),
-  };
+  const unread = useMemo(
+    () => homeInflowPendingItems(props.items).filter((item) => !item.reviewed),
+    [props.items],
+  );
+  const groups = useMemo(
+    () => ({
+      new: unread.filter(
+        (item) => !item.promotedTaskId && !isUncertainInflow(item),
+      ),
+      existing: unread.filter((item) => item.promotedTaskId),
+      uncertain: unread.filter(isUncertainInflow),
+    }),
+    [unread],
+  );
+  const nowMs = useHomeInflowClock(unread.length > 0);
   type InflowTab = keyof typeof groups | "completion";
   const tabs: InflowTab[] = ["new", "existing", "uncertain"];
   const hasCompletion = Boolean(props.completionReviews);
@@ -295,6 +320,7 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
                 {...props}
                 items={groups[kind]}
                 kind={kind}
+                nowMs={nowMs}
                 onPromote={handlePromote}
                 onDismiss={handleDismiss}
                 onMarkSeenMany={kind !== "new" ? handleMarkSeenMany : undefined}
@@ -326,8 +352,12 @@ function HomeInflowGroup({
   onReviewChange,
   onOpenTask,
   kind,
+  nowMs,
   initialView = "list",
-}: HomeInflowReviewProps & { kind: "new" | "existing" | "uncertain" }) {
+}: HomeInflowReviewProps & {
+  kind: "new" | "existing" | "uncertain";
+  nowMs: number;
+}) {
   const mobile = useSinglePaneInflow();
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const titleId = `home-inflow-title-${kind}`;
@@ -803,6 +833,7 @@ function HomeInflowGroup({
                   const priority =
                     kind === "new" ? newWorkPriority(item) : undefined;
                   const receivedAt = new Date(item.receivedAt);
+                  const age = formatHomeInflowAge(receivedAt.getTime(), nowMs);
                   return (
                     <li key={conversationId}>
                       <button
@@ -868,9 +899,16 @@ function HomeInflowGroup({
                               copy.projects.inflowSenderPending}
                           </strong>
                           {Number.isFinite(receivedAt.getTime()) ? (
-                            <time dateTime={item.receivedAt}>
-                              {homeInflowReceivedAtFormat.format(receivedAt)}
-                            </time>
+                            <span className="home-inflow-review__received">
+                              {age && (
+                                <span className="home-inflow-review__elapsed">
+                                  {age}
+                                </span>
+                              )}
+                              <time dateTime={item.receivedAt}>
+                                {homeInflowReceivedAtFormat.format(receivedAt)}
+                              </time>
+                            </span>
                           ) : (
                             <span>{copy.projects.inflowHomeDatePending}</span>
                           )}

@@ -76,6 +76,15 @@ describe("home inflow review", () => {
     expect(markup).toContain(copy.projects.inflowPriorityLevels[2]);
     expect(markup).toContain(copy.projects.inflowPriorityLevels[1]);
   });
+  it("places elapsed days beside the exact received time in the queue", () => {
+    const receivedAt = new Date(
+      Date.now() - (7 * 24 + 1) * 3_600_000,
+    ).toISOString();
+    const markup = renderReview([inflow("older", { receivedAt })]);
+    expect(markup).toContain(
+      `class="home-inflow-review__elapsed">7일 전</span><time dateTime="${receivedAt}">`,
+    );
+  });
   it("offers batch review only for existing updates and uncertain conversations", () => {
     const markup = renderReview([
       inflow("new"),
