@@ -14,7 +14,6 @@ import {
   HomeInflowReview,
   homeInflowPendingItems,
   resolveHomeInflowSelection,
-  sortNewWorkByPriority,
   visibleHomeInflowItems,
 } from "./HomeInflowReview";
 
@@ -49,23 +48,30 @@ function inflow(
 }
 
 describe("home inflow review", () => {
-  it("shows the shared priority before opening a new request, highest first", () => {
-    const rows = [
-      inflow("improvement", { suggestedPriority: 1 }),
-      inflow("bug-fix", { suggestedPriority: 2 }),
-      inflow("urgent", { suggestedPriority: 3 }),
-      inflow("refreshing", {
+  it("shows requests newest first regardless of priority, with full received timestamps", () => {
+    const oldest = new Date(2026, 10, 25, 11, 20).toISOString();
+    const morning = new Date(2026, 10, 27, 9, 15).toISOString();
+    const latest = new Date(2026, 10, 27, 16, 30).toISOString();
+    const markup = renderReview([
+      inflow("urgent", { suggestedPriority: 3, receivedAt: oldest }),
+      inflow("bug-fix", { suggestedPriority: 2, receivedAt: morning }),
+      inflow("improvement", { suggestedPriority: 1, receivedAt: latest }),
+      inflow("unknown-date", {
         suggestedPriority: 3,
-        analysisStatus: "refreshing",
+        receivedAt: "invalid",
       }),
-    ];
-    expect(sortNewWorkByPriority(rows).map((row) => row.id)).toEqual([
-      "urgent",
-      "bug-fix",
-      "improvement",
-      "refreshing",
     ]);
-    const markup = renderReview(rows);
+    expect(
+      Array.from(
+        markup.matchAll(/<time dateTime="([^"]+)">([^<]+)<\/time>/g),
+        ([, value, label]) => [value, label],
+      ),
+    ).toEqual([
+      [latest, "2026. 11. 27. 16:30"],
+      [morning, "2026. 11. 27. 09:15"],
+      [oldest, "2026. 11. 25. 11:20"],
+    ]);
+    expect(markup).toContain(copy.projects.inflowHomeDatePending);
     expect(markup).toContain('data-priority="3"');
     expect(markup).toContain(copy.projects.inflowPriorityLevels[2]);
     expect(markup).toContain(copy.projects.inflowPriorityLevels[1]);

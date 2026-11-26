@@ -57,6 +57,14 @@ type HomeInflowReviewProps = {
 };
 
 const HOME_INFLOW_PREVIEW_SIZE = 4;
+const homeInflowReceivedAtFormat = new Intl.DateTimeFormat("ko-KR", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
 
 function useSinglePaneInflow() {
   const query = "(max-width: 1000px)";
@@ -433,8 +441,8 @@ function HomeInflowGroup({
   const handledCalendarReveal = useRef(0);
   const visibleItems = useMemo(() => {
     if (view === "calendar") return homeInflowOnDate(allItems, range.anchor);
-    return kind === "new" ? sortNewWorkByPriority(allItems) : allItems;
-  }, [allItems, kind, view, range.anchor]);
+    return allItems;
+  }, [allItems, view, range.anchor]);
   const showDetail = view === "list" || calendarDetailOpen;
   const calendarDay = view === "calendar" ? range.anchor.getTime() : undefined;
 
@@ -794,6 +802,7 @@ function HomeInflowGroup({
                   const Mark = active ? CheckCircle2 : Circle;
                   const priority =
                     kind === "new" ? newWorkPriority(item) : undefined;
+                  const receivedAt = new Date(item.receivedAt);
                   return (
                     <li key={conversationId}>
                       <button
@@ -858,9 +867,13 @@ function HomeInflowGroup({
                             {item.senderName ??
                               copy.projects.inflowSenderPending}
                           </strong>
-                          <time dateTime={item.receivedAt}>
-                            {formatHomeInflowTime(item.receivedAt)}
-                          </time>
+                          {Number.isFinite(receivedAt.getTime()) ? (
+                            <time dateTime={item.receivedAt}>
+                              {homeInflowReceivedAtFormat.format(receivedAt)}
+                            </time>
+                          ) : (
+                            <span>{copy.projects.inflowHomeDatePending}</span>
+                          )}
                         </span>
                       </button>
                     </li>
@@ -996,12 +1009,6 @@ function newWorkPriority(item: ProjectInflowItem): 0 | 1 | 2 | 3 | undefined {
     : undefined;
 }
 
-export function sortNewWorkByPriority(items: readonly ProjectInflowItem[]) {
-  return [...items].sort(
-    (a, b) => (newWorkPriority(b) ?? -1) - (newWorkPriority(a) ?? -1),
-  );
-}
-
 export function resolveHomeInflowSelection(
   items: ProjectInflowItem[],
   selectedConversationId: string | undefined,
@@ -1011,13 +1018,4 @@ export function resolveHomeInflowSelection(
       (item) => inflowConversationKey(item) === selectedConversationId,
     ) ?? items[0]
   );
-}
-
-function formatHomeInflowTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return copy.projects.inflowHomeDatePending;
-  return new Intl.DateTimeFormat("ko-KR", {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
 }
