@@ -37,6 +37,7 @@ export type MarkInflowsSeen = (
 
 type HomeInflowReviewProps = {
   completionReviews?: ReactNode;
+  completionReviewCountLabel?: string;
   highlightedCompletionReviewId?: string;
   onFocusHandled?(id: number): void;
   focusRequest?: number;
@@ -259,9 +260,11 @@ export function HomeInflowReview({ ...props }: HomeInflowReviewProps) {
                       ? copy.projects.inflowExistingTabShort
                       : copy.projects.inflowUncertainTitle}
               </span>
-              {kind !== "completion" && (
+              {(kind !== "completion" || props.completionReviewCountLabel) && (
                 <span className="home-inflow-tabs__count">
-                  {groups[kind].length}
+                  {kind === "completion"
+                    ? props.completionReviewCountLabel
+                    : groups[kind].length}
                 </span>
               )}
             </button>

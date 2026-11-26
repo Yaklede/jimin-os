@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { Task } from "../api/planning";
 import { designPreviewInflow } from "../design-preview-inflow";
+import { HomeInflowReview } from "./HomeInflowReview";
 import { HomeWorkspace } from "./HomeWorkspace";
 
 const layout = vi.hoisted(() => ({ mobile: false }));
@@ -158,7 +159,7 @@ describe("home request-first layout", () => {
     const markup = renderToStaticMarkup(
       createElement(HomeWorkspace, {
         ...homeProps(),
-        completionReviews: createElement("p", null, "완료 보고 검수용"),
+        completionReviews: () => createElement("p", null, "완료 보고 검수용"),
         deliveryFailureCount: 0,
       }),
     );
@@ -167,4 +168,31 @@ describe("home request-first layout", () => {
     expect(markup).toContain("완료 보고 검수용");
     expect(markup).toContain('aria-controls="home-today-task-list"');
   });
+  it.each([undefined, "4", "50+"])(
+    "shows the completion-review count only when available (%s)",
+    (count) => {
+      const done = async () => {};
+      const html = renderToStaticMarkup(
+        createElement(HomeInflowReview, {
+          items: [],
+          saving: false,
+          onPromote: done,
+          onDismiss: done,
+          onRetryAnalysis: done,
+          onOpenTask: done,
+          completionReviews: createElement("div"),
+          completionReviewCountLabel: count,
+        }),
+      );
+      const tab = html.match(
+        /id="home-inflow-tab-completion"[^>]*>(.*?)<\/button>/,
+      )?.[1];
+      expect(tab).toContain("완료 보고");
+      if (count) {
+        expect(tab).toContain(`class="home-inflow-tabs__count">${count}</span>`);
+      } else {
+        expect(tab).not.toContain("home-inflow-tabs__count");
+      }
+    },
+  );
 });

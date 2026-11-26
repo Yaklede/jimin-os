@@ -20,6 +20,7 @@ interface Props {
   baseUrl: string;
   authenticate<T>(request: (token: string) => Promise<T>): Promise<T>;
   onChanged(approved: boolean): void | Promise<void>;
+  onPendingCountChange?(label: string | undefined): void;
   highlightedId?: string;
 }
 
@@ -74,6 +75,7 @@ export function CompletionReviewPanel({
   baseUrl,
   authenticate,
   onChanged,
+  onPendingCountChange,
   highlightedId,
 }: Props) {
   const [items, setItems] = useState<CompletionReview[]>([]);
@@ -91,6 +93,11 @@ export function CompletionReviewPanel({
   const generation = useRef(0);
   const pending = useRef(false);
   const working = Boolean(busy || batch);
+  const pendingCountLabel = items.length
+    ? `${items.length}${cursor ? "+" : ""}`
+    : cursor
+      ? "1+"
+      : undefined;
   const visible = expanded ? items : items.slice(0, 3);
   const eligibleVisible = visible.filter(canConfirmTogether);
   const currentSelection = selected.filter((snapshot) =>
@@ -105,6 +112,9 @@ export function CompletionReviewPanel({
   const allVisibleSelected =
     eligibleVisible.length > 0 &&
     selectedVisible.length === eligibleVisible.length;
+  useEffect(() => {
+    onPendingCountChange?.(pendingCountLabel);
+  }, [onPendingCountChange, pendingCountLabel]);
   useEffect(() => {
     if (!notice) return;
     const timer = window.setTimeout(() => setNotice(""), 6000);
@@ -202,6 +212,7 @@ export function CompletionReviewPanel({
     try {
       await submitDecision(review, approve, note);
       forgetDecisions(new Set([review.id]));
+      if (cursor && items.length === 1) await load();
       setNotice(approve ? c.approved : c.rejected);
       await onChanged(approve);
     } catch (e) {
@@ -249,7 +260,7 @@ export function CompletionReviewPanel({
         setBatch({ done: index + 1, total: targets.length });
       }
       forgetDecisions(approved);
-      if (conflict) await load();
+      if (conflict || (cursor && approved.size === items.length)) await load();
       setNotice(c.batchResult(approved.size, targets.length - approved.size));
       if (approved.size) {
         try {
@@ -279,12 +290,7 @@ export function CompletionReviewPanel({
           <h2 ref={heading} tabIndex={-1}>
             <CheckCheck size={20} aria-hidden="true" />
             {c.title}{" "}
-            {items.length > 0 && (
-              <span>
-                {items.length}
-                {cursor ? "+" : ""}개
-              </span>
-            )}
+            {pendingCountLabel && <span>{pendingCountLabel}개</span>}
           </h2>
           <p>{c.help}</p>
         </div>
@@ -305,7 +311,7 @@ export function CompletionReviewPanel({
       )}
       {notice && <p role="status">{notice}</p>}
       {!loaded && !error && <p role="status">{c.loading}</p>}
-      {loaded && !items.length && !error && <p>{c.empty}</p>}
+      {loaded && !pendingCountLabel && !error && <p>{c.empty}</p>}
       {items.length > 0 && (
         <div className="completion-reviews__selection">
           <label className="completion-reviews__pick">
