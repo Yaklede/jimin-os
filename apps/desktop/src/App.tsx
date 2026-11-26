@@ -5672,17 +5672,18 @@ export default function App() {
                 <HomeWorkspace
                   deliveryFailureCount={manualFailures.size}
                   onOpenDeliveryHistory={openDeliveryHistory}
-                  completionReviews={
+                  completionReviews={(onPendingCountChange) => (
                     <CompletionReviewPanel
                       baseUrl={apiBaseUrl}
                       authenticate={withAuthenticatedSession}
+                      onPendingCountChange={onPendingCountChange}
                       highlightedId={highlightedCompletionReviewId}
                       onChanged={async (approved) => {
                         if (approved) setDeliveryWatchStarted(Date.now());
                         await loadHomeSnapshot();
                       }}
                     />
-                  }
+                  )}
                   highlightedCompletionReviewId={highlightedCompletionReviewId}
                   onRequestOpenHandled={consumeDeckIntent}
                   requestOpenRequest={

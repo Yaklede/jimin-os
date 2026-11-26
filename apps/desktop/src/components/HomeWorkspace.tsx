@@ -66,7 +66,9 @@ type HomeWorkspaceProps = {
   onRequestOpenHandled?(id: number): void;
   requestOpenRequest?: number;
   scheduledWork?: ReactNode;
-  completionReviews?: ReactNode;
+  completionReviews?: (
+    onPendingCountChange: (label: string | undefined) => void,
+  ) => ReactNode;
   highlightedCompletionReviewId?: string;
   deliveryFailureCount: number;
   onOpenDeliveryHistory(): void;
@@ -185,6 +187,8 @@ export function HomeWorkspace({
   onDeferGmailInflow,
   onRetryGmailInflowAnalysis,
 }: HomeWorkspaceProps) {
+  const [completionReviewCountLabel, setCompletionReviewCountLabel] =
+    useState<string>();
   const mobile = useMobileLayout();
   const [completingTaskId, setCompletingTaskId] = useState<string>();
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
@@ -364,7 +368,10 @@ export function HomeWorkspace({
             onFocusHandled={onRequestOpenHandled}
             initialView="list"
             items={snapshot?.inflow ?? []}
-            completionReviews={completionReviews}
+            completionReviews={completionReviews?.(
+              setCompletionReviewCountLabel,
+            )}
+            completionReviewCountLabel={completionReviewCountLabel}
             highlightedCompletionReviewId={highlightedCompletionReviewId}
             saving={inflowSaving}
             onPromote={onPromoteInflow}
