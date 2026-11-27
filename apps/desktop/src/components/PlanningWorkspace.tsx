@@ -38,6 +38,7 @@ import {
   useDelayedSkeleton,
 } from "./ContentSkeleton";
 import { LinkifiedText } from "./ExternalTextLink";
+import { TaskTicketPrompt } from "./TicketPromptDraft";
 import { EmptySurface } from "./HomeWorkspace";
 import { type ScheduleProjectReference } from "./scheduleLinkage";
 import {
@@ -387,6 +388,7 @@ export function PlanningWorkspace({
                         <LinkifiedText text={task.notes} />
                       </p>
                     )}
+                    <TaskTicketPrompt task={task} collapsed />
                   </div>
                   {task.dueAt && (
                     <time
@@ -598,6 +600,7 @@ export function PlanningWorkspace({
                           <LinkifiedText text={task.notes} />
                         </p>
                       )}
+                      <TaskTicketPrompt task={task} collapsed />
                     </div>
                     {task.completedAt && (
                       <time dateTime={task.completedAt}>

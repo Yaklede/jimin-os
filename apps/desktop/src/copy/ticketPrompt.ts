@@ -1,6 +1,7 @@
 export const ticketPromptCopy = {
   title: "나만 보는 프롬프트",
   help: "버튼을 누르면 AI가 티켓 분석을 바탕으로 초안을 만들어요. 고쳐서 복사할 수 있고, 여기서 실행하거나 Google Chat에 보내지 않아요.",
+  draftHelp: "내용을 고쳐서 복사할 수 있어요. 여기서 실행하거나 Google Chat에 보내지 않아요.",
   chooseTicket: "티켓 선택",
   chooseTicketHint: "어떤 티켓을 분석할지 선택해 주세요.",
   project: "스킬을 고를 프로젝트",
@@ -12,8 +13,16 @@ export const ticketPromptCopy = {
   newerAnalysis:
     "새 대화가 들어왔어요. 이 초안에는 만들 당시의 분석이 담겨 있어요.",
   generate: "프롬프트 생성",
+  generateBoth: "프롬프트 2개 생성",
+  generateMissing: "나머지 초안 만들기",
+  openSavedDraft: "이전에 만든 초안 열기",
+  openTaskPrompts: "티켓 프롬프트",
+  combinedHint: "비스킷링크와 올데이페이용 초안을 따로 만들어요.",
+  variant: "프로젝트별 초안",
+  generalDraft: "일반 초안",
   generating: "초안 만드는 중…",
   generateFailed: "AI 초안을 못 만들었어요. 다시 시도해 주세요.",
+  partialFailure: "일부 초안을 못 만들었어요. 나머지만 다시 시도해 주세요.",
   useBasicDraft: "기본 초안 만들기",
   fallbackDraft:
     "기존 분석으로 만든 기본 초안이에요. AI 보조 스킬 추천은 없어요.",

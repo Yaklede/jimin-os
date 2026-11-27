@@ -113,14 +113,14 @@
 .home-direct-tasks__groups > .mobile-task-group:only-child {
   grid-column: 1 / -1;
 }
-.home-direct-tasks .mobile-task-group h3 {
+.home-direct-tasks .mobile-task-group > h3 {
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin: 0 0 8px;
   font-size: 16px;
 }
-.home-direct-tasks .mobile-task-group h3 span {
+.home-direct-tasks .mobile-task-group > h3 span {
   font-size: 14px;
   color: var(--muted);
 }
@@ -233,6 +233,9 @@
 @media (max-width: 720px) {
   .home-direct-tasks__groups {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .home-direct-tasks .mobile-task-detail .ticket-prompt-draft textarea {
+    font-size: 16px;
   }
 }
 .project-weekly-metrics dd button {

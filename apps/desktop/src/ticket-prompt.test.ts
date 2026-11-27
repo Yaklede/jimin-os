@@ -1,9 +1,20 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { designPreviewInflow } from "./design-preview-inflow";
+import type { Task } from "./api/planning";
+import { TaskTicketPrompt } from "./components/TicketPromptDraft";
+import { ticketPromptCopy } from "./copy/ticketPrompt";
+import {
+  createTicketPromptSession,
+  TicketPromptRuntime,
+} from "./ticket-prompt-runtime";
 import {
   buildTicketPrompt,
+  inflowTicketPromptSource,
   projectPromptSkills,
   promptTickets,
+  taskTicketPromptSource,
   ticketDraftRequest,
 } from "./ticket-prompt";
 import { validSkillCatalog } from "./ticket-skill-catalog";
@@ -11,6 +22,17 @@ import { validSkillCatalog } from "./ticket-skill-catalog";
 const base = designPreviewInflow()[0];
 const ticket = "https://itsm.bix.bz/issues/101";
 const title = "정산 오류 확인";
+const assigned: Task = {
+  id: "assigned",
+  projectId: base.projectId,
+  title: "정산 오류 확인 (배정 완료)",
+  notes: "배정하면서 원본 링크를 뺀 일감 설명",
+  status: "open",
+  priority: 1,
+  dueAt: null,
+  completedAt: null,
+  version: 1,
+};
 const references = (project: string) => [
   {
     provider: "itsm",
@@ -22,7 +44,140 @@ const references = (project: string) => [
   },
 ];
 
+describe("assigned task prompt controls", () => {
+  it("displays an existing private draft inline on Home, including a saved second ticket", () => {
+    const session = createTicketPromptSession();
+    const linkedItem = {
+      ...base,
+      referenceDocuments: references("비스킷링크"),
+      referenceLinks: ["https://itsm.bix.bz/issues/303"],
+      promotedTaskId: assigned.id,
+    };
+    session.write(inflowTicketPromptSource(linkedItem).key, "303", [
+      { text: "보존된 두 번째 티켓 초안", skills: [], notices: [], revision: 1 },
+    ]);
+    const markup = renderToStaticMarkup(
+      createElement(
+        TicketPromptRuntime.Provider,
+        {
+          value: {
+            session,
+            generate: async () => {
+              throw new Error("must not regenerate");
+            },
+          },
+        },
+        createElement(TaskTicketPrompt, {
+          task: assigned,
+          linkedItem,
+          revealSavedDraft: true,
+        }),
+      ),
+    );
+    expect(markup).toContain("<textarea");
+    expect(markup).toContain("보존된 두 번째 티켓 초안");
+    expect(markup).not.toContain(ticketPromptCopy.openSavedDraft);
+  });
+
+  it("offers generation only for a task that has a ticket when no draft was saved", () => {
+    const markup = (task: Task) =>
+      renderToStaticMarkup(
+        createElement(TaskTicketPrompt, { task, revealSavedDraft: true }),
+      );
+    expect(markup({ ...assigned, notes: ticket })).toContain(
+      ticketPromptCopy.generate,
+    );
+    expect(markup(assigned)).toBe("");
+  });
+});
+
 describe("private ticket prompt", () => {
+  it.each(["[BL/ADP]", "[BL] [ADP]", "BL / ADP"])(
+    "creates separate project scopes for explicit %s title markers even with a single verified ITSM project",
+    (tag) => {
+      const item = {
+        ...base,
+        suggestedTaskTitle: `${tag} 정산 오류 확인`,
+        referenceDocuments: references("비스킷링크"),
+      };
+      const [selected] = promptTickets(item);
+      expect(selected.combinedProjects).toEqual(["biscuitlink", "alldaypay"]);
+      for (const [project, label, other] of [
+        ["biscuitlink", "비스킷링크", "alldaypay-cs-auto-resolver"],
+        ["alldaypay", "올데이페이", "biscuitlink-cs-auto-resolver"],
+      ] as const) {
+        const chosen = projectPromptSkills(project, [
+          "alldaypay-cs-auto-resolver",
+          "biscuitlink-cs-auto-resolver",
+        ]);
+        expect(chosen).toHaveLength(1);
+        expect(
+          ticketDraftRequest(item, selected, [], project).evidence,
+        ).toMatch(new RegExp(`^이 초안의 대상 프로젝트는 ${label}`));
+        expect(
+          buildTicketPrompt(item, selected, project, chosen),
+        ).not.toContain(`$${other}`);
+      }
+    },
+  );
+
+  it("does not turn lookalikes or project codes in an ITSM description into two drafts", () => {
+    expect(
+      promptTickets({
+        ...base,
+        suggestedTaskTitle: "ADP/SBL 정산 확인",
+        suggestedTaskNotes: "원문에만 BL와 ADP가 함께 있음",
+        referenceDocuments: references("올데이페이"),
+      })[0].combinedProjects,
+    ).toBeUndefined();
+  });
+
+  it("retains edits for both variants after assignment and also reads older tasks with a link", () => {
+    const item = {
+      ...base,
+      suggestedTaskTitle: "[BL / ADP] 배정 전 제목",
+      referenceDocuments: references("비스킷링크"),
+    };
+    const session = createTicketPromptSession();
+    const before = inflowTicketPromptSource(item);
+    session.write(before.key, "101", [
+      {
+        project: "biscuitlink",
+        text: "편집한 BL 내용",
+        notices: [],
+        skills: [],
+        revision: 1,
+      },
+      {
+        project: "alldaypay",
+        text: "편집한 ADP 내용",
+        notices: [],
+        skills: [],
+        revision: 1,
+      },
+    ]);
+    session.rememberPromotion(assigned.id, item);
+    const after = taskTicketPromptSource(
+      assigned,
+      session.sourceForTask(assigned.id),
+    );
+    expect(after.key).toBe(before.key);
+    expect(promptTickets(after)[0].combinedProjects).toEqual([
+      "biscuitlink",
+      "alldaypay",
+    ]);
+    expect(session.read(after.key, "101").map(({ text }) => text)).toEqual([
+      "편집한 BL 내용",
+      "편집한 ADP 내용",
+    ]);
+    const older = taskTicketPromptSource({
+      ...assigned,
+      notes: `[원문](${ticket}?unneeded=1)과 https://itsm.bix.bz.invalid/issues/999.`,
+    });
+    expect(promptTickets(older)).toMatchObject([{ id: "101", url: ticket }]);
+    expect(promptTickets(taskTicketPromptSource(assigned))).toEqual([]);
+  });
+
   it("uses verified Redmine project, not the project of the Chat room", () => {
     const item = {
       ...base,
@@ -51,7 +206,7 @@ describe("private ticket prompt", () => {
 
   it("does not trust project claims in ticket descriptions or unverified Chat context", () => {
     const [reference] = references("다른 프로젝트");
-    const tickets = promptTickets({
+    const item = {
       ...base,
       projectName: "올데이페이",
       referenceDocuments: [
@@ -65,7 +220,8 @@ describe("private ticket prompt", () => {
         "https://itsm.bix.bz.evil.test/issues/102",
         "https://itsm.bix.bz/issues/103",
       ],
-    });
+    };
+    const tickets = promptTickets(item);
     expect(tickets).toMatchObject([{ id: "101", url: ticket }, { id: "103" }]);
     expect(tickets.every((entry) => entry.project === undefined)).toBe(true);
   });

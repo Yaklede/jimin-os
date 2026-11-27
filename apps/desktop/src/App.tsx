@@ -9,7 +9,7 @@ import { retryDeliveryRecovery } from "./api/deliveryRecovery";
 import { approveInflowChange } from "./api/inflowChanges";
 import { InflowChangeDialog } from "./components/InflowChangeDialog";
 import { requestTicketDraft } from "./api/ticketPrompt";
-import { TicketPromptRuntime } from "./ticket-prompt-runtime";
+import { TicketPromptRuntime, createTicketPromptSession } from "./ticket-prompt-runtime";
 import type { TicketDraftRequest } from "./ticket-prompt";
 import { Server, Sparkles } from "lucide-react";
 import { ScheduledWorkPanel } from "./components/ScheduledWorkPanel";
@@ -669,6 +669,14 @@ export default function App() {
       ),
     [apiBaseUrl, withAuthenticatedSession],
   );
+  const ticketPromptSession = useMemo(createTicketPromptSession, []);
+  const ticketPromptRuntime = useMemo(
+    () => ({ generate: generateTicketDraft, session: ticketPromptSession }),
+    [generateTicketDraft, ticketPromptSession],
+  );
+  useEffect(() => {
+    if (sessionLoaded && !tokens) ticketPromptSession.clear();
+  }, [sessionLoaded, tokens, ticketPromptSession]);
 
   const bootstrapTrustedNetworkDevice = useCallback(async () => {
     setMode("loading");
@@ -4817,6 +4825,9 @@ export default function App() {
           ...input,
         }),
       );
+      if (updated.promotedTaskId) {
+        ticketPromptSession.rememberPromotion(updated.promotedTaskId, item);
+      }
       setDeliveryWatchStarted(Date.now());
       const reflectionFailed = showInflowDeliveryFailure(updated);
       if (!reflectionFailed && destination === "home")
@@ -6236,7 +6247,7 @@ export default function App() {
     </div>
   );
   return (
-    <TicketPromptRuntime.Provider value={generateTicketDraft}>
+    <TicketPromptRuntime.Provider value={ticketPromptRuntime}>
       {shell}
     </TicketPromptRuntime.Provider>
   );

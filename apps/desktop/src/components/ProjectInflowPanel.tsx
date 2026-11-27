@@ -47,6 +47,7 @@ import {
 import { LinkifiedText, SafeExternalLink } from "./ExternalTextLink";
 import { ProjectChatAccounts } from "./ProjectChatAccounts";
 import { TicketPromptDraft } from "./TicketPromptDraft";
+import { inflowTicketPromptSource } from "../ticket-prompt";
 import {
   InflowPromotionDialog,
   inflowPromotionDialogCopy,
@@ -1799,7 +1800,7 @@ export function InflowItemRow({
         </p>
       )}
       {item.status !== "dismissed" && (
-        <TicketPromptDraft key={conversationId} item={item} />
+        <TicketPromptDraft key={conversationId} source={inflowTicketPromptSource(item)} />
       )}
     </li>
   );
