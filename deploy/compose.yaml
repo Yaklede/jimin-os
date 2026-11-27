@@ -68,9 +68,11 @@ services:
         JIMIN_BUILD_SHA: ${JIMIN_BUILD_SHA:?set JIMIN_BUILD_SHA}
         RUST_BUILDER_IMAGE: ${RUST_BUILDER_IMAGE:?set RUST_BUILDER_IMAGE}
     user: "10001:10001"
+    group_add: ["1000"]
     restart: unless-stopped
     environment:
       DATABASE_URL_FILE: /run/secrets/api_database_url
+      JIMIN_TICKET_PROMPT_SOCKET: /run/jimin-ticket-prompt/draft.sock
       JIMIN_API_BIND_ADDR: ${JIMIN_API_BIND_ADDR:-0.0.0.0:8080}
       JIMIN_API_PROBE_ADDR: ${JIMIN_API_PROBE_ADDR:-127.0.0.1:8080}
       JIMIN_BUILD_SHA: ${JIMIN_BUILD_SHA:?set JIMIN_BUILD_SHA}
@@ -93,6 +95,11 @@ services:
       - auth_verify_key
       - auth_refresh_pepper
       - auth_pairing_pepper
+    volumes:
+      - type: volume
+        source: ticket_prompt_socket
+        target: /run/jimin-ticket-prompt
+        read_only: true
     tmpfs:
       - /tmp:uid=10001,gid=10001,mode=0700,size=32m
     networks:
@@ -128,6 +135,8 @@ services:
     restart: unless-stopped
     environment:
       CODEX_HOME: /home/node/.codex
+      JIMIN_TICKET_PROMPT_SOCKET: /run/jimin-ticket-prompt/draft.sock
+      JIMIN_TICKET_PROMPT_API_UID: "10001"
       DATABASE_URL_FILE: /run/secrets/api_database_url
       JIMIN_AGENT_CODEX_BIN: /usr/local/bin/codex
       JIMIN_AGENT_WORKSPACE: /workspace
@@ -147,6 +156,9 @@ services:
       - type: volume
         source: agent_workspace
         target: /workspace/data
+      - type: volume
+        source: ticket_prompt_socket
+        target: /run/jimin-ticket-prompt
     secrets:
       - api_database_url
     tmpfs:
@@ -222,6 +234,7 @@ volumes:
   caddy_data: {}
   codex_home: {}
   postgres_data: {}
+  ticket_prompt_socket: {}
 
 secrets:
   api_database_url:

@@ -1,0 +1,31 @@
+export const ticketPromptCopy = {
+  title: "나만 보는 프롬프트",
+  help: "버튼을 누르면 AI가 티켓 분석을 바탕으로 초안을 만들어요. 고쳐서 복사할 수 있고, 여기서 실행하거나 Google Chat에 보내지 않아요.",
+  chooseTicket: "티켓 선택",
+  chooseTicketHint: "어떤 티켓을 분석할지 선택해 주세요.",
+  project: "스킬을 고를 프로젝트",
+  projectUnknown:
+    "ITSM에서 프로젝트를 확인하지 못했어요. 알고 있다면 직접 선택해 주세요.",
+  general: "프로젝트 스킬 없이 만들기",
+  analysisPending: "최신 분석이 끝나면 프롬프트를 만들 수 있어요.",
+  analysisFailed: "업무 분석을 다시 시도한 뒤 프롬프트를 만들어 주세요.",
+  newerAnalysis:
+    "새 대화가 들어왔어요. 이 초안에는 만들 당시의 분석이 담겨 있어요.",
+  generate: "프롬프트 생성",
+  generating: "초안 만드는 중…",
+  generateFailed: "AI 초안을 못 만들었어요. 다시 시도해 주세요.",
+  useBasicDraft: "기본 초안 만들기",
+  fallbackDraft:
+    "기존 분석으로 만든 기본 초안이에요. AI 보조 스킬 추천은 없어요.",
+  editor: "프롬프트 초안",
+  skills: "추천한 스킬",
+  catalogUnavailable: "스킬 목록을 못 읽었어요. 직접 입력해 주세요.",
+  catalogSnapshot:
+    "설치본을 만들 때 확인한 Mac 스킬 목록을 사용했어요. 실행 전에 Codex에서 사용할 수 있는지 확인해 주세요.",
+  projectSkillUnavailable: "프로젝트 스킬이 없어요. 설치를 확인해 주세요.",
+  copy: "프롬프트 복사",
+  closeDraft: "초안 닫기",
+  copying: "복사하는 중…",
+  copied: "복사했어요. Codex에 붙여넣어 실행할 수 있어요.",
+  copyFailed: "자동으로 복사하지 못했어요. 선택된 내용을 직접 복사해 주세요.",
+};

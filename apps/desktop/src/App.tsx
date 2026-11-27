@@ -8,6 +8,9 @@ import { useTaskCompletion } from "./components/TaskCompletionDialog";
 import { retryDeliveryRecovery } from "./api/deliveryRecovery";
 import { approveInflowChange } from "./api/inflowChanges";
 import { InflowChangeDialog } from "./components/InflowChangeDialog";
+import { requestTicketDraft } from "./api/ticketPrompt";
+import { TicketPromptRuntime } from "./ticket-prompt-runtime";
+import type { TicketDraftRequest } from "./ticket-prompt";
 import { Server, Sparkles } from "lucide-react";
 import { ScheduledWorkPanel } from "./components/ScheduledWorkPanel";
 import {
@@ -657,6 +660,14 @@ export default function App() {
       return retryUnauthorizedRequest(session, operation, refreshActiveSession);
     },
     [refreshActiveSession],
+  );
+
+  const generateTicketDraft = useCallback(
+    (request: TicketDraftRequest, signal: AbortSignal) =>
+      withAuthenticatedSession((accessToken) =>
+        requestTicketDraft(apiBaseUrl, accessToken, request, signal),
+      ),
+    [apiBaseUrl, withAuthenticatedSession],
   );
 
   const bootstrapTrustedNetworkDevice = useCallback(async () => {
@@ -5621,7 +5632,7 @@ export default function App() {
     ],
   );
 
-  return (
+  const shell = (
     <div
       className="app-shell"
       data-app-state={showLaunchSplash ? "launching" : "active"}
@@ -6223,6 +6234,11 @@ export default function App() {
         </OsShell>
       )}
     </div>
+  );
+  return (
+    <TicketPromptRuntime.Provider value={generateTicketDraft}>
+      {shell}
+    </TicketPromptRuntime.Provider>
   );
 }
 

@@ -32,6 +32,7 @@ pub mod scheduled_chat_reply;
 pub mod scheduled_work;
 pub mod sync;
 pub mod task_chat;
+pub mod ticket_prompt;
 pub mod webhook;
 pub mod weekly_report;
 pub mod work;

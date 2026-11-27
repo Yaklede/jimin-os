@@ -1,0 +1,63 @@
+.ticket-prompt-draft {
+  display: grid;
+  gap: 12px;
+  min-inline-size: 0;
+  margin-block-start: 16px;
+  padding-block-start: 12px;
+  border-block-start: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.ticket-prompt-draft :is(h3, p, ul) {
+  margin: 0;
+}
+
+.ticket-prompt-draft h3 {
+  color: var(--text-strong);
+  font-size: inherit;
+}
+
+.ticket-prompt-draft :is(p, small) {
+  color: var(--muted);
+}
+
+.ticket-prompt-draft ul {
+  padding-inline-start: 16px;
+}
+
+.ticket-prompt-draft label {
+  display: grid;
+  gap: 4px;
+  min-inline-size: 0;
+}
+
+.ticket-prompt-draft :is(select, textarea) {
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-inline-size: 0;
+  min-block-size: 44px;
+  padding-block: 8px;
+  padding-inline-start: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background-color: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.ticket-prompt-draft textarea {
+  padding-inline-end: 8px;
+  resize: vertical;
+}
+
+.ticket-prompt-draft .secondary-button {
+  justify-self: start;
+  max-inline-size: 100%;
+  min-block-size: 44px;
+}
+
+.ticket-prompt-draft__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

@@ -4,6 +4,8 @@ use uuid::Uuid;
 #[cfg(target_os = "macos")]
 mod inflow_notifications;
 #[cfg(target_os = "macos")]
+mod local_codex_skills;
+#[cfg(target_os = "macos")]
 mod open_deck_bridge;
 
 const SESSION_ACCOUNT: &str = "device-session";
@@ -133,6 +135,7 @@ pub fn run() {
         save_device_session,
         clear_device_session,
         read_or_create_installation_id,
+        local_codex_skills::list_local_codex_skills,
         inflow_notifications::configure_inflow_notifications,
         inflow_notifications::inflow_notification_diagnostics,
         inflow_notifications::test_inflow_notification,

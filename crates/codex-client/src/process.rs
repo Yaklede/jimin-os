@@ -28,6 +28,20 @@ const ENV_ALLOWLIST: &[&str] = &[
 const STDERR_BYTE_LIMIT: u64 = 1024 * 1024;
 const STDERR_LINE_LIMIT: u64 = 10_000;
 const STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+pub(crate) const TEXT_DRAFT_DISABLED_FEATURES: &[&str] = &[
+    "shell_tool",
+    "unified_exec",
+    "shell_snapshot",
+    "view_image",
+    "hooks",
+    "plugins",
+    "apps",
+    "browser_use",
+    "computer_use",
+    "code_mode",
+    "multi_agent",
+    "multi_agent_v2",
+];
 
 pub struct AppServerProcess {
     child: Child,
@@ -159,12 +173,32 @@ impl AppServerProcess {
     /// Returns a typed version, spawn, pipe, or protocol setup error. Server
     /// stderr is drained without exposing its contents.
     pub async fn spawn(codex_binary: &Path) -> Result<Self> {
+        Self::spawn_with_args(codex_binary, &[]).await
+    }
+
+    /// Starts a dedicated App Server for private, text-only drafts. Its
+    /// lifecycle is separate from the conversation and background worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::spawn`].
+    pub async fn spawn_for_text_draft(
+        codex_binary: &Path,
+        disabled_servers: &[String],
+    ) -> Result<Self> {
+        let overrides = text_draft_overrides(disabled_servers)?;
+        let overrides = overrides.iter().map(String::as_str).collect::<Vec<_>>();
+        Self::spawn_with_args(codex_binary, &overrides).await
+    }
+
+    async fn spawn_with_args(codex_binary: &Path, overrides: &[&str]) -> Result<Self> {
         ensure_compatible(codex_binary).await?;
         let workspace = resolve_workspace()?;
 
         let mut command = Command::new(codex_binary);
         command
             .arg("app-server")
+            .args(overrides.iter().flat_map(|value| ["-c", *value]))
             .arg("--listen")
             .arg("stdio://")
             .current_dir(&workspace)
@@ -282,6 +316,28 @@ impl AppServerProcess {
             drained_notifications,
         })
     }
+}
+
+fn text_draft_overrides(disabled_servers: &[String]) -> Result<Vec<String>> {
+    let mut overrides = TEXT_DRAFT_DISABLED_FEATURES
+        .iter()
+        .map(|name| format!("features.{name}=false"))
+        .collect::<Vec<_>>();
+    overrides.extend([
+        "model_provider=\"openai\"".into(),
+        "web_search=\"disabled\"".into(),
+    ]);
+    for server in disabled_servers {
+        if !(1..=80).contains(&server.len())
+            || !server
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(Error::InvalidProtocolMessage);
+        }
+        overrides.push(format!("mcp_servers.{server}.enabled=false"));
+    }
+    Ok(overrides)
 }
 
 fn spawn_stderr_drain<R>(

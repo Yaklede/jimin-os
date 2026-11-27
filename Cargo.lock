@@ -2536,6 +2536,7 @@ dependencies = [
 name = "jimin-agent"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "clap",
  "futures-util",
  "jimin-codex-client",
