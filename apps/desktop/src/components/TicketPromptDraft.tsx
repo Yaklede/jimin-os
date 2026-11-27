@@ -1,4 +1,4 @@
-import { Clipboard, FileText } from "lucide-react";
+import { Clipboard, FileText, RefreshCw } from "lucide-react";
 import { useContext, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import type { ProjectInflowItem } from "../api/googleChat";
@@ -17,10 +17,23 @@ import {
 } from "../ticket-prompt";
 import { readTicketSkillCatalog } from "../ticket-skill-catalog";
 import {
+  replaceTicketDraftRevision,
   TicketPromptRuntime,
   type SavedTicketDraft,
 } from "../ticket-prompt-runtime";
 import "./ticketPromptDraft.css";
+
+const manualPair = ["biscuitlink", "alldaypay"] as const;
+type ProjectSkillChoice = TicketPromptProject | "both" | "";
+
+function missingDraftProjects(
+  projects: readonly (TicketPromptProject | undefined)[],
+  drafts: readonly SavedTicketDraft[],
+) {
+  return projects.filter(
+    (project) => !drafts.some((draft) => draft.project === project),
+  );
+}
 
 export function TaskTicketPrompt({
   task,
@@ -69,6 +82,7 @@ export function TicketPromptDraft({
   const id = useId();
   const ticketSelect = useRef<HTMLSelectElement>(null);
   const generateButton = useRef<HTMLButtonElement>(null);
+  const regenerateButton = useRef<HTMLButtonElement>(null);
   const editor = useRef<HTMLTextAreaElement>(null);
   const copyButton = useRef<HTMLButtonElement>(null);
   const focusEditor = useRef(false);
@@ -91,14 +105,22 @@ export function TicketPromptDraft({
   const [selectedTicketId, setSelectedTicketId] = useState(
     initialSaved?.ticketId ?? "",
   );
-  const [projectOverride, setProjectOverride] = useState<TicketPromptProject>();
+  const [projectOverride, setProjectOverride] = useState<ProjectSkillChoice>();
+  const [regenerateProject, setRegenerateProject] =
+    useState<ProjectSkillChoice>();
   const [drafts, setDrafts] = useState<readonly SavedTicketDraft[]>(
     initialSaved?.drafts ?? [],
   );
   const [draftProject, setDraftProject] = useState<TicketPromptProject>();
-  const [busy, setBusy] = useState<"generate" | "copy">();
+  const [busy, setBusy] = useState<"generate" | "regenerate" | "copy">();
   const [feedback, setFeedback] = useState<
-    "copied" | "copyFailed" | "generateFailed"
+    | "copied"
+    | "copyFailed"
+    | "generateFailed"
+    | "regenerated"
+    | "generatedPair"
+    | "regenerateFailed"
+    | "restoredDraft"
   >();
   const activeDraft =
     drafts.find(({ project }) => project === draftProject) ?? drafts[0];
@@ -108,14 +130,33 @@ export function TicketPromptDraft({
     tickets.length === 1
       ? tickets[0]
       : tickets.find((value) => value.id === selectedTicketId);
-  const project = ticket?.project ?? projectOverride;
-  const variants = ticket?.combinedProjects ?? [project];
+  const canChooseProject = ticket && !ticket.project && !ticket.combinedProjects;
+  const canChooseRegeneration = canChooseProject && drafts.length === 1;
+  const regenerationScope =
+    (canChooseRegeneration ? regenerateProject : undefined) ??
+    activeDraft?.project;
   const cached = ticket ? readDrafts(ticket.id) : [];
   const storedDrafts = draftOpen ? drafts : cached;
-  const missing = variants.filter(
-    (variant) => !storedDrafts.some((entry) => entry.project === variant),
+  const chosenProject =
+    ticket?.project ??
+    projectOverride ??
+    (storedDrafts.some(({ manualPair: paired }) => paired)
+      ? "both"
+      : storedDrafts[0]?.project);
+  const pairRequested = Boolean(
+    ticket?.combinedProjects || chosenProject === "both",
   );
+  const variants =
+    ticket?.combinedProjects ??
+    (chosenProject === "both" ? manualPair : [chosenProject || undefined]);
+  const missing = missingDraftProjects(variants, storedDrafts);
   const analysisReady = source.analysisStatus === "ready";
+  const regenerateLabel =
+    regenerationScope === "both"
+      ? activeDraft?.project
+        ? c.addOtherDraft
+        : c.generateBoth
+      : c.regenerate;
 
   useEffect(() => () => operation.current?.abort(), []);
   useEffect(() => {
@@ -132,25 +173,57 @@ export function TicketPromptDraft({
       if (feedback === "copied")
         copyButton.current?.focus({ preventScroll: true });
       if (feedback === "generateFailed")
-        generateButton.current?.focus({ preventScroll: true });
+        (generateButton.current ?? regenerateButton.current)?.focus({
+          preventScroll: true,
+        });
+      if (
+        feedback === "regenerated" ||
+        feedback === "generatedPair" ||
+        feedback === "regenerateFailed" ||
+        feedback === "restoredDraft"
+      )
+        regenerateButton.current?.focus({ preventScroll: true });
     }
   }, [busy, feedback]);
 
   if (!tickets.length && !draftOpen) return null;
 
-  async function generate(useAi: boolean) {
-    if (!ticket || !analysisReady || !missing.length || operation.current)
-      return;
+  async function generate(
+    useAi: boolean,
+    replacement?: { current: SavedTicketDraft; choice?: ProjectSkillChoice },
+  ) {
+    const pairFromEditor = replacement?.choice === "both";
+    if (!ticket || !analysisReady || operation.current) return;
+    const targets = !replacement
+      ? missing
+      : replacement.choice === "both"
+        ? missingDraftProjects(manualPair, storedDrafts)
+        : [replacement.choice || undefined];
+    const replacementIndex = replacement
+      ? storedDrafts.indexOf(replacement.current)
+      : -1;
+    if (!targets.length || (replacement && replacementIndex < 0)) return;
+    const expandingPair = pairFromEditor || (!replacement && pairRequested);
+    const manuallyPaired =
+      pairFromEditor || (!replacement && chosenProject === "both");
+    const failure = replacement ? "regenerateFailed" : "generateFailed";
     const run = new AbortController();
     operation.current = run;
-    setBusy("generate");
+    setBusy(replacement ? "regenerate" : "generate");
+    if (replacement) setFeedback(undefined);
     try {
       const catalog = await readTicketSkillCatalog();
       if (run.signal.aborted) return;
       const names = catalog.skills.map(({ name }) => name);
       const results = [...storedDrafts];
-      let failed = false;
-      for (const variant of missing) {
+      // A general draft becomes the first successful scoped draft, but remains undoable.
+      // An existing project draft is not rewritten when only its partner is missing.
+      let replaceIndex = expandingPair
+        ? results.findIndex(({ project }) => project === undefined)
+        : replacementIndex;
+      let replacedProject: TicketPromptProject | undefined;
+      let succeeded = 0;
+      for (const variant of targets) {
         try {
           if (useAi && !runtime) throw new Error(c.generateFailed);
           const request = ticketDraftRequest(
@@ -182,17 +255,27 @@ export function TicketPromptDraft({
             !names.includes(ticketPromptProjects[variant].skill)
           )
             notices.push(c.projectSkillUnavailable);
-          results.push({
+          const generated: SavedTicketDraft = {
             project: variant,
             text: buildTicketPrompt(source, ticket, variant, skills, ai),
             skills,
             notices,
             revision: source.revision,
-          });
+            manualPair: manuallyPaired || replacement?.current.manualPair,
+          };
+          if (replaceIndex >= 0) {
+            const previous = results[replaceIndex];
+            results[replaceIndex] = replaceTicketDraftRevision(
+              previous,
+              generated,
+            );
+            if (previous === activeDraft) replacedProject = variant;
+            replaceIndex = -1;
+          } else results.push(generated);
+          succeeded++;
           runtime?.session.write(source.key, ticket.id, [...results]);
         } catch {
           if (run.signal.aborted) return;
-          failed = true;
         }
       }
       setDrafts(results);
@@ -200,9 +283,24 @@ export function TicketPromptDraft({
         focusEditor.current = true;
         setDraftProject(results[0]?.project);
       }
-      setFeedback(failed ? "generateFailed" : undefined);
+      if (pairFromEditor) {
+        setProjectOverride("both");
+        if (replacedProject) setDraftProject(replacedProject);
+        setRegenerateProject(undefined);
+      } else if (replacement && succeeded) {
+        const project = targets[0];
+        setDraftProject(project);
+        if (canChooseProject && !pairRequested)
+          setProjectOverride(project ?? "");
+        setRegenerateProject(undefined);
+      }
+      if (succeeded < targets.length)
+        setFeedback(pairFromEditor && succeeded > 0 ? "generateFailed" : failure);
+      else if (replacement)
+        setFeedback(pairFromEditor ? "generatedPair" : "regenerated");
+      else setFeedback(undefined);
     } catch {
-      if (!run.signal.aborted) setFeedback("generateFailed");
+      if (!run.signal.aborted) setFeedback(failure);
     } finally {
       operation.current = null;
       if (!run.signal.aborted) setBusy(undefined);
@@ -212,7 +310,23 @@ export function TicketPromptDraft({
   function closeDraft() {
     returningToSelection.current = true;
     setDrafts([]);
+    setRegenerateProject(undefined);
     setFeedback(undefined);
+  }
+
+  function restorePreviousDraft() {
+    if (!ticket || !activeDraft?.previous || operation.current) return;
+    const previous = activeDraft.previous;
+    const next = drafts.map((entry) =>
+      entry === activeDraft ? previous : entry,
+    );
+    runtime?.session.write(source.key, ticket.id, next);
+    setDrafts(next);
+    setDraftProject(previous.project);
+    if (canChooseProject && !pairRequested)
+      setProjectOverride(previous.project ?? "");
+    setRegenerateProject(undefined);
+    setFeedback("restoredDraft");
   }
 
   function editDraft(text: string) {
@@ -255,7 +369,7 @@ export function TicketPromptDraft({
 
   const retry = missing.length > 0 &&
     (feedback === "generateFailed" ||
-      (draftOpen && ticket?.combinedProjects)) && (
+      (draftOpen && pairRequested)) && (
       <div className="ticket-prompt-draft__recovery">
         {feedback === "generateFailed" && (
           <p role="alert">{draftOpen ? c.partialFailure : c.generateFailed}</p>
@@ -293,6 +407,13 @@ export function TicketPromptDraft({
         <h3 id={`${id}-title`}>{c.title}</h3>
         <p>{draftOpen ? c.draftHelp : c.help}</p>
       </header>
+      {!analysisReady && (
+        <p role="status">
+          {source.analysisStatus === "failed"
+            ? c.analysisFailed
+            : c.analysisPending}
+        </p>
+      )}
       {!draftOpen ? (
         <>
           {tickets.length > 1 && (
@@ -319,39 +440,14 @@ export function TicketPromptDraft({
             </label>
           )}
           {ticket?.combinedProjects && <p>{c.combinedHint}</p>}
-          {ticket && !ticket.project && !ticket.combinedProjects && (
-            <label>
-              <span>{c.project}</span>
-              <select
-                className="focus-visible-control"
-                value={projectOverride ?? ""}
-                disabled={Boolean(busy)}
-                aria-describedby={`${id}-project-help`}
-                onChange={(event) => {
-                  const value = event.currentTarget.value;
-                  setProjectOverride(
-                    Object.hasOwn(ticketPromptProjects, value)
-                      ? (value as TicketPromptProject)
-                      : undefined,
-                  );
-                }}
-              >
-                <option value="">{c.general}</option>
-                {Object.entries(ticketPromptProjects).map(([value, info]) => (
-                  <option key={value} value={value}>
-                    {info.label}
-                  </option>
-                ))}
-              </select>
-              <small id={`${id}-project-help`}>{c.projectUnknown}</small>
-            </label>
-          )}
-          {!analysisReady && (
-            <p role="status">
-              {source.analysisStatus === "failed"
-                ? c.analysisFailed
-                : c.analysisPending}
-            </p>
+          {canChooseProject && (
+            <ProjectSkillSelect
+              helpId={`${id}-project-help`}
+              help={pairRequested ? c.combinedHint : c.projectUnknown}
+              project={chosenProject}
+              disabled={Boolean(busy)}
+              onChange={setProjectOverride}
+            />
           )}
           <div className="ticket-prompt-draft__actions">
             {cached.length > 0 && (
@@ -380,10 +476,10 @@ export function TicketPromptDraft({
                 <FileText aria-hidden="true" />
                 {busy === "generate"
                   ? c.generating
-                  : cached.length
-                    ? c.generateMissing
-                    : ticket?.combinedProjects
-                      ? c.generateBoth
+                  : missing.length > 1
+                    ? c.generateBoth
+                    : cached.length
+                      ? c.generateMissing
                       : c.generate}
               </button>
             )}
@@ -409,6 +505,7 @@ export function TicketPromptDraft({
                     disabled={Boolean(busy)}
                     onClick={() => {
                       setDraftProject(project);
+                      setRegenerateProject(undefined);
                       if (feedback !== "generateFailed") setFeedback(undefined);
                     }}
                   >
@@ -447,9 +544,21 @@ export function TicketPromptDraft({
               value={draft}
               rows={8}
               spellCheck={false}
+              readOnly={busy === "generate" || busy === "regenerate"}
               onChange={(event) => editDraft(event.currentTarget.value)}
             />
           </label>
+          {canChooseRegeneration && (
+            <ProjectSkillSelect
+              helpId={`${id}-regenerate-project-help`}
+              help={
+                regenerationScope === "both" ? c.combinedHint : c.regenerateProjectHint
+              }
+              project={regenerationScope}
+              disabled={!analysisReady || Boolean(busy)}
+              onChange={setRegenerateProject}
+            />
+          )}
           <div className="ticket-prompt-draft__actions">
             <button
               ref={copyButton}
@@ -462,6 +571,22 @@ export function TicketPromptDraft({
               {busy === "copy" ? c.copying : c.copy}
             </button>
             <button
+              ref={regenerateButton}
+              type="button"
+              className="secondary-button focus-visible-control"
+              disabled={!ticket || !analysisReady || Boolean(busy)}
+              onClick={() => {
+                if (activeDraft)
+                  void generate(true, {
+                    current: activeDraft,
+                    choice: regenerationScope,
+                  });
+              }}
+            >
+              <RefreshCw aria-hidden="true" />
+              {busy === "regenerate" ? c.regenerating : regenerateLabel}
+            </button>
+            <button
               type="button"
               className="secondary-button focus-visible-control"
               disabled={Boolean(busy)}
@@ -471,13 +596,72 @@ export function TicketPromptDraft({
             </button>
           </div>
           {feedback && feedback !== "generateFailed" && (
-            <p role={feedback === "copied" ? "status" : "alert"}>
+            <p
+              role={
+                feedback === "copyFailed" || feedback === "regenerateFailed"
+                  ? "alert"
+                  : "status"
+              }
+            >
               {c[feedback]}
             </p>
+          )}
+          {activeDraft?.previous && (
+            <button
+              type="button"
+              className="secondary-button focus-visible-control"
+              disabled={!ticket || Boolean(busy)}
+              onClick={restorePreviousDraft}
+            >
+              {c.restoreDraft}
+            </button>
           )}
           {retry}
         </>
       )}
     </section>
+  );
+}
+
+function ProjectSkillSelect({
+  project,
+  helpId,
+  help,
+  disabled,
+  onChange,
+}: {
+  project?: ProjectSkillChoice;
+  helpId: string;
+  help: string;
+  disabled: boolean;
+  onChange: (project: ProjectSkillChoice) => void;
+}) {
+  return (
+    <label>
+      <span>{c.project}</span>
+      <select
+        className="focus-visible-control"
+        value={project ?? ""}
+        disabled={disabled}
+        aria-describedby={helpId}
+        onChange={(event) => {
+          const value = event.currentTarget.value;
+          onChange(
+            value === "both" || Object.hasOwn(ticketPromptProjects, value)
+              ? (value as ProjectSkillChoice)
+              : "",
+          );
+        }}
+      >
+        <option value="">{c.general}</option>
+        {Object.entries(ticketPromptProjects).map(([value, info]) => (
+          <option key={value} value={value}>
+            {info.label}
+          </option>
+        ))}
+        <option value="both">{c.bothProjects}</option>
+      </select>
+      <small id={helpId}>{help}</small>
+    </label>
   );
 }

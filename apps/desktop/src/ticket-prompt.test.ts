@@ -7,6 +7,7 @@ import { TaskTicketPrompt } from "./components/TicketPromptDraft";
 import { ticketPromptCopy } from "./copy/ticketPrompt";
 import {
   createTicketPromptSession,
+  replaceTicketDraftRevision,
   TicketPromptRuntime,
 } from "./ticket-prompt-runtime";
 import {
@@ -76,6 +77,8 @@ describe("assigned task prompt controls", () => {
     );
     expect(markup).toContain("<textarea");
     expect(markup).toContain("보존된 두 번째 티켓 초안");
+    expect(markup).toContain(ticketPromptCopy.regenerate);
+    expect(markup).not.toContain(ticketPromptCopy.restoreDraft);
     expect(markup).not.toContain(ticketPromptCopy.openSavedDraft);
   });
 
@@ -87,11 +90,70 @@ describe("assigned task prompt controls", () => {
     expect(markup({ ...assigned, notes: ticket })).toContain(
       ticketPromptCopy.generate,
     );
+    expect(markup({ ...assigned, notes: ticket })).toContain(
+      `<option value="both">${ticketPromptCopy.bothProjects}</option>`,
+    );
     expect(markup(assigned)).toBe("");
+  });
+
+  it("keeps the missing project action after reopening a manually paired partial draft", () => {
+    const session = createTicketPromptSession();
+    session.write(`task:${assigned.id}`, "101", [
+      {
+        project: "biscuitlink",
+        text: "먼저 만든 비스킷링크 초안",
+        skills: [],
+        notices: [],
+        manualPair: true,
+        revision: 1,
+      },
+    ]);
+    const markup = renderToStaticMarkup(
+      createElement(
+        TicketPromptRuntime.Provider,
+        {
+          value: {
+            session,
+            generate: async () => {
+              throw new Error("must not automatically regenerate");
+            },
+          },
+        },
+        createElement(TaskTicketPrompt, {
+          task: { ...assigned, notes: ticket },
+          revealSavedDraft: true,
+        }),
+      ),
+    );
+    expect(markup).toContain("먼저 만든 비스킷링크 초안");
+    expect(markup).toContain(ticketPromptCopy.generateMissing);
   });
 });
 
 describe("private ticket prompt", () => {
+  it("keeps the exact previous draft, its scope and skills without accumulating older revisions", () => {
+    const original = {
+      text: "직접 편집한 초안",
+      skills: [],
+      notices: ["보존할 안내"],
+      revision: 2,
+    };
+    const next = {
+      text: "비스킷링크용 새 초안",
+      project: "biscuitlink" as const,
+      skills: [{ name: "biscuitlink-cs-auto-resolver", reason: "프로젝트 절차" }],
+      notices: [],
+      revision: 3,
+    };
+    const regenerated = replaceTicketDraftRevision(original, next);
+    expect(regenerated.previous).toEqual(original);
+    const again = replaceTicketDraftRevision(regenerated, {
+      ...next,
+      text: "한 번 더 생성",
+    });
+    expect(again.previous).toEqual(next);
+  });
+
   it.each(["[BL/ADP]", "[BL] [ADP]", "BL / ADP"])(
     "creates separate project scopes for explicit %s title markers even with a single verified ITSM project",
     (tag) => {

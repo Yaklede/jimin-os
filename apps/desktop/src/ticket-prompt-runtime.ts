@@ -15,13 +15,26 @@ type GenerateTicketDraft = (
   signal: AbortSignal,
 ) => Promise<TicketDraftResponse>;
 
-export type SavedTicketDraft = {
+type TicketDraftRevision = {
   project?: TicketPromptProject;
   text: string;
   skills: readonly PromptSkill[];
   notices: readonly string[];
   revision: number | null;
+  manualPair?: boolean;
 };
+
+export type SavedTicketDraft = TicketDraftRevision & {
+  previous?: TicketDraftRevision;
+};
+
+export function replaceTicketDraftRevision(
+  current: SavedTicketDraft,
+  next: TicketDraftRevision,
+): SavedTicketDraft {
+  const { previous: _older, ...previous } = current;
+  return { ...next, previous };
+}
 
 export function createTicketPromptSession() {
   // Private drafts and their lineage stay in the current app session.
