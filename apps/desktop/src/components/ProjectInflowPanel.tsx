@@ -46,6 +46,7 @@ import {
 } from "./DeadlinePicker";
 import { LinkifiedText, SafeExternalLink } from "./ExternalTextLink";
 import { ProjectChatAccounts } from "./ProjectChatAccounts";
+import { TicketPromptDraft } from "./TicketPromptDraft";
 import {
   InflowPromotionDialog,
   inflowPromotionDialogCopy,
@@ -1796,6 +1797,9 @@ export function InflowItemRow({
         <p className="project-inflow-item__error" role="alert">
           {dismissError}
         </p>
+      )}
+      {item.status !== "dismissed" && (
+        <TicketPromptDraft key={conversationId} item={item} />
       )}
     </li>
   );

@@ -16,6 +16,7 @@ pub mod push;
 mod report_evidence;
 pub mod scheduled_chat_reply;
 pub mod scheduled_work;
+mod ticket_prompt;
 mod voice_command;
 pub mod webhook;
 
@@ -154,6 +155,7 @@ pub struct ApiState {
     webhook: Option<Arc<webhook::WebhookRuntime>>,
     push: Option<Arc<push::PushRuntime>>,
     agent: Option<Database>,
+    ticket_prompt: Option<reqwest::Client>,
 }
 
 impl ApiState {
@@ -179,12 +181,20 @@ impl ApiState {
             webhook: None,
             push: None,
             agent: None,
+            ticket_prompt: None,
         }
     }
 
     #[must_use]
     pub fn with_authentication(mut self, authentication: auth::Authentication) -> Self {
         self.authentication = Some(Arc::new(authentication));
+        self
+    }
+
+    /// Attaches the optional, private text drafting service.
+    #[must_use]
+    pub fn with_ticket_prompt_socket(mut self, path: std::path::PathBuf) -> Self {
+        self.ticket_prompt = ticket_prompt::client(path);
         self
     }
 
@@ -1795,6 +1805,7 @@ pub(crate) fn error_response(
         sync_project_google_chat_source,
         list_project_inflow_items,
         decide_project_inflow_item,
+        ticket_prompt::generate,
         get_home_snapshot,
         refresh_work_brief,
         list_recommendations,
@@ -1963,6 +1974,10 @@ pub(crate) fn error_response(
         VoiceCommandResponse,
         HomeSnapshotResponse,
         jimin_storage::delivery_recovery::DeliveryRecovery,
+        jimin_storage::ticket_prompt::DraftRequest,
+        jimin_storage::ticket_prompt::DraftResponse,
+        jimin_storage::ticket_prompt::SkillCandidate,
+        jimin_storage::ticket_prompt::SkillSuggestion,
         RecommendationResponse,
         RecommendationListResponse,
         RecommendationDecisionKind,
@@ -2059,6 +2074,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
 #[allow(clippy::too_many_lines)] // The router is an auditable registry of public API surfaces.
 pub fn router(state: ApiState) -> Router {
     let router = Router::new()
+        .merge(ticket_prompt::router())
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .merge(
@@ -11481,6 +11497,7 @@ mod tests {
                 "/v1/tasks",
                 "/v1/tasks/{task_id}",
                 "/v1/tasks/{task_id}/complete",
+                "/v1/ticket-prompt/draft",
                 "/v1/workspaces"
             ]
         );
@@ -13073,6 +13090,88 @@ mod tests {
                 .expect("handler should respond");
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
+    }
+
+    #[tokio::test]
+    async fn ticket_prompt_requires_a_session_and_valid_input() {
+        let (state, token, _) = signed_auth_state(true);
+        for (authorization, body, expected) in [
+            (None, "not json", StatusCode::UNAUTHORIZED),
+            (
+                Some(token.as_str()),
+                r#"{"ticketId":"0","title":"","evidence":"test","candidates":[]}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Some(token.as_str()),
+                r#"{"ticketId":"42","title":"","evidence":"test","candidates":[]}"#,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ] {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/v1/ticket-prompt/draft")
+                .header("content-type", "application/json");
+            if let Some(token) = authorization {
+                request = request.header("authorization", format!("Bearer {token}"));
+            }
+            let response = router(state.clone())
+                .oneshot(request.body(Body::from(body)).expect("request"))
+                .await
+                .expect("handler");
+            assert_eq!(response.status(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn ticket_prompt_uses_only_the_private_socket_and_returns_an_uncached_grounded_draft() {
+        let path = std::env::temp_dir().join(format!(
+            "jimin-draft-{}.sock",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let listener = tokio::net::UnixListener::bind(&path).expect("private test listener");
+        let fake_agent = Router::new().route("/draft", post(|| async {
+            Json(serde_json::json!({
+                "goal": "중복 기록 확인", "checks": ["입력 조건 비교"], "verification": "재현 조건 정리",
+                "skills": [
+                    {"name":"local-check","reason":"조건 비교에 필요","evidence":"두 번 기록되는 조건"},
+                    {"name":"invented","reason":"추천","evidence":"두 번 기록되는 조건"}
+                ]
+            }))
+        }));
+        let service = tokio::spawn(async move { axum::serve(listener, fake_agent).await });
+        let (state, token, _) = signed_auth_state(true);
+        let response = router(state.with_ticket_prompt_socket(path.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/ticket-prompt/draft")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::json!({
+                        "ticketId":"42", "title":"정산 기록", "evidence":"두 번 기록되는 조건",
+                        "candidates":[{"name":"local-check","description":"조건에 따른 결과 검토"}],
+                    }).to_string()))
+                    .expect("request"),
+            )
+            .await.expect("handler");
+        service.abort();
+        tokio::fs::remove_file(path)
+            .await
+            .expect("remove test socket");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let draft: jimin_storage::ticket_prompt::DraftResponse =
+            serde_json::from_slice(&body).expect("draft");
+        assert_eq!(draft.goal, "중복 기록 확인");
+        assert_eq!(draft.skills.len(), 1);
+        assert_eq!(draft.skills[0].name, "local-check");
     }
 
     #[tokio::test]

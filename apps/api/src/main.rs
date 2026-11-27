@@ -157,6 +157,9 @@ async fn run_server() -> Result<(), &'static str> {
     )
     .with_trusted_network(config.trusted_network())
     .with_itsm_available(config.itsm_enabled());
+    if let Some(path) = std::env::var_os(jimin_storage::ticket_prompt::SOCKET_ENV) {
+        state = state.with_ticket_prompt_socket(path.into());
+    }
     if let Some((authentication, pairing)) = runtime {
         state = state.with_authentication(authentication);
         state = state.with_pairing(pairing);

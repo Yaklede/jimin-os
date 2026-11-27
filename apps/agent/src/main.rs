@@ -20,6 +20,7 @@ mod inflow_analysis;
 mod itsm;
 mod meeting_analysis;
 mod meeting_transcription;
+mod ticket_prompt;
 mod work_inbox;
 mod worker_loop;
 
@@ -341,6 +342,7 @@ async fn run_serve(codex_binary: &Path, marker_path: &Path) -> ExitCode {
     let _itsm_sync_worker = config
         .itsm_client()
         .map(|client| itsm::spawn_sync_worker(database.clone(), client.clone()));
+    let _ticket_prompt_server = ticket_prompt::start(codex_binary);
     let mut budget = CrashBudget::new(SERVE_FAILURE_BUDGET, SERVE_STABLE_WINDOW);
     loop {
         let startup = tokio::select! {

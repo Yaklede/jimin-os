@@ -23,6 +23,7 @@ LABEL org.opencontainers.image.title="Jimin OS API" \
 
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder --chown=10001:10001 /workspace/target/release/jimin-api /usr/local/bin/jimin-api
+RUN install -d -o 1000 -g 1000 -m 0750 /run/jimin-ticket-prompt
 
 ENV HOME=/nonexistent \
     JIMIN_API_BIND_ADDR=0.0.0.0:8080 \

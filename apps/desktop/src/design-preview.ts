@@ -21,6 +21,7 @@ import { scheduledWorkTemplate } from "./components/ScheduledWorkPanel";
 import type { ProjectGoogleChatSource } from "./api/googleChat";
 import type { TaskChatRoute } from "./api/chatRouting";
 import type { CompletionReview } from "./api/completionReviews";
+import type { TicketDraftRequest, TicketDraftResponse } from "./ticket-prompt";
 
 // Fixtures for local preview or an explicit design-preview build only.
 export function installDesignPreview(): void {
@@ -465,6 +466,31 @@ export function installDesignPreview(): void {
     ).toUpperCase();
     if (!path.startsWith("/v1/") && !path.startsWith("/health/"))
       return originalFetch(input, init);
+    if (path === "/v1/ticket-prompt/draft" && method === "POST") {
+      const request = JSON.parse(String(init?.body)) as TicketDraftRequest;
+      if (new URLSearchParams(location.search).get("ticketDraft") === "error") {
+        return json({ error: "preview unavailable" }, 503);
+      }
+      const result: TicketDraftResponse = {
+        goal: `${request.title || `티켓 #${request.ticketId}`}에 적힌 동작과 기대 결과를 비교해요.`,
+        checks: [
+          "요청한 화면에서 거래 상태별로 실제 결과가 달라지는지 확인해요.",
+        ],
+        verification: "확인한 상태별 결과와 재현에 필요한 입력을 정리해요.",
+        skills: request.candidates.some(
+          ({ name }) => name === "preview-ticket-check",
+        )
+          ? [
+              {
+                name: "preview-ticket-check",
+                reason: "티켓에 적힌 거래 조건을 기준으로 결과를 확인해요.",
+                evidence: request.title,
+              },
+            ]
+          : [],
+      };
+      return json(result);
+    }
     const conversationRoute =
       /^\/v1\/conversations\/([^/]+)\/(turns|stream|messages|jobs\/latest)$/u.exec(
         path,

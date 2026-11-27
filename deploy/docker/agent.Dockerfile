@@ -37,6 +37,7 @@ COPY --from=codex-installer /usr/local/lib/node_modules/@openai /usr/local/lib/n
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder --chown=node:node /workspace/target/release/jimin-agent /usr/local/bin/jimin-agent
 COPY --chown=node:node apps/agent/tests/fixtures/generic-prompt.txt /opt/jimin-agent/fixtures/generic-prompt.txt
+RUN install -d -o 1000 -g 1000 -m 0750 /run/jimin-ticket-prompt
 
 RUN rm -rf /usr/local/lib/node_modules/npm \
     && rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/pnpm \
