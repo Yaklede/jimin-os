@@ -2,55 +2,127 @@ import { Clipboard, FileText } from "lucide-react";
 import { useContext, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import type { ProjectInflowItem } from "../api/googleChat";
+import type { Task } from "../api/planning";
 import { ticketPromptCopy as c } from "../copy/ticketPrompt";
 import {
   buildTicketPrompt,
+  inflowTicketPromptSource,
   promptTickets,
   projectPromptSkills,
   ticketDraftRequest,
   ticketPromptProjects,
-  type PromptSkill,
+  taskTicketPromptSource,
   type TicketPromptProject,
+  type TicketPromptSource,
 } from "../ticket-prompt";
 import { readTicketSkillCatalog } from "../ticket-skill-catalog";
-import { TicketPromptRuntime } from "../ticket-prompt-runtime";
+import {
+  TicketPromptRuntime,
+  type SavedTicketDraft,
+} from "../ticket-prompt-runtime";
 import "./ticketPromptDraft.css";
 
-export function TicketPromptDraft({ item }: { item: ProjectInflowItem }) {
-  const generateDraft = useContext(TicketPromptRuntime);
-  const tickets = useMemo(() => promptTickets(item), [item]);
+export function TaskTicketPrompt({
+  task,
+  linkedItem,
+  collapsed = false,
+  revealSavedDraft = false,
+}: {
+  task: Task;
+  linkedItem?: ProjectInflowItem;
+  collapsed?: boolean;
+  revealSavedDraft?: boolean;
+}) {
+  const runtime = useContext(TicketPromptRuntime);
+  const source = taskTicketPromptSource(
+    task,
+    runtime?.session.sourceForTask(task.id) ??
+      (linkedItem ? inflowTicketPromptSource(linkedItem) : undefined),
+  );
+  if (!promptTickets(source).length) return null;
+  const content = (
+    <TicketPromptDraft
+      key={task.id}
+      source={source}
+      revealSavedDraft={revealSavedDraft}
+    />
+  );
+  return collapsed ? (
+    <details className="ticket-prompt-draft-disclosure">
+      <summary className="focus-visible-control">{c.openTaskPrompts}</summary>
+      {content}
+    </details>
+  ) : (
+    content
+  );
+}
+
+export function TicketPromptDraft({
+  source,
+  revealSavedDraft = false,
+}: {
+  source: TicketPromptSource;
+  revealSavedDraft?: boolean;
+}) {
+  const runtime = useContext(TicketPromptRuntime);
+  const tickets = useMemo(() => promptTickets(source), [source]);
   const id = useId();
   const ticketSelect = useRef<HTMLSelectElement>(null);
   const generateButton = useRef<HTMLButtonElement>(null);
   const editor = useRef<HTMLTextAreaElement>(null);
   const copyButton = useRef<HTMLButtonElement>(null);
+  const focusEditor = useRef(false);
   const returningToSelection = useRef(false);
   const operation = useRef<AbortController | null>(null);
-  const [selectedTicketId, setSelectedTicketId] = useState("");
+  function readDrafts(ticketId: string) {
+    const primary = runtime?.session.read(source.key, ticketId) ?? [];
+    return !primary.length && source.fallbackKey
+      ? (runtime?.session.read(source.fallbackKey, ticketId) ?? [])
+      : primary;
+  }
+  const [initialSaved] = useState(() => {
+    if (revealSavedDraft) {
+      for (const ticket of tickets) {
+        const drafts = readDrafts(ticket.id);
+        if (drafts.length) return { ticketId: ticket.id, drafts };
+      }
+    }
+  });
+  const [selectedTicketId, setSelectedTicketId] = useState(
+    initialSaved?.ticketId ?? "",
+  );
   const [projectOverride, setProjectOverride] = useState<TicketPromptProject>();
-  const [draft, setDraft] = useState<string>();
-  const [skills, setSkills] = useState<PromptSkill[]>([]);
-  const [notices, setNotices] = useState<string[]>([]);
+  const [drafts, setDrafts] = useState<readonly SavedTicketDraft[]>(
+    initialSaved?.drafts ?? [],
+  );
+  const [draftProject, setDraftProject] = useState<TicketPromptProject>();
   const [busy, setBusy] = useState<"generate" | "copy">();
   const [feedback, setFeedback] = useState<
     "copied" | "copyFailed" | "generateFailed"
   >();
-  const [draftRevision, setDraftRevision] = useState<number | null>();
-  const draftOpen = draft !== undefined;
+  const activeDraft =
+    drafts.find(({ project }) => project === draftProject) ?? drafts[0];
+  const draft = activeDraft?.text;
+  const draftOpen = Boolean(activeDraft);
   const ticket =
     tickets.length === 1
       ? tickets[0]
       : tickets.find((value) => value.id === selectedTicketId);
   const project = ticket?.project ?? projectOverride;
-  const analysisReady =
-    item.analysisStatus === "ready" &&
-    (item.sourceRevision == null ||
-      item.analyzedRevision === item.sourceRevision);
+  const variants = ticket?.combinedProjects ?? [project];
+  const cached = ticket ? readDrafts(ticket.id) : [];
+  const storedDrafts = draftOpen ? drafts : cached;
+  const missing = variants.filter(
+    (variant) => !storedDrafts.some((entry) => entry.project === variant),
+  );
+  const analysisReady = source.analysisStatus === "ready";
 
   useEffect(() => () => operation.current?.abort(), []);
   useEffect(() => {
-    if (draftOpen) editor.current?.focus();
-    else if (returningToSelection.current) {
+    if (draftOpen && focusEditor.current) {
+      focusEditor.current = false;
+      editor.current?.focus();
+    } else if (!draftOpen && returningToSelection.current) {
       returningToSelection.current = false;
       (ticketSelect.current ?? generateButton.current)?.focus();
     }
@@ -67,7 +139,8 @@ export function TicketPromptDraft({ item }: { item: ProjectInflowItem }) {
   if (!tickets.length && !draftOpen) return null;
 
   async function generate(useAi: boolean) {
-    if (!ticket || !analysisReady || operation.current) return;
+    if (!ticket || !analysisReady || !missing.length || operation.current)
+      return;
     const run = new AbortController();
     operation.current = run;
     setBusy("generate");
@@ -75,37 +148,59 @@ export function TicketPromptDraft({ item }: { item: ProjectInflowItem }) {
       const catalog = await readTicketSkillCatalog();
       if (run.signal.aborted) return;
       const names = catalog.skills.map(({ name }) => name);
-      const recommended = projectPromptSkills(project, names);
-      if (useAi && !generateDraft) throw new Error(c.generateFailed);
-      const request = ticketDraftRequest(item, ticket, catalog.skills);
-      const ai = useAi ? await generateDraft?.(request, run.signal) : undefined;
-      if (run.signal.aborted) return;
-      // The API enforces this too; only installed candidates can become skill calls.
-      const allowed = new Set(request.candidates.map(({ name }) => name));
-      recommended.push(
-        ...(ai?.skills ?? [])
-          .filter(({ name }) => allowed.delete(name))
-          .slice(0, 2),
-      );
-      const notice =
-        catalog.source === "unavailable"
-          ? [c.catalogUnavailable]
-          : catalog.source === "snapshot" && recommended.length > 0
-            ? [c.catalogSnapshot]
-            : [];
-      if (
-        catalog.source !== "unavailable" &&
-        project &&
-        !names.includes(ticketPromptProjects[project].skill)
-      ) {
-        notice.push(c.projectSkillUnavailable);
+      const results = [...storedDrafts];
+      let failed = false;
+      for (const variant of missing) {
+        try {
+          if (useAi && !runtime) throw new Error(c.generateFailed);
+          const request = ticketDraftRequest(
+            source,
+            ticket,
+            catalog.skills,
+            variant,
+          );
+          // The AI route has one active slot; simultaneous requests would reject the second draft.
+          const ai = useAi
+            ? await runtime?.generate(request, run.signal)
+            : undefined;
+          if (run.signal.aborted) return;
+          const skills = projectPromptSkills(variant, names);
+          const allowed = new Set(request.candidates.map(({ name }) => name));
+          skills.push(
+            ...(ai?.skills ?? [])
+              .filter(({ name }) => allowed.delete(name))
+              .slice(0, 2),
+          );
+          const notices = !ai ? [c.fallbackDraft] : [];
+          if (catalog.source === "unavailable")
+            notices.push(c.catalogUnavailable);
+          if (catalog.source === "snapshot" && skills.length)
+            notices.push(c.catalogSnapshot);
+          if (
+            catalog.source !== "unavailable" &&
+            variant &&
+            !names.includes(ticketPromptProjects[variant].skill)
+          )
+            notices.push(c.projectSkillUnavailable);
+          results.push({
+            project: variant,
+            text: buildTicketPrompt(source, ticket, variant, skills, ai),
+            skills,
+            notices,
+            revision: source.revision,
+          });
+          runtime?.session.write(source.key, ticket.id, [...results]);
+        } catch {
+          if (run.signal.aborted) return;
+          failed = true;
+        }
       }
-      if (!ai) notice.unshift(c.fallbackDraft);
-      setFeedback(undefined);
-      setNotices(notice);
-      setSkills(recommended);
-      setDraftRevision(item.sourceRevision);
-      setDraft(buildTicketPrompt(item, ticket, project, recommended, ai));
+      setDrafts(results);
+      if (!draftOpen && results.length) {
+        focusEditor.current = true;
+        setDraftProject(results[0]?.project);
+      }
+      setFeedback(failed ? "generateFailed" : undefined);
     } catch {
       if (!run.signal.aborted) setFeedback("generateFailed");
     } finally {
@@ -116,8 +211,18 @@ export function TicketPromptDraft({ item }: { item: ProjectInflowItem }) {
 
   function closeDraft() {
     returningToSelection.current = true;
-    setDraft(undefined);
+    setDrafts([]);
     setFeedback(undefined);
+  }
+
+  function editDraft(text: string) {
+    if (!ticket || !activeDraft) return;
+    const next = drafts.map((entry) =>
+      entry === activeDraft ? { ...entry, text } : entry,
+    );
+    runtime?.session.write(source.key, ticket.id, next);
+    setDrafts(next);
+    if (feedback !== "generateFailed") setFeedback(undefined);
   }
 
   async function copyDraft() {
@@ -148,6 +253,36 @@ export function TicketPromptDraft({ item }: { item: ProjectInflowItem }) {
     }
   }
 
+  const retry = missing.length > 0 &&
+    (feedback === "generateFailed" ||
+      (draftOpen && ticket?.combinedProjects)) && (
+      <div className="ticket-prompt-draft__recovery">
+        {feedback === "generateFailed" && (
+          <p role="alert">{draftOpen ? c.partialFailure : c.generateFailed}</p>
+        )}
+        <div className="ticket-prompt-draft__actions">
+          {draftOpen && (
+            <button
+              type="button"
+              className="secondary-button focus-visible-control"
+              disabled={!analysisReady || Boolean(busy)}
+              onClick={() => void generate(true)}
+            >
+              {busy === "generate" ? c.generating : c.generateMissing}
+            </button>
+          )}
+          <button
+            type="button"
+            className="secondary-button focus-visible-control"
+            disabled={!analysisReady || Boolean(busy)}
+            onClick={() => void generate(false)}
+          >
+            {c.useBasicDraft}
+          </button>
+        </div>
+      </div>
+    );
+
   return (
     <section
       className="ticket-prompt-draft"
@@ -156,7 +291,7 @@ export function TicketPromptDraft({ item }: { item: ProjectInflowItem }) {
     >
       <header>
         <h3 id={`${id}-title`}>{c.title}</h3>
-        <p>{c.help}</p>
+        <p>{draftOpen ? c.draftHelp : c.help}</p>
       </header>
       {!draftOpen ? (
         <>
@@ -183,7 +318,8 @@ export function TicketPromptDraft({ item }: { item: ProjectInflowItem }) {
               </select>
             </label>
           )}
-          {ticket && !ticket.project && (
+          {ticket?.combinedProjects && <p>{c.combinedHint}</p>}
+          {ticket && !ticket.project && !ticket.combinedProjects && (
             <label>
               <span>{c.project}</span>
               <select
@@ -212,51 +348,95 @@ export function TicketPromptDraft({ item }: { item: ProjectInflowItem }) {
           )}
           {!analysisReady && (
             <p role="status">
-              {item.analysisStatus === "failed"
+              {source.analysisStatus === "failed"
                 ? c.analysisFailed
                 : c.analysisPending}
             </p>
           )}
-          <button
-            ref={generateButton}
-            type="button"
-            className="secondary-button focus-visible-control"
-            disabled={!ticket || !analysisReady || Boolean(busy)}
-            onClick={() => void generate(true)}
-          >
-            <FileText aria-hidden="true" />
-            {busy === "generate" ? c.generating : c.generate}
-          </button>
-          {feedback === "generateFailed" && (
-            <>
-              <p role="alert">{c.generateFailed}</p>
+          <div className="ticket-prompt-draft__actions">
+            {cached.length > 0 && (
               <button
+                ref={generateButton}
+                type="button"
+                className="secondary-button focus-visible-control"
+                disabled={Boolean(busy)}
+                onClick={() => {
+                  focusEditor.current = true;
+                  setDraftProject(cached[0]?.project);
+                  setDrafts(cached);
+                }}
+              >
+                <FileText aria-hidden="true" /> {c.openSavedDraft}
+              </button>
+            )}
+            {(!cached.length || missing.length > 0) && (
+              <button
+                ref={!cached.length ? generateButton : undefined}
                 type="button"
                 className="secondary-button focus-visible-control"
                 disabled={!ticket || !analysisReady || Boolean(busy)}
-                onClick={() => void generate(false)}
+                onClick={() => void generate(true)}
               >
-                {c.useBasicDraft}
+                <FileText aria-hidden="true" />
+                {busy === "generate"
+                  ? c.generating
+                  : cached.length
+                    ? c.generateMissing
+                    : ticket?.combinedProjects
+                      ? c.generateBoth
+                      : c.generate}
               </button>
-            </>
-          )}
+            )}
+          </div>
+          {retry}
         </>
       ) : (
         <>
-          {notices.map((notice) => (
+          {drafts.length > 1 && (
+            <div
+              role="group"
+              aria-labelledby={`${id}-variants`}
+              className="ticket-prompt-draft__variants"
+            >
+              <span id={`${id}-variants`}>{c.variant}</span>
+              <div className="ticket-prompt-draft__actions">
+                {drafts.map(({ project }) => (
+                  <button
+                    key={project ?? "general"}
+                    type="button"
+                    className="secondary-button focus-visible-control"
+                    aria-pressed={activeDraft?.project === project}
+                    disabled={Boolean(busy)}
+                    onClick={() => {
+                      setDraftProject(project);
+                      if (feedback !== "generateFailed") setFeedback(undefined);
+                    }}
+                  >
+                    {project
+                      ? ticketPromptProjects[project].label
+                      : c.generalDraft}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {activeDraft?.notices.map((notice) => (
             <p key={notice}>{notice}</p>
           ))}
-          {draftRevision !== item.sourceRevision && <p>{c.newerAnalysis}</p>}
-          {skills.length > 0 && (
+          {activeDraft?.revision !== source.revision && (
+            <p>{c.newerAnalysis}</p>
+          )}
+          {Boolean(activeDraft?.skills.length) && (
             <div>
               <strong>{c.skills}</strong>
-              <ul>
-                {skills.map(({ name, reason }) => (
-                  <li key={name}>
-                    <code>${name}</code> · {reason}
-                  </li>
+              <div role="list" className="ticket-prompt-draft__skills">
+                {activeDraft?.skills.map(({ name, reason }) => (
+                  <div key={name} role="listitem">
+                    <code>${name}</code>
+                    <small>{reason}</small>
+                  </div>
                 ))}
-              </ul>
+              </div>
             </div>
           )}
           <label>
@@ -267,10 +447,7 @@ export function TicketPromptDraft({ item }: { item: ProjectInflowItem }) {
               value={draft}
               rows={8}
               spellCheck={false}
-              onChange={(event) => {
-                setDraft(event.currentTarget.value);
-                setFeedback(undefined);
-              }}
+              onChange={(event) => editDraft(event.currentTarget.value)}
             />
           </label>
           <div className="ticket-prompt-draft__actions">
@@ -293,11 +470,12 @@ export function TicketPromptDraft({ item }: { item: ProjectInflowItem }) {
               {c.closeDraft}
             </button>
           </div>
-          {feedback && (
+          {feedback && feedback !== "generateFailed" && (
             <p role={feedback === "copied" ? "status" : "alert"}>
               {c[feedback]}
             </p>
           )}
+          {retry}
         </>
       )}
     </section>

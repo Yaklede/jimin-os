@@ -137,6 +137,13 @@ export function installDesignPreview(): void {
       }),
     );
   }
+  if (new URLSearchParams(location.search).get("ticketPair") === "1") {
+    inflow[2].suggestedTaskTitle = "[BL / ADP] 로그인 안내 문구 개선";
+    inflow[2].referenceDocuments[0].title = "[BL / ADP] 예시 ITSM 티켓 42";
+    // A Home task with a ticket but no prompt draft, for the generate path.
+    tasks[1].notes += "\n관련 ITSM: https://itsm.example/issues/43";
+    tasks[1].dueAt = now;
+  }
   tasks[0].assigneeName = "김경주, 송천안";
   tasks.push({
     ...tasks[7],
@@ -468,11 +475,15 @@ export function installDesignPreview(): void {
       return originalFetch(input, init);
     if (path === "/v1/ticket-prompt/draft" && method === "POST") {
       const request = JSON.parse(String(init?.body)) as TicketDraftRequest;
-      if (new URLSearchParams(location.search).get("ticketDraft") === "error") {
+      const failure = new URLSearchParams(location.search).get("ticketDraft");
+      const project = /^이 초안의 대상 프로젝트는 (비스킷링크|올데이페이)입니다/.exec(
+        request.evidence,
+      )?.[1];
+      if (failure === "error" || (failure === "partial" && project === "올데이페이")) {
         return json({ error: "preview unavailable" }, 503);
       }
       const result: TicketDraftResponse = {
-        goal: `${request.title || `티켓 #${request.ticketId}`}에 적힌 동작과 기대 결과를 비교해요.`,
+        goal: `${project ? `${project}에서 ` : ""}${request.title || `티켓 #${request.ticketId}`}에 적힌 동작과 기대 결과를 비교해요.`,
         checks: [
           "요청한 화면에서 거래 상태별로 실제 결과가 달라지는지 확인해요.",
         ],

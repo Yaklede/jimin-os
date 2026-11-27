@@ -6,6 +6,7 @@ import {
   RefreshCw,
   SlidersHorizontal,
 } from "lucide-react";
+import type { ProjectInflowItem } from "../api/googleChat";
 import type { Task } from "../api/planning";
 import {
   filterMobileTasks,
@@ -16,6 +17,7 @@ import {
   type MobileTaskGrouping,
 } from "../mobileTaskView";
 import { LinkifiedText } from "./ExternalTextLink";
+import { TaskTicketPrompt } from "./TicketPromptDraft";
 import { workspaceActionCopy as text } from "../copy/workspaceActions";
 import "./homeTaskQueue.css";
 
@@ -23,6 +25,7 @@ type Props = {
   sectionRef?: Ref<HTMLElement>;
   todayRequest?: number;
   tasks: Task[];
+  recentInflow?: readonly ProjectInflowItem[];
   loading?: boolean;
   onLoadAll(): Promise<Task[]>;
   onComplete(task: Task): Promise<void>;
@@ -33,6 +36,7 @@ export function MobileTaskQueue({
   sectionRef,
   todayRequest = 0,
   tasks,
+  recentInflow,
   loading,
   onLoadAll,
   onComplete,
@@ -442,6 +446,13 @@ export function MobileTaskQueue({
                             {pending === task.id ? "저장 중" : "완료하기"}
                           </button>
                         </div>
+                        <TaskTicketPrompt
+                          task={task}
+                          linkedItem={recentInflow?.find(
+                            (item) => item.promotedTaskId === task.id,
+                          )}
+                          revealSavedDraft
+                        />
                       </div>
                     )}
                   </li>

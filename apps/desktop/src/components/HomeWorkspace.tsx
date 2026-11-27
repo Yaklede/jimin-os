@@ -400,6 +400,7 @@ export function HomeWorkspace({
           sectionRef={taskSectionRef}
           todayRequest={todayRequest}
           tasks={snapshot?.tasks ?? []}
+          recentInflow={snapshot?.recentInflow}
           loading={loading}
           onLoadAll={onLoadAllTasks}
           onComplete={onCompleteTask}

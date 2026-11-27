@@ -62,6 +62,7 @@ import {
   useDelayedSkeleton,
 } from "./ContentSkeleton";
 import { LinkifiedText } from "./ExternalTextLink";
+import { TaskTicketPrompt } from "./TicketPromptDraft";
 import { useMobileLayout } from "../useMobileLayout";
 import { MobileDisclosure } from "./MobileDisclosure";
 import { EmptySurface } from "./HomeWorkspace";
@@ -1180,6 +1181,9 @@ export function ProjectsWorkspace({
                             editingTaskId !== task.id && (
                               <TaskDetail
                                 task={task}
+                                linkedInflow={projectInflowItems.find(
+                                  (item) => item.promotedTaskId === task.id,
+                                )}
                                 parentTask={tasks.find(
                                   (item) => item.id === task.parentTaskId,
                                 )}
@@ -1416,7 +1420,12 @@ export function ProjectsWorkspace({
                             </button>
                             {selectedTaskId === task.id &&
                               editingTaskId !== task.id && (
-                                <TaskDetail task={task} />
+                                <TaskDetail
+                                  task={task}
+                                  linkedInflow={projectInflowItems.find(
+                                    (item) => item.promotedTaskId === task.id,
+                                  )}
+                                />
                               )}
                             {editingTaskId === task.id && (
                               <TaskEditForm
@@ -2594,7 +2603,15 @@ function ProjectEditForm({
   );
 }
 
-function TaskDetail({ task, parentTask }: { task: Task; parentTask?: Task }) {
+function TaskDetail({
+  task,
+  parentTask,
+  linkedInflow,
+}: {
+  task: Task;
+  parentTask?: Task;
+  linkedInflow?: ProjectInflowItem;
+}) {
   return (
     <section
       className="project-task-detail"
@@ -2663,6 +2680,7 @@ function TaskDetail({ task, parentTask }: { task: Task; parentTask?: Task }) {
           </dd>
         </div>
       </dl>
+      <TaskTicketPrompt task={task} linkedItem={linkedInflow} />
     </section>
   );
 }
