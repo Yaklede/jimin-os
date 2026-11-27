@@ -8,6 +8,7 @@ export const ticketPromptCopy = {
   projectUnknown:
     "ITSM에서 프로젝트를 확인하지 못했어요. 알고 있다면 직접 선택해 주세요.",
   general: "프로젝트 스킬 없이 만들기",
+  bothProjects: "비스킷링크 + 올데이페이",
   analysisPending: "최신 분석이 끝나면 프롬프트를 만들 수 있어요.",
   analysisFailed: "업무 분석을 다시 시도한 뒤 프롬프트를 만들어 주세요.",
   newerAnalysis:
@@ -15,6 +16,16 @@ export const ticketPromptCopy = {
   generate: "프롬프트 생성",
   generateBoth: "프롬프트 2개 생성",
   generateMissing: "나머지 초안 만들기",
+  addOtherDraft: "다른 프로젝트 초안 추가",
+  regenerate: "초안 다시 만들기",
+  regenerateProjectHint:
+    "프로젝트를 선택하고 다시 만들면 설치된 프로젝트 스킬을 반영해요.",
+  regenerating: "초안 다시 만드는 중…",
+  regenerated: "새 초안을 만들었어요.",
+  generatedPair: "두 프로젝트 초안이 준비됐어요.",
+  regenerateFailed: "새 초안을 못 만들었어요. 기존 초안은 그대로예요. 다시 시도해 주세요.",
+  restoreDraft: "이전 초안으로 되돌리기",
+  restoredDraft: "이전 초안으로 되돌렸어요.",
   openSavedDraft: "이전에 만든 초안 열기",
   openTaskPrompts: "티켓 프롬프트",
   combinedHint: "비스킷링크와 올데이페이용 초안을 따로 만들어요.",
